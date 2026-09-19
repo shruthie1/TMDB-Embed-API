@@ -162,7 +162,7 @@ function obtainTmdbKey() {
     if (!k) console.warn('[Showbox] No TMDB API key available (multi-key set empty).');
     return k;
 }
-const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
+const TMDB_BASE_URL = 'https://api.tmdb.org/3';
 // Determine cache directory based on environment
 // Use /tmp/.cache when running on Vercel, otherwise use local .cache directory
 // Allow external override to keep cache writes out of watched tree during dev
@@ -231,6 +231,14 @@ const saveToCache = async (cacheKey, content, subDir = '') => {
 };
 
 // NEW HELPER FUNCTIONS
+
+// Strip credentials from a URL before it reaches a log sink.
+// TMDB urls carry ?api_key=; logging them verbatim leaks the key into
+// every log file, shipped bundle and support paste.
+const redactUrl = (url) => {
+    if (!url) return url;
+    return String(url).replace(/([?&](?:api_key|apikey|token|key)=)[^&#\s]+/gi, '$1REDACTED');
+};
 
 // Function to create URL-friendly slugs
 const slugify = (text) => {
@@ -991,7 +999,7 @@ const getShowboxUrlFromTmdbInfo = async (tmdbType, tmdbId, regionPreference = nu
     if (!tmdbData || process.env.DISABLE_CACHE === 'true') {
         const TMDB_API_KEY = obtainTmdbKey();
         const tmdbApiUrl = `${TMDB_BASE_URL}/${tmdbType}/${tmdbId}?api_key=${TMDB_API_KEY}`;
-        console.log(`  Fetching TMDB data from: ${tmdbApiUrl}`);
+        console.log(`  Fetching TMDB data from: ${redactUrl(tmdbApiUrl)}`);
         try {
             const response = await axios.get(tmdbApiUrl, { timeout: 10000 });
             tmdbData = response.data;
@@ -1024,7 +1032,7 @@ const getShowboxUrlFromTmdbInfo = async (tmdbType, tmdbId, regionPreference = nu
     if (!tmdbAlternativeTitlesData || process.env.DISABLE_CACHE === 'true') {
         const TMDB_API_KEY = obtainTmdbKey();
         const altTitlesApiUrl = `${TMDB_BASE_URL}/${tmdbType}/${tmdbId}/alternative_titles?api_key=${TMDB_API_KEY}`;
-        console.log(`  Fetching TMDB alternative titles from: ${altTitlesApiUrl}`);
+        console.log(`  Fetching TMDB alternative titles from: ${redactUrl(altTitlesApiUrl)}`);
         try {
             const response = await axios.get(altTitlesApiUrl, { timeout: 10000 });
             tmdbAlternativeTitlesData = response.data;
@@ -1050,7 +1058,7 @@ const getShowboxUrlFromTmdbInfo = async (tmdbType, tmdbId, regionPreference = nu
     if (!tmdbImagesData || process.env.DISABLE_CACHE === 'true') {
         const TMDB_API_KEY = obtainTmdbKey();
         const imagesApiUrl = `${TMDB_BASE_URL}/${tmdbType}/${tmdbId}/images?api_key=${TMDB_API_KEY}`;
-        console.log(`  Fetching TMDB images from: ${imagesApiUrl}`);
+        console.log(`  Fetching TMDB images from: ${redactUrl(imagesApiUrl)}`);
         try {
             const response = await axios.get(imagesApiUrl, { timeout: 10000 });
             tmdbImagesData = response.data;
@@ -2968,7 +2976,7 @@ const getTmdbDataForPStream = async (tmdbType, tmdbId) => {
     if (!tmdbData || process.env.DISABLE_CACHE === 'true') {
         const TMDB_API_KEY = obtainTmdbKey();
         const tmdbApiUrl = `${TMDB_BASE_URL}/${tmdbType}/${tmdbId}?api_key=${TMDB_API_KEY}`;
-        console.log(`  [PStream] Fetching TMDB data from: ${tmdbApiUrl}`);
+        console.log(`  [PStream] Fetching TMDB data from: ${redactUrl(tmdbApiUrl)}`);
 
         try {
             const response = await axios.get(tmdbApiUrl, { timeout: 10000 });

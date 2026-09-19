@@ -21,7 +21,7 @@ async function getExternalIds(type, tmdbId) {
   const key = `${type}:${tmdbId}`;
   const cached = cache.imdbByTmdb.get(key);
   if (isFresh(cached)) return cached.data;
-  const json = await tmdbFetchJson(`https://api.themoviedb.org/3/${type}/${tmdbId}/external_ids`);
+  const json = await tmdbFetchJson(`https://api.tmdb.org/3/${type}/${tmdbId}/external_ids`);
   cache.imdbByTmdb.set(key, { data: json, ts: Date.now() });
   return json;
 }
@@ -29,7 +29,7 @@ async function getDetails(type, tmdbId) {
   const key = `${type}:${tmdbId}:details`;
   const cached = cache.details.get(key);
   if (isFresh(cached)) return cached.data;
-  const json = await tmdbFetchJson(`https://api.themoviedb.org/3/${type}/${tmdbId}`);
+  const json = await tmdbFetchJson(`https://api.tmdb.org/3/${type}/${tmdbId}`);
   cache.details.set(key, { data: json, ts: Date.now() });
   return json;
 }

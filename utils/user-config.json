@@ -2,7 +2,7 @@
   "defaultProviders": [],
   "configVersion": 1,
   "tmdbApiKeys": [],
-  "enableShowboxProvider": true,
+  "enableShowboxProvider": false,
   "febboxCookies": [],
   "enable4khdhubProvider": true,
   "enableVixsrcProvider": true,
@@ -19,5 +19,5 @@
   "enableLordflixProvider": false,
   "enableNotorrentProvider": false,
   "enableDahmermoviesProvider": true,
-  "port": 8787
+  "port": 8790
 }

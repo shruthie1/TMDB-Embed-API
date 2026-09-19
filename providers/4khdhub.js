@@ -1625,7 +1625,7 @@ async function getTMDBDetails(tmdbId, mediaType) {
 
     try {
         console.log(`[4KHDHub] Fetching ${mediaType} details for TMDB ID: ${tmdbId}`);
-        const response = await makeRequest(`https://api.themoviedb.org/3/${mediaType}/${tmdbId}?api_key=${TMDB_API_KEY}`);
+        const response = await makeRequest(`https://api.tmdb.org/3/${mediaType}/${tmdbId}?api_key=${TMDB_API_KEY}`);
         const data = JSON.parse(response.body);
 
         if (mediaType === 'movie') {

@@ -6,7 +6,7 @@
 const { getTmdbApiKey } = require('./tmdbKey');
 const { findBestMatch } = require('./titleMatch');
 
-const TMDB_BASE = 'https://api.themoviedb.org/3';
+const TMDB_BASE = 'https://api.tmdb.org/3';
 
 const cache = new Map();
 const TTL = 24 * 60 * 60 * 1000;

@@ -108,7 +108,7 @@ async function getVideasyStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
     try {
         const type = mediaType === 'tv' ? 'tv' : 'movie';
         const { data } = await axios.get(
-            `https://api.themoviedb.org/3/${type}/${tmdbId}?api_key=${tmdbKey}&append_to_response=external_ids`,
+            `https://api.tmdb.org/3/${type}/${tmdbId}?api_key=${tmdbKey}&append_to_response=external_ids`,
             { timeout: 8000 }
         );
         details = {

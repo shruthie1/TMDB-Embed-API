@@ -66,7 +66,7 @@ async function getDahmermoviesStreams(tmdbId, mediaType = 'movie', seasonNum = n
     try {
         const type = mediaType === 'tv' ? 'tv' : 'movie';
         const { data } = await axios.get(
-            `https://api.themoviedb.org/3/${type}/${tmdbId}?api_key=${tmdbKey}`,
+            `https://api.tmdb.org/3/${type}/${tmdbId}?api_key=${tmdbKey}`,
             { timeout: 8000 }
         );
         title = data.title || data.name || '';

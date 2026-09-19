@@ -319,6 +319,24 @@ app.get('/api/providers/:name', (req,res) => {
 });
 
 // Aggregate streams across all enabled providers
+// A single slow provider must not hold the whole aggregate response hostage.
+// Promise.all resolves only when the LAST provider settles, so one host that
+// is unreachable (and retries internally) blocks 12 good results indefinitely.
+// Each provider now races a timer: on expiry it yields [] and the aggregate
+// returns partial results, with providerTimings[name] = null marking the miss.
+const PROVIDER_TIMEOUT_MS = Number(process.env.PROVIDER_TIMEOUT_MS) || 45000;
+
+function raceProviderTimeout(promise, ms, name) {
+  let timer;
+  const timeout = new Promise(resolve => {
+    timer = setTimeout(() => {
+      console.warn(`[api] provider ${name} exceeded ${ms}ms - returning partial results`);
+      resolve({ __timedOut: true });
+    }, ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 app.get('/api/streams/:type/:tmdbId', async (req,res) => {
   const { type, tmdbId } = req.params;
   if (!['movie','series'].includes(type)) return res.status(400).json({ success:false, error:'INVALID_TYPE' });
@@ -337,10 +355,13 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
       try {
         console.log(`[api] invoking provider ${name} for tmdbId=${tmdbId}`);
         const t0 = Date.now();
-        const r = await prov.fetch({ tmdbId, type, season, episode, imdbId, filters:{ } });
+        const r = await raceProviderTimeout(
+          prov.fetch({ tmdbId, type, season, episode, imdbId, filters:{ } }),
+          PROVIDER_TIMEOUT_MS, name);
+        if (r && r.__timedOut) { providerTimings[name] = null; return []; }
         providerTimings[name] = Date.now()-t0;
         console.log(`[api] provider ${name} returned ${Array.isArray(r)?r.length:0} streams`);
-        return r;
+        return Array.isArray(r) ? r : [];
       } catch (e) {
         console.error(`[api] provider ${name} failed:`, e.message);
         providerTimings[name] = null;
