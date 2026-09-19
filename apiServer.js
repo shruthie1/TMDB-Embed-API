@@ -7,7 +7,7 @@ const { authenticate, issueSession, requireAuth, getSession, updatePassword } = 
 const path = require('path');
 const { listProviders, getProvider, getCookieStats } = require('./providers/registry');
 const { createProxyRoutes, processStreamsForProxy } = require('./proxy/proxyServer');
-const { resolveImdbId } = require('./utils/tmdb');
+const { resolveImdbId, searchTitles } = require('./utils/tmdb');
 const { applyFilters } = require('./utils/streamFilters');
 
 const app = express();
@@ -236,6 +236,20 @@ app.post('/api/restart', (req,res) => {
 // --- Basic informational endpoints ---
 app.get('/api/health', (req, res) => {
   res.json({ ok: true, service: 'tmdb-embed-api', time: new Date().toISOString() });
+});
+
+// Server-side catalogue search; the TMDB key never reaches the browser.
+app.get('/api/search', async (req, res) => {
+  const query = String(req.query.q || '').trim();
+  const type = ['movie', 'series', 'all'].includes(req.query.type) ? req.query.type : 'all';
+  if (query.length < 2) return res.status(400).json({ success: false, error: 'QUERY_TOO_SHORT' });
+  try {
+    const results = await searchTitles(query, type);
+    res.json({ success: true, query, type, results });
+  } catch (error) {
+    const missingKey = /TMDB_API_KEY missing/i.test(error.message);
+    res.status(missingKey ? 503 : 502).json({ success: false, error: missingKey ? 'TMDB_API_KEY_MISSING' : 'TMDB_SEARCH_FAILED' });
+  }
 });
 
 // Metrics endpoint

@@ -1,7 +1,7 @@
 /* Basic Chitram OTT stream browser/player. */
 (function () {
   const $ = (s) => document.querySelector(s);
-  const els = { form: $('#searchForm'), type: $('#mediaType'), id: $('#tmdbId'), search: $('#searchBtn'), status: $('#status'), streams: $('#streams'), count: $('#streamCount'), video: $('#video'), empty: $('#videoEmpty'), now: $('#nowPlaying'), details: $('#nowDetails'), audio: $('#audioTracks'), subtitle: $('#subtitleNote') };
+  const els = { form: $('#searchForm'), type: $('#mediaType'), query: $('#searchQuery'), search: $('#searchBtn'), status: $('#status'), resultsSection: $('#resultsSection'), results: $('#results'), resultCount: $('#resultCount'), streams: $('#streams'), count: $('#streamCount'), video: $('#video'), empty: $('#videoEmpty'), now: $('#nowPlaying'), details: $('#nowDetails'), audio: $('#audioTracks'), subtitle: $('#subtitleNote') };
   let hls = null;
   let currentStreams = [];
   let currentIndex = -1;
@@ -11,6 +11,16 @@
   function streamLabel(stream) { return stream.name || stream.title || stream.provider || 'Stream'; }
   function languageFromLabel(stream) { const m = streamLabel(stream).match(/\[([^\]]+)\]/); return m ? m[1] : ''; }
   function isHls(url) { return /\.m3u8(?:$|\?)/i.test(url || ''); }
+
+  function renderResults(results) {
+    els.resultCount.textContent = results.length;
+    els.resultsSection.hidden = !results.length;
+    if (!results.length) { els.results.innerHTML = ''; return; }
+    els.results.innerHTML = results.map(item => `<button class="result" type="button" data-id="${esc(item.id)}" data-type="${esc(item.mediaType)}" data-title="${esc(item.title)}">
+      ${item.poster ? `<img src="${esc(item.poster)}" alt="" loading="lazy">` : '<div class="result-poster"></div>'}
+      <div class="result-body"><div class="result-title">${esc(item.title)}</div><div class="result-meta">${esc(item.mediaType === 'series' ? 'Series' : 'Movie')} · ${esc(item.year || 'Year unknown')} · ★ ${esc(item.rating)}</div><p class="result-overview">${esc(item.overview)}</p></div>
+    </button>`).join('');
+  }
 
   function renderStreams(streams) {
     els.count.textContent = streams.length;
@@ -74,20 +84,39 @@
     setStatus(`Playing ${languageFromLabel(stream) || 'selected'} stream ${index + 1} of ${currentStreams.length}.`, 'good');
   }
 
-  async function search() {
-    const id = els.id.value.trim(); if (!/^\d+$/.test(id)) { setStatus('Enter a numeric TMDB ID.', 'error'); return; }
-    els.search.disabled = true; setStatus('Finding streams…'); els.streams.innerHTML = ''; currentStreams = [];
+  async function loadStreams(type, id, title) {
+    els.search.disabled = true; setStatus(`Finding streams for ${title || `TMDB ${id}`}…`); els.streams.innerHTML = ''; currentStreams = [];
     try {
-      const response = await fetch(`/api/streams/${encodeURIComponent(els.type.value)}/${encodeURIComponent(id)}`);
+      const response = await fetch(`/api/streams/${encodeURIComponent(type)}/${encodeURIComponent(id)}`);
       const data = await response.json(); if (!response.ok || !data.success) throw new Error(data.error || 'API request failed');
       currentStreams = Array.isArray(data.streams) ? data.streams.filter(s => s && s.url) : []; renderStreams(currentStreams);
       setStatus(`${data.count || currentStreams.length} stream${(data.count || currentStreams.length) === 1 ? '' : 's'} found for TMDB ${id}.`, 'good');
+      if (title) els.now.textContent = title;
       if (currentStreams.length) playStream(0);
     } catch (e) { setStatus(e.message || 'Could not load streams.', 'error'); els.streams.innerHTML = '<div class="empty">The stream request failed. Check the API deployment logs.</div>'; }
     finally { els.search.disabled = false; }
   }
 
+  async function search() {
+    const query = els.query.value.trim();
+    if (!query) { setStatus('Enter a title or TMDB ID.', 'error'); return; }
+    if (/^\d+$/.test(query)) {
+      const type = els.type.value === 'series' ? 'series' : 'movie';
+      return loadStreams(type, query, `TMDB ${query}`);
+    }
+    els.search.disabled = true; setStatus('Searching TMDB…'); renderResults([]);
+    try {
+      const response = await fetch(`/api/search?q=${encodeURIComponent(query)}&type=${encodeURIComponent(els.type.value)}`);
+      const data = await response.json(); if (!response.ok || !data.success) throw new Error(data.error || 'Search failed');
+      renderResults(data.results || []);
+      setStatus(`${(data.results || []).length} result${(data.results || []).length === 1 ? '' : 's'} found. Choose a title to load streams.`, 'good');
+      if (!data.results?.length) els.results.innerHTML = '<div class="empty">No matching titles found.</div>';
+    } catch (e) { setStatus(e.message || 'Search failed.', 'error'); }
+    finally { els.search.disabled = false; }
+  }
+
   els.form.addEventListener('submit', e => { e.preventDefault(); search(); });
+  els.results.addEventListener('click', e => { const card = e.target.closest('[data-id]'); if (card) loadStreams(card.dataset.type, card.dataset.id, card.dataset.title); });
   els.streams.addEventListener('click', e => { const card = e.target.closest('[data-index]'); if (card) playStream(Number(card.dataset.index)); });
   els.audio.addEventListener('change', () => {
     const value = els.audio.value || '';
@@ -95,5 +124,8 @@
     if (value.startsWith('hls:') && hls) hls.audioTrack = Number(value.slice(4));
     else if (els.video.audioTracks) Array.from(els.video.audioTracks).forEach((t, i) => { t.enabled = i === Number(value); });
   });
-  const queryId = new URLSearchParams(location.search).get('id'); if (queryId) els.id.value = queryId; search();
+  const params = new URLSearchParams(location.search); const queryId = params.get('id'); const query = params.get('q');
+  if (queryId) { els.query.value = queryId; els.type.value = params.get('type') === 'series' ? 'series' : 'movie'; }
+  else if (query) els.query.value = query;
+  search();
 }());

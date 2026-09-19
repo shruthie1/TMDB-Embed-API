@@ -18,13 +18,19 @@
 
     <form id="searchForm" class="searchbar">
       <select id="mediaType" aria-label="Media type">
+        <option value="all">All</option>
         <option value="movie">Movie</option>
         <option value="series">Series</option>
       </select>
-      <input id="tmdbId" inputmode="numeric" placeholder="Enter TMDB ID" value="1408162" required>
-      <button type="submit" id="searchBtn">Search streams</button>
+      <input id="searchQuery" placeholder="Search title or enter TMDB ID" value="1408162" required>
+      <button type="submit" id="searchBtn">Search</button>
     </form>
     <p id="status" class="status" role="status">Ready. Try TMDB ID 1408162.</p>
+
+    <section id="resultsSection" class="results-section" hidden>
+      <div class="section-heading"><h2>Search results</h2><span id="resultCount" class="count">0</span></div>
+      <div id="results" class="results"></div>
+    </section>
 
     <section class="player-card">
       <div class="video-wrap">
