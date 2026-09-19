@@ -1,4 +1,5 @@
 const { config } = require('../utils/config');
+const { AsyncLocalStorage } = require('async_hooks');
 const fs = require('fs');
 const path = require('path');
 
@@ -21,6 +22,33 @@ const providerFunctionMap = {
   'onetouchtv.js': 'getOnetouchtvStreams',
   'zxcstreams.js': 'getZxcstreamsStreams',
 };
+
+// Per-request cookie context.
+//
+// Showbox reads (and writes back to) global.currentRequestConfig from ~9 call
+// sites deep inside a 3000-line module. The previous save/restore around an
+// await was not concurrency-safe: two overlapping Showbox requests interleaved
+// and stomped each other's cookie, which is why a search for one title showed
+// up inside another title's request.
+//
+// AsyncLocalStorage gives each request its own store that follows the async
+// call chain, so those existing reads stay correct without rewriting Showbox.
+// global.currentRequestConfig is redefined as an accessor onto the active
+// store, falling back to a shared object when no request is in flight.
+const requestContext = new AsyncLocalStorage();
+const fallbackConfig = {};
+
+Object.defineProperty(global, 'currentRequestConfig', {
+  configurable: true,
+  get() { const store = requestContext.getStore(); return store ? store.cfg : fallbackConfig; },
+  set(v) { const store = requestContext.getStore(); if (store) store.cfg = v || {}; else Object.assign(fallbackConfig, v || {}); },
+});
+
+Object.defineProperty(global, 'currentRequestUserCookieRemainingMB', {
+  configurable: true,
+  get() { const store = requestContext.getStore(); return store ? store.remainingMB : fallbackConfig.__remainingMB; },
+  set(v) { const store = requestContext.getStore(); if (store) store.remainingMB = v; else fallbackConfig.__remainingMB = v; },
+});
 
 // Stats for debug endpoint
 let lastCookieStats = { selected: null, index: null, total: 0, remainingMB: null, timestamp: null };
@@ -80,9 +108,10 @@ function createFetchFunction(providerInfo) {
           return [];
         }
         const cookies = await getEffectiveCookies();
-        const previousConfig = global.currentRequestConfig;
-        global.currentRequestConfig = { ...(previousConfig || {}) };
         let selected = null;
+        // Run the whole Showbox resolve inside its own async context so the
+        // cookie it picks cannot be seen or overwritten by a concurrent request.
+        return await requestContext.run({ cfg: {}, remainingMB: null }, async () => {
         if (cookies.length > 0) {
           const index = Math.floor(Math.random() * cookies.length);
           selected = cookies[index];
@@ -91,11 +120,15 @@ function createFetchFunction(providerInfo) {
           lastCookieStats = { selected: selected.slice(0, 16) + '...', index, total: cookies.length, remainingMB: null, timestamp: Date.now() };
           console.log(`[registry] Cookie random pick index=${index} total=${cookies.length}`);
         }
-        result = await module[funcName](mediaType, ctx.tmdbId, ctx.season || null, ctx.episode || null, null, selected);
+        const out = await module[funcName](mediaType, ctx.tmdbId, ctx.season || null, ctx.episode || null, null, selected);
         if (global.currentRequestUserCookieRemainingMB != null) {
           lastCookieStats.remainingMB = global.currentRequestUserCookieRemainingMB;
         }
-        global.currentRequestConfig = previousConfig || {};
+        const ms = Date.now() - t0;
+        console.log(`[registry] ${providerInfo.name} fetch duration ${ms}ms`);
+        if (!Array.isArray(out)) return [];
+        return out.map(s => ({ ...s, provider: s.provider || providerInfo.name }));
+        });
       } else {
         // Standard provider call
         result = await module[funcName](ctx.tmdbId, mediaType, ctx.season || null, ctx.episode || null);

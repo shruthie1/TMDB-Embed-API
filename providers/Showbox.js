@@ -240,11 +240,56 @@ const redactUrl = (url) => {
     return String(url).replace(/([?&](?:api_key|apikey|token|key)=)[^&#\s]+/gi, '$1REDACTED');
 };
 
+// Per-host circuit breaker.
+//
+// An unreachable host (showbox.media from a blocked network) was retried at
+// full cost on every strategy in the ladder: ~6 title variants x several
+// search strategies x a 30s timeout each, for a host that answered nothing.
+// After N consecutive transport failures the host is considered down and
+// further calls short-circuit for COOLDOWN_MS instead of burning a timeout.
+// Any success resets it, so a transient blip self-heals.
+const HOST_FAILURE_THRESHOLD = Number(process.env.HOST_FAILURE_THRESHOLD) || 3;
+const HOST_COOLDOWN_MS = Number(process.env.HOST_COOLDOWN_MS) || 120000;
+const hostBreaker = new Map();
+
+const hostOf = (url) => { try { return new URL(String(url)).host; } catch { return null; } };
+
+const breakerIsOpen = (url) => {
+    const host = hostOf(url);
+    if (!host) return false;
+    const state = hostBreaker.get(host);
+    if (!state || state.failures < HOST_FAILURE_THRESHOLD) return false;
+    if (Date.now() - state.openedAt > HOST_COOLDOWN_MS) { hostBreaker.delete(host); return false; }
+    return true;
+};
+
+const breakerRecordFailure = (url) => {
+    const host = hostOf(url);
+    if (!host) return;
+    const state = hostBreaker.get(host) || { failures: 0, openedAt: 0 };
+    state.failures += 1;
+    if (state.failures === HOST_FAILURE_THRESHOLD) {
+        state.openedAt = Date.now();
+        console.warn(`ShowBoxScraper: circuit OPEN for ${host} after ${state.failures} failures - skipping for ${HOST_COOLDOWN_MS}ms`);
+    }
+    hostBreaker.set(host, state);
+};
+
+const breakerRecordSuccess = (url) => { const host = hostOf(url); if (host) hostBreaker.delete(host); };
+
 // Function to create URL-friendly slugs
+// Titles that survive slugification only as connective residue. A slug of
+// "and" (from "<native script> & <native script>") is not a weak match - it is
+// a guaranteed miss that still costs a full network timeout, so it is rejected
+// outright rather than fetched.
+const SLUG_STOPWORDS = new Set(['and', 'the', 'a', 'an', 'of', 'or', 'in', 'on', 'to']);
+
 const slugify = (text) => {
     if (!text) return '';
-    return text
+    const slug = text
         .toString()
+        .normalize('NFD')                 // Split accents off their base letter
+        .replace(/[\u0300-\u036f]/g, '')  // ...and drop them: "Amelie" not "amlie"
         .toLowerCase()
         .trim()
         .replace(/&/g, 'and')             // Replace & with 'and'
@@ -253,6 +298,13 @@ const slugify = (text) => {
         .replace(/--+/g, '-')             // Replace multiple - with single -
         .replace(/^-+/, '')               // Trim - from start of text
         .replace(/-+$/, '');              // Trim - from end of text
+
+    // A non-Latin title reduces to '' or to pure stopwords. Either way there is
+    // no title left to match on - treat it as unslugifiable.
+    if (!slug) return '';
+    const meaningful = slug.split('-').filter(part => part && !SLUG_STOPWORDS.has(part));
+    if (meaningful.length === 0) return '';
+    return slug;
 };
 
 // Function to normalize titles for comparison
@@ -1434,11 +1486,17 @@ class ShowBoxScraper {
             currentHeaders['Cookie'] = `ui=${cookieValue}`;
         }
 
+        if (breakerIsOpen(requestUrl)) {
+            console.log(`ShowBoxScraper: skipping ${redactUrl(requestUrl)} - host circuit is open`);
+            return null;
+        }
+
         try {
             const response = await axios.get(requestUrl, {
                 headers: currentHeaders,
                 timeout: 30000
             });
+            breakerRecordSuccess(requestUrl);
             const responseData = response.data;
 
             // Only cache JSON responses, not HTML (HTML is too large and wasteful)
@@ -1452,7 +1510,10 @@ class ShowBoxScraper {
             return responseData;
         } catch (error) {
             const errorMessage = error.response ? `${error.message} (Status: ${error.response.status})` : error.message;
-            console.log(`ShowBoxScraper: Request failed for ${url}: ${errorMessage}`);
+            // Only transport failures trip the breaker. An HTTP error response
+            // means the host IS reachable and merely lacks this title.
+            if (!error.response) breakerRecordFailure(requestUrl);
+            console.log(`ShowBoxScraper: Request failed for ${redactUrl(url)}: ${errorMessage}`);
             // timerLabel removed; profiling disabled
             return null;
         }
