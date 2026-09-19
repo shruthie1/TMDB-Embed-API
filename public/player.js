@@ -55,6 +55,10 @@
     const stream = currentStreams[index]; if (!stream || !stream.url) return;
     currentIndex = index; document.querySelectorAll('.stream').forEach((el, i) => el.classList.toggle('active', i === index));
     if (hls) { hls.destroy(); hls = null; }
+    // Clear the previous media source before attaching another language URL.
+    // Without this, browsers can keep rendering the old HLS buffer after a
+    // stream-card or language-selector switch.
+    els.video.pause(); els.video.removeAttribute('src'); els.video.load();
     clearTracks(); addExternalSubtitles(stream); els.empty.style.display = 'none';
     els.now.textContent = streamLabel(stream); els.details.textContent = `${stream.provider || 'Unknown provider'} · ${stream.quality || 'Auto'} · ${languageFromLabel(stream) || 'language from manifest'}`;
     const headers = stream.headers || {};
