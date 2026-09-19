@@ -192,7 +192,7 @@ app.use((req,res,next)=>{ metrics.requestsTotal++; metrics.lastRequestAt = Date.
 app.use(express.static(path.join(process.cwd(),'public')));
 
 // Config API
-app.get('/api/config', (req,res) => {
+app.get('/api/config', requireAuth, (req,res) => {
   const fs = require('fs');
   let override = {};
   try { if (fs.existsSync(OVERRIDE_PATH)) override = JSON.parse(fs.readFileSync(OVERRIDE_PATH,'utf8')); } catch (e) {
@@ -200,7 +200,7 @@ app.get('/api/config', (req,res) => {
   }
   res.json({ success:true, merged: config, override, overridePath: OVERRIDE_PATH });
 });
-app.post('/api/config', (req,res) => {
+app.post('/api/config', requireAuth, (req,res) => {
   const patch = req.body || {};
   if (patch.port) {
     const p = Number(patch.port); if (!Number.isFinite(p) || p<=0 || p>65535) return res.status(400).json({ success:false, error:'INVALID_PORT'});
@@ -299,7 +299,7 @@ app.get('/api/providers', (req,res) => {
 });
 
 // Debug environment/config endpoint (do not expose publicly in production)
-app.get('/api/debug/env', (req,res) => {
+app.get('/api/debug/env', requireAuth, (req,res) => {
   const cookieStats = getCookieStats ? getCookieStats() : null;
   res.json({
     port: config.port,
