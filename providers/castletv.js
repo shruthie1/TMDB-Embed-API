@@ -286,6 +286,18 @@ function pickPreferredTracks(tracks) {
     return withVideo.length > 0 ? withVideo : tracks;
 }
 
+// Castle changed the track schema from languageId/languageName to id/name.
+// Normalize both shapes before requesting playback; otherwise an undefined
+// languageId makes the API return its default Hindi stream for every label.
+function normalizeLanguageTrack(track) {
+    if (!track || typeof track !== 'object') return track;
+    return {
+        ...track,
+        languageId: track.languageId ?? track.id,
+        languageName: track.languageName ?? track.name ?? track.abbreviate
+    };
+}
+
 async function getCastletvStreams(tmdbId, mediaType = 'movie', seasonNum = null, episodeNum = null) {
     console.log(`[CastleTV] Fetching streams for TMDB ID: ${tmdbId}, Type: ${mediaType}`);
 
@@ -355,7 +367,7 @@ async function getCastletvStreams(tmdbId, mediaType = 'movie', seasonNum = null,
         }
 
         const epEntry = episodes.find((e) => e.id && e.id.toString() === episodeId);
-        const allTracks = (epEntry && epEntry.tracks) || [];
+        const allTracks = ((epEntry && epEntry.tracks) || []).map(normalizeLanguageTrack);
         const tracks = pickPreferredTracks(allTracks);
 
         const streams = [];

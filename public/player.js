@@ -74,7 +74,13 @@
     const headers = stream.headers || {};
     if (window.Hls && Hls.isSupported() && isHls(stream.url)) {
       hls = new Hls({ enableWorker: true, xhrSetup: function (xhr) { ['Referer', 'Origin', 'Accept', 'Accept-Language'].forEach(k => { if (headers[k]) { try { xhr.setRequestHeader(k, headers[k]); } catch (_) {} } }); } });
-      hls.on(Hls.Events.MANIFEST_PARSED, function () { renderAudioTracks((hls.audioTracks || []).map(t => ({ name: t.name || t.lang, lang: t.lang }))); els.video.play().catch(() => {}); });
+      const applyManifestAudio = function (tracks) {
+        const list = Array.isArray(tracks) ? tracks : [];
+        renderAudioTracks(list.map(t => ({ name: t.name || t.lang, lang: t.lang })));
+        if (list.length && hls.audioTrack < 0) hls.audioTrack = 0;
+      };
+      hls.on(Hls.Events.MANIFEST_PARSED, function (_, data) { applyManifestAudio(data && data.audioTracks ? data.audioTracks : hls.audioTracks); els.video.play().catch(() => {}); });
+      hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, function (_, data) { applyManifestAudio(data && data.audioTracks ? data.audioTracks : hls.audioTracks); });
       hls.on(Hls.Events.ERROR, function (_, data) { if (data.fatal) setStatus('The stream could not be loaded in this browser. Try another provider.', 'error'); });
       hls.loadSource(stream.url); hls.attachMedia(els.video);
     } else {
