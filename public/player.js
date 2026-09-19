@@ -24,7 +24,7 @@
 
   function clearTracks() {
     els.video.querySelectorAll('track').forEach(t => t.remove());
-    els.audio.innerHTML = '<option>No alternate audio detected</option>'; els.audio.disabled = true;
+    els.audio.innerHTML = '<option>Detecting audio…</option>'; els.audio.disabled = true;
     els.subtitle.textContent = '';
   }
 
@@ -40,8 +40,15 @@
   }
 
   function renderAudioTracks(tracks) {
-    if (!tracks.length) { els.audio.innerHTML = '<option>No alternate audio detected</option>'; els.audio.disabled = true; return; }
-    els.audio.innerHTML = tracks.map((t, i) => `<option value="${i}">${esc(t.name || t.lang || `Audio ${i + 1}`)}</option>`).join(''); els.audio.disabled = false;
+    const languageStreams = currentStreams.map((stream, index) => ({
+      index,
+      name: `${languageFromLabel(stream) || 'Default'} · ${stream.quality || 'Auto'} · ${stream.provider || 'Provider'}`
+    }));
+    const embedded = tracks.map((track, index) => ({ index, name: track.name || track.lang || `Audio ${index + 1}`, embedded: true }));
+    const options = [...languageStreams.map(item => ({ ...item, value: `stream:${item.index}` })), ...embedded.map(item => ({ ...item, value: `hls:${item.index}` }))];
+    if (!options.length) { els.audio.innerHTML = '<option>No alternate audio detected</option>'; els.audio.disabled = true; return; }
+    els.audio.innerHTML = options.map(option => `<option value="${option.value}"${option.index === currentIndex && !option.embedded ? ' selected' : ''}>${esc(option.name)}</option>`).join('');
+    els.audio.disabled = false;
   }
 
   function playStream(index) {
@@ -58,9 +65,9 @@
       hls.loadSource(stream.url); hls.attachMedia(els.video);
     } else {
       els.video.src = stream.url; els.video.play().catch(() => {});
-      if (els.video.audioTracks && els.video.audioTracks.length) renderAudioTracks(Array.from(els.video.audioTracks).map(t => ({ name: t.label, lang: t.language })));
+      renderAudioTracks(els.video.audioTracks ? Array.from(els.video.audioTracks).map(t => ({ name: t.label, lang: t.language })) : []);
     }
-    setStatus(`Playing stream ${index + 1} of ${currentStreams.length}.`, 'good');
+    setStatus(`Playing ${languageFromLabel(stream) || 'selected'} stream ${index + 1} of ${currentStreams.length}.`, 'good');
   }
 
   async function search() {
@@ -78,6 +85,11 @@
 
   els.form.addEventListener('submit', e => { e.preventDefault(); search(); });
   els.streams.addEventListener('click', e => { const card = e.target.closest('[data-index]'); if (card) playStream(Number(card.dataset.index)); });
-  els.audio.addEventListener('change', () => { if (hls) hls.audioTrack = Number(els.audio.value); else if (els.video.audioTracks) Array.from(els.video.audioTracks).forEach((t, i) => { t.enabled = i === Number(els.audio.value); }); });
+  els.audio.addEventListener('change', () => {
+    const value = els.audio.value || '';
+    if (value.startsWith('stream:')) return playStream(Number(value.slice(7)));
+    if (value.startsWith('hls:') && hls) hls.audioTrack = Number(value.slice(4));
+    else if (els.video.audioTracks) Array.from(els.video.audioTracks).forEach((t, i) => { t.enabled = i === Number(value); });
+  });
   const queryId = new URLSearchParams(location.search).get('id'); if (queryId) els.id.value = queryId; search();
 }());
