@@ -415,22 +415,28 @@ app.get('/api/streams/:provider/:type/:tmdbId', async (req,res) => {
   }
 });
 
-const PORT = config.port;
-const HOST = process.env.BIND_HOST || '0.0.0.0';
-const server = app.listen(PORT, HOST, () => {
-  console.log(`TMDB Embed REST API listening on http://${HOST}:${PORT}`);
-  if (HOST !== 'localhost') {
-    console.log(`Local access (if running on your machine): http://localhost:${PORT}`);
-  }
-  console.log('Endpoints:');
-  console.log('  GET  /api/health');
-  console.log('  GET  /api/metrics');
-  console.log('  GET  /api/providers');
-  console.log('  GET  /api/streams/:type/:id');
-  console.log('  POST /api/streams/:type/:id');
-  if (!config.febboxCookies || config.febboxCookies.length === 0) {
-    console.warn('[startup][warning] No FEBBOX_COOKIES configured. Showbox / PStream related streams may be unavailable. Set FEBBOX_COOKIES in your environment to enable these sources.');
-  }
-});
+// Vercel imports this module as a serverless handler, while local/Docker runs
+// execute it directly and need a normal listening server.
+if (require.main === module) {
+  const PORT = config.port;
+  const HOST = process.env.BIND_HOST || '0.0.0.0';
+  const server = app.listen(PORT, HOST, () => {
+    console.log(`TMDB Embed REST API listening on http://${HOST}:${PORT}`);
+    if (HOST !== 'localhost') {
+      console.log(`Local access (if running on your machine): http://localhost:${PORT}`);
+    }
+    console.log('Endpoints:');
+    console.log('  GET  /api/health');
+    console.log('  GET  /api/metrics');
+    console.log('  GET  /api/providers');
+    console.log('  GET  /api/streams/:type/:id');
+    console.log('  POST /api/streams/:type/:id');
+    if (!config.febboxCookies || config.febboxCookies.length === 0) {
+      console.warn('[startup][warning] No FEBBOX_COOKIES configured. Showbox / PStream related streams may be unavailable. Set FEBBOX_COOKIES in your environment to enable these sources.');
+    }
+  });
 
-server.on('error', (err)=>{ console.error('[diagnostic] server error', err); });
+  server.on('error', (err)=>{ console.error('[diagnostic] server error', err); });
+}
+
+module.exports = app;
