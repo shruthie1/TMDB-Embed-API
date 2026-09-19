@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chitram OTT Player</title>
+  <link rel="stylesheet" href="/player.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">CHITRAM OTT</p>
+        <h1>Find something to watch</h1>
+      </div>
+      <a href="/" class="admin-link">Admin</a>
+    </header>
+
+    <form id="searchForm" class="searchbar">
+      <select id="mediaType" aria-label="Media type">
+        <option value="movie">Movie</option>
+        <option value="series">Series</option>
+      </select>
+      <input id="tmdbId" inputmode="numeric" placeholder="Enter TMDB ID" value="1408162" required>
+      <button type="submit" id="searchBtn">Search streams</button>
+    </form>
+    <p id="status" class="status" role="status">Ready. Try TMDB ID 1408162.</p>
+
+    <section class="player-card">
+      <div class="video-wrap">
+        <video id="video" controls playsinline preload="metadata"></video>
+        <div id="videoEmpty" class="video-empty">Choose a stream to start playback</div>
+      </div>
+      <div class="player-meta">
+        <div>
+          <strong id="nowPlaying">Nothing selected</strong>
+          <span id="nowDetails"></span>
+        </div>
+        <label class="audio-picker">Audio
+          <select id="audioTracks" disabled><option>No alternate audio detected</option></select>
+        </label>
+      </div>
+      <div id="subtitleNote" class="subtitle-note"></div>
+    </section>
+
+    <section>
+      <div class="section-heading">
+        <h2>Available streams</h2>
+        <span id="streamCount" class="count">0</span>
+      </div>
+      <div id="streams" class="streams"></div>
+    </section>
+  </main>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
+  <script src="/player.js"></script>
+</body>
+</html>
