@@ -96,6 +96,22 @@ function normalizeConfig(base) {
     if (!explicitEmptyKeys && cfg.tmdbApiKey) cfg.tmdbApiKeys = [cfg.tmdbApiKey];
     else cfg.tmdbApiKeys = [];
   }
+  // Serverless has no writable override file, so the key can only arrive as an
+  // environment variable. Without this the committed config (which ships with
+  // no key on purpose - it is a public repo) won overrode a TMDB_API_KEY set in
+  // the host's dashboard: line ~138 below MIRRORS config into process.env and
+  // deletes the var when the list is empty, so a correctly configured deploy
+  // erased its own key at startup and every lookup returned nothing.
+  //
+  // The file still wins when it has keys; this only fills a gap. Read AFTER the
+  // legacy single-key branch so an explicit local key keeps priority, and
+  // deliberately NOT gated on explicitEmptyKeys: clearing the list in the
+  // config UI is a statement about the override file, not an instruction to
+  // ignore the deployment's environment.
+  if (!cfg.tmdbApiKeys.length && process.env.TMDB_API_KEY) {
+    cfg.tmdbApiKeys = String(process.env.TMDB_API_KEY)
+      .split(/[\n,;]+/).map((k) => k.trim()).filter(Boolean);
+  }
   // If user explicitly cleared tmdbApiKeys via override, also clear legacy single key so it is not shown
   if (explicitEmptyKeys) {
     cfg.tmdbApiKey = null;
