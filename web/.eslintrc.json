@@ -1,0 +1,74 @@
+{
+  "root": true,
+  "parserOptions": {
+    "ecmaVersion": 2023,
+    "sourceType": "module",
+    "ecmaFeatures": {
+      "jsx": true
+    }
+  },
+  "env": {
+    "browser": true,
+    "node": true,
+    "es2023": true
+  },
+  "plugins": [
+    "react",
+    "react-hooks"
+  ],
+  "settings": {
+    "react": {
+      "version": "18.2"
+    }
+  },
+  "ignorePatterns": [
+    ".next",
+    ".next-check",
+    ".next-verify",
+    "node_modules"
+  ],
+  "rules": {
+    "no-undef": "error",
+    "no-unused-vars": [
+      "error",
+      {
+        "args": "none",
+        "varsIgnorePattern": "^_"
+      }
+    ],
+    "no-use-before-define": [
+      "error",
+      {
+        "functions": false,
+        "classes": true,
+        "variables": true
+      }
+    ],
+    "react/jsx-uses-vars": "error",
+    "react/jsx-uses-react": "error",
+    "no-dupe-keys": "error",
+    "no-dupe-args": "error",
+    "no-dupe-class-members": "error",
+    "no-unreachable": "error",
+    "no-self-assign": "error",
+    "no-self-compare": "error",
+    "no-cond-assign": "error",
+    "no-constant-condition": [
+      "error",
+      {
+        "checkLoops": false
+      }
+    ],
+    "no-sparse-arrays": "error",
+    "no-unsafe-negation": "error",
+    "valid-typeof": "error",
+    "no-obj-calls": "error",
+    "no-func-assign": "error",
+    "no-import-assign": "error",
+    "no-const-assign": "error",
+    "no-class-assign": "error",
+    "no-setter-return": "error",
+    "react-hooks/rules-of-hooks": "error",
+    "react-hooks/exhaustive-deps": "warn"
+  }
+}

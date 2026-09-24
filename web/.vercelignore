@@ -1,0 +1,6 @@
+# Generated locally; Vercel builds its own output.
+.next
+.next-*
+.vercel
+node_modules
+

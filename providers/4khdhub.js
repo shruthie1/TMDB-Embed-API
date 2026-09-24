@@ -4,6 +4,7 @@ const { URL } = require('url');
 const cheerio = require('cheerio');
 const fs = require('fs').promises;
 const path = require('path');
+const { deaccent } = require('../utils/titleMatch');
 
 // Configuration
 const DOMAINS_URL = 'https://raw.githubusercontent.com/phisher98/TVVVV/refs/heads/main/domains.json';
@@ -371,7 +372,16 @@ function cleanTitle(title) {
 
 // Enhanced title normalization with better handling of special cases
 function normalizeTitle(title) {
-    return title
+    // Deaccent FIRST, via the shared helper. Without it a macron falls outside
+    // the [a-z0-9] class below and becomes a SPACE: "Bahubali" (a-macron)
+    // turned into "b hubali", "Arya" (A-macron) into "rya". Measured
+    // 2026-09-21: 11 of 15 real Indic titles normalised to garbage - the same
+    // bug class that made castletv.js serve a different film entirely.
+    //
+    // Everything after the deaccent is 4kHDHub-specific (article stripping,
+    // vs/doctor/mister expansion) and deliberately stays local: it is tuned to
+    // this one catalogue's filename conventions, not a general title rule.
+    return deaccent(title)
         .toLowerCase()
         // Handle common title variations
         .replace(/&/g, 'and')           // & -> and

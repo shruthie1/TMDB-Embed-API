@@ -1,0 +1,7 @@
+.next-check
+.vercel
+.env*
+.next-dead-*
+.next-stale-*
+node_modules/
+.next/

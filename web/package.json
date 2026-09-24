@@ -1,0 +1,33 @@
+{
+  "name": "chitram-web",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -p 3200",
+    "build": "next build --no-lint",
+    "deploy:prod": "./scripts/deploy-prod.sh",
+    "start": "next start -p 3200",
+    "test": "vitest run",
+    "build:check": "rm -rf .next-check && NEXT_DIST_DIR=.next-check next build --no-lint 2>&1 | tail -20",
+    "clean": "rm -rf .next .next-check",
+    "verify": "NEXT_DIST_DIR=.next-verify next build --no-lint",
+    "lint": "eslint --ext .js,.jsx,.mjs components lib app",
+    "check": "npm run lint && npm test && npm run build:check"
+  },
+  "dependencies": {
+    "hls.js": "1.7.1",
+    "next": "14.2.15",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/react": "^16.3.3",
+    "@types/node": "^20.14.0",
+    "eslint": "^8.57.1",
+    "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-react-hooks": "^4.6.2",
+    "jsdom": "^25.0.1",
+    "vitest": "^2.1.1"
+  }
+}

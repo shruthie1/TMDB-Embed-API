@@ -2,6 +2,7 @@ const { config } = require('../utils/config');
 const { AsyncLocalStorage } = require('async_hooks');
 const fs = require('fs');
 const path = require('path');
+const { normaliseStreams } = require('../utils/streamSchema');
 
 // Lazy load cache for providers
 const providerCache = new Map();
@@ -21,6 +22,8 @@ const providerFunctionMap = {
   'netmirror.js': 'getNetmirrorStreams',
   'onetouchtv.js': 'getOnetouchtvStreams',
   'zxcstreams.js': 'getZxcstreamsStreams',
+  'showsst.js': 'getShowsstStreams',
+  'mapple.js': 'getMappleStreams',
 };
 
 // Per-request cookie context.
@@ -109,6 +112,7 @@ function createFetchFunction(providerInfo) {
         }
         const cookies = await getEffectiveCookies();
         let selected = null;
+        let statsForThisRequest = null;
         // Run the whole Showbox resolve inside its own async context so the
         // cookie it picks cannot be seen or overwritten by a concurrent request.
         return await requestContext.run({ cfg: {}, remainingMB: null }, async () => {
@@ -117,21 +121,43 @@ function createFetchFunction(providerInfo) {
           selected = cookies[index];
           global.currentRequestConfig.cookie = selected.startsWith('ui=') ? selected : `ui=${selected}`;
           global.currentRequestConfig.cookies = cookies.map(c => c.startsWith('ui=') ? c : `ui=${c}`);
-          lastCookieStats = { selected: selected.slice(0, 16) + '...', index, total: cookies.length, remainingMB: null, timestamp: Date.now() };
+          // Build this request's stats object locally; publish it only at the
+          // end. A concurrent request mutating the shared slot mid-flight used
+          // to let one request's cookie pair up with another's remainingMB.
+          statsForThisRequest = { selected: selected.slice(0, 16) + '...', index, total: cookies.length, remainingMB: null, timestamp: Date.now() };
+          lastCookieStats = statsForThisRequest;
           console.log(`[registry] Cookie random pick index=${index} total=${cookies.length}`);
         }
         const out = await module[funcName](mediaType, ctx.tmdbId, ctx.season || null, ctx.episode || null, null, selected);
-        if (global.currentRequestUserCookieRemainingMB != null) {
-          lastCookieStats.remainingMB = global.currentRequestUserCookieRemainingMB;
+        if (statsForThisRequest && global.currentRequestUserCookieRemainingMB != null) {
+          // Write through our own object, then re-publish, so we never stamp a
+          // remainingMB onto a newer request's stats.
+          statsForThisRequest.remainingMB = global.currentRequestUserCookieRemainingMB;
+          lastCookieStats = statsForThisRequest;
         }
         const ms = Date.now() - t0;
         console.log(`[registry] ${providerInfo.name} fetch duration ${ms}ms`);
         if (!Array.isArray(out)) return [];
-        return out.map(s => ({ ...s, provider: s.provider || providerInfo.name }));
+        return normaliseStreams(out.map(s => ({ ...s, provider: s.provider || providerInfo.name })));
         });
       } else {
-        // Standard provider call
-        result = await module[funcName](ctx.tmdbId, mediaType, ctx.season || null, ctx.episode || null);
+        // Standard provider call, under a wall-clock cap.
+        //
+        // Providers already run concurrently, so total resolve time is set by
+        // the SLOWEST one, not the sum. Without a cap a single unreachable
+        // origin holds up every other provider's results. Measured 2026-09-23
+        // on 628241: castletv 616ms, netmirror 1ms, onetouchtv 281ms, showsst
+        // 650ms, mapple 2578ms - all done inside 2.6s - while vaplayer sat at
+        // 8577ms waiting on a host that answers 522, making the request 10.1s.
+        //
+        // A provider that exceeds the cap yields nothing rather than delaying
+        // everyone. It is a LATENCY bound, not a correctness one: a slow
+        // provider's streams are dropped for this request only, and the fast
+        // providers' results still reach the player.
+        result = await withDeadline(
+          module[funcName](ctx.tmdbId, mediaType, ctx.season || null, ctx.episode || null),
+          PROVIDER_DEADLINE_MS,
+          providerInfo.name);
       }
 
       const durationMs = Date.now() - t0;
@@ -139,14 +165,49 @@ function createFetchFunction(providerInfo) {
 
       if (!Array.isArray(result)) return [];
 
-      // Add provider name if not present
-      return result.map(s => ({ ...s, provider: s.provider || providerInfo.name }));
+      // Add provider name if not present, then normalise to the canonical
+      // stream contract (utils/streamSchema.js) so every provider's output
+      // is shaped identically regardless of what that provider emits.
+      return normaliseStreams(result.map(s => ({ ...s, provider: s.provider || providerInfo.name })));
 
     } catch (e) {
       console.error(`[registry] ${providerInfo.name} fetch error:`, e.message);
       return [];
     }
   };
+}
+
+// Cap how long any one provider may hold up a resolve.
+//
+// Sized off MEASURED cold-cache work, not a round number. Measured 2026-09-23:
+// onetouchtv 99ms, showsst 252ms, castletv 485-1541ms, mapple 1160-3214ms,
+// vaplayer 2822ms (after its probe fix), netmirror 7330-9226ms cold / ~0ms warm
+// - netmirror is genuinely slow because it ffprobes the mp4 for audio language.
+//
+// A first pass at 6000ms cut netmirror off and silently dropped the Telugu
+// track it exists to provide, which is a correctness loss dressed up as a
+// speed win. The cap must sit ABOVE the slowest honest provider and only catch
+// origins that are hung.
+// 12000ms was still cutting it fine: netmirror measured 9226ms cold on 912649,
+// and a cold ffprobe plus a slow mirror can exceed that. Dropping the provider
+// there does not just cost a stream, it costs the AUDIO LANGUAGE on a stream we
+// would otherwise have - so the cap is set above the worst measured cold run
+// with headroom, and exists only to catch an origin that is genuinely hung.
+const PROVIDER_DEADLINE_MS = Number(process.env.PROVIDER_DEADLINE_MS) || 20000;
+
+// Resolves to [] if the provider overruns. The underlying promise is NOT
+// cancellable, so it is left to settle on its own; attaching a catch here
+// keeps an late rejection from surfacing as an unhandled rejection.
+function withDeadline(promise, ms, name) {
+  let timer;
+  const guard = new Promise((resolve) => {
+    timer = setTimeout(() => {
+      console.warn(`[registry] ${name} exceeded ${ms}ms deadline - dropping its results for this request`);
+      resolve([]);
+    }, ms);
+  });
+  promise.catch(() => {});
+  return Promise.race([promise, guard]).finally(() => clearTimeout(timer));
 }
 
 // Initialize providers - always load all; enabled state is checked dynamically from live config

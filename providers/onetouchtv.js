@@ -3,6 +3,7 @@ const { getDetails, resolveImdbId } = require('../utils/tmdb');
 const { getEpisodesPerSeason } = require('../utils/cinemetaEpisodes');
 const { findBestMatch } = require('../utils/titleMatch');
 const { tmdbTitleToImdbId } = require('../utils/tmdbTitleToImdb');
+const { searchSpellings } = require('../utils/titleMatch');
 
 const MAIN_URL = 'https://api3.devcorp.me';
 const AES_KEY = Buffer.from('im72charPasswordofdInitVectorStm', 'utf8');
@@ -156,14 +157,16 @@ async function getEpisodeStreams(id, playId) {
 }
 
 function resolveQuality(quality) {
-    if (!quality) return 'Unknown';
+    if (!quality) return 'Auto';
     const q = quality.toLowerCase();
     if (q === 'auto') return 'Auto';
+    if (q.includes('2160') || q.includes('4k') || q.includes('uhd')) return '2160p';
+    if (q.includes('1440')) return '1440p';
     if (q.includes('1080')) return '1080p';
     if (q.includes('720')) return '720p';
     if (q.includes('480')) return '480p';
     if (q.includes('360')) return '360p';
-    return quality;
+    return 'Auto';
 }
 
 async function resolveAbsoluteEpisode(imdbId, season, episode) {
@@ -199,7 +202,18 @@ async function getOnetouchtvStreams(tmdbId, mediaType = 'movie', seasonNum = nul
         const season = seasonNum || 1;
         const episode = episodeNum || 1;
 
-        const searchKeywords = [title];
+        // A macron is not merely a bad match here, it is a bad REQUEST: the
+        // search endpoint answers HTTP 404 for "Bāhubali: The Beginning" and
+        // HTTP 200 for the same title without the accent. TMDB spells several
+        // of this catalogue's films that way, so the deaccented form has to be
+        // tried too. findBestOttMatch still scores the result and the IMDB
+        // cross-check below still runs, so a looser query cannot smuggle in a
+        // different film.
+        // searchSpellings (utils/titleMatch.js) is the shared ladder: accented,
+        // deaccented, depunctuated, head-only and doubled-vowel. It collapses
+        // to a single entry for a plain ASCII title, so the common case still
+        // costs one request.
+        const searchKeywords = searchSpellings(title);
         if (type === 'series' && season > 1) {
             searchKeywords.unshift(`${title} Season ${season}`);
         }
@@ -298,17 +312,30 @@ async function getOnetouchtvStreams(tmdbId, mediaType = 'movie', seasonNum = nul
             }
         }
 
+        // The upstream source object never exposes per-track audio/language
+        // metadata (no EXT-X-MEDIA:TYPE=AUDIO renditions, no audio array —
+        // confirmed by fetching the actual .m3u8: it is a single flat media
+        // playlist with #EXT-X-ENDLIST and no EXT-X-STREAM-INF variants
+        // either). `track[]` is subtitles only (kind: "captions"). So
+        // `languages`/`audio` are genuinely unknown here — left empty rather
+        // than guessed, and `quality` stays whatever the manifest reports
+        // since there is no second rendition to compare against.
         const out = [];
         for (const src of sources) {
             if (!src.url) continue;
             const quality = resolveQuality(src.quality);
             const sourceName = src.name ? ` | ${src.name}` : '';
+            const container = (src.type || 'hls').toLowerCase() === 'hls' ? 'hls' : (src.type || null);
             out.push({
                 name: `OneTouchTV${sourceName}`,
                 title: `${matchResult.title}\n${quality} · ${(src.type ?? 'HLS').toUpperCase()}`,
                 url: src.url,
                 quality,
                 provider: 'OneTouchTV',
+                container,
+                languages: [],
+                audio: [],
+                size: null,
                 headers: {
                     'User-Agent': 'Mozilla/5.0',
                     'Referer': `${MAIN_URL}/`

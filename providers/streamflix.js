@@ -63,6 +63,38 @@ function downloadBases(config) {
     return out;
 }
 
+const BASE_REACHABILITY_TTL = 5 * 60 * 1000;
+const baseReachabilityCache = new Map(); // base -> { ok, ts }
+
+// Cards pointing at a dead CDN base (DNS-dead mirror, TLS failure, connection
+// refused) must never reach the UI as playable streams. A cheap HEAD probe
+// per base, cached briefly, keeps this from adding real latency on repeat
+// calls while still catching a mirror that has gone dark.
+async function isBaseReachable(base) {
+    const cached = baseReachabilityCache.get(base);
+    if (cached && Date.now() - cached.ts < BASE_REACHABILITY_TTL) return cached.ok;
+
+    let ok = false;
+    try {
+        const res = await axios.head(base, {
+            headers: REQUEST_HEADERS,
+            timeout: 6000,
+            validateStatus: () => true // any HTTP response at all means the host is alive
+        });
+        ok = Boolean(res && res.status);
+    } catch (err) {
+        console.log(`[StreamFlix] CDN base unreachable: ${base} (${err.code || err.message})`);
+        ok = false;
+    }
+    baseReachabilityCache.set(base, { ok, ts: Date.now() });
+    return ok;
+}
+
+async function reachableBases(bases) {
+    const results = await Promise.all(bases.map(async (base) => ({ base, ok: await isBaseReachable(base) })));
+    return results.filter((r) => r.ok).map((r) => r.base);
+}
+
 function subtitleHint(filename) {
     const f = (filename || '').toLowerCase();
     if (f.includes('esub') || f.includes('.srt') || f.includes('.ass') || f.includes('sub')) {
@@ -89,10 +121,16 @@ async function getStreamflixStreams(tmdbId, mediaType = 'movie', seasonNum = nul
             return [];
         }
 
+        const liveBases = await reachableBases(bases);
+        if (liveBases.length === 0) {
+            console.log(`[StreamFlix] All ${bases.length} CDN base(s) are unreachable — returning zero streams`);
+            return [];
+        }
+
         if (mediaType === 'movie') {
             if (!match.movielink) return [];
             const subs = subtitleHint(match.movielink);
-            return bases.map((base, i) => ({
+            return liveBases.map((base, i) => ({
                 name: 'StreamFlix',
                 title: `StreamFlix${i > 0 ? ` Mirror ${i}` : ''}${subs} | ${match.moviename}`,
                 url: `${base}${match.movielink}`,
@@ -110,7 +148,7 @@ async function getStreamflixStreams(tmdbId, mediaType = 'movie', seasonNum = nul
 
             if (ep && ep.link) {
                 const subs = subtitleHint(ep.link);
-                return bases.map((base, i) => ({
+                return liveBases.map((base, i) => ({
                     name: 'StreamFlix',
                     title: `StreamFlix${i > 0 ? ` Mirror ${i}` : ''}${subs} | ${match.moviename} S${seasonNum}E${episodeNum}${ep.name ? ` • ${ep.name}` : ''}`,
                     url: `${base}${ep.link}`,

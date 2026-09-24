@@ -3,3 +3,7 @@ restart.trigger
 .vscode/
 .env
 /tmp_context
+.vercel
+
+# local backups
+*.bak

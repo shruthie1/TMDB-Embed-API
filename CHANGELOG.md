@@ -2,6 +2,72 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **Title matching served the WRONG FILM on accented titles.** `normalizeTitle`
+  stripped to `[a-z0-9]` without deaccenting first, so a macron became a SPACE:
+  `"Bahubali: The Beginning"` (a-macron) normalised to `"b hubali the beginning"`.
+  Neither match pass hit CastleTV's `"Baahubali: The Beginning"`, and a substring
+  fallback then matched a DIFFERENT film literally titled `"Beginning"` at
+  `rows[0]`. We played that film and reported Bahubali as Tamil-only. A census of
+  15 real Indic titles found **11 normalising to garbage** (`"Arya"` -> `"rya"`,
+  `"Kantara"` -> `"k nt r"`); after the fix, 0 of 15.
+
+- **`utils/titleMatch.js` replaced.** The 1.3.0 entry below describes a ported
+  fuzzy scorer (Dice bigrams + token Jaccard + weighted threshold). It was never
+  wired up - no provider imported it - and measured against the cases above it
+  scores the correct `"Baahubali: The Beginning"` row at **0.354** and returns
+  nothing, rejecting both it and the two titles recovered below. It is replaced
+  by a rule-based matcher shared by all five title-searching providers
+  (castletv, netmirror, onetouchtv, 4khdhub, dahmermovies), which previously
+  each carried their own copy of these rules - which is why every earlier fix
+  landed in only one of them.
+
+  The governing rule is **a wrong match must lose to no match**: there is no
+  `rows[0]` fallback anywhere. A provider that cannot identify the title returns
+  nothing and lets another provider win, because a wrong stream that plays is
+  undetectable downstream.
+
+- **False negatives found by resolving live titles** (measured 2026-09-21,
+  streams before -> after):
+  - `Salaar: Part 1 - Ceasefire` (770906), listed as bare `Salaar`: **1 -> 13**
+  - `Ponniyin Selvan: Part I` (660046), listed as `Ponniyin Selvan`: **1 -> 7**
+  - `Kalki 2898-AD` (801688), listed as `Kalki 2898 AD (Hindi)`: now matches
+  - `Pushpa 2 - The Rule` (857598), listed as `... (Reloaded Version)`: now matches
+
+  Each was fixed by a MORE PRECISE rule - part numbers, language tags, edition
+  tags - never by loosening. A guard was added at the same time: different part
+  numbers can never match, so `"Ponniyin Selvan: Part Two"` cannot answer a
+  request for Part I. Both rows came back in ONE result set.
+
+- **A release-group tag was read as a language.** `"...AAC5 1-[YTS MX]"` produced
+  `languages: ["Yts mx"]`, which the UI offered as an audio choice;
+  `canonicalLanguage` title-cases anything it does not recognise. The bracket
+  parser now accepts only known languages; the structured `languages` field
+  still accepts anything.
+
+- **VaPlayer's language was discarded.** Its `name` is bare `"VaPlayer"` with the
+  release string in `title`, and language parsing read only `name || title`. On
+  628241 (a TELUGU original) it returned a file explicitly marked `HINDI` with
+  `languages: []`, so nothing warned the viewer it was a dub.
+
+### Added
+
+- **One Audio control regardless of how a provider ships languages.** Providers
+  express multi-language two ways: one master with muxed tracks (CastleTV demux,
+  4 tracks on 811941) or ONE STREAM PER LANGUAGE (770906: 13 streams that are
+  really 6 languages x 2 qualities). Only the first reached the Audio button, so
+  on Salaar it showed a single dead entry while the other five languages sat
+  unlabelled in the Source list. `web/lib/player/audioOptions.js` unifies both;
+  the in-file switch is preferred when available because it keeps playback
+  position.
+
+- **`utils/TITLE_MATCH_BASELINE.md`** - measured baselines with the commands that
+  produced them, the guards that must never regress, and which zero-result titles
+  are CORRECT (preview-gated or genuine catalogue gaps) rather than bugs.
+
 ## [1.3.0] - 2026-08-19
 
 ### Added
@@ -13,7 +79,7 @@ All notable changes to this project will be documented in this file.
   - `netmirror` - Netflix direct (embed-tmdb) plus NewTV platform fallback (Netflix/Prime Video/Hotstar/Disney) with rotating discovery domains.
   - `onetouchtv` - OneTouchTV streams via AES-256-CBC custom-base64 API (title/season matching + IMDb verification + absolute-episode resolution).
   - `zxcstreams` - ZXCStreams multi-server backend (icarus/berkas/orion/athena) with dynamic domain discovery and shared-token flow.
-- **New shared utilities**: `utils/titleMatch.js` (fuzzy title matching port), `utils/tmdbTitleToImdb.js` (TMDB title→IMDb resolution with cache), `utils/cinemetaEpisodes.js` (episode counts per season).
+- **New shared utilities**: `utils/titleMatch.js` (fuzzy title matching port; never wired up, replaced in Unreleased - see above), `utils/tmdbTitleToImdb.js` (TMDB title→IMDb resolution with cache), `utils/cinemetaEpisodes.js` (episode counts per season).
 - **Configurable provider-check TMDB ID**: the title used by dashboard functional checks is now editable in the Server Status panel (default `278`, env `PROVIDER_CHECK_TMDB_ID`). Persisted via `POST /api/config`, reset via Clear All, and exposed through `/api/status` as `providerCheckTmdbId`.
 
 ### Fixed

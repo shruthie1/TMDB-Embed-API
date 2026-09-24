@@ -1,9 +1,11 @@
 require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
+const { fromRoot, paths: appPaths } = require('../lib/runtime/paths');
+const { features } = require('../lib/runtime/environment');
 // Relocated user-config.json into utils directory; maintain backward-compatible fallback
-const NEW_OVERRIDE_PATH = path.join(process.cwd(), 'utils', 'user-config.json');
-const LEGACY_OVERRIDE_PATH = path.join(process.cwd(), 'user-config.json');
+const NEW_OVERRIDE_PATH = fromRoot('utils', 'user-config.json');
+const LEGACY_OVERRIDE_PATH = fromRoot('user-config.json');
 const OVERRIDE_PATH = (fs.existsSync(NEW_OVERRIDE_PATH) || !fs.existsSync(LEGACY_OVERRIDE_PATH)) ? NEW_OVERRIDE_PATH : LEGACY_OVERRIDE_PATH;
 const CONFIG_SCHEMA_VERSION = 1; // Increment when structure / semantics change
 
@@ -43,6 +45,15 @@ function readOverrideFile() {
 }
 
 function writeOverrideFile(obj) {
+  // On serverless the bundle is read-only and /tmp is per-instance and
+  // ephemeral, so a "successful" write would be invisible to the very next
+  // request and lost entirely on the next cold start. Silently returning true
+  // there would show the admin UI a saved setting that does not exist. Refuse
+  // instead, so the caller can surface a real error.
+  if (!features.configPersistence) {
+    console.error('[config] Refusing to write override file: this runtime has no persistent filesystem. Set configuration via environment variables instead.');
+    return false;
+  }
   try {
     fs.writeFileSync(OVERRIDE_PATH, JSON.stringify(obj, null, 2));
     return true;
@@ -54,7 +65,7 @@ function writeOverrideFile(obj) {
 
 function getProviderNames() {
   try {
-    const providersDir = path.join(process.cwd(), 'providers');
+    const providersDir = appPaths.providers;
     if (!fs.existsSync(providersDir)) return [];
     return fs.readdirSync(providersDir)
       .filter(file => file.endsWith('.js') && file !== 'registry.js')
@@ -130,6 +141,8 @@ function applyConfigToEnv(cfg){
   if (cfg.excludeCodecsRaw) process.env.EXCLUDE_CODECS = cfg.excludeCodecsRaw; else delete process.env.EXCLUDE_CODECS;
   if (cfg.febboxCookies && cfg.febboxCookies.length) process.env.FEBBOX_COOKIES = cfg.febboxCookies.join(',');
   else delete process.env.FEBBOX_COOKIES;
+  if (cfg.cfClearance && Object.keys(cfg.cfClearance).length) process.env.CF_CLEARANCE = JSON.stringify(cfg.cfClearance);
+  else delete process.env.CF_CLEARANCE;
   if (cfg.defaultRegion) process.env.DEFAULT_REGION = cfg.defaultRegion; else delete process.env.DEFAULT_REGION;
   
   // Dynamic provider enable flags
@@ -173,6 +186,17 @@ function loadConfig() {
     tmdbApiKey: process.env.TMDB_API_KEY || null,
   tmdbApiKeys: parseJsonMaybe(process.env.TMDB_API_KEYS) || null,
     febboxCookies: parseCookies(process.env.FEBBOX_COOKIES),
+    // Febbox OAuth app credentials. Kept in .env (gitignored) and surfaced on
+    // the config object so they are visible in one place, but nothing consumes
+    // them yet: Showbox authenticates with the `ui=` session cookie above, not
+    // with a client id/secret. Wire these up only if Febbox ships an OAuth API.
+    febboxClientId: process.env.FEBBOX_CLIENT_ID || null,
+    febboxClientSecret: process.env.FEBBOX_CLIENT_SECRET || null,
+    // Cloudflare clearance cookies for hosts that sit behind a JS challenge
+    // (DahmerMovies' p.111477.xyz). Shape: { "host": "cf_clearance=..." }.
+    // A browser mints these by visiting the URL once; node cannot solve the
+    // challenge itself, so the cookie has to be supplied from outside.
+    cfClearance: parseJsonMaybe(process.env.CF_CLEARANCE) || null,
     // Extended advanced config (may not exist in env)
     disableCache: process.env.DISABLE_CACHE,
     enablePStreamApi: process.env.ENABLE_PSTREAM_API,
@@ -193,6 +217,14 @@ function loadConfig() {
   
   const override = readOverrideFile();
   const merged = { ...envCfg, ...override };
+
+  // The hosting platform assigns the port and the process MUST bind the one it
+  // is given. user-config.json carries a saved port (8790 locally), and since
+  // the override spreads last it would otherwise beat $PORT and make the
+  // container bind the wrong port - the platform's health check then never
+  // connects and the deploy is marked failed. A platform-provided PORT
+  // therefore wins over the stored value. API_PORT stays a local-only fallback.
+  if (process.env.PORT) merged.port = Number(process.env.PORT) || merged.port;
   const normalized = normalizeConfig(merged);
   applyConfigToEnv(normalized); // ensure providers see updated process.env values
   return normalized;

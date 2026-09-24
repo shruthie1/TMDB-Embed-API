@@ -1,0 +1,346 @@
+'use client';
+
+/**
+ * Adapter: TMDB-Embed-API  ->  the shape this UI was built for.
+ *
+ * This UI came from the Chitram repo, where the backend was a "resolver" that
+ * streamed NDJSON progress events and answered with {masterUrl, referer}.
+ * The backend here is different in three ways, and this file is the only
+ * place that knows it:
+ *
+ *   1. It returns ONE JSON response after the provider fan-out, not a live
+ *      event feed. So the progress log is synthesised (see resolveLive).
+ *   2. Its stream objects are `{url, provider, quality, levels, languages,
+ *      audio, selectableAudio, container}` - the canonical shape from
+ *      utils/streamSchema.js - not `{masterUrl, referer}`.
+ *   3. It proxies upstream Referer itself (proxy/proxyServer.js rewrites every
+ *      url through /m3u8-proxy), so the browser never needs to send one. That
+ *      is why `referer` is always null below rather than threaded through.
+ *
+ * Keeping the translation here means the components stay byte-identical to the
+ * Chitram originals - the reason the UI looks the same is that it IS the same.
+ */
+
+// Empty means same-origin, which is the normal case: next.config.mjs rewrites
+// the backend's routes to the Express API, so the browser never needs its
+// origin and there is no CORS to configure. Set NEXT_PUBLIC_API_BASE only to
+// point a local UI at a remote backend.
+import { abortReason } from './abortReason';
+
+const BASE = process.env.NEXT_PUBLIC_API_BASE || '';
+
+/** The viewer's preferred audio language. */
+export const PREFERRED_LANGUAGE =
+  process.env.NEXT_PUBLIC_PREFERRED_LANGUAGE || 'Telugu';
+
+async function getJson(path, { timeoutMs = 60000, signal } = {}) {
+  const ac = new AbortController();
+  // Abort WITH a reason. A bare abort() surfaces as "signal is aborted without
+  // reason" in Next's dev overlay at the throw site, even though every caller
+  // here handles it (listSources catches, resolveLive checks signal.aborted).
+  const timer = setTimeout(() => ac.abort(abortReason(`timeout after ${timeoutMs}ms`)), timeoutMs);
+  const onAbort = () => ac.abort(signal.reason ?? abortReason('caller cancelled'));
+  if (signal) signal.addEventListener('abort', onAbort, { once: true });
+  try {
+    const r = await fetch(`${BASE}${path}`, { cache: 'no-store', signal: ac.signal });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return await r.json();
+  } finally {
+    clearTimeout(timer);
+    if (signal) signal.removeEventListener('abort', onAbort);
+  }
+}
+
+/**
+ * One backend stream -> one UI "source".
+ *
+ * `masterUrl` is what useHls attaches. `referer` stays null on purpose: see
+ * point 3 above. Sending one would be harmless but misleading - it would
+ * suggest the browser is authenticating to the CDN when the server already did.
+ */
+function isHls(s) {
+  const c = String(s.container || '').toLowerCase();
+  if (c) return c === 'hls';
+  // No container stated: fall back to the url, allowing for the proxy wrapper.
+  const u = String(s.url || '');
+  return /\.m3u8(\?|$)/i.test(u) || /m3u8-proxy|[?&]url=[^&]*m3u8/i.test(u);
+}
+
+export function toSource(s, i = 0) {
+  if (!s || !s.url) return null;
+  const languages = Array.isArray(s.languages) ? s.languages : [];
+  return {
+    id: `${s.provider || 'src'}-${i}`,
+    provider: s.provider || s.name || 'Unknown',
+    label: s.title || s.provider || 'Stream',
+    masterUrl: s.url,
+    referer: null,
+    // Anything not HLS goes to <video src> directly rather than through
+    // hls.js - useHls branches on this.
+    //
+    // Decided by `container`, NOT by the url. Every url here is already
+    // rewritten to `/m3u8-proxy?url=<encoded>` by proxy/proxyServer.js, so the
+    // ".m3u8" is inside an encoded query parameter and a url test reports HLS
+    // masters as progressive. That sends a real HLS master to <video src>,
+    // where it plays without hls.js and therefore with NO quality ladder and
+    // NO audio menu - exactly the two things this UI is for. Measured on
+    // Irumudi: 4 of 5 streams were misclassified this way.
+    progressive: !isHls(s),
+    quality: s.quality || 'Auto',
+    // The measured ladder when the backend knows it (lib/media + the provider
+    // fix in providers/vaplayer.js). [] means unknown, never "one level".
+    levels: Array.isArray(s.levels) ? s.levels : [],
+    languages,
+    audio: Array.isArray(s.audio) ? s.audio : [],
+    // True only when the manifest really carries selectable renditions, so the
+    // Audio menu is not offered on a stream that cannot switch.
+    selectableAudio: Boolean(s.selectableAudio),
+    // A synthetic master binding one provider's video to another's audio
+    // (utils/hybridStream.js). It is the only way to get the best video AND
+    // the preferred language on titles where no single provider has both, so
+    // the ranking treats it as the top tier.
+    hybrid: Boolean(s.hybrid),
+    subtitles: Array.isArray(s.subtitles) ? s.subtitles : [],
+  };
+}
+
+/** Pixel height of a source's best level, for ranking. 0 when unknown. */
+export function sourceHeight(s) {
+  const fromLevels = (s?.levels || [])
+    .map((l) => Number(l?.height) || 0)
+    .reduce((m, h) => (h > m ? h : m), 0);
+  if (fromLevels) return fromLevels;
+  const m = String(s?.quality || '').match(/(\d{3,4})p/);
+  return m ? Number(m[1]) : 0;
+}
+
+/**
+ * Rank sources so the RIGHT one is already playing.
+ *
+ * The viewer chooses nothing. Measured across 16 Telugu titles on 2026-09-22,
+ * every one of them had 1080p video but only 9 had the preferred language at
+ * all - so the scarce resource is LANGUAGE, not pixels, and the ranking spends
+ * resolution to buy it rather than the other way round.
+ *
+ * The order is a fallback chain, best tier first:
+ *
+ *   1. HYBRID - best video bound to preferred-language audio, in sync. The
+ *      only tier that gets both. Offered on 7 of the 16.
+ *   2. PREFERRED LANGUAGE, switchable - a real multi-track master. Switching
+ *      language keeps the playback position.
+ *   3. PREFERRED LANGUAGE, any resolution - 4 more titles (Salaar, RRR, Saaho,
+ *      Maharshi) carry Telugu ONLY below HD. 720p Telugu beats 1080p Hindi:
+ *      the standing requirement is the language.
+ *   4. SWITCHABLE audio - no preferred language anywhere, but the viewer can
+ *      at least choose.
+ *   5. Anything else, best resolution first - the remaining 5 titles have no
+ *      Telugu at all. Play rather than refuse.
+ *
+ * Resolution breaks ties WITHIN a tier, never across one. A working stream in
+ * the wrong language is still a worse outcome than a smaller correct one.
+ */
+export function rankSources(sources) {
+  const tier = (s) => {
+    const preferred = (s.languages || []).includes(PREFERRED_LANGUAGE);
+    if (s.hybrid) return 0;
+    if (preferred && s.selectableAudio) return 1;
+    if (preferred) return 2;
+    if (s.selectableAudio) return 3;
+    return 4;
+  };
+  return [...sources].sort((a, b) => {
+    const t = tier(a) - tier(b);
+    if (t !== 0) return t;
+    // A progressive source has no ladder and no audio menu, so within a tier
+    // it loses to an HLS one of the same height.
+    const p = (a.progressive ? 1 : 0) - (b.progressive ? 1 : 0);
+    if (p !== 0) return p;
+    return sourceHeight(b) - sourceHeight(a);
+  });
+}
+
+function endpoint(type, id, { season, episode, provider, refresh, capabilities }) {
+  // The backend's own route vocabulary is movie|series, not movie|tv.
+  const kind = type === 'tv' || type === 'series' ? 'series' : 'movie';
+  const qs = new URLSearchParams();
+  if (season) qs.set('season', String(season));
+  if (episode) qs.set('episode', String(episode));
+  if (refresh) qs.set('refresh', '1');
+  if (capabilities) qs.set('capabilities', '1');
+  const q = qs.toString();
+  const path = provider
+    ? `/api/streams/${provider}/${kind}/${id}`
+    : `/api/streams/${kind}/${id}`;
+  return `${path}${q ? `?${q}` : ''}`;
+}
+
+/** Fetch and adapt every playable source for a title. */
+export async function listSources(type, id, opts = {}) {
+  try {
+    const d = await getJson(endpoint(type, id, opts), opts);
+    const raw = Array.isArray(d?.streams) ? d.streams : [];
+    return rankSources(raw.map(toSource).filter(Boolean));
+  } catch {
+    return null; // null = "could not ask", [] = "asked, none exist"
+  }
+}
+
+/**
+ * Resolve with a progress log.
+ *
+ * The backend has no event feed, so the log is synthesised around the single
+ * request. It is deliberately honest about that: it reports the request
+ * starting and what came back, and never invents per-provider events it did
+ * not observe. Inventing a plausible-looking "trying vaplayer…" for a provider
+ * that was never contacted would be a lie the viewer cannot check.
+ *
+ * Signature matches Chitram's resolveStreamLive so useResolve is unchanged.
+ * @returns {() => void} cancel
+ */
+export function resolveLive(type, id, {
+  season = 0, episode = 0, provider = null, refresh = false,
+  onEvent, onDone, onFail,
+} = {}) {
+  const ac = new AbortController();
+  let settled = false;
+
+  const emit = (e) => { if (!settled && onEvent) onEvent({ ...e, at: Date.now() }); };
+
+  // `provider` is the viewer's LAST-USED provider, remembered per title. It is
+  // a PREFERENCE, not a filter.
+  //
+  // It used to be passed to the backend, which made the URL
+  // /api/streams/CastleTV/movie/<id> - and that endpoint resolves ONLY that
+  // provider. Measured on movie/256040: pinned returned 2 streams from 1
+  // provider, the full fan-out returned 3 from 2. So every replay of a title
+  // silently lost every other provider, including (on other titles) the
+  // NetMirror master that carries the extra audio renditions. The Source list
+  // then showed a single entry and the audio menu had nothing to offer.
+  //
+  // Fan out fully and let rankSources put the remembered one first.
+  emit({ type: 'wave-start', providers: ['all enabled providers'] });
+
+  getJson(endpoint(type, id, { season, episode, provider: null, refresh }),
+    { timeoutMs: 120000, signal: ac.signal })
+    .then((d) => {
+      if (settled) return;
+      const raw = Array.isArray(d?.streams) ? d.streams : [];
+      let sources = rankSources(raw.map(toSource).filter(Boolean));
+      // Honour the remembered provider by ORDER, now that it no longer
+      // restricts the fan-out. Everything else keeps rankSources' ranking.
+      // The remembered provider is a NAME, and a name no longer identifies a
+      // row: measured on 811941 (Devara), CastleTV returns five rows and only
+      // ONE is the demux master carrying the audio menu. Honouring the pin
+      // must never promote a worse row of the same provider ahead of a better
+      // one, or the language switcher silently disappears on replay - which is
+      // exactly what a stale "CastleTV" pin did.
+      //
+      // So reorder by provider, but keep rankSources' order inside each half
+      // AND never let the pin outrank a row that offers selectable audio.
+      if (provider) {
+        const want = String(provider).toLowerCase();
+        const isWanted = (s) => String(s.provider).toLowerCase() === want;
+        const best = sources.find((s) => s.selectableAudio) || null;
+        const pinned = sources.filter((s) => isWanted(s) && s !== best);
+        const rest = sources.filter((s) => !isWanted(s) && s !== best);
+        sources = [...(best ? [best] : []), ...pinned, ...rest];
+      }
+
+      // Report per provider from what actually came back. The backend also
+      // returns providerTimings, so these numbers are measured, not guessed.
+      const timings = d?.providerTimings || {};
+      const seen = new Set();
+      for (const s of sources) {
+        const key = String(s.provider).toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        emit({ type: 'extract-ok', provider: s.provider, ms: timings[key] ?? 0 });
+      }
+      for (const [name, ms] of Object.entries(timings)) {
+        if (!seen.has(String(name).toLowerCase())) {
+          emit({ type: 'extract-fail', provider: name, ms });
+        }
+      }
+
+      settled = true;
+      if (!sources.length) { onFail?.(new Error('No playable source found.')); return; }
+      onDone?.({ ...sources[0], sources });
+    })
+    .catch((err) => {
+      if (settled || ac.signal.aborted) return;
+      settled = true;
+      onFail?.(err);
+    });
+
+  return () => { settled = true; ac.abort(abortReason('resolve superseded or unmounted')); };
+}
+
+/**
+ * URL handed to hls.js / <video>.
+ *
+ * Chitram wrapped every master in its resolver's `/api/m3u8?u=...` relay so the
+ * server could attach the provider's Referer. This backend has already done
+ * that: proxy/proxyServer.js rewrote each url to `/m3u8-proxy?url=...` (and
+ * `/ts-proxy` for progressive files) before the browser ever saw it, and it
+ * strips the upstream headers from the payload for the same reason.
+ *
+ * Wrapping again would produce `/api/m3u8?u=/m3u8-proxy?url=...` - a relay
+ * pointed at a relay - so these are pass-throughs. They exist as functions so
+ * useHls keeps its original shape.
+ */
+export function playableUrl(masterUrl) { return masterUrl; }
+
+/**
+ * Ask the backend to play one source's picture with another's audio.
+ *
+ * Called when the viewer has picked a language that does not exist inside the
+ * video source they are watching. The backend applies its duration gate before
+ * agreeing - two sources that disagree on runtime are very likely two
+ * different films, since CastleTV matches by TITLE - so a 409 here means "this
+ * combination is not real", not "the server failed".
+ *
+ * @returns {Promise<{url: string, delta: number, padded: boolean}|null>} null when
+ * not pairable. `padded` true means the two halves are the same film but cut
+ * with different ad/intro padding, so the automatic PTS probe cannot close the
+ * gap and the viewer may need the Audio timing bar.
+ */
+export async function pairSources(video, audio, opts = {}) {
+  if (!video?.masterUrl || !audio?.masterUrl) return null;
+  const body = {
+    video: { url: video.masterUrl, provider: video.provider, quality: video.quality },
+    audio: { url: audio.masterUrl, provider: audio.provider, quality: audio.quality },
+  };
+  // Which title this is, so the server can ask TMDB for the runtime.
+  //
+  // The runtime is what lets a PADDED source pair at all: without it the only
+  // same-film test the server has is "the two sides agree on length", which
+  // refuses a 2160p picture carrying an ad reel even when the audio beside it
+  // is the only Telugu track on the title. Measured 2026-09-23 on movie/1290190
+  // - mapple 9376s vs CastleTV 8974s, both within minutes of TMDB's 151min.
+  //
+  // Deliberately NOT sending headers alongside: the server resolved these urls
+  // and already knows their headers first-hand (lib/media/streamHeaders.js).
+  // Echoing them back from the browser would let a caller point our fetcher at
+  // an arbitrary host with arbitrary headers.
+  if (opts.tmdbId) {
+    body.tmdbId = opts.tmdbId;
+    body.type = opts.mediaType === 'tv' || opts.mediaType === 'series' ? 'series' : 'movie';
+  }
+  // A manual offset from the Audio timing bar, ADDED to whatever the automatic
+  // PTS probe works out. Positive means the viewer wants the audio later.
+  if (Number(opts.nudge)) body.nudge = Number(opts.nudge);
+  try {
+    const r = await fetch(`${BASE}/hybrid/pair`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: opts.signal,
+    });
+    if (!r.ok) return null;
+    const d = await r.json();
+    return d?.url ? d : null;
+  } catch {
+    return null;
+  }
+}
+export function proxiedSegment(url) { return url; }

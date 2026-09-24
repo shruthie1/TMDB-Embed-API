@@ -1,5 +1,6 @@
 const { createDecipheriv } = require('crypto');
 const { getDetails } = require('../utils/tmdb');
+const { searchSpellings, findTitleMatch } = require('../utils/titleMatch');
 
 const CASTLE_BASE = 'https://api.hlowb.com';
 const PKG = 'com.external.castle';
@@ -194,6 +195,13 @@ function streamQuality(url, description, resolutionNum, defaultQual) {
         }
         if (/4k|uhd/i.test(String(description))) return '4K';
     }
+    // Castle's hls_mps paths embed the true height (.../<hash>/480/index...).
+    // It requested 1080p but serves 480p, so the path beats the requested
+    // resolution number - otherwise every variant is mislabelled 1080p.
+    if (url) {
+        const pathHeight = /\/(\d{3,4})\/[^/]*$/.exec(String(url).split('?')[0]);
+        if (pathHeight && knownHeight(pathHeight[1])) return `${pathHeight[1]}p`;
+    }
     const numLabel = resolutionNumToLabel(Number(resolutionNum));
     if (numLabel) return numLabel;
     if (url) {
@@ -214,8 +222,31 @@ function formatSize(bytes) {
     return `${(bytes / 1000000).toFixed(0)} MB`;
 }
 
+// A preview clip betrays itself in the path even when the API flag does not.
+function isPreviewUrl(url) {
+    return /\/index_preview_\d+\.m3u8/i.test(String(url || ''));
+}
+
+function looksLikePreviewPayload(data) {
+    const urls = [data.videoUrl, ...(data.videos || []).map((v) => v && v.url)].filter(Boolean);
+    return urls.length > 0 && urls.every(isPreviewUrl);
+}
+
 function buildCastleStreams(raw, langLabel, titleLine, resolution) {
     const data = unwrap(raw);
+    // Castle gates real playback behind a signed-in VIP session. Anonymously we
+    // get either permissionDenied (no url at all) or isPreview (a ~480p preview
+    // reel of .jpg segments served under the title's own hash). Both used to be
+    // emitted as if they were the film, which is where "every language sounds
+    // the same" came from - it was one preview reel wearing N language labels.
+    if (data.permissionDenied === true) return [];
+    if (data.isPreview === true) return [];
+    // isPreview is Castle's own flag and it is not always set: some titles come
+    // back with it absent (or false) while every returned URL is still an
+    // `index_preview_*` clip under a `/480/` path, labelled 1080p. Measured on
+    // one such title, all five "languages" were the same 10.02 minute, 191
+    // segment reel. Trust the URL shape as well as the flag.
+    if (looksLikePreviewPayload(data)) return [];
     if (!data.videoUrl && !((data.videos || []).length)) return [];
 
     const defaultQual = resolutionLabel(resolution);
@@ -233,7 +264,10 @@ function buildCastleStreams(raw, langLabel, titleLine, resolution) {
     if (data.videos && data.videos.length > 0) {
         const bestByUrl = new Map();
         for (const v of data.videos) {
-            const videoUrl = v.url || data.videoUrl;
+            // Entries without their own url are metadata-only rows (size and
+            // resolutionDescription). Falling back to data.videoUrl here minted
+            // one fake stream per advertised resolution, all the same file.
+            const videoUrl = v.url;
             if (!videoUrl) continue;
             const resNum = Number(v.resolution) || 0;
             const qual = streamQuality(
@@ -261,7 +295,11 @@ function buildCastleStreams(raw, langLabel, titleLine, resolution) {
         for (const { stream } of bestByUrl.values()) {
             streams.push(stream);
         }
-    } else {
+    }
+
+    // videos[] present but every entry was metadata-only: fall back to the one
+    // real url on the payload rather than dropping the stream entirely.
+    if (streams.length === 0) {
         const videoUrl = data.videoUrl;
         if (!videoUrl) return [];
         const qual = streamQuality(videoUrl, data.resolutionDescription, 0, defaultQual);
@@ -280,10 +318,34 @@ function buildCastleStreams(raw, langLabel, titleLine, resolution) {
     return streams;
 }
 
+// Castle signs every playback URL and rotates an `index_preview_<NNN>` suffix,
+// so the same physical media comes back under a different URL on each call.
+// Identity is the CDN path with the query and that suffix removed - this is
+// what lets us tell "a real second language" apart from "the same file again".
+function mediaIdentity(url) {
+    if (!url) return '';
+    const noQuery = String(url).split('?')[0];
+    const pathOnly = noQuery.replace(/^https?:\/\/[^/]+/i, '');
+    return pathOnly.replace(/_(\d+)(\.m3u8)$/i, '$2');
+}
+
+// Every track is queried, never just the existIndividualVideo ones.
+//
+// This used to keep only eiv===true tracks when any existed. But eiv is
+// ADVISORY and Castle sets it false on tracks that do serve their own file -
+// the comment at the call site already says so for Kantara's Hindi track.
+// Measured 2026-09-21 on Devara: Part 1 (811941), a TELUGU original:
+//   [{1037 Telugu eiv:false}, {1018 Hindi eiv:true}, {1033 Tamil eiv:false},
+//    {1039 Malayalam eiv:false}, {1035 Kannada eiv:false}]
+// Exactly one track was flagged, so the filter discarded Telugu, Tamil,
+// Malayalam and Kannada and the film came back Hindi-only. Trusting a flag the
+// code elsewhere calls unreliable is what cost the original language.
+//
+// Querying all of them is safe: the caller already collapses results by media
+// identity, so languages that share one file emit a single stream naming each,
+// and a track with no distinct file simply resolves to the same URL.
 function pickPreferredTracks(tracks) {
-    if (!tracks || !tracks.length) return tracks || [];
-    const withVideo = tracks.filter((t) => t.existIndividualVideo === true);
-    return withVideo.length > 0 ? withVideo : tracks;
+    return tracks || [];
 }
 
 // Castle changed the track schema from languageId/languageName to id/name.
@@ -320,22 +382,46 @@ async function getCastletvStreams(tmdbId, mediaType = 'movie', seasonNum = null,
 
         const secKey = await getSecurityKey();
 
-        const keyword = year ? `${title} ${year}` : title;
-        const searchResult = await searchCastle(secKey, keyword);
-        const rows = (unwrap(searchResult).rows || []);
+        // Ask in every plausible spelling, best first. Deaccenting locally is
+        // not enough on its own: if Castle's index is ASCII-only, querying in
+        // the accented spelling returns zero rows, and zero rows is
+        // indistinguishable downstream from "Castle has no copy".
+        // searchSpellings collapses to one entry for an ASCII title, so nothing
+        // is fetched twice.
+        const keywords = searchSpellings(title, { year });
 
-        if (rows.length === 0) {
-            console.log(`[CastleTV] No search results for "${keyword}"`);
-            return [];
+        let rows = [];
+        let keyword = keywords[0];
+        for (const candidate of keywords) {
+            keyword = candidate;
+            const searchResult = await searchCastle(secKey, candidate);
+            rows = (unwrap(searchResult).rows || []);
+            if (rows.length) break;
+            console.log(`[CastleTV] No search results for "${candidate}"`);
         }
 
-        const titleLc = title.toLowerCase();
-        const match = rows.find((r) => {
-            const name = (r.title || r.name || '').toLowerCase();
-            return name.includes(titleLc) || titleLc.includes(name);
-        }) || rows[0];
+        if (rows.length === 0) return [];
 
-        if (!match) return [];
+        // Title matching lives in utils/titleMatch.js, shared by every
+        // title-based provider. It deaccents FIRST (a macron used to fall
+        // outside [a-z0-9] and become a SPACE, so "Bahubali" normalised to
+        // "b hubali the beginning"), tolerates Indic doubled vowels
+        // ("Bahubali" ~ "Baahubali") and allows a catalogue to omit a sequel
+        // suffix ("Devara" for TMDB's "Devara: Part 1").
+        //
+        // It never falls back to rows[0]. Guessing produced a confidently wrong
+        // film with a plausible-looking stream - we served "Beginning" instead
+        // of "Bahubali: The Beginning" and reported the film as Tamil-only.
+        // Returning nothing lets another provider win instead.
+        const match = findTitleMatch(rows, title);
+        if (!match) {
+            // Log what WAS on offer. A bare "no match" is indistinguishable
+            // from a matcher that is too strict, and telling those two apart
+            // by hand is what cost a day on Bahubali.
+            const offered = rows.slice(0, 6).map((r) => r.title || r.name).join(' | ');
+            console.log(`[CastleTV] No confident match for "${title}" among ${rows.length} rows - skipping (saw: ${offered})`);
+            return [];
+        }
         const castleId = (match.id || match.redirectId || match.redirectIdStr || '').toString();
         if (!castleId) return [];
 
@@ -370,8 +456,16 @@ async function getCastletvStreams(tmdbId, mediaType = 'movie', seasonNum = null,
         const allTracks = ((epEntry && epEntry.tracks) || []).map(normalizeLanguageTrack);
         const tracks = pickPreferredTracks(allTracks);
 
+        // existIndividualVideo is advisory only - Castle sets it false on tracks
+        // that still return their own per-language file (Kantara Chapter 1's
+        // Hindi track is eiv=false yet serves .../Kantara/hin_720/). So always
+        // fan out, and decide what is genuinely distinct from the media path
+        // that comes back rather than from this flag.
         const streams = [];
         const seenUrls = new Set();
+        // Keyed by media identity, so the [3,2,1] resolution fan-out and the
+        // rotating URL suffix collapse into one entry per real file.
+        const seenMedia = new Set();
 
         if (tracks.length > 0) {
             const langJobs = tracks.map((track) =>
@@ -384,22 +478,47 @@ async function getCastletvStreams(tmdbId, mediaType = 'movie', seasonNum = null,
             );
             const allResults = await Promise.all(langJobs);
 
+            // One entry per DISTINCT media file. Several languageIds often
+            // resolve to the same file (one multi-audio or original-language
+            // mix); emitting that once per language is what made every option
+            // sound identical. A language with its own file still gets its own
+            // entry. Labels are decided after collection so a shared file can
+            // name every language it actually serves.
+            const byMedia = new Map();
             for (const trackResults of allResults) {
                 for (const r of trackResults) {
                     if (r.status !== 'fulfilled') continue;
                     const { raw, resolution, track } = r.value;
-                    const langLabel = `[${track.languageName || track.abbreviate || 'Unknown'}]`;
-                    for (const s of buildCastleStreams(raw, langLabel, titleLine, resolution)) {
-                        if (!seenUrls.has(s.url)) {
-                            seenUrls.add(s.url);
-                            streams.push(s);
+                    for (const s of buildCastleStreams(raw, '', titleLine, resolution)) {
+                        const identity = mediaIdentity(s.url);
+                        const langName = track.languageName || track.abbreviate || 'Unknown';
+                        const existing = byMedia.get(identity);
+                        if (existing) {
+                            if (!existing.langs.includes(langName)) existing.langs.push(langName);
+                            continue;
                         }
+                        byMedia.set(identity, { stream: s, langs: [langName] });
                     }
                 }
+            }
+            for (const { stream, langs } of byMedia.values()) {
+                if (seenUrls.has(stream.url)) continue;
+                seenUrls.add(stream.url);
+                seenMedia.add(mediaIdentity(stream.url));
+                const label = `[${langs.join('/')}]`;
+                stream.name = stream.name.replace('CastleTV |', `CastleTV ${label} |`);
+                stream.language = langs.join('/');
+                streams.push(stream);
             }
         }
 
         if (streams.length === 0) {
+            // One shared file for the title. Castle still tells us which
+            // language it is via the default track, so use that rather than
+            // leaving it unlabelled - but never claim the other languages.
+            const defaultTrack = allTracks.find((t) => t.isDefault) || allTracks[0];
+            const defaultName = defaultTrack && (defaultTrack.languageName || defaultTrack.abbreviate);
+            const sharedLabel = defaultName ? `[${defaultName}]` : '';
             const sharedResults = await Promise.allSettled(
                 [3, 2, 1].map((resolution) =>
                     getVideoShared(secKey, activeId, episodeId, resolution)
@@ -409,11 +528,12 @@ async function getCastletvStreams(tmdbId, mediaType = 'movie', seasonNum = null,
             for (const r of sharedResults) {
                 if (r.status !== 'fulfilled') continue;
                 const { raw, resolution } = r.value;
-                for (const s of buildCastleStreams(raw, '', titleLine, resolution)) {
-                    if (!seenUrls.has(s.url)) {
-                        seenUrls.add(s.url);
-                        streams.push(s);
-                    }
+                for (const s of buildCastleStreams(raw, sharedLabel, titleLine, resolution)) {
+                    const identity = mediaIdentity(s.url);
+                    if (seenUrls.has(s.url) || seenMedia.has(identity)) continue;
+                    seenUrls.add(s.url);
+                    seenMedia.add(identity);
+                    streams.push(s);
                 }
             }
         }

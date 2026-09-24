@@ -4,6 +4,35 @@
 
 const cors = require('cors');
 const fetch = require('node-fetch');
+const http = require('http');
+const https = require('https');
+
+// node-fetch without an explicit agent uses a small default connection pool per
+// host. HLS is connection-hungry (a playlist warm-up plus the segment the player
+// is actually blocked on, all to the same CDN), so requests were queueing behind
+// each other and appearing to the browser as a hung ts-proxy. Keep-alive with a
+// generous ceiling lets the real request through and reuses sockets.
+// maxSockets was 64. A single HLS playback opens several segment fetches at
+// once, and two players plus a hybrid pair (which fans out to BOTH providers)
+// reach that ceiling easily; past it every new segment waits for a slot and
+// burns its whole timeout queued. Measured 2026-09-22: active=128 queued=87.
+// `timeout` here is socket-IDLE only - it does NOT bound a request whose body
+// stalls, which is why the watchdog in pipeUpstream exists.
+const MAX_SOCKETS = Number(process.env.PROXY_MAX_SOCKETS) || 256;
+const httpAgent = new http.Agent({ keepAlive: true, maxSockets: MAX_SOCKETS, timeout: 60000 });
+const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: MAX_SOCKETS, timeout: 60000 });
+const agentFor = (url) => (String(url).startsWith('https:') ? httpsAgent : httpAgent);
+
+// Socket exhaustion is invisible until you print it: a request queued in
+// `requests` is one the pool has accepted but has no socket for yet, which is
+// exactly what a hung ts-proxy looks like from the browser.
+setInterval(() => {
+    const count = (a) => Object.values(a).reduce((n, v) => n + (Array.isArray(v) ? v.length : 0), 0);
+    const active = count(httpsAgent.sockets) + count(httpAgent.sockets);
+    const queued = count(httpsAgent.requests) + count(httpAgent.requests);
+    const free = count(httpsAgent.freeSockets) + count(httpAgent.freeSockets);
+    if (active || queued) console.log(`[pool] active=${active} queued=${queued} free=${free}`);
+}, 5000).unref();
 
 const CACHE_MAX_SIZE = 2000;
 const CACHE_EXPIRY_MS = 2 * 60 * 60 * 1000; // 2 hours
@@ -51,6 +80,179 @@ function cleanupTailPrefetch() {
 }
 setInterval(cleanupTailPrefetch, 15 * 60 * 1000).unref();
 
+// Upstream fetches had no timeout. A CDN that accepts the connection and then
+// stalls (or silently swallows HEAD) left the request hanging forever, which
+// surfaced in the browser as a ts-proxy request stuck on (pending) until hls.js
+// gave up and canceled it. Every upstream call now aborts on its own deadline:
+// probes get a short one because they are optional, body reads a longer one.
+const PROBE_TIMEOUT_MS = Number(process.env.PROXY_PROBE_TIMEOUT_MS) || 6000;
+const BODY_TIMEOUT_MS = Number(process.env.PROXY_BODY_TIMEOUT_MS) || 30000;
+// How long a body may go SILENT before its socket is reclaimed. Not a total
+// duration cap: a big segment is allowed to take as long as it needs, provided
+// it keeps delivering bytes.
+const BODY_STALL_MS = Number(process.env.PROXY_BODY_STALL_MS) || 25000;
+
+// Read a whole body under a deadline. `fetchWithTimeout` clears its abort timer
+// once HEADERS arrive, which is correct for streaming but leaves a buffered
+// read with no limit at all - a response that stops mid-body simply never
+// resolves, and its socket is never returned to the agent. Everything that
+// awaits arrayBuffer()/text() goes through here instead.
+async function readBodyWithTimeout(resp, timeoutMs = BODY_STALL_MS, kind = 'arrayBuffer') {
+    let timer = null;
+    const deadline = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+            try { resp.body?.destroy?.(); } catch { /* already gone */ }
+            reject(new Error(`body read exceeded ${timeoutMs}ms`));
+        }, timeoutMs);
+    });
+    try {
+        return await Promise.race([resp[kind](), deadline]);
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+// Give a socket back when the response is being ABANDONED.
+//
+// node-fetch keep-alive only returns a socket to the agent's free list once the
+// body is fully read or destroyed. Every `if (!resp.ok) return ...` path threw
+// the response away WITHOUT touching its body, so the socket stayed checked out
+// for good. A provider that is merely erroring - VaPlayer answers Cloudflare
+// 522 on every request - therefore leaked one socket per attempt, and the pool
+// wedged with a small `active` count that never fell: measured 2026-09-22,
+// `[pool] active=9 queued=0 free=0` steady while the API returned `socket hang
+// up` to every new request until restart.
+//
+// An error body is small and uninteresting, so destroy rather than read it.
+function discardBody(resp) {
+    try { resp?.body?.destroy?.(); } catch { /* already gone */ }
+}
+
+// Short cooldown for a host that has told us to back off.
+//
+// A rate-limited upstream gets WORSE the more we retry it. Measured 2026-09-22:
+// showsst's api.whysosigmabro.fun 302s to d.whysosigmabro.fun, which answered
+// `upstream 427` / `upstream blocked`, and the log showed 9 fetches of the same
+// url inside one playback attempt as hls.js and the player both retried. Serve
+// the refusal from memory for a short window instead of forwarding every retry.
+//
+// Deliberately SHORT and per-host: these limits lift on their own, and a stale
+// breaker would keep a recovered provider dead. Status-based only - a 404 or a
+// 522 is not a rate limit and must not trip it.
+const THROTTLE_STATUSES = new Set([429, 427, 503]);
+const THROTTLE_COOLDOWN_MS = Number(process.env.PROXY_THROTTLE_COOLDOWN_MS) || 20000;
+const throttledHosts = new Map(); // host -> epoch ms when it may be tried again
+
+function hostOf(url) {
+    try { return new URL(String(url)).hostname; } catch { return null; }
+}
+
+function throttledUntil(url) {
+    const h = hostOf(url);
+    if (!h) return 0;
+    const until = throttledHosts.get(h) || 0;
+    if (until && until <= Date.now()) { throttledHosts.delete(h); return 0; }
+    return until;
+}
+
+// A signed url that has EXPIRED can never succeed on retry - only a fresh
+// resolve can help. Measured 2026-09-22 on movie/1213243: showsst's second
+// front, proxy2.jordanblackwell.bid, answered
+// `{"success":false,"error":"Invalid or expired media grant"}` and the log
+// showed ELEVEN fetches of that one playlist url while hls.js and the player
+// both retried. TLS was clean (Google Trust Services), so this was not the
+// firewall - the grant had simply run out.
+//
+// Keyed by the EXACT url, not the host: the host is fine, this one signed link
+// is not, and blocking the host would kill the next resolve's fresh link too.
+// Expired/forbidden is dead on the FIRST response - no retry can fix it.
+const DEAD_STATUSES = new Set([401, 403, 404, 410]);
+// Anything else that fails REPEATEDLY on the same url is dead in practice.
+// Measured 2026-09-22 on movie/1213243: the sub-playlist
+// .../playlist/ygo6NnOV3Q5kLUAQUsC-aQ/content_icUxz answered 500 on six
+// separate fetches across two playback attempts and never recovered, while
+// the master playlist beside it answered 200 every time. Two strikes is
+// enough to tell a dead rendition from a blip.
+const DEAD_STRIKES = 2;
+const DEAD_URL_TTL_MS = Number(process.env.PROXY_DEAD_URL_TTL_MS) || 60000;
+const deadUrls = new Map(); // url -> epoch ms when the note expires
+
+function deadStatusFor(url) {
+    const rec = deadUrls.get(url);
+    if (!rec) return 0;
+    if (rec.until <= Date.now()) { deadUrls.delete(url); return 0; }
+    return rec.status;
+}
+
+const urlStrikes = new Map(); // url -> consecutive failure count
+
+function noteDeadUrl(url, status) {
+    const key = String(url);
+    const code = Number(status);
+    if (!DEAD_STATUSES.has(code)) {
+        const n = (urlStrikes.get(key) || 0) + 1;
+        urlStrikes.set(key, n);
+        if (n < DEAD_STRIKES) return;
+    }
+    urlStrikes.delete(key);
+    deadUrls.set(key, { status: code, until: Date.now() + DEAD_URL_TTL_MS });
+    if (deadUrls.size > 500) {
+        // Bounded: drop the oldest half rather than grow without limit.
+        const keys = [...deadUrls.keys()].slice(0, 250);
+        for (const k of keys) deadUrls.delete(k);
+    }
+    if (urlStrikes.size > 500) {
+        for (const k of [...urlStrikes.keys()].slice(0, 250)) urlStrikes.delete(k);
+    }
+}
+
+function noteThrottle(url, status) {
+    if (!THROTTLE_STATUSES.has(Number(status))) return;
+    const h = hostOf(url);
+    if (!h) return;
+    throttledHosts.set(h, Date.now() + THROTTLE_COOLDOWN_MS);
+    console.warn(`[throttle] ${h} returned ${status}; pausing it for ${THROTTLE_COOLDOWN_MS}ms`);
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = BODY_TIMEOUT_MS) {
+    const controller = new AbortController();
+    // The deadline covers the handshake and headers only. Clearing it in a
+    // finally would be wrong in the other direction too: leaving it armed
+    // aborts a perfectly healthy body mid-download, since a large segment
+    // legitimately takes longer to stream than to start.
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    // A CALLER's signal (the client hanging up) must also abort this fetch.
+    //
+    // `signal` used to be written after the options spread, so a signal passed
+    // in was silently discarded, and the request ran to its full timeout even
+    // though nobody was waiting for it any more. hls.js cancels segments on
+    // every seek and every quality switch, so those abandoned requests each
+    // held a pool slot for 30s. Measured 2026-09-22 with maxSockets=64:
+    // `[pool] active=128 queued=87 free=0` and 27 of 41 aborts logged
+    // `bytes=0` - they never got a single byte because they never got a
+    // socket. A healthy ts-proxy segment then 500s at 42s while the SAME url
+    // fetched directly returns 200 in 0.43s.
+    const outer = options.signal;
+    const onAbort = () => controller.abort();
+    if (outer) {
+        if (outer.aborted) controller.abort();
+        else outer.addEventListener('abort', onAbort, { once: true });
+    }
+    try {
+        const resp = await fetch(url, { agent: agentFor(url), ...options, signal: controller.signal });
+        clearTimeout(timer);
+        return resp;
+    } catch (e) {
+        clearTimeout(timer);
+        throw e;
+    } finally {
+        // Without this the aborted client's listener stays attached to a
+        // long-lived signal and leaks one closure per request.
+        if (outer) outer.removeEventListener('abort', onAbort);
+    }
+}
+
 function getCachedSegment(url) {
     if (isCacheDisabled()) return null;
     const e = segmentCache.get(url);
@@ -64,25 +266,35 @@ async function prefetchSegment(url, headers) {
     const existing = segmentCache.get(url);
     if (existing && Date.now() - existing.timestamp <= CACHE_EXPIRY_MS) return;
     try {
-        const resp = await fetch(url, { headers: { 'User-Agent': DEFAULT_UA, ...headers } });
-        if (!resp.ok) return;
-        const data = new Uint8Array(await resp.arrayBuffer());
+        const resp = await fetchWithTimeout(url, { headers: { 'User-Agent': DEFAULT_UA, ...headers } });
+        if (!resp.ok) { discardBody(resp); return; }
+        const data = new Uint8Array(await readBodyWithTimeout(resp));
         const responseHeaders = {};
         resp.headers.forEach((v, k) => responseHeaders[k] = v);
         segmentCache.set(url, { data, headers: responseHeaders, timestamp: Date.now() });
     } catch (_e) { /* ignore */ }
 }
 
+const PREFETCH_MAX = Number(process.env.PROXY_PREFETCH_MAX) || 3;
+const PREFETCH_CONCURRENCY = Number(process.env.PROXY_PREFETCH_CONCURRENCY) || 2;
+
 const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 function inferContentType(upstreamCT, targetUrl) {
-    const bad = !upstreamCT || /application\/octet-stream/i.test(upstreamCT) || /application\/(x-)?zip/i.test(upstreamCT);
+    // Several providers disguise media segments as images or scripts (Castle
+    // serves .jpg, NetMirror .js) and the CDN labels them to match. Forwarding
+    // image/jpeg to the browser makes MSE reject the buffer, so the player just
+    // spins on "Loading stream...". A disguised type is therefore as unusable
+    // as a missing one: fall through to extension/URL sniffing in both cases.
+    const disguised = upstreamCT && /^(image|text)\//i.test(upstreamCT);
+    const bad = !upstreamCT || disguised || /application\/octet-stream/i.test(upstreamCT) || /application\/(x-)?zip/i.test(upstreamCT) || /application\/javascript/i.test(upstreamCT);
     if (!bad) return upstreamCT;
     if (/\.mkv(\?|$)/i.test(targetUrl)) return 'video/x-matroska';
     if (/\.mp4(\?|$)/i.test(targetUrl)) return 'video/mp4';
     if (/\.m3u8(\?|$)/i.test(targetUrl)) return 'application/vnd.apple.mpegurl';
-    if (/\.ts(\?|$)/i.test(targetUrl)) return 'video/mp2t';
-    return 'application/octet-stream';
+    // Anything else reaching ts-proxy is a media segment whatever it is named,
+    // and mp2t is what every one of these providers actually ships.
+    return 'video/mp2t';
 }
 
 function extractOriginalUrl(proxyUrl) {
@@ -114,11 +326,25 @@ function extractOriginalUrl(proxyUrl) {
     } catch { return proxyUrl; }
 }
 
-function rewriteM3u8(content, targetUrl, baseProxyUrl, headers) {
+// `ptsOffset` routes SEGMENTS through /pts-rebase instead of /ts-proxy, so a
+// hybrid's borrowed audio can be shifted onto the video provider's timeline.
+// Zero (the normal case) leaves every url exactly as before.
+function rewriteM3u8(content, targetUrl, baseProxyUrl, headers, ptsOffset = 0) {
+    const segRoute = ptsOffset ? 'pts-rebase' : 'ts-proxy';
+    const segExtra = ptsOffset ? `&pts=${ptsOffset}` : '';
     const lines = content.split('\n');
     const out = []; const segmentUrls = [];
+    // A URL line that FOLLOWS #EXT-X-STREAM-INF is a variant playlist, whatever
+    // it is named. showsst serves its variants as `.../api?d=<blob>` with no
+    // .m3u8 anywhere in the URL, so extension-matching alone sent a PLAYLIST
+    // through ts-proxy: hls.js then got playlist text where it expected
+    // MPEG-TS, reported duration 0:00 and spun forever, while the segment URLs
+    // inside it were never rewritten and went to the origin raw (403).
+    // Measured 2026-09-22 on movie/1408162.
+    let afterStreamInf = false;
     for (const line of lines) {
         if (line.startsWith('#')) {
+            if (line.startsWith('#EXT-X-STREAM-INF')) afterStreamInf = true;
             if (line.startsWith('#EXT-X-KEY:')) {
                 const regex = /https?:\/\/[^""\s]+/g; const keyUrl = regex.exec(line)?.[0];
                 if (keyUrl) {
@@ -137,38 +363,178 @@ function rewriteM3u8(content, targetUrl, baseProxyUrl, headers) {
                 } else out.push(line);
             } else out.push(line);
         } else if (line.trim()) {
+            // The flag applies to THIS url line only; a master lists several
+            // variants, and leaving it set would treat every later segment in
+            // a media playlist as a playlist too.
+            const isVariant = afterStreamInf;
+            afterStreamInf = false;
             try {
                 const abs = new URL(line, targetUrl).href;
-                if (/\.m3u8(\?|$)/i.test(abs)) {
+                if (isVariant || /\.m3u8(\?|$)/i.test(abs)) {
                     out.push(`${baseProxyUrl}/m3u8-proxy?url=${encodeURIComponent(abs)}&headers=${encodeURIComponent(JSON.stringify(headers))}`);
-                } else if (/\.ts(\?|$)/i.test(abs)) {
+                } else {
+                    // Any non-playlist line in an m3u8 body is a media segment,
+                    // whatever its extension. Several providers disguise
+                    // segments as .jpg/.png (Castle, OneTouchTV) or use bare
+                    // relative names (NetMirror's 2560_000.jpg). Matching only
+                    // .ts left those emitted raw, so the browser fetched them
+                    // cross-origin (CORS error) or resolved them against
+                    // /m3u8-proxy (404) - which is why a proxied stream still
+                    // would not play.
                     segmentUrls.push(abs);
-                    out.push(`${baseProxyUrl}/ts-proxy?url=${encodeURIComponent(abs)}&headers=${encodeURIComponent(JSON.stringify(headers))}`);
-                } else out.push(line);
+                    out.push(`${baseProxyUrl}/${segRoute}?url=${encodeURIComponent(abs)}&headers=${encodeURIComponent(JSON.stringify(headers))}${segExtra}`);
+                }
             } catch { out.push(line); }
         } else out.push(line);
     }
     if (segmentUrls.length && !isCacheDisabled()) {
-        Promise.all(segmentUrls.map(u => prefetchSegment(u, headers))).catch(() => undefined);
+        // Prefetch only the first few segments, and never more than a couple at
+        // a time. This used to fan out over every line in the playlist, which
+        // for a feature-length stream means hundreds of concurrent fetches: the
+        // socket pool fills with speculative work and the segment the player is
+        // actually waiting on never gets a connection, so playback just hangs.
+        // Warming the opening segments is the only part that helps startup.
+        const warm = segmentUrls.slice(0, PREFETCH_MAX);
+        console.log(`[prefetch] playlist had ${segmentUrls.length} segments, warming ${warm.length}`);
+        (async () => {
+            for (let i = 0; i < warm.length; i += PREFETCH_CONCURRENCY) {
+                await Promise.all(warm.slice(i, i + PREFETCH_CONCURRENCY).map(u => prefetchSegment(u, headers)));
+            }
+        })().catch(() => undefined);
     }
     return out.join('\n');
 }
 
+// resp.body.pipe(res) alone is a hang waiting to happen: if the upstream body
+// stalls or errors after the headers arrived, nothing ends the client response
+// and the browser sits on (pending) until hls.js cancels the segment. Pipe
+// through this instead so an upstream failure, or a client that walks away,
+// always tears both sides down.
+function pipeUpstream(resp, res, label) {
+    const body = resp.body;
+    if (!body) { res.end(); return; }
+    let settled = false;
+    // Only a body that did NOT drain normally may be destroyed. Destroying one
+    // that read to completion tears down the keep-alive socket instead of
+    // returning it to the agent's free list, so the pool fills with sockets
+    // that are alive but unreusable: active climbed 1 -> 31 across ~97 requests
+    // and never came back down. A clean end must simply be left alone.
+    const cleanup = (err) => {
+        if (settled) return;
+        settled = true;
+        if (err) {
+            console.warn(`[${label}] upstream body failed: ${err.message}`);
+            if (!res.headersSent) res.status(502).json({ error: `upstream body failed: ${err.message}` });
+            else res.destroy(err);
+        }
+        // Reached only when the body never ended: an error, or a client that
+        // hung up mid-stream. Both leave bytes in flight that nobody will read.
+        if (typeof body.destroy === 'function') body.destroy();
+    };
+    // A body that simply STOPS sending - no error, no end, no client hangup -
+    // was the remaining leak: cleanup() only ran on error or close, so the
+    // socket stayed checked out of the agent forever. With maxSockets=64 the
+    // pool wedged at active=65 queued=14 free=0 and never drained, after which
+    // every provider timed out at exactly PROXY_BODY_TIMEOUT_MS and Castle
+    // silently returned 0 streams until a restart. Measured 2026-09-22.
+    //
+    // The watchdog is reset by PROGRESS, not armed once: a large segment may
+    // legitimately take minutes to stream, but it must never go quiet for
+    // longer than the stall window.
+    let stallTimer = null;
+    const clearStall = () => { if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; } };
+    const armStall = () => {
+        clearStall();
+        stallTimer = setTimeout(() => {
+            if (settled) return;
+            console.warn(`[${label}] upstream body stalled ${BODY_STALL_MS}ms, dropping`);
+            cleanup(new Error('upstream body stalled'));
+        }, BODY_STALL_MS);
+    };
+
+    // Register end/error before pipe() so a body that drains immediately cannot
+    // settle before we are listening.
+    body.on('data', armStall);
+    body.on('end', () => { settled = true; clearStall(); });
+    body.on('error', (e) => { clearStall(); cleanup(e); });
+    res.on('close', () => { clearStall(); cleanup(); });
+    armStall();
+    body.pipe(res);
+}
+
+let tsProxySeq = 0;
+let m3u8Seq = 0;
+
+// Rate telemetry. A runaway client loop is only visible as a RATE and as a
+// repeat-count per URL - a per-request line just buries it. Summarise every
+// 10s and stay silent when nothing moved.
+const rateStats = { ts: 0, m3u8: 0, urls: new Map() };
+function noteProxyHit(kind, url) {
+    rateStats[kind] += 1;
+    const k = String(url || '').slice(0, 100);
+    rateStats.urls.set(k, (rateStats.urls.get(k) || 0) + 1);
+}
+setInterval(() => {
+    if (!rateStats.ts && !rateStats.m3u8) return;
+    const top = [...rateStats.urls.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
+    const dup = top.filter(([, n]) => n > 1);
+    console.log(`[proxy-rate] 10s: ts=${rateStats.ts} m3u8=${rateStats.m3u8} distinct=${rateStats.urls.size}`
+        + (dup.length ? ` REPEATS: ${dup.map(([u, n]) => `${n}x ${u.slice(-60)}`).join(' | ')}` : ' (no repeats)'));
+    rateStats.ts = 0; rateStats.m3u8 = 0; rateStats.urls.clear();
+}, 10000).unref();
+
 function createProxyRoutes(app) {
     // m3u8 playlist proxy
     app.get('/m3u8-proxy', cors(), async (req, res) => {
+        const mId = (m3u8Seq = (m3u8Seq + 1) % 100000);
+        const m_t0 = Date.now();
+        const mstage = (n) => console.log(`[m3u8-proxy#${mId}] ${n} +${Date.now() - m_t0}ms`);
+        noteProxyHit('m3u8', req.query.url);
+        mstage('enter');
+        const gone = new AbortController();
+        res.on('close', () => { if (!res.writableEnded) { mstage('CLIENT ABORTED'); gone.abort(); } });
         const targetUrl = req.query.url; if (!targetUrl) return res.status(400).json({ error: 'URL parameter required' });
         let headers = {};
         try { headers = JSON.parse(req.query.headers || '{}'); } catch {
             // Ignore URL parsing errors
         }
         try {
-            const response = await fetch(targetUrl, { headers: { 'User-Agent': DEFAULT_UA, ...headers } });
-            if (!response.ok) return res.status(response.status).json({ error: `M3U8 fetch failed: ${response.status}` });
-            const text = await response.text();
+            const coolingUntil = throttledUntil(targetUrl);
+            if (coolingUntil) {
+                const waitMs = coolingUntil - Date.now();
+                mstage(`skipped, host cooling down ${waitMs}ms`);
+                return res.status(503).json({
+                    error: 'upstream rate limited',
+                    host: hostOf(targetUrl),
+                    retryAfterMs: waitMs,
+                });
+            }
+            const deadStatus = deadStatusFor(targetUrl);
+            if (deadStatus) {
+                mstage(`skipped, url already failed ${deadStatus}`);
+                return res.status(deadStatus).json({
+                    error: `M3U8 fetch failed: ${deadStatus}`,
+                    reason: 'this link has expired; resolve the title again',
+                });
+            }
+            mstage(`upstream fetch start ${targetUrl.slice(0, 80)}`);
+            const response = await fetchWithTimeout(targetUrl, { signal: gone.signal, headers: { 'User-Agent': DEFAULT_UA, ...headers } });
+            mstage(`upstream headers status=${response.status}`);
+            if (!response.ok) {
+                discardBody(response);
+                noteThrottle(targetUrl, response.status);
+                noteDeadUrl(targetUrl, response.status);
+                return res.status(response.status).json({ error: `M3U8 fetch failed: ${response.status}` });
+            }
+            urlStrikes.delete(String(targetUrl));
+            const text = await readBodyWithTimeout(response, BODY_STALL_MS, 'text');
+            mstage(`body read ${text.length}b`);
             const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
             const baseProxyUrl = `${protocol}://${req.get('host')}`;
-            const rewritten = rewriteM3u8(text, targetUrl, baseProxyUrl, headers);
+            // A hybrid's audio playlist carries `rebase=1&pts=<n>`; everything
+            // else rewrites exactly as before.
+            const ptsOffset = req.query.rebase === '1' ? (Number(req.query.pts) || 0) : 0;
+            const rewritten = rewriteM3u8(text, targetUrl, baseProxyUrl, headers, ptsOffset);
             res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
             res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
             res.setHeader('Access-Control-Allow-Origin', '*');
@@ -178,6 +544,25 @@ function createProxyRoutes(app) {
 
     // ts / key segment proxy
     app.get('/ts-proxy', cors(), async (req, res) => {
+        const reqId = (tsProxySeq = (tsProxySeq + 1) % 100000);
+        noteProxyHit('ts', req.query.url);
+        const t_enter = Date.now();
+        const stage = (name) => console.log(`[ts-proxy#${reqId}] ${name} +${Date.now() - t_enter}ms`);
+        stage('enter');
+        // Byte totals are what distinguish ordinary playback from a client
+        // re-fetching the same segments: request counts alone look identical.
+        let bytesOut = 0;
+        const origWrite = res.write.bind(res);
+        res.write = (chunk, ...rest) => { if (chunk) bytesOut += chunk.length; return origWrite(chunk, ...rest); };
+        // Abort every upstream fetch this request started once the browser is
+        // gone. Logging the abort was not enough: the fetch kept its pool slot
+        // for the full BODY_TIMEOUT_MS, which is what wedged the agent.
+        const gone = new AbortController();
+        res.on('close', () => {
+            stage(`${res.writableEnded ? 'client done' : 'CLIENT ABORTED'} bytes=${bytesOut} url=${String(req.query.url || '').slice(0, 120)}`);
+            if (!res.writableEnded) gone.abort();
+        });
+        res.on('finish', () => stage(`finish bytes=${bytesOut}`));
         const targetUrl = req.query.url; if (!targetUrl) return res.status(400).json({ error: 'URL parameter required' });
         const debug = req.query.debug === '1';
         const noSynth = req.query.noSynth === '1';
@@ -207,24 +592,44 @@ function createProxyRoutes(app) {
             const now = Date.now();
             // Progressive growth supersedes single-shot clamp if enabled
             if (progressiveOpen) {
-                const prog = progressiveOpenMap.get(targetUrl) || { lastEnd: -1 };
+                const prog = progressiveOpenMap.get(targetUrl) || { lastEnd: -1, grow: true };
                 const prevEnd = prog.lastEnd;
                 let nextEnd;
                 if (prog.lastEnd < 0) {
                     nextEnd = openChunkKB * 1024 - 1;
-                } else {
+                } else if (prog.grow) {
                     const increment = openChunkKB * 1024;
                     nextEnd = prog.lastEnd + increment;
                     const maxCap = 256 * 1024 * 1024 - 1; // 256MB
                     if (nextEnd > maxCap) nextEnd = maxCap;
+                } else {
+                    // The previous window was ABANDONED by the client, so
+                    // widening it fetches more of what nobody read. Measured
+                    // 2026-09-23 on a NetMirror mp4: bytes=0- probes from
+                    // hls.js aborted 8 times to 2 completions, and because the
+                    // window grew on every one of them regardless, a single
+                    // request pulled 41218136 bytes upstream and threw all of
+                    // it away. That discarded traffic - not Node - is what
+                    // pushed `main fetch headers` from 597ms to 4337ms.
+                    //
+                    // Progressive growth assumes a file being read linearly.
+                    // A player that probes and closes is the opposite, so hold
+                    // the window until a client actually drains one.
+                    nextEnd = prog.lastEnd;
                 }
                 const newRange = `bytes=0-${nextEnd}`;
                 headers.Range = newRange;
                 effectiveRange = newRange;
                 prog.lastEnd = nextEnd;
+                prog.grow = false; // set true again only once this response is fully read
                 progressiveOpenMap.set(targetUrl, prog);
+                // Re-arm growth only on a response the client read to the end.
+                res.on('close', () => {
+                    const cur = progressiveOpenMap.get(targetUrl);
+                    if (cur === prog) prog.grow = Boolean(res.writableEnded);
+                });
                 appliedClamp = true; // reuse flag for logging
-                if (debug) console.log('[ts-proxy] progressiveOpen expand', { prevEnd, nextEnd, increment: openChunkKB * 1024 });
+                if (debug) console.log('[ts-proxy] progressiveOpen', { prevEnd, nextEnd, grew: nextEnd !== prevEnd });
             } else if (clampOpen) {
                 const lastTs = openRangeClampMap.get(targetUrl);
                 if (!lastTs || (now - lastTs) > OPEN_RANGE_CLAMP_TTL_MS) {
@@ -277,12 +682,22 @@ function createProxyRoutes(app) {
                 }
             }
 
-            // HEAD preflight (only when no explicit Range requested) to get size for synthesized partial response
+            // HEAD preflight (only when no explicit Range requested) to get size for synthesized partial response.
+            //
+            // This whole preamble (HEAD + range probe + tail prefetch) exists to
+            // synthesize seek support for a single large file. An HLS segment is
+            // a few hundred KB fetched start-to-finish and never seeked within,
+            // so for those the probes are pure amplification: measured 268
+            // upstream calls for 105 segment requests, 2.6x per segment, which
+            // is what floods the network tab and the socket pool. Skip them for
+            // anything served out of a playlist and just stream the bytes.
+            const looksLikeHlsSegment = /\.(ts|jpg|jpeg|png|js|m4s|aac)(\?|$)/i.test(String(targetUrl));
             let contentLength = null;
             let upstreamAcceptRanges = null;
-            if (!effectiveRange) {
+            if (!effectiveRange && !looksLikeHlsSegment) {
                 try {
-                    const headResp = await fetch(targetUrl, { method: 'HEAD', headers: { 'User-Agent': DEFAULT_UA, ...headers } });
+                    stage('HEAD start');
+                    const headResp = await fetchWithTimeout(targetUrl, { signal: gone.signal, method: 'HEAD', headers: { 'User-Agent': DEFAULT_UA, ...headers } }, PROBE_TIMEOUT_MS);
                     if (headResp.ok) {
                         contentLength = headResp.headers.get('content-length');
                         upstreamAcceptRanges = headResp.headers.get('accept-ranges');
@@ -290,21 +705,30 @@ function createProxyRoutes(app) {
                     } else if (debug) {
                         console.log('[ts-proxy] HEAD status', headResp.status);
                     }
+                    // Only the HEADERS are wanted here either way. node-fetch
+                    // still hands back a body object and holds the socket until
+                    // it settles, so release it explicitly rather than relying
+                    // on a HEAD having nothing to send.
+                    discardBody(headResp);
                 } catch (_e) { if (debug) console.log('[ts-proxy] HEAD failed'); }
             }
 
-            // Fallback probe: if still no size, attempt a 0-0 range request to derive total size from Content-Range
-            if (!effectiveRange && !contentLength) {
+            // Fallback probe: if still no size, attempt a 0-0 range request to derive total size from Content-Range.
+            // Skipped for playlist segments for the same reason as the HEAD
+            // above: with HEAD gone contentLength is always null here, so
+            // without this guard the probe fires on every single segment.
+            if (!effectiveRange && !contentLength && !looksLikeHlsSegment) {
                 try {
                     const probeRange = 'bytes=0-0';
                     if (debug) console.log('[ts-proxy] probe range');
-                    const probeResp = await fetch(targetUrl, { headers: { 'User-Agent': DEFAULT_UA, ...headers, 'Range': probeRange } });
+                    stage('probe start');
+                    const probeResp = await fetchWithTimeout(targetUrl, { signal: gone.signal, headers: { 'User-Agent': DEFAULT_UA, ...headers, 'Range': probeRange } }, PROBE_TIMEOUT_MS);
                     if (probeResp.status === 206) {
                         const cr = probeResp.headers.get('content-range');
                         if (cr) {
                             const m = cr.match(/\/(\d+)$/); if (m) contentLength = m[1];
                         }
-                        try { await probeResp.arrayBuffer(); } catch (readErr) {
+                        try { await readBodyWithTimeout(probeResp); } catch (readErr) {
                             if (debug) console.log('[ts-proxy] probe body read failed', readErr.message);
                         }
                         if (debug) console.log('[ts-proxy] probe success', { contentLength });
@@ -325,9 +749,10 @@ function createProxyRoutes(app) {
                     (async () => {
                         try {
                             if (debug) console.log('[ts-proxy] tail prefetch start', { tailRange });
-                            const tr = await fetch(targetUrl, { headers: { 'User-Agent': DEFAULT_UA, ...headers, Range: tailRange } });
+                            stage('tail start');
+                            const tr = await fetchWithTimeout(targetUrl, { signal: gone.signal, headers: { 'User-Agent': DEFAULT_UA, ...headers, Range: tailRange } }, PROBE_TIMEOUT_MS);
                             if (tr.status === 206) {
-                                const buf = Buffer.from(await tr.arrayBuffer());
+                                const buf = Buffer.from(await readBodyWithTimeout(tr));
                                 const cr = tr.headers.get('content-range');
                                 if (cr) {
                                     const mm = cr.match(/bytes\s+(\d+)-(\d+)\/(\d+)/i);
@@ -353,7 +778,7 @@ function createProxyRoutes(app) {
                 const desired = initChunkKB * 1024;
                 const chunkSize = Math.min(desired, Math.max(0, total - 1));
                 const syntheticRange = `bytes=0-${chunkSize}`;
-                const resp = await fetch(targetUrl, { headers: { 'User-Agent': DEFAULT_UA, ...headers, 'Range': syntheticRange } });
+                const resp = await fetchWithTimeout(targetUrl, { signal: gone.signal, headers: { 'User-Agent': DEFAULT_UA, ...headers, 'Range': syntheticRange } });
                 if (resp.status === 206) {
                     if (debug) console.log('[ts-proxy] synthetic 206', syntheticRange);
                     const upstreamCT = inferContentType(resp.headers.get('content-type'), targetUrl);
@@ -366,16 +791,43 @@ function createProxyRoutes(app) {
                     res.setHeader('Cache-Control', 'public, max-age=3600');
                     res.setHeader('Access-Control-Allow-Origin', '*');
                     // Pipe first chunk then leave connection open? Simpler: end after chunk; player will request next range.
-                    return resp.body.pipe(res);
+                    return pipeUpstream(resp, res, `ts-proxy#${reqId}`);
                 }
                 // If server ignored range (e.g., returned 200), fall through to normal logic below.
             }
 
-            const upstreamOptions = { headers: { 'User-Agent': DEFAULT_UA, ...headers } };
+            const cfCookie = cfCookieFor(targetUrl);
+            const cfUa = process.env.CF_CLEARANCE_UA;
+            const upstreamOptions = {
+                headers: {
+                    'User-Agent': DEFAULT_UA,
+                    ...headers,
+                    // A cf_clearance cookie is only accepted alongside the exact
+                    // User-Agent that solved the challenge, so it overrides both.
+                    ...(cfCookie ? { Cookie: [headers.Cookie, cfCookie].filter(Boolean).join('; ') } : {}),
+                    ...(cfCookie && cfUa ? { 'User-Agent': cfUa } : {})
+                }
+            };
             // If client supplied a suffix range like bytes=0- we pass it; force200 strips Range
             if (force200 && headers.Range) delete headers.Range;
-            const resp = await fetch(targetUrl, upstreamOptions);
+            stage('main fetch start');
+            const resp = await fetchWithTimeout(targetUrl, upstreamOptions);
+            stage(`main fetch headers status=${resp.status}`);
             if (!resp.ok && resp.status !== 206) {
+                // Highest-traffic leak of the three: this is the SEGMENT route,
+                // so one abandoned body per failed segment drains the pool fast.
+                discardBody(resp);
+                if (isCloudflareChallenge(resp)) {
+                    const host = (() => { try { return new URL(targetUrl).hostname; } catch { return 'upstream'; } })();
+                    console.log(`[ts-proxy#${reqId}] cloudflare challenge from ${host}${cfCookie ? ' (cf_clearance was sent and rejected)' : ' (no cf_clearance configured)'}`);
+                    return res.status(403).json({
+                        error: 'cloudflare_challenge',
+                        host,
+                        detail: cfCookie
+                            ? 'The configured cf_clearance cookie was rejected - it has expired, or was minted by a different IP/User-Agent.'
+                            : `${host} requires a browser-solved Cloudflare challenge. Set cfClearance in utils/user-config.json to play this source.`
+                    });
+                }
                 if (debug) console.log('[ts-proxy] upstream error', resp.status);
                 return res.status(resp.status).json({ error: `TS fetch failed: ${resp.status}` });
             }
@@ -405,31 +857,72 @@ function createProxyRoutes(app) {
             res.setHeader('Cache-Control', 'public, max-age=3600');
             res.setHeader('Access-Control-Allow-Origin', '*');
             if (debug) console.log('[ts-proxy] streaming body', { status: resp.status, ct: upstreamCT, cl, contentRange: force200 ? undefined : contentRange });
-            resp.body.pipe(res);
-        } catch (e) { if (debug) console.log('[ts-proxy] exception', e.message); res.status(500).json({ error: e.message }); }
+            stage('piping body');
+            pipeUpstream(resp, res, `ts-proxy#${reqId}`);
+        } catch (e) { if (debug) console.log('[ts-proxy] exception', e.message); if (!res.headersSent) res.status(500).json({ error: e.message }); }
     });
 
     // subtitle proxy
     app.get('/sub-proxy', cors(), async (req, res) => {
+        const gone = new AbortController();
+        res.on('close', () => { if (!res.writableEnded) gone.abort(); });
         const targetUrl = req.query.url; if (!targetUrl) return res.status(400).json({ error: 'url parameter required' });
         let headers = {}; try { headers = JSON.parse(req.query.headers || '{}'); } catch {
             // Ignore URL parsing errors
         }
         try {
-            const resp = await fetch(targetUrl, { headers: { 'User-Agent': DEFAULT_UA, ...headers } });
-            if (!resp.ok) return res.status(resp.status).json({ error: `subtitle fetch failed: ${resp.status}` });
+            const resp = await fetchWithTimeout(targetUrl, { signal: gone.signal, headers: { 'User-Agent': DEFAULT_UA, ...headers } });
+            if (!resp.ok) {
+                discardBody(resp);
+                return res.status(resp.status).json({ error: `subtitle fetch failed: ${resp.status}` });
+            }
             res.setHeader('Access-Control-Allow-Origin', '*');
             res.setHeader('Cache-Control', 'public, max-age=3600');
             res.setHeader('Content-Type', resp.headers.get('content-type') || 'text/vtt');
-            resp.body.pipe(res);
+            pipeUpstream(resp, res, 'sub-proxy');
         } catch (e) { res.status(500).json({ error: e.message }); }
     });
+}
+
+// Some upstreams (DahmerMovies' p.111477.xyz) sit behind a Cloudflare JS
+// challenge. Node cannot solve it: the origin a.111477.xyz 307s into the
+// protected worker, and the worker answers every server-side request with
+// 403 + `cf-mitigated: challenge`, whatever headers we send. A browser solves
+// it and is handed a `cf_clearance` cookie, so the only way through from here
+// is to be given that cookie. CF_CLEARANCE maps hostname -> cookie string.
+//
+// The cookie is bound to the IP and User-Agent that solved the challenge, so
+// it only works when this server shares the browser's public IP, and the UA
+// must match the browser that minted it (set cfClearanceUserAgent).
+function cfCookieFor(targetUrl) {
+    let map = {};
+    try { map = JSON.parse(process.env.CF_CLEARANCE || '{}'); } catch { return null; }
+    let host = '';
+    try { host = new URL(targetUrl).hostname.toLowerCase(); } catch { return null; }
+    for (const [key, cookie] of Object.entries(map)) {
+        const k = String(key).toLowerCase();
+        if (host === k || host.endsWith(`.${k}`)) return cookie;
+    }
+    return null;
+}
+
+// Cloudflare's challenge is an HTML page served with 403. Forwarding that body
+// to a <video> element yields an opaque decode failure, so detect it and say
+// what actually happened.
+function isCloudflareChallenge(resp) {
+    if (resp.headers.get('cf-mitigated') === 'challenge') return true;
+    const server = (resp.headers.get('server') || '').toLowerCase();
+    const ct = (resp.headers.get('content-type') || '').toLowerCase();
+    return server.includes('cloudflare') && resp.status === 403 && ct.includes('text/html');
 }
 
 function processStreamsForProxy(streams, serverUrl) {
     if (!Array.isArray(streams)) return streams;
     return streams.map(s => {
         if (!s || !s.url || typeof s.url !== 'string') return s;
+        // A synthetic master already points at this server and embeds proxied
+        // child URLs of its own; wrapping it again would proxy the proxy.
+        if (s.__noProxy) { const { __noProxy, ...rest } = s; return rest; }
         const original = extractOriginalUrl(s.url);
         const headers = s.headers || {};
         const hParam = Object.keys(headers).length ? `&headers=${encodeURIComponent(JSON.stringify(headers))}` : '';
@@ -450,4 +943,4 @@ function processStreamsForProxy(streams, serverUrl) {
     });
 }
 
-module.exports = { createProxyRoutes, processStreamsForProxy };
+module.exports = { createProxyRoutes, processStreamsForProxy, rewriteM3u8 };

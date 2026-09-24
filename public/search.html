@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chitram — Search</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <div id="siteHeader"></div>
+
+  <main class="page-tight">
+    <section class="search-hero">
+      <form id="searchForm" class="search-input-wrap">
+        <input id="searchInput" type="search" placeholder="Search for a movie or series…" autocomplete="off">
+        <button type="submit" class="btn btn-primary">Search</button>
+      </form>
+      <div class="search-filters">
+        <button type="button" class="filter-chip active" data-type="all">All</button>
+        <button type="button" class="filter-chip" data-type="movie">Movies</button>
+        <button type="button" class="filter-chip" data-type="series">Series</button>
+      </div>
+    </section>
+
+    <p class="results-heading" id="resultsHeading" hidden></p>
+    <div id="resultsGrid" class="card-grid"></div>
+    <div id="stateBlock"></div>
+  </main>
+
+  <script src="/api.js"></script>
+  <script src="/header.js"></script>
+  <script>window.ChitramAPI.initTheme();</script>
+  <script src="/search.js"></script>
+  <script>renderHeader('search');</script>
+</body>
+</html>

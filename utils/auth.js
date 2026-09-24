@@ -1,9 +1,14 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { fromRoot } = require('../lib/runtime/paths');
+const { features } = require('../lib/runtime/environment');
 
-// Path for auth users file
-const AUTH_FILE = path.join(process.cwd(), 'utils/auth-users.json');
+// Path for auth users file. Resolved from the app root, not process.cwd():
+// cwd is wherever the process was launched from, which is not the repo root
+// on Vercel, and a wrong path here silently creates a fresh default-password
+// file instead of reading the real one.
+const AUTH_FILE = fromRoot('utils', 'auth-users.json');
 
 // In-memory cache
 let usersCache = null;
@@ -12,6 +17,14 @@ const LOAD_INTERVAL_MS = 30 * 1000; // reload at most every 30s
 
 function ensureAuthFile() {
   if (fs.existsSync(AUTH_FILE)) return;
+  // Without a persistent filesystem this would mint a brand-new
+  // "admin"/"change-me" account on every cold start - a fresh default
+  // credential each time, which is worse than having no file at all. Refuse,
+  // and require credentials to come from the environment instead.
+  if (!features.configPersistence) {
+    console.error('[auth] No auth-users.json and no persistent filesystem: refusing to create default credentials. Provide AUTH_USERS via environment instead.');
+    return;
+  }
   const defaultPassword = 'change-me';
   const { hash } = hashPassword(defaultPassword);
   const data = {
@@ -59,6 +72,12 @@ function updatePassword(username, newPassword){
   const u = users.find(x => x.username === username);
   if (!u) return false;
   u.hash = hashPassword(newPassword).hash;
+  // A password change that cannot be persisted would appear to succeed and
+  // then silently revert on the next invocation.
+  if (!features.configPersistence) {
+    console.error('[auth] Refusing password change: this runtime has no persistent filesystem.');
+    return false;
+  }
   try {
     fs.writeFileSync(AUTH_FILE, JSON.stringify({ users }, null, 2));
     usersCache = users;

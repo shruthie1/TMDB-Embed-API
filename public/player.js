@@ -10,7 +10,17 @@
   function esc(value) { return String(value ?? '').replace(/[&<>'"]/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', "'":'&#39;', '"':'&quot;' }[c])); }
   function streamLabel(stream) { return stream.name || stream.title || stream.provider || 'Stream'; }
   function languageFromLabel(stream) { const m = streamLabel(stream).match(/\[([^\]]+)\]/); return m ? m[1] : ''; }
-  function isHls(url) { return /\.m3u8(?:$|\?)/i.test(url || ''); }
+  // A proxied playlist is `/m3u8-proxy?url=<encoded>`, so the `.m3u8` lives
+  // inside the query string percent-encoded and a plain extension test misses
+  // it. hls.js then never starts and the <video> element is handed a playlist
+  // it cannot decode, which shows up as a player stuck on "Loading stream...".
+  // Decode the wrapper and check the proxy route as well as the extension.
+  function isHls(url) {
+    const raw = String(url || '');
+    if (/\.m3u8(?:$|\?)/i.test(raw)) return true;
+    if (/\/m3u8-proxy(?:$|\?)/i.test(raw)) return true;
+    try { return /\.m3u8(?:$|\?|&)/i.test(decodeURIComponent(raw)); } catch (_) { return false; }
+  }
 
   function renderResults(results) {
     els.resultCount.textContent = results.length;
@@ -57,7 +67,16 @@
     const embedded = tracks.map((track, index) => ({ index, name: track.name || track.lang || `Audio ${index + 1}`, embedded: true }));
     const options = [...languageStreams.map(item => ({ ...item, value: `stream:${item.index}` })), ...embedded.map(item => ({ ...item, value: `hls:${item.index}` }))];
     if (!options.length) { els.audio.innerHTML = '<option>No alternate audio detected</option>'; els.audio.disabled = true; return; }
-    els.audio.innerHTML = options.map(option => `<option value="${option.value}"${option.index === currentIndex && !option.embedded ? ' selected' : ''}>${esc(option.name)}</option>`).join('');
+    // `index` means two different things: a position in currentStreams for a
+    // language option, and a position in the HLS audio-track list for an
+    // embedded one. Compare each against its own space, never across.
+    // The dropdown is a single control, so exactly one option may be selected:
+    // an active embedded track wins, otherwise the playing stream is marked.
+    const activeHlsTrack = hls && hls.audioTrack >= 0 ? hls.audioTrack : -1;
+    const selectedValue = embedded.length && activeHlsTrack >= 0
+      ? `hls:${activeHlsTrack}`
+      : `stream:${currentIndex}`;
+    els.audio.innerHTML = options.map(option => `<option value="${option.value}"${option.value === selectedValue ? ' selected' : ''}>${esc(option.name)}</option>`).join('');
     els.audio.disabled = false;
   }
 

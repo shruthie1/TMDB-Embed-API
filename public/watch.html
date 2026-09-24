@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chitram — Watch</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <div id="siteHeader"></div>
+
+  <main>
+    <section id="backdropSection"></section>
+    <div id="headerSection"></div>
+    <p class="watch-overview" id="overview" hidden></p>
+
+    <section class="player-shell" id="playerShell">
+      <div class="video-wrap" id="videoWrap">
+        <video id="video" playsinline preload="metadata"></video>
+        <div id="videoEmpty" class="video-empty">Choose a stream below to start playback</div>
+        <div id="videoLoading" class="video-loading" hidden><div class="spinner"></div><span>Loading stream…</span></div>
+        <div id="videoError" class="video-error" hidden></div>
+      </div>
+      <div class="player-meta">
+        <div>
+          <strong id="nowPlaying">Nothing selected</strong>
+          <span id="nowDetails"></span>
+        </div>
+      </div>
+      <div id="subtitleNote" class="subtitle-note"></div>
+    </section>
+
+    <div id="timingStrip" class="timing-strip"></div>
+
+    <section class="stream-groups">
+      <div class="row-head" style="padding:0 0 6px;">
+        <h2>Available streams</h2>
+        <span class="badge" id="streamCount">0</span>
+      </div>
+      <div id="streamGroups"></div>
+    </section>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
+  <script src="/api.js"></script>
+  <script src="/header.js"></script>
+  <script>window.ChitramAPI.initTheme();</script>
+  <script src="/player-core.js"></script>
+  <script src="/watch.js"></script>
+  <script>renderHeader('');</script>
+</body>
+</html>
