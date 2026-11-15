@@ -21,6 +21,7 @@ const castleDemux = require('./utils/castleDemux');
 
 const app = express();
 app.set('trust proxy', 1);
+const { publicBase } = require('./lib/runtime/publicBase');
 
 // Mount proxy routes early so downstream handlers can use them.
 //
@@ -91,14 +92,6 @@ process.on('uncaughtException', (err) => {
 process.on('unhandledRejection', (reason) => {
   console.error('[diagnostic] unhandledRejection', reason);
 });
-// Periodic heartbeat to confirm event loop activity (can be removed later)
-let hbCount = 0;
-setInterval(()=>{
-  hbCount++;
-  if (hbCount % 6 === 0) { // every 60s if interval is 10s
-    console.log('[diagnostic] heartbeat 60s elapsed, process alive');
-  }
-}, 10_000).unref();
 
 
 // --- Metrics (in-memory) ---
@@ -427,7 +420,66 @@ registerPairRoute(app);
 // master must be absolute, because hls.js resolves them against the master's
 // own origin and these masters are assembled, not fetched from one.
 function serverUrlFor(req) {
-  return process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
+  return publicBase(req);
+}
+
+// Make a provider's streams playable from a browser: remember each url's
+// request headers (for /hybrid/pair), then route header-gated origins via
+// the proxy. Shared by the aggregate and the per-provider route - the
+// per-provider route used to skip it and returned NetMirror's raw mp4,
+// which its CDN refuses without a Referer (429 / ERR_BLOCKED_BY_ORB).
+function routeStreamsForBrowser(streams, serverUrl) {
+  // Record url -> headers BEFORE any proxy rewriting. Both branches below
+  // strip `headers` once the proxy carries them, so recording afterwards
+  // would remember a proxied url with nothing attached and /hybrid/pair
+  // would be back to fetching provider manifests bare.
+  streamHeaders.rememberStreams(streams);
+  if (config.enableProxy) {
+    streams = processStreamsForProxy(streams, serverUrl);
+    // Omit original headers when proxying to avoid leaking upstream requirements
+    streams = streams.map(s => { if (s && typeof s === 'object') { const { headers, ...rest } = s; return rest; } return s; });
+  } else {
+    // Proxy the streams that CANNOT work any other way, even though the
+    // routing policy is off.
+    //
+    // `enableProxy` is a performance policy - the proxy costs 13-22x in
+    // latency, so ordinary streams go direct. But a stream whose origin
+    // demands a Referer/Origin cannot be played by a browser at all: fetch
+    // and <video> both forbid setting those headers, so the request goes out
+    // bare and the origin refuses it.
+    //
+    // Measured 2026-09-23 on movie/1273049 (NetMirror, a raw mp4):
+    //   no Referer                       HTTP/2 429  text/html 185b
+    //   Referer videodownloader.site     HTTP/2 206  video/mp4
+    //                                    x-oss-cdn-auth: success
+    // In Chrome that surfaced as ERR_BLOCKED_BY_ORB on the media request and
+    // "NetMirror is not responding" in the player - a provider that worked
+    // perfectly from curl and never once worked in a browser.
+    //
+    // So the test is need, not policy: a stream carrying request headers is
+    // routed through the proxy; everything else stays direct and keeps the
+    // speed that turning the flag off was for.
+    const needsHeaders = (s) => s && typeof s === 'object' && !s.__noProxy
+      && s.headers && Object.keys(s.headers).length > 0;
+    const gated = streams.filter(needsHeaders);
+    if (gated.length) {
+      const proxiedByUrl = new Map(
+        processStreamsForProxy(gated, serverUrl).map((s, i) => [gated[i].url, s.url]));
+      streams = streams.map((s) => {
+        if (!needsHeaders(s)) return s;
+        const url = proxiedByUrl.get(s.url);
+        if (!url) return s;
+        // Drop the headers now that the proxy carries them, for the same
+        // reason as the enableProxy branch above: they are an upstream
+        // requirement and not the browser's business.
+        const { headers, ...rest } = s;
+        return { ...rest, url };
+      });
+      console.log(`[proxy] ${gated.length}/${streams.length} stream(s) routed via proxy `
+        + '(header-gated origins); the rest direct');
+    }
+  }
+  return streams;
 }
 
 app.get('/api/streams/:type/:tmdbId', async (req,res) => {
@@ -530,7 +582,7 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
       }
     };
 
-    const serverUrlEarly = `${req.protocol}://${req.get('host')}`;
+    const serverUrlEarly = publicBase(req);
     let castleStreams = [];
     let demuxed = null;
     // The gate only holds while Castle actually covers the user's language.
@@ -638,56 +690,7 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
     }
 
     streams = sortStreamsCanonically(streams);
-    // Record url -> headers BEFORE any proxy rewriting. Both branches below
-    // strip `headers` once the proxy carries them, so recording afterwards
-    // would remember a proxied url with nothing attached and /hybrid/pair
-    // would be back to fetching provider manifests bare.
-    streamHeaders.rememberStreams(streams);
-    if (config.enableProxy) {
-      streams = processStreamsForProxy(streams, serverUrl);
-      // Omit original headers when proxying to avoid leaking upstream requirements
-      streams = streams.map(s => { if (s && typeof s === 'object') { const { headers, ...rest } = s; return rest; } return s; });
-    } else {
-      // Proxy the streams that CANNOT work any other way, even though the
-      // routing policy is off.
-      //
-      // `enableProxy` is a performance policy - the proxy costs 13-22x in
-      // latency, so ordinary streams go direct. But a stream whose origin
-      // demands a Referer/Origin cannot be played by a browser at all: fetch
-      // and <video> both forbid setting those headers, so the request goes out
-      // bare and the origin refuses it.
-      //
-      // Measured 2026-09-23 on movie/1273049 (NetMirror, a raw mp4):
-      //   no Referer                       HTTP/2 429  text/html 185b
-      //   Referer videodownloader.site     HTTP/2 206  video/mp4
-      //                                    x-oss-cdn-auth: success
-      // In Chrome that surfaced as ERR_BLOCKED_BY_ORB on the media request and
-      // "NetMirror is not responding" in the player - a provider that worked
-      // perfectly from curl and never once worked in a browser.
-      //
-      // So the test is need, not policy: a stream carrying request headers is
-      // routed through the proxy; everything else stays direct and keeps the
-      // speed that turning the flag off was for.
-      const needsHeaders = (s) => s && typeof s === 'object' && !s.__noProxy
-        && s.headers && Object.keys(s.headers).length > 0;
-      const gated = streams.filter(needsHeaders);
-      if (gated.length) {
-        const proxiedByUrl = new Map(
-          processStreamsForProxy(gated, serverUrl).map((s, i) => [gated[i].url, s.url]));
-        streams = streams.map((s) => {
-          if (!needsHeaders(s)) return s;
-          const url = proxiedByUrl.get(s.url);
-          if (!url) return s;
-          // Drop the headers now that the proxy carries them, for the same
-          // reason as the enableProxy branch above: they are an upstream
-          // requirement and not the browser's business.
-          const { headers, ...rest } = s;
-          return { ...rest, url };
-        });
-        console.log(`[proxy] ${gated.length}/${streams.length} stream(s) routed via proxy `
-          + '(header-gated origins); the rest direct');
-      }
-    }
+    streams = routeStreamsForBrowser(streams, serverUrl);
     // Every call here fans out to a dozen providers, and NetMirror rate limits
     // per IP ("Too Many Requests in Short Period of Time"). A plain page reload
     // re-ran the whole fan-out and burned another NetMirror probe even when the
@@ -760,11 +763,7 @@ app.get('/api/streams/:provider/:type/:tmdbId', async (req,res) => {
     streams = applyFilters(streams, prov.name, config.minQualities, config.excludeCodecs);
     metrics.streamsReturned += streams.length;
     streams = sortStreamsCanonically(streams);
-    if (config.enableProxy) {
-      const serverUrl = `${req.protocol}://${req.get('host')}`;
-      streams = processStreamsForProxy(streams, serverUrl);
-      streams = streams.map(s => { if (s && typeof s === 'object') { const { headers, ...rest } = s; return rest; } return s; });
-    }
+    streams = routeStreamsForBrowser(streams, publicBase(req));
     res.json({ success:true, provider: prov.name, tmdbId, imdbId, count: streams.length, providerTimings, streams });
   } catch (e) {
     metrics.lastError = e.message;

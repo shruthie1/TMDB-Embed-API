@@ -6,6 +6,7 @@ const cors = require('cors');
 const fetch = require('node-fetch');
 const http = require('http');
 const https = require('https');
+const { publicBase } = require('../lib/runtime/publicBase');
 
 // node-fetch without an explicit agent uses a small default connection pool per
 // host. HLS is connection-hungry (a playlist warm-up plus the segment the player
@@ -564,7 +565,7 @@ function createProxyRoutes(app) {
             const text = await readBodyWithTimeout(response, BODY_STALL_MS, 'text');
             mstage(`body read ${text.length}b`);
             const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
-            const baseProxyUrl = `${protocol}://${req.get('host')}`;
+            const baseProxyUrl = publicBase(req, protocol);
             // A hybrid's audio playlist carries `rebase=1&pts=<n>`; everything
             // else rewrites exactly as before.
             const ptsOffset = req.query.rebase === '1' ? (Number(req.query.pts) || 0) : 0;
