@@ -1033,7 +1033,7 @@ kbd{
 }
 .pctl-mid{flex:1;display:grid;place-items:center;cursor:pointer}
 .pctl-big{
-  width:66px;height:66px;border-radius:var(--radius-round);display:grid;place-items:center;
+  width:66px;height:66px;border-radius:var(--radius-pill);display:grid;place-items:center;
   background:rgb(var(--rgb-bg) / .6);border:1px solid var(--line);color:var(--paper);
   backdrop-filter:blur(8px);transition:transform .18s var(--ease);
 }
@@ -1060,7 +1060,7 @@ kbd{
 }
 .pctl-track{
   position:relative;height:3px;width:100%;background:rgb(var(--rgb-text) / .2);
-  border-radius:var(--radius-xs);
+  border-radius:var(--radius-sm);
   /* Grows under the pointer rather than on click, so the target announces
      itself before you commit. */
   transition:height .14s var(--ease);
@@ -1068,10 +1068,10 @@ kbd{
 .pctl-scrub:hover .pctl-track,
 .pctl-scrub:focus-visible .pctl-track,
 .pctl-scrub[data-scrubbing] .pctl-track{height:5px}
-.pctl-buf{position:absolute;inset:0 auto 0 0;background:rgb(var(--rgb-text) / .34);border-radius:var(--radius-xs)}
-.pctl-played{position:absolute;inset:0 auto 0 0;background:var(--paper);border-radius:var(--radius-xs)}
+.pctl-buf{position:absolute;inset:0 auto 0 0;background:rgb(var(--rgb-text) / .34);border-radius:var(--radius-sm)}
+.pctl-played{position:absolute;inset:0 auto 0 0;background:var(--paper);border-radius:var(--radius-sm)}
 .pctl-knob{
-  position:absolute;top:50%;width:13px;height:13px;border-radius:var(--radius-round);
+  position:absolute;top:50%;width:13px;height:13px;border-radius:var(--radius-pill);
   background:var(--paper);transform:translate(-50%,-50%) scale(.85);
   box-shadow:0 1px 4px rgb(var(--rgb-black) / .6);
   opacity:0;transition:opacity .14s var(--ease), transform .14s var(--ease);
@@ -1154,7 +1154,7 @@ kbd{
    Baahubali 2 - and without this the row looked the same whether it was
    working or broken. Reuses the player's pspin so there is one spin in the UI. */
 .pmenu-spin{
-  width:12px;height:12px;flex:0 0 auto;border-radius:var(--radius-round);
+  width:12px;height:12px;flex:0 0 auto;border-radius:var(--radius-pill);
   border:2px solid var(--line);border-top-color:var(--paper);
   animation:pspin .85s linear infinite;
 }
@@ -2393,7 +2393,7 @@ kbd{
 .sync-bar{padding:var(--space-1-5) 0;cursor:pointer;touch-action:none}
 .sync-bar-track{
   position:relative;height:3px;width:100%;background:rgb(var(--rgb-text) / .2);
-  border-radius:var(--radius-xs);transition:height .14s var(--ease);
+  border-radius:var(--radius-sm);transition:height .14s var(--ease);
 }
 .sync-bar:hover .sync-bar-track,
 .sync-bar:focus-visible .sync-bar-track{height:5px}
@@ -2403,9 +2403,9 @@ kbd{
   position:absolute;left:50%;top:50%;width:1px;height:9px;
   transform:translate(-50%,-50%);background:rgb(var(--rgb-text) / .45);z-index:var(--z-focus);
 }
-.sync-bar-fill{position:absolute;top:0;bottom:0;background:var(--paper);opacity:.75;border-radius:var(--radius-xs)}
+.sync-bar-fill{position:absolute;top:0;bottom:0;background:var(--paper);opacity:.75;border-radius:var(--radius-sm)}
 .sync-bar-knob{
-  position:absolute;top:50%;width:13px;height:13px;border-radius:var(--radius-round);
+  position:absolute;top:50%;width:13px;height:13px;border-radius:var(--radius-pill);
   background:var(--paper);transform:translate(-50%,-50%) scale(.85);
   box-shadow:0 1px 4px rgb(var(--rgb-black) / .6);z-index:3;
   transition:transform .14s var(--ease);
