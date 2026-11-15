@@ -2953,3 +2953,7 @@ html .pctl-scrub:focus-visible,html .sync-bar:focus-visible{outline:none}
 .embed-stage-bar>*{pointer-events:auto}
 .embed-stage-bar .ov-back{position:static}
 .embed-stage-bar .pmenu{top:calc(100% + 10px);bottom:auto}
+
+/* ErrorBoundary fallback outside the player: cover the viewport, since the
+   player container it would normally sit in may be the thing that crashed. */
+.boundary-screen{position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.88)}

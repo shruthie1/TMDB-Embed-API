@@ -47,6 +47,7 @@ export async function GET(request) {
     const response = await fetch(parsed, {
       headers: { accept: 'text/html', 'user-agent': 'Chitram-local-lab/1.0' },
       cache: 'no-store',
+      signal: AbortSignal.timeout(10000),
     });
     const html = await response.text();
     return Response.json({ ok: response.ok, status: response.status,

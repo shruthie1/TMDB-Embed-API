@@ -3,6 +3,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { fetchTitle, fetchTitleFull, poster } from '../../../../lib/api';
 import Player from '../../../../components/Player';
+import ErrorBoundary from '../../../../components/ErrorBoundary';
 import CastRow, { CastRowSkeleton } from '../../../../components/CastRow';
 import EpisodeList from '../../../../components/EpisodeList';
 import { Row } from '../../../../components/Row';
@@ -219,6 +220,7 @@ export default function TitlePage() {
       )}
 
       {play && (
+        <ErrorBoundary label="the player" onClose={() => setPlay(null)}>
         <Player
           title={t}
           season={play.season || 0}
@@ -232,6 +234,7 @@ export default function TitlePage() {
           }}
           onNext={isTv ? playNext : undefined}
         />
+        </ErrorBoundary>
       )}
       <Toast message={toast} />
     </article>
