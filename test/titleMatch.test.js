@@ -359,3 +359,42 @@ test('an edition tag in the row title does not block the match', () => {
     assert.equal(tm.findTitleMatch([{ title: 'Pushpa: The Rise - Part 1' }],
         'Pushpa 2 - The Rule'), null);
 });
+
+// --- every named import from utils/titleMatch must exist ---
+// Prod 2026-11-15: onetouchtv.js and tmdbTitleToImdb.js imported findBestMatch
+// after the module stopped exporting it, so OneTouchTV threw
+// "findBestMatch is not a function" on every title and returned 0 streams.
+test('every destructured import from utils/titleMatch is actually exported', () => {
+    const fsx = require('fs');
+    const pathx = require('path');
+    const exported = require('../utils/titleMatch');
+    const root = pathx.join(__dirname, '..');
+    const files = [
+        ...fsx.readdirSync(pathx.join(root, 'providers')).map((f) => pathx.join(root, 'providers', f)),
+        ...fsx.readdirSync(pathx.join(root, 'utils')).map((f) => pathx.join(root, 'utils', f)),
+    ].filter((f) => f.endsWith('.js'));
+    const missing = [];
+    for (const f of files) {
+        const s = fsx.readFileSync(f, 'utf8');
+        const re = /const\s*\{([^}]+)\}\s*=\s*require\(['"](?:\.\.\/utils\/|\.\/)titleMatch['"]\)/g;
+        let m;
+        while ((m = re.exec(s)) !== null) {
+            for (const part of m[1].split(',')) {
+                const name = part.split(':')[0].trim();
+                if (name && !(name in exported)) missing.push(`${pathx.basename(f)}: ${name}`);
+            }
+        }
+    }
+    assert.deepEqual(missing, []);
+});
+
+test('findBestMatch picks the matching candidate and returns {best}', () => {
+    const { findBestMatch } = require('../utils/titleMatch');
+    const cands = [
+        { title: 'Leo', year: 1974, raw: 'old' },
+        { title: 'Leo', year: 2023, raw: 'new' },
+        { title: 'Leon', year: 2023, raw: 'other' },
+    ];
+    assert.equal(findBestMatch({ title: 'Leo', year: 2023 }, cands).best.raw, 'new');
+    assert.equal(findBestMatch({ title: 'Nothing Here' }, cands).best, null);
+});

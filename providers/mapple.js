@@ -34,6 +34,13 @@ const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
 
 // Session (cookies + requestToken) is reusable across titles. Re-bootstrapping
 // per request wasted ~500ms each time for no benefit.
+// mapple.fun renamed two endpoints by 2026-11-15 (read from its
+// /_next/static chunks): /api/request-token -> /api/ui/session and
+// /api/playback-init -> /api/media-session. The old init path answered 401
+// "Invalid request token", so mapple returned 0 on every title (14/14 bench).
+const REQUEST_TOKEN_PATH = process.env.MAPPLE_REQUEST_TOKEN_PATH || '/api/ui/session';
+const PLAYBACK_INIT_PATH = process.env.MAPPLE_PLAYBACK_INIT_PATH || '/api/media-session';
+
 const SESSION_TTL_MS = Number(process.env.MAPPLE_SESSION_TTL_MS) || 10 * 60 * 1000;
 
 // Fronts ordered by how often they actually carried a title in the sweep, so a
@@ -114,7 +121,7 @@ async function json(res) {
 async function bootstrap(mediaType, mediaId) {
     const jar = new Map();
     await go(jar, `${BASE}/watch/${mediaType}/${mediaId}`);
-    const rt = await json(await go(jar, `${BASE}/api/request-token`, {
+    const rt = await json(await go(jar, `${BASE}${REQUEST_TOKEN_PATH}`, {
         method: 'POST', headers: { accept: 'application/json' },
     }));
     if (!rt?.token) throw new Error('no requestToken');
@@ -171,7 +178,7 @@ async function getMappleStreams(tmdbId, mediaType = 'movie', seasonNum = null, e
             base.episode = Number(episodeNum);
         }
 
-        let init = await json(await go(jar, `${BASE}/api/playback-init`, {
+        let init = await json(await go(jar, `${BASE}${PLAYBACK_INIT_PATH}`, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify(base),
@@ -180,7 +187,7 @@ async function getMappleStreams(tmdbId, mediaType = 'movie', seasonNum = null, e
         if (init?.requiresPow) {
             const nonce = solvePow(init.pow.challenge, init.pow.difficulty);
             if (!nonce) { console.warn(`[mapple] PoW unsolved for ${tmdbId}`); return []; }
-            init = await json(await go(jar, `${BASE}/api/playback-init`, {
+            init = await json(await go(jar, `${BASE}${PLAYBACK_INIT_PATH}`, {
                 method: 'POST',
                 headers: { 'content-type': 'application/json' },
                 body: JSON.stringify({
@@ -271,4 +278,4 @@ async function getMappleStreams(tmdbId, mediaType = 'movie', seasonNum = null, e
     }
 }
 
-module.exports = { getMappleStreams, solvePow, SOURCES, BASE, streamHeaders };
+module.exports = { REQUEST_TOKEN_PATH, PLAYBACK_INIT_PATH, getMappleStreams, solvePow, SOURCES, BASE, streamHeaders };

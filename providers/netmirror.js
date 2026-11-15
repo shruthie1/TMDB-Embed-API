@@ -52,12 +52,41 @@ const { Agent } = require('undici');
 const { dohLookup } = require('../utils/dohResolver');
 const { probeAudioTracks } = require('../lib/media/mp4AudioProbe');
 
-const dohAgent = new Agent({ connect: { lookup: dohLookup } });
+// Long keep-alive: on the prod VM (Hostinger AS47583) a middlebox resets most
+// TLS handshakes whose SNI names a mirror. Measured 2026-11-15 from the VM:
+// 9 of 12 `curl https://net27.cc/` attempts got "Connection reset by peer",
+// while SNI cloudflare.com to the same IP always connected. A handshake that
+// gets through is fine afterwards, so keep it open and reuse it.
+const dohAgent = new Agent({
+    connect: { lookup: dohLookup },
+    keepAliveTimeout: 60 * 1000,
+    keepAliveMaxTimeout: 10 * 60 * 1000,
+});
+
+// Connection-level failures that a fresh attempt can get past. Each fails in
+// ~60ms, so a few retries cost little. A bad certificate is never accepted:
+// the retry opens a new connection and verifies again.
+const RETRYABLE_CONN = new Set([
+    'ECONNRESET', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT',
+    'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+]);
+const CONN_RETRIES = Number(process.env.NETMIRROR_CONN_RETRIES) || 5;
 
 // Every fetch in this file goes through here so a new call site cannot quietly
 // skip the resolver and start failing again.
-function nmFetch(url, options = {}) {
-    return fetch(url, { dispatcher: dohAgent, ...options });
+async function nmFetch(url, options = {}, fetchImpl = fetch) {
+    let lastErr;
+    for (let attempt = 0; attempt < CONN_RETRIES; attempt++) {
+        if (options.signal && options.signal.aborted) break;
+        try {
+            return await fetchImpl(url, { dispatcher: dohAgent, ...options });
+        } catch (err) {
+            lastErr = err;
+            const code = err && err.cause && err.cause.code;
+            if (!RETRYABLE_CONN.has(code)) throw err;
+        }
+    }
+    throw lastErr;
 }
 
 const streamCache = new Map();
@@ -102,7 +131,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // Ordered; the first that answers wins and is remembered for the process.
 const API_MIRRORS = (process.env.NETMIRROR_API_BASE
     ? [process.env.NETMIRROR_API_BASE]
-    : ['https://net27.cc', 'https://netfree.cc', 'https://iosmirror.cc'])
+    : ['https://net27.cc', 'https://netfree.cc', 'https://iosmirror.cc', 'https://net79.cc'])
     .map((u) => u.replace(/\/$/, ''));
 
 let liveMirror = null;
@@ -817,4 +846,4 @@ async function getNetmirrorStreams(tmdbId, mediaType = 'movie', seasonNum = null
 // while the VIDEO rungs point at one shared decoy id. Measured 2026-09-22 on
 // 155 (The Dark Knight) and 693134 (Dune: Part Two) - both served video from
 // files/220884.
-module.exports = { getNetmirrorStreams, masterMatchesTitle };
+module.exports = { getNetmirrorStreams, masterMatchesTitle, nmFetch };

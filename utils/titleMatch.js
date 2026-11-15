@@ -311,7 +311,33 @@ function findTitleMatch(rows, title, { getTitle, year = null, getYear = null } =
     return null;
 }
 
+// Adapter for the older call shape still used by onetouchtv.js,
+// tmdbTitleToImdb.js and hdghartv.js: (query, candidates) -> { best }.
+// Candidates are { title, year?, raw }. The shared module dropped this name,
+// and those callers then threw "findBestMatch is not a function" on every
+// title (prod 2026-11-15, OneTouchTV 0 streams on all 14 bench titles).
+function findBestMatch(query, candidates) {
+    const q = query || {};
+    const best = findTitleMatch(candidates, q.title, {
+        getTitle: (c) => c.title || '',
+        year: q.year || null,
+        getYear: (c) => c.year || null,
+    });
+    return { best: best || null };
+}
+
+// hdghartv: try each spelling through `search` until one matches.
+async function findBestMatchWithRetry(query, variants, search) {
+    for (const v of (variants && variants.length ? variants : [query.title])) {
+        const rows = await search(v);
+        const { best } = findBestMatch(query, rows);
+        if (best) return { best };
+    }
+    return { best: null };
+}
+
 module.exports = {
+    findBestMatch, findBestMatchWithRetry,
     SUFFIX_NOISE,
     deaccent, normalizeTitle, looseTitle, withoutArticle, stripLanguageTag,
     partNumber, conflictingParts, samePart, splitPart,

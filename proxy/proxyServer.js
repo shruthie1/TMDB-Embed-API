@@ -36,7 +36,29 @@ setInterval(() => {
 
 const CACHE_MAX_SIZE = 2000;
 const CACHE_EXPIRY_MS = 2 * 60 * 60 * 1000; // 2 hours
+// A count cap alone does not bound memory: 2000 HLS segments of 1-4 MB is
+// 2-8 GB, while PM2 restarts this process at 500 MB (--max-memory-restart).
+// Cap the bytes too, evicting oldest first.
+const CACHE_MAX_BYTES = Number(process.env.PROXY_SEGMENT_CACHE_MAX_BYTES) || 64 * 1024 * 1024;
 const segmentCache = new Map();
+let segmentCacheBytes = 0;
+function dropSegment(url) {
+    const e = segmentCache.get(url);
+    if (!e) return;
+    segmentCacheBytes -= e.data ? e.data.byteLength : 0;
+    segmentCache.delete(url);
+}
+function cacheSegment(url, data, headers) {
+    dropSegment(url);
+    if (!data || data.byteLength > CACHE_MAX_BYTES) return;
+    segmentCache.set(url, { data, headers, timestamp: Date.now() });
+    segmentCacheBytes += data.byteLength;
+    while (segmentCacheBytes > CACHE_MAX_BYTES || segmentCache.size > CACHE_MAX_SIZE) {
+        dropSegment(segmentCache.keys().next().value);
+    }
+}
+// Small entries, but one per distinct upstream url, forever, before this cap.
+const PROGRESSIVE_MAP_MAX = 5000;
 // Track first open-ended (bytes=0-) range per target to clamp only once per TTL window
 const openRangeClampMap = new Map();
 const OPEN_RANGE_CLAMP_TTL_MS = 5 * 60 * 1000; // 5 minutes
@@ -53,12 +75,12 @@ function isCacheDisabled() {
 function cleanupCache() {
     const now = Date.now();
     for (const [url, entry] of segmentCache.entries()) {
-        if (now - entry.timestamp > CACHE_EXPIRY_MS) segmentCache.delete(url);
+        if (now - entry.timestamp > CACHE_EXPIRY_MS) dropSegment(url);
     }
     if (segmentCache.size > CACHE_MAX_SIZE) {
         const entries = Array.from(segmentCache.entries()).sort((a, b) => a[1].timestamp - b[1].timestamp);
         const toRemove = entries.slice(0, segmentCache.size - CACHE_MAX_SIZE);
-        toRemove.forEach(([u]) => segmentCache.delete(u));
+        toRemove.forEach(([u]) => dropSegment(u));
     }
     return segmentCache.size;
 }
@@ -257,7 +279,7 @@ function getCachedSegment(url) {
     if (isCacheDisabled()) return null;
     const e = segmentCache.get(url);
     if (!e) return null;
-    if (Date.now() - e.timestamp > CACHE_EXPIRY_MS) { segmentCache.delete(url); return null; }
+    if (Date.now() - e.timestamp > CACHE_EXPIRY_MS) { dropSegment(url); return null; }
     return e;
 }
 
@@ -271,7 +293,7 @@ async function prefetchSegment(url, headers) {
         const data = new Uint8Array(await readBodyWithTimeout(resp));
         const responseHeaders = {};
         resp.headers.forEach((v, k) => responseHeaders[k] = v);
-        segmentCache.set(url, { data, headers: responseHeaders, timestamp: Date.now() });
+        cacheSegment(url, data, responseHeaders);
     } catch (_e) { /* ignore */ }
 }
 
@@ -351,6 +373,18 @@ function rewriteM3u8(content, targetUrl, baseProxyUrl, headers, ptsOffset = 0) {
                     const proxyUrl = `${baseProxyUrl}/ts-proxy?url=${encodeURIComponent(keyUrl)}&headers=${encodeURIComponent(JSON.stringify(headers))}`;
                     out.push(line.replace(keyUrl, proxyUrl));
                     if (!isCacheDisabled()) prefetchSegment(keyUrl, headers);
+                } else out.push(line);
+            } else if (line.startsWith('#EXT-X-MAP:')) {
+                // fMP4 init segment. Left raw, the browser fetched it without
+                // the CDN's required Referer (403) and the stream never
+                // started: mapple on 1376856, prod 2026-11-15.
+                const uriMatch = line.match(/URI="([^"]+)"/);
+                if (uriMatch) {
+                    try {
+                        const initUrl = new URL(uriMatch[1], targetUrl).href;
+                        const proxyUrl = `${baseProxyUrl}/ts-proxy?url=${encodeURIComponent(initUrl)}&headers=${encodeURIComponent(JSON.stringify(headers))}`;
+                        out.push(line.replace(uriMatch[1], proxyUrl));
+                    } catch { out.push(line); }
                 } else out.push(line);
             } else if (line.startsWith('#EXT-X-MEDIA:') || line.startsWith('#EXT-X-I-FRAME-STREAM-INF:')) {
                 const uriMatch = line.match(/URI="([^"]+)"/);
@@ -622,7 +656,11 @@ function createProxyRoutes(app) {
                 effectiveRange = newRange;
                 prog.lastEnd = nextEnd;
                 prog.grow = false; // set true again only once this response is fully read
+                progressiveOpenMap.delete(targetUrl);
                 progressiveOpenMap.set(targetUrl, prog);
+                while (progressiveOpenMap.size > PROGRESSIVE_MAP_MAX) {
+                    progressiveOpenMap.delete(progressiveOpenMap.keys().next().value);
+                }
                 // Re-arm growth only on a response the client read to the end.
                 res.on('close', () => {
                     const cur = progressiveOpenMap.get(targetUrl);
@@ -943,4 +981,8 @@ function processStreamsForProxy(streams, serverUrl) {
     });
 }
 
-module.exports = { createProxyRoutes, processStreamsForProxy, rewriteM3u8 };
+module.exports = {
+    createProxyRoutes, processStreamsForProxy, rewriteM3u8,
+    // Exposed for tests.
+    _segmentCache: { cacheSegment, getCachedSegment, stats: () => ({ entries: segmentCache.size, bytes: segmentCacheBytes, maxBytes: CACHE_MAX_BYTES }) },
+};

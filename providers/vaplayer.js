@@ -4,45 +4,112 @@ const STREAM_API = 'https://streamdata.vaplayer.ru/api.php';
 const PLAYER_ORIGIN = 'https://nextgencloudfabric.com';
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
-async function fetchStreamUrls(imdb, type, season, episode) {
-    const params = new URLSearchParams({ imdb, type });
-    if (type === 'tv' && season != null && episode != null) {
-        params.set('season', String(season));
-        params.set('episode', String(episode));
+// VaPlayer changed its API by 2026-11-15: api.php now returns title and
+// file_name only, and stream_urls appear only with a single-use, IP-bound
+// api_token. Measured: tt31969655 and tt0816692 both came back without
+// stream_urls, so the provider returned 0 on every title (14/14 bench).
+// The chain, read from nextgencloudfabric.com/embed/assets/js/player.min.js
+// and vadec.js:
+//   1. GET vaplayer.ru/embed/va_src.php?path=/embed/<type>/<imdb>[/s/e] -> {src}
+//   2. GET src (the player page)            -> CONFIG.apiToken
+//   3. GET api.php?...&stream_urls&api_token -> stream_urls, base64 and
+//      encrypted, plus va.wasm_url; the WASM exports alloc() and decrypt(),
+//      and the plaintext (one url per line) starts at ptr+12.
+//   4. GET <stream origin>/generate.php?api_token -> host token, appended as
+//      ?token= (or replacing __TOKEN__). Without it the master answers 401.
+const WRAPPER_ORIGIN = process.env.VAPLAYER_WRAPPER_ORIGIN || 'https://vaplayer.ru';
+const STEP_TIMEOUT_MS = Number(process.env.VAPLAYER_STEP_TIMEOUT_MS) || 8000;
+
+function apiHeaders(extra = {}) {
+    return { 'User-Agent': USER_AGENT, Referer: `${PLAYER_ORIGIN}/`, Origin: PLAYER_ORIGIN, ...extra };
+}
+
+async function getText(url, headers) {
+    const r = await fetch(url, { headers, signal: AbortSignal.timeout(STEP_TIMEOUT_MS) });
+    if (!r.ok) throw new Error(`HTTP ${r.status} for ${new URL(url).pathname}`);
+    return r.text();
+}
+
+function embedPath(imdb, type, season, episode) {
+    return type === 'tv' ? `/embed/tv/${imdb}/${season}/${episode}` : `/embed/movie/${imdb}`;
+}
+
+async function getApiToken(imdb, type, season, episode) {
+    const path = embedPath(imdb, type, season, episode);
+    const vs = JSON.parse(await getText(
+        `${WRAPPER_ORIGIN}/embed/va_src.php?path=${encodeURIComponent(path)}`,
+        { 'User-Agent': USER_AGENT, Referer: `${WRAPPER_ORIGIN}${path}` }));
+    if (!vs || !vs.src) return null;
+    const page = await getText(vs.src, { 'User-Agent': USER_AGENT, Referer: `${WRAPPER_ORIGIN}/` });
+    const m = page.match(/"apiToken":"([^"]+)"/);
+    return m ? m[1] : null;
+}
+
+const wasmCache = new Map(); // va.w -> Promise<WebAssembly.Module>
+async function decryptStreamUrls(enc, va) {
+    if (!va || !va.wasm_url) return [];
+    const key = String(va.w || va.wasm_url);
+    if (!wasmCache.has(key)) {
+        wasmCache.set(key, fetch(va.wasm_url, { headers: apiHeaders(), signal: AbortSignal.timeout(STEP_TIMEOUT_MS) })
+            .then((r) => r.arrayBuffer()).then((b) => WebAssembly.compile(b))
+            .catch((e) => { wasmCache.delete(key); throw e; }));
+        while (wasmCache.size > 20) wasmCache.delete(wasmCache.keys().next().value);
     }
+    const inst = await WebAssembly.instantiate(await wasmCache.get(key), {});
+    const ex = inst.exports;
+    const bytes = Buffer.from(enc, 'base64');
+    const ptr = ex.alloc(bytes.length);
+    new Uint8Array(ex.memory.buffer, ptr, bytes.length).set(bytes);
+    const n = ex.decrypt(ptr, bytes.length);
+    return new TextDecoder().decode(new Uint8Array(ex.memory.buffer, ptr + 12, n)).split('\n').filter(Boolean);
+}
 
-    const url = `${STREAM_API}?${params.toString()}`;
-    const referer = type === 'tv'
-        ? `${PLAYER_ORIGIN}/embed/tv/${imdb}/${season}/${episode}`
-        : `${PLAYER_ORIGIN}/embed/movie/${imdb}`;
-
+async function hostToken(origin, apiToken) {
     try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 12000);
-
-        const resp = await fetch(url, {
-            signal: controller.signal,
-            headers: {
-                'User-Agent': USER_AGENT,
-                'Referer': referer,
-                'Origin': PLAYER_ORIGIN
-            }
-        });
-        clearTimeout(timer);
-
-        if (!resp.ok) {
-            throw new Error(`VaPlayer API HTTP ${resp.status}`);
+        const t = (await getText(`${origin}/generate.php?api_token=${encodeURIComponent(apiToken)}`, apiHeaders())).trim();
+        if (t.startsWith('{') || t.startsWith('[')) {
+            const j = JSON.parse(t);
+            return typeof j === 'string' ? j : (j.token || j.data || j.string || j.result || '');
         }
+        return t;
+    } catch {
+        return '';
+    }
+}
 
-        const json = await resp.json();
+function applyToken(url, token) {
+    if (!token) return url;
+    if (url.includes('__TOKEN__')) return url.split('__TOKEN__').join(token);
+    return `${url}${url.includes('?') ? '&' : '?'}token=${token}`;
+}
+
+async function fetchStreamUrls(imdb, type, season, episode) {
+    try {
+        const apiToken = await getApiToken(imdb, type, season, episode);
+        if (!apiToken) throw new Error('no apiToken on the player page');
+
+        const params = new URLSearchParams({ imdb, type });
+        if (type === 'tv' && season != null && episode != null) {
+            params.set('season', String(season));
+            params.set('episode', String(episode));
+        }
+        const url = `${STREAM_API}?${params.toString()}&stream_urls&api_token=${encodeURIComponent(apiToken)}`;
+        const json = JSON.parse(await getText(url, apiHeaders()));
         if (json.status_code !== '200' && json.status_code !== 200) {
             throw new Error(`VaPlayer API error: ${json.error || `status_code=${json.status_code}`}`);
         }
+        const data = json.data || {};
+        let urls = data.stream_urls || [];
+        if (typeof urls === 'string') urls = await decryptStreamUrls(urls, json.vp || json.va);
 
-        return {
-            urls: (json.data && json.data.stream_urls) || [],
-            fileName: (json.data && json.data.file_name) || ''
-        };
+        // One host token per stream origin, shared by every url on it.
+        const tokens = new Map();
+        for (const u of urls) {
+            const o = new URL(u).origin;
+            if (!tokens.has(o)) tokens.set(o, hostToken(o, apiToken));
+        }
+        const signed = await Promise.all(urls.map(async (u) => applyToken(u, await tokens.get(new URL(u).origin))));
+        return { urls: signed, fileName: data.file_name || '' };
     } catch (err) {
         console.warn(`[VaPlayer] fetch failed for ${imdb}: ${err.message}`);
         return { urls: [], fileName: '' };
@@ -210,4 +277,4 @@ async function getVaplayerStreams(tmdbId, mediaType = 'movie', seasonNum = null,
     }
 }
 
-module.exports = { getVaplayerStreams };
+module.exports = { applyToken, decryptStreamUrls, getVaplayerStreams };

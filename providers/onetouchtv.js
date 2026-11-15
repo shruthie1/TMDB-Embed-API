@@ -12,6 +12,10 @@ const FETCH_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Referer': 'https://onetouchtv.xyz/'
 };
+// Headers the proxy sends to the stream CDN. No Referer: the hitv.ltd CDN
+// returns 403 for any foreign Referer and 200 without one (measured
+// 2026-11-15), so a Referer here broke every OneTouchTV row.
+const STREAM_HEADERS = { 'User-Agent': 'Mozilla/5.0' };
 const FETCH_TIMEOUT_MS = 15000;
 const FETCH_RETRIES = 2;
 const FETCH_RETRY_DELAY_MS = 400;
@@ -336,10 +340,7 @@ async function getOnetouchtvStreams(tmdbId, mediaType = 'movie', seasonNum = nul
                 languages: [],
                 audio: [],
                 size: null,
-                headers: {
-                    'User-Agent': 'Mozilla/5.0',
-                    'Referer': `${MAIN_URL}/`
-                },
+                headers: { ...STREAM_HEADERS },
                 ...(subtitles.length ? { subtitles } : {})
             });
         }
@@ -358,4 +359,4 @@ async function getOnetouchtvStreams(tmdbId, mediaType = 'movie', seasonNum = nul
     }
 }
 
-module.exports = { getOnetouchtvStreams };
+module.exports = { getOnetouchtvStreams, STREAM_HEADERS };

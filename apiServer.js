@@ -284,13 +284,38 @@ app.get('/api/providers/:name', (req,res) => {
   res.json({ success:true, provider:{ name: p.name, enabled: p.enabled } });
 });
 
-// Aggregate streams across all enabled providers
-// A single slow provider must not hold the whole aggregate response hostage.
-// Promise.all resolves only when the LAST provider settles, so one host that
-// is unreachable (and retries internally) blocks 12 good results indefinitely.
-// Each provider now races a timer: on expiry it yields [] and the aggregate
-// returns partial results, with providerTimings[name] = null marking the miss.
-const PROVIDER_TIMEOUT_MS = Number(process.env.PROVIDER_TIMEOUT_MS) || 45000;
+// Aggregate streams across all enabled providers.
+//
+// Deadline model (one of each):
+// - Per provider: PROVIDER_DEADLINE_MS in providers/registry.js (20s). An
+//   overrun yields [] marked `timedOut`, recorded as a 'timeout' outcome.
+//   This replaces a second 45s race here that could never fire before the
+//   registry's 20s one.
+// - Per request: the response waits for PRIMARY_PROVIDERS (the ones the web
+//   player actually plays: castletv, netmirror) and gives the rest
+//   SECONDARY_GRACE_MS more. A secondary still running then keeps going in the
+//   background and fills providerHitCache, so the next request for the title
+//   gets it at once. If nothing at all came back, the response waits for them.
+// Off by default: with PRIMARY_PROVIDERS unset every provider counts as
+// primary and the response waits for all of them (each still capped by the
+// 20s deadline). Set PRIMARY_PROVIDERS=castletv,netmirror to turn the early
+// answer on.
+const PRIMARY_LIST = (process.env.PRIMARY_PROVIDERS || '')
+  .split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
+const isPrimary = (name) => PRIMARY_LIST.length === 0 || PRIMARY_LIST.includes(name);
+const SECONDARY_GRACE_MS = Number(process.env.SECONDARY_GRACE_MS) || 1500;
+
+// Per-provider result caches, keyed provider|title. Separate from the breaker:
+// the breaker is about a provider's health, these are about one title.
+// - hits: a provider's raw streams for 10 min (signed URLs outlive that).
+// - empties: a provider that had nothing for a title is not asked again for
+//   PROVIDER_EMPTY_TTL_MS. Kept short because an empty can be a transient
+//   upstream failure (NetMirror reports resets as empty). ?refresh=1 skips both.
+const { createTtlCache } = require('./lib/runtime/ttlCache');
+const providerHitCache = createTtlCache({
+  ttlMs: Number(process.env.PROVIDER_HIT_TTL_MS) || 10 * 60 * 1000, maxEntries: 2000 });
+const providerEmptyCache = createTtlCache({
+  ttlMs: Number(process.env.PROVIDER_EMPTY_TTL_MS) || 3 * 60 * 1000, maxEntries: 5000 });
 
 // How long a browser may reuse an /api/streams response. Short enough that a
 // title's streams stay fresh and signed URLs stay valid, long enough to absorb
@@ -308,7 +333,9 @@ const STREAMS_CACHE_SECONDS = Number(process.env.STREAMS_CACHE_SECONDS) || 300;
 // holds. Keyed per title+episode; the payload carries signed per-session URLs,
 // so this Map must stay process-local and never be shared between users.
 const STREAMS_MEMO_MS = Number(process.env.STREAMS_MEMO_MS) || 10 * 60 * 1000;
-const streamsMemo = new Map();
+// Capped: an unbounded Map grew with every distinct title+episode requested.
+const streamsMemo = createTtlCache({
+  ttlMs: STREAMS_MEMO_MS, maxEntries: Number(process.env.STREAMS_MEMO_MAX) || 500 });
 
 // `withCaps` is part of the key: the two variants return different payloads for
 // the same title, so sharing one entry would serve a capabilities response to a
@@ -317,20 +344,16 @@ function memoKey(type, tmdbId, season, episode, withCaps) {
   return `${type}:${tmdbId}:${season ?? ''}:${episode ?? ''}:${withCaps ? 'caps' : 'plain'}`;
 }
 function memoGet(key) {
-  const e = streamsMemo.get(key);
-  if (!e) return null;
-  if (Date.now() > e.expiresAt) { streamsMemo.delete(key); return null; }
-  return e.payload;
+  return streamsMemo.get(key) || null;
 }
 function memoSet(key, payload) {
   // Never cache an empty result: a transient upstream failure would otherwise
   // be pinned for the full TTL, turning one bad moment into ten dead minutes.
   if (!payload || !Array.isArray(payload.streams) || payload.streams.length === 0) return;
-  streamsMemo.set(key, { payload, expiresAt: Date.now() + STREAMS_MEMO_MS });
+  streamsMemo.set(key, payload);
 }
 setInterval(() => {
-  const now = Date.now();
-  for (const [k, e] of streamsMemo) if (e.expiresAt < now) streamsMemo.delete(k);
+  streamsMemo.prune(); providerHitCache.prune(); providerEmptyCache.prune();
 }, 5 * 60 * 1000).unref();
 
 // Deterministic ordering for the aggregate response. The user's standing
@@ -383,16 +406,6 @@ function sortStreamsCanonically(streams) {
 
 // Caps how long one provider may hold up the whole fan-out. Lives here, with
 // the streams routes that use it - it is not demux-specific.
-function raceProviderTimeout(promise, ms, name) {
-  let timer;
-  const timeout = new Promise(resolve => {
-    timer = setTimeout(() => {
-      console.warn(`[api] provider ${name} exceeded ${ms}ms - returning partial results`);
-      resolve({ __timedOut: true });
-    }, ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-}
 
 // CastleTV demux (one muxed TS -> an HLS master with per-language audio)
 // lives in lib/media/republish.js. Routes are registered rather than bound
@@ -463,11 +476,27 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
     // about the title, not about the provider - see recordProviderOutcome.
     const titleIsResolvable = Boolean(imdbId);
 
-    const runProvider = async (name) => {
+    // Providers skipped by an open breaker on this request. If nothing else
+    // returns a stream they are retried below: a breaker trades a provider's
+    // latency for the others' results, and with no results there is nothing
+    // to trade for. Prod 2026-11-15 19:01: one flaky NetMirror probe re-tripped
+    // its breaker, so The Paradise (1376856) returned 0 streams instantly for
+    // 10 minutes while /api/streams/netmirror/movie/1376856 returned 1.
+    const skippedByBreaker = [];
+    const refresh = req.query.refresh === '1';
+    const titleKey = `${type}:${tmdbId}:${season ?? ''}:${episode ?? ''}`;
+    const runProvider = async (name, { bypassBreaker = false } = {}) => {
       const prov = getProvider(name);
       if (!prov || !prov.enabled) return [];
-      if (breakerOpen(name)) {
+      const ck = `${name}|${titleKey}`;
+      if (!refresh) {
+        const hit = providerHitCache.get(ck);
+        if (hit) { providerTimings[name] = 0; return hit; }
+        if (providerEmptyCache.has(ck)) { providerTimings[name] = 0; return []; }
+      }
+      if (!bypassBreaker && breakerOpen(name)) {
         providerTimings[name] = null;
+        skippedByBreaker.push(name);
         return [];
       }
       metrics.providerCalls[name] = (metrics.providerCalls[name]||0)+1;
@@ -477,17 +506,18 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
       const t0 = Date.now();
       try {
         console.log(`[api] invoking provider ${name} for tmdbId=${tmdbId}`);
-        const r = await raceProviderTimeout(
-          prov.fetch({ tmdbId, type, season, episode, imdbId, filters:{ } }),
-          PROVIDER_TIMEOUT_MS, name);
-        if (r && r.__timedOut) {
+        const r = await prov.fetch({ tmdbId, type, season, episode, imdbId, filters:{ } });
+        if (r && r.timedOut) {
           providerTimings[name] = null;
           recordProviderOutcome(name, 'timeout', Date.now()-t0, 0);
           return [];
         }
         providerTimings[name] = Date.now()-t0;
         const n = Array.isArray(r) ? r.length : 0;
-        recordProviderOutcome(name, n > 0 ? 'hit' : 'empty', providerTimings[name], n, titleIsResolvable);
+        recordProviderOutcome(name, n > 0 ? 'hit' : 'empty', providerTimings[name], n, titleIsResolvable,
+          titleKey);
+        if (n > 0) providerHitCache.set(ck, r);
+        else if (titleIsResolvable) providerEmptyCache.set(ck, true);
         console.log(`[api] provider ${name} returned ${n} streams`);
         return Array.isArray(r) ? r : [];
       } catch (e) {
@@ -529,7 +559,36 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
     const remaining = selectedProviders.filter((name) =>
       name !== GATE_PROVIDER && !(gateHolds && GATED_BY_DEMUX.includes(name)));
 
-    const results = await Promise.all(remaining.map(runProvider));
+    const tasks = remaining.map((name) => ({ name, p: runProvider(name) }));
+    await Promise.all(tasks.filter((x) => isPrimary(x.name)).map((x) => x.p));
+    const LATE = Symbol('late');
+    let grace;
+    const graceOver = new Promise((r) => { grace = setTimeout(() => r(LATE), SECONDARY_GRACE_MS); });
+    let results = await Promise.all(tasks.map((x) =>
+      isPrimary(x.name) ? x.p : Promise.race([x.p, graceOver])));
+    clearTimeout(grace);
+    const late = tasks.filter((x, i) => results[i] === LATE);
+    results = results.map((r) => (r === LATE ? [] : r));
+    if (late.length && castleStreams.length === 0 && results.every((r) => r.length === 0)) {
+      // Nothing yet: an answer with streams is worth waiting for.
+      const settled = await Promise.all(late.map((x) => x.p));
+      late.forEach((x, k) => { results[tasks.indexOf(x)] = settled[k]; });
+      late.length = 0;
+    }
+    for (const x of late) {
+      providerTimings[x.name] = null;
+      console.log(`[api] ${x.name} still running after grace for ${tmdbId}; its result will be cached for the next request`);
+    }
+    if (castleStreams.length === 0 && results.every((r) => r.length === 0) && skippedByBreaker.length) {
+      const retry = skippedByBreaker.splice(0);
+      console.log(`[api] no streams for ${tmdbId}; retrying breaker-skipped providers: ${retry.join(', ')}`);
+      if (retry.includes(GATE_PROVIDER)) {
+        castleStreams = await runProvider(GATE_PROVIDER, { bypassBreaker: true });
+        if (!demuxed) demuxed = await buildCastleDemuxEntry(castleStreams, serverUrlEarly);
+      }
+      const others = retry.filter((name) => name !== GATE_PROVIDER);
+      results.push(...await Promise.all(others.map((name) => runProvider(name, { bypassBreaker: true }))));
+    }
     let streams = [...castleStreams, ...results.flat()];
     streams = applyFilters(streams, 'aggregate', config.minQualities, config.excludeCodecs);
     metrics.streamsReturned += streams.length;
@@ -668,7 +727,9 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
 
     res.set('Cache-Control', `private, max-age=${STREAMS_CACHE_SECONDS}`);
     const payload = { success:true, tmdbId, imdbId, count: streams.length, providerTimings, streams };
-    memoSet(mk, payload);
+    // A response missing a late provider is not memoized, so the next request
+    // rebuilds it and picks that provider up from providerHitCache.
+    if (!late.length) memoSet(mk, payload);
     res.json(payload);
   } catch (e) {
     metrics.lastError = e.message;

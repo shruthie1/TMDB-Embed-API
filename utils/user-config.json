@@ -28,5 +28,6 @@
   "enableOnetouchtvProvider": true,
   "enableStreamflixProvider": false,
   "enableVaplayerProvider": true,
-  "enableMappleProvider": true
+  "enableMappleProvider": true,
+  "enableShowsstProvider": false
 }

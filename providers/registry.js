@@ -64,7 +64,9 @@ async function getEffectiveCookies() {
 function getProviderFiles() {
   const providersDir = path.join(__dirname);
   return fs.readdirSync(providersDir)
-    .filter(file => file.endsWith('.js') && file !== 'registry.js')
+    // Only files with an entry function. An unmapped file (providers/__nm_s.js,
+    // an old netmirror copy) otherwise ran on every request and returned [].
+    .filter(file => file.endsWith('.js') && file !== 'registry.js' && providerFunctionMap[file])
     .map(file => ({
       name: path.parse(file).name.toLowerCase(),
       file: file,
@@ -163,6 +165,9 @@ function createFetchFunction(providerInfo) {
       const durationMs = Date.now() - t0;
       console.log(`[registry] ${providerInfo.name} fetch duration ${durationMs}ms`);
 
+      // The aggregate route records this as a 'timeout', not an 'empty'.
+      if (result === TIMED_OUT) { const out = []; out.timedOut = true; return out; }
+
       if (!Array.isArray(result)) return [];
 
       // Add provider name if not present, then normalise to the canonical
@@ -194,6 +199,7 @@ function createFetchFunction(providerInfo) {
 // would otherwise have - so the cap is set above the worst measured cold run
 // with headroom, and exists only to catch an origin that is genuinely hung.
 const PROVIDER_DEADLINE_MS = Number(process.env.PROVIDER_DEADLINE_MS) || 20000;
+const TIMED_OUT = Symbol('timedOut');
 
 // Resolves to [] if the provider overruns. The underlying promise is NOT
 // cancellable, so it is left to settle on its own; attaching a catch here
@@ -203,7 +209,7 @@ function withDeadline(promise, ms, name) {
   const guard = new Promise((resolve) => {
     timer = setTimeout(() => {
       console.warn(`[registry] ${name} exceeded ${ms}ms deadline - dropping its results for this request`);
-      resolve([]);
+      resolve(TIMED_OUT);
     }, ms);
   });
   promise.catch(() => {});
@@ -236,4 +242,4 @@ function getProvider(name) {
 
 function getCookieStats() { return lastCookieStats; }
 
-module.exports = { listProviders, getProvider, getCookieStats };
+module.exports = { listProviders, getProvider, getCookieStats, PROVIDER_DEADLINE_MS };
