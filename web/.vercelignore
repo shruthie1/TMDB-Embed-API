@@ -4,3 +4,11 @@
 .vercel
 node_modules
 
+
+# Local dev secrets and overrides. Never upload: Next gives .env.local
+# precedence over dashboard env vars, so an uploaded copy silently overrode
+# API_ORIGIN in production and the UI proxied streams to localhost:8790
+# (Vercel: DNS_HOSTNAME_RESOLVED_PRIVATE -> 404 on every /api/streams call).
+.env.local
+.env*.local
+.env.local.bak.*

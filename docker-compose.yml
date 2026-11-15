@@ -3,20 +3,36 @@ services:
   tmdb-embed-api:
     build: .
     container_name: tmdb-embed-api
+    # Secrets (TMDB_API_KEY, FEBBOX_*) come from .env next to this file. The
+    # `environment` block below still wins for anything it sets, so .env's
+    # local API_PORT cannot move the container off 8787.
+    env_file:
+      - path: .env
+        required: false
     environment:
       # Provide at least one TMDB key (comma separated or override via UI later)
       - TMDB_API_KEY=${TMDB_API_KEY:-}
       # Alternative: supply JSON array
       # - TMDB_API_KEYS=["key1","key2"]
       - API_PORT=8787
+      # PORT outranks API_PORT AND the `port` in utils/user-config.json (which
+      # is 8790, and gets mirrored into API_PORT at load). Without it the
+      # container listened on 8790 while compose published 8787.
+      - PORT=8787
       - BIND_HOST=0.0.0.0
+      # The https origin viewers reach this API on. Stream, castle-demux and
+      # hybrid urls are built from it; an http url would be blocked as mixed
+      # content on the https web app.
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-}
       # FebBox cookies (comma separated) if you want Showbox immediately functional
       - FEBBOX_COOKIES=${FEBBOX_COOKIES:-}
     ports:
       - "8787:8787"
     volumes:
-      # Persist runtime overrides (created by the admin UI)
-      - user_config_data:/app/utils/user-config.json
+      # Persist runtime overrides (created by the admin UI). A BIND mount of
+      # the checked-out file: a named volume at a file path makes Docker
+      # create a directory there, and the config loader then cannot read it.
+      - ./utils/user-config.json:/app/utils/user-config.json
       # Allow restart trigger file (optional; stored in container FS)
       # - restart_marker:/app/restart.trigger
     restart: unless-stopped
@@ -26,6 +42,3 @@ services:
       timeout: 5s
       start_period: 20s
       retries: 3
-volumes:
-  user_config_data:
-  # restart_marker:

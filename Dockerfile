@@ -1,5 +1,5 @@
 # ---------- Build Stage ----------
-FROM node:20-alpine AS build
+FROM node:24-alpine AS build
 ARG VERSION=dev
 WORKDIR /app
 
@@ -11,6 +11,8 @@ RUN npm install --omit=dev
 
 # Copy only required source (avoid sending screenshots, node_modules already installed)
 COPY apiServer.js ./
+COPY lib ./lib
+COPY routes ./routes
 COPY providers ./providers
 COPY proxy ./proxy
 COPY public ./public
@@ -18,7 +20,7 @@ COPY utils ./utils
 COPY README.md ./
 
 # ---------- Runtime Stage ----------
-FROM node:20-alpine AS runtime
+FROM node:24-alpine AS runtime
 ARG VERSION=dev
 WORKDIR /app
 ENV NODE_ENV=production \
@@ -26,12 +28,20 @@ ENV NODE_ENV=production \
     BIND_HOST=0.0.0.0 \
     APP_VERSION=${VERSION}
 
+# ffmpeg/ffprobe: castle-demux splits CastleTV's muxed language tracks and
+# ptsRebase aligns paired audio to the video, both by spawning them. Without
+# the binaries every hybrid (video from one provider, Telugu audio from Castle)
+# is refused - which is exactly why it cannot run on Vercel.
+RUN apk add --no-cache ffmpeg
+
 # Create non-root user
 RUN addgroup -S app && adduser -S app -G app
 
 # Copy node_modules from build and necessary source
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/apiServer.js ./
+COPY --from=build /app/lib ./lib
+COPY --from=build /app/routes ./routes
 COPY --from=build /app/public ./public
 COPY --from=build /app/providers ./providers
 COPY --from=build /app/proxy ./proxy
