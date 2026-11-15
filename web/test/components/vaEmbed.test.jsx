@@ -132,13 +132,18 @@ describe('automatic use', () => {
   const embed = vaEmbedChoice(DEVARA);
   const error = { message: 'No playable source found.' };
 
-  it('only when there are no other sources, or all of them died', () => {
+  it('only when the resolve returned zero sources', () => {
     expect(shouldAutoEmbed({ embed, error, sources: [] })).toBe(true);
-    expect(shouldAutoEmbed({ embed, error, sources: SOURCES,
-                             dead: new Set(['CastleTV', 'OneTouchTV']) })).toBe(true);
   });
 
-  it('never while another source of ours is alive, or without an error', () => {
+  it('never while sources are in hand, even after one CastleTV row failed', () => {
+    // Devara: five CastleTV rows. One failure used to mark them all dead by
+    // provider name, and the embed replaced a title with four rows left.
+    const castle = [0, 1, 2, 3, 4].map((i) => ({
+      id: `CastleTV-${i}`, provider: 'CastleTV', masterUrl: `https://x/${i}.m3u8`,
+    }));
+    expect(shouldAutoEmbed({ embed, error, sources: castle, dead: new Set(['CastleTV']) }))
+      .toBe(false);
     expect(shouldAutoEmbed({ embed, error, sources: SOURCES, dead: new Set(['CastleTV']) }))
       .toBe(false);
     expect(shouldAutoEmbed({ embed, error: null, sources: [] })).toBe(false);

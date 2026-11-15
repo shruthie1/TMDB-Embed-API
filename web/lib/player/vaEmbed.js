@@ -35,12 +35,15 @@ export function vaEmbedChoice(title = {}) {
 }
 
 /**
- * Switch to the embed on our own only when nothing of ours can play: an error
- * is showing and every source we hold has died this session (vacuously true
- * when the resolve returned nothing). A "not responding" error while other
- * sources are still alive stays manual.
+ * Switch to the embed on our own ONLY when the resolve returned zero sources.
+ *
+ * It used to fire whenever every held source was "dead", and dead was keyed
+ * by provider name, so one CastleTV failure on Devara (five CastleTV rows)
+ * made all five dead and the embed replaced a title that still had four
+ * untouched rows. Measured live on chtrm2 2026-11-16: the embed came on while
+ * CastleTV was playing. With any source in hand the viewer chooses.
  */
-export function shouldAutoEmbed({ embed, error, sources = [], dead = new Set() }) {
+export function shouldAutoEmbed({ embed, error, sources = [] }) {
   if (!embed || !error) return false;
-  return (sources || []).every((s) => !s?.masterUrl || dead.has(s.provider));
+  return !(sources || []).some((s) => s?.masterUrl);
 }

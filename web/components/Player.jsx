@@ -13,6 +13,7 @@ import useSwitchGuard from '../lib/player/useSwitchGuard';
 import { videoChoices, videoIdOf, videoLabels } from '../lib/player/trackChoices';
 import EmbedStage from './player/EmbedStage';
 import { VA_EMBED_ID, vaEmbedChoice, shouldAutoEmbed } from '../lib/player/vaEmbed';
+import { markDead, nextAlive } from '../lib/player/deadSources';
 import { pairSources } from '../lib/backend';
 import {
   useResolve, useHls, useRecovery, useControlVisibility,
@@ -163,7 +164,9 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
    * Returns true when it took over, so the caller only re-resolves as a last
    * resort. Never picks the source that just died.
    */
-  // Providers whose url died THIS session. Skipped when recovering, because
+  // Sources whose url died THIS session, by source ID (lib/player/
+  // deadSources.js: a provider name covers several rows). Skipped when
+  // recovering, because
   // `provider !== currentSource` alone is not enough: after one switch the
   // original becomes eligible again, so two stale urls could hand the player
   // back and forth between them.
@@ -226,15 +229,14 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
 
   const recoverBySwitching = useCallback((reason = 'switch') => {
     if (resolve.currentSource) {
-      deadSources.current.add(resolve.currentSource);
+      markDead(deadSources.current,
+        { id: resolve.currentSourceId, provider: resolve.currentSource });
       forgetProvider(title.mediaType, title.tmdbId, resolve.currentSource, season, episode);
       // We are abandoning this source, so say why. Without this the knowledge
       // dies with the tab and the same bad source is chosen again next time.
       reportPlayback({ ...reportCtx.current, ...reportMetrics(), ok: false, reason });
     }
-    const alt = resolve.sources?.find(
-      s => s.masterUrl && !deadSources.current.has(s.provider),
-    );
+    const alt = nextAlive(resolve.sources, deadSources.current);
     if (!alt) return false;
     switchSourceRef.current?.(alt);
     return true;
@@ -1321,11 +1323,11 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     }
     pickSource(src);
   }, [stream, currentSourceId, pickSource]);
-  // Automatic only when nothing of ours can play: an error with every held
-  // source dead (or none at all). Once per title, so Close is not undone.
+  // Automatic only when the resolve returned NO sources at all. Once per
+  // title, so Close is not undone.
   useEffect(() => {
     if (embedOn || autoEmbedUsed.current) return;
-    if (!shouldAutoEmbed({ embed: vaEmbed, error, sources, dead: deadSources.current })) return;
+    if (!shouldAutoEmbed({ embed: vaEmbed, error, sources })) return;
     autoEmbedUsed.current = true;
     try { videoRef.current?.pause(); } catch { /* element gone */ }
     setEmbedOn(true);
