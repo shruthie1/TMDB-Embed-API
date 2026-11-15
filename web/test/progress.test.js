@@ -271,6 +271,14 @@ describe('getSeeds', () => {
     tick();
     saveProgress({ mediaType: 'movie', tmdbId: 2, positionSec: 6990,
                    durationSec: 7000, title: 'New' });
-    expect(getSeeds(1)).toEqual([{ mediaType: 'movie', tmdbId: 2, title: 'New' }]);
+    expect(getSeeds(1)).toEqual([{ mediaType: 'movie', tmdbId: 2, title: 'New',
+                                   originalLang: null }]);
+  });
+
+  it('carries the original language so home rows can follow it', () => {
+    saveProgress({ mediaType: 'movie', tmdbId: 3, positionSec: 6990,
+                   durationSec: 7000, title: 'Pushpa', originalLang: 'te' });
+    expect(getSeeds(1)[0]).toMatchObject({ tmdbId: 3, originalLang: 'te' });
+    expect(getProgress('movie', 3).originalLang).toBe('te');
   });
 });

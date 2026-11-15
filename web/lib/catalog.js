@@ -1,5 +1,8 @@
 import { searchKey, searchScore, similarity, variants, typoFixes } from './fuzzy';
 import { abortReason } from './abortReason';
+import { lookupIndex } from './searchIndex';
+import { prepQuery, tierOf, rankScore, yearOf, TIER } from './searchRank';
+import { DEFAULT_PREFS, INDIA_PROVIDERS } from './prefs';
 
 // Server-side catalog. Runs in Next.js route handlers — plain HTTP only,
 // no browser, so it deploys to Vercel. Cinemeta first (~0.02s), TMDB for
@@ -70,31 +73,45 @@ export async function discoverByLang(code, { type = 'movie', limit = 18 } = {}) 
   return dedupe((d?.results || []).slice(0, limit).map(m => fromTmdb(m, type)));
 }
 
-export async function trendingIndia({ limit = 18 } = {}) {
+export async function trendingIndia({ limit = 18, langs = LANGS.map(l => l.code) } = {}) {
   // /trending is GLOBAL and its `region` parameter is ignored, so sorting its
   // results only reorders whatever Hollywood is trending that week. Measured
   // 2026-08-31: 0 of 20 results were Indian-language, and the hero banner led
   // with The Odyssey. Discover actually filters, so ask it directly.
   const recent = new Date(Date.now() - 400 * 864e5).toISOString().slice(0, 10);
-  const d = await j(tmdbUrl('/discover/movie', {
-    with_original_language: LANGS.map(l => l.code).join('|'),
+  const page = (p) => j(tmdbUrl('/discover/movie', {
+    with_original_language: langs.join('|'),
     sort_by: 'popularity.desc',
     // Low enough that a regional release still qualifies - Indian films poll
     // far below Hollywood on TMDB - high enough to skip unranked uploads.
     'vote_count.gte': '15',
     'primary_release_date.gte': recent,
+    page: String(p),
   }));
-  const found = (d?.results || []).map(m => fromTmdb(m, 'movie'));
-  if (found.length >= 6) return dedupe(found).slice(0, limit);
+  const pages = await Promise.all([page(1), page(2)]);
+  const found = dedupe(pages.flatMap(d => (d?.results || []).map(m => fromTmdb(m, 'movie'))));
+  // Popularity alone is mostly Hindi and Tamil (Telugu measured 2/18), so
+  // take turns by language in the viewer's order, each by popularity.
+  if (found.length >= 6) return interleaveByLang(found, langs).slice(0, limit);
 
   // A quiet release window is possible; fall back to global trending with the
   // Indian titles pulled to the front rather than showing an empty banner.
   const g = await j(tmdbUrl('/trending/movie/week'));
   const all = (g?.results || []).map(m => fromTmdb(m, 'movie'));
-  const codes = new Set(LANGS.map(l => l.code));
+  const codes = new Set(langs);
   return dedupe([...found,
                  ...all.filter(t => codes.has(t.originalLang)),
                  ...all.filter(t => !codes.has(t.originalLang))]).slice(0, limit);
+}
+
+/** Round-robin across `langs` in order; other languages go last. */
+export function interleaveByLang(titles, langs) {
+  const groups = langs.map(code => titles.filter(t => t.originalLang === code));
+  const out = [];
+  for (let i = 0; groups.some(g => i < g.length); i++) {
+    for (const g of groups) if (i < g.length) out.push(g[i]);
+  }
+  return [...out, ...titles.filter(t => !langs.includes(t.originalLang))];
 }
 
 /**
@@ -115,16 +132,127 @@ export async function trendingSeriesGlobal({ limit = 18 } = {}) {
   return dedupe((d?.results || []).map(m => fromTmdb(m, 'tv'))).slice(0, limit);
 }
 
-export async function recentlyAdded({ limit = 18 } = {}) {
-  const today = new Date().toISOString().slice(0, 10);
-  const from = new Date(Date.now() - 120 * 864e5).toISOString().slice(0, 10);
-  const d = await j(tmdbUrl('/discover/movie', {
+const isoDaysAgo = (days) => new Date(Date.now() - days * 864e5).toISOString().slice(0, 10);
+
+/** Streaming in India on one of these apps, on a subscription (not rent/buy). */
+const onApps = (providers) => ({
+  watch_region: 'IN',
+  with_watch_providers: providers.join('|'),
+  with_watch_monetization_types: 'flatrate',
+});
+
+/**
+ * Newest films in the viewer's languages that are already streaming on their
+ * apps. The old row asked for every language worldwide by release date and
+ * measured 1/18 Indian on 2026-11-15.
+ */
+export async function recentlyAdded({ limit = 18, langs = DEFAULT_PREFS.langs,
+                                      providers = INDIA_PROVIDERS } = {}) {
+  const ask = (days) => j(tmdbUrl('/discover/movie', {
+    ...onApps(providers),
+    with_original_language: langs.join('|'),
     sort_by: 'primary_release_date.desc',
-    'primary_release_date.gte': from,
-    'primary_release_date.lte': today,
-    'vote_count.gte': '8',
+    'primary_release_date.gte': isoDaysAgo(days),
+    'primary_release_date.lte': isoDaysAgo(0),
+    'vote_count.gte': '3',
+    include_adult: 'false',
   }));
-  return dedupe((d?.results || []).slice(0, limit).map(m => fromTmdb(m, 'movie')));
+  let d = await ask(180);
+  // A quiet half-year (or one narrow language) must not leave a bare rail.
+  if ((d?.results || []).length < 8) d = await ask(540);
+  return dedupe((d?.results || []).map(m => fromTmdb(m, 'movie'))).slice(0, limit);
+}
+
+/**
+ * A language rail: the last ~2 years by popularity first, then all-time
+ * popular to fill. All-time alone led with decade-old hits.
+ */
+export async function languageRow(lang, { limit = 30 } = {}) {
+  // Two pages: Top 10 and Trending claim the head of this list on the home
+  // page, so one page left Tamil with 6 titles after dedupe.
+  const page = (p) => j(tmdbUrl('/discover/movie', {
+    with_original_language: lang,
+    sort_by: 'popularity.desc',
+    'primary_release_date.gte': isoDaysAgo(730),
+    'primary_release_date.lte': isoDaysAgo(0),
+    'vote_count.gte': '10',
+    include_adult: 'false',
+    page: String(p),
+  }));
+  const pages = await Promise.all([page(1), page(2)]);
+  const fresh = dedupe(pages.flatMap(d => (d?.results || []).map(m => fromTmdb(m, 'movie'))));
+  if (fresh.length >= limit) return dedupe(fresh).slice(0, limit);
+  // Kannada measured 5 titles in 2 years at this vote floor.
+  const all = await discoverByLang(lang, { limit: limit * 2 });
+  return dedupe([...fresh, ...all]).slice(0, limit);
+}
+
+const dedupeRaw = (rows) => rows.filter((m, i) => rows.findIndex(x => x.id === m.id) === i);
+
+/**
+ * A genre rail across the viewer's languages: last ~5 years by popularity,
+ * like the genre rows on Netflix and Prime Video home pages.
+ */
+export async function genreRow(genreId, { limit = 30, langs = DEFAULT_PREFS.langs } = {}) {
+  // Two pages: the home page drops titles an earlier row already showed.
+  const page = (p) => j(tmdbUrl('/discover/movie', {
+    with_original_language: langs.join('|'),
+    with_genres: String(genreId),
+    sort_by: 'popularity.desc',
+    'primary_release_date.gte': isoDaysAgo(5 * 365),
+    'primary_release_date.lte': isoDaysAgo(0),
+    'vote_count.gte': '10',
+    include_adult: 'false',
+    page: String(p),
+  }));
+  const pages = await Promise.all([page(1), page(2)]);
+  return interleaveByLang(dedupe(pages.flatMap(d => (d?.results || [])
+    .map(m => fromTmdb(m, 'movie')))), langs).slice(0, limit);
+}
+
+/** Upcoming films in the viewer's languages, soonest first ("Coming soon"). */
+export async function comingSoon({ limit = 18, langs = DEFAULT_PREFS.langs } = {}) {
+  const d = await j(tmdbUrl('/discover/movie', {
+    with_original_language: langs.join('|'),
+    region: 'IN',
+    sort_by: 'popularity.desc',
+    'primary_release_date.gte': isoDaysAgo(-1),
+    'primary_release_date.lte': isoDaysAgo(-180),
+    include_adult: 'false',
+  }));
+  return dedupe((d?.results || []).filter(m => m.poster_path)
+    .map(m => fromTmdb(m, 'movie'))).slice(0, limit);
+}
+
+// TMDB genres that are never a "series to binge": soap, talk, reality, news.
+const NOT_SERIES = '10766|10767|10764|10763';
+// Daily soaps are often tagged Drama, so the genre filter misses them
+// (Teri Meri Doriyaann, ~900 episodes). An episode count past this is a soap.
+const SOAP_EPISODES = 80;
+
+/**
+ * Recent series in one or more languages that stream on the viewer's apps.
+ * Replaces "Indian series", which measured 18/18 old Hindi soaps (median 2013).
+ */
+export async function ottSeries(langs, { limit = 18, providers = INDIA_PROVIDERS } = {}) {
+  const params = {
+    ...onApps(providers),
+    with_original_language: [].concat(langs).join('|'),
+    without_genres: NOT_SERIES,
+    sort_by: 'popularity.desc',
+    'first_air_date.gte': '2022-01-01',
+    'vote_count.gte': '3',
+    include_adult: 'false',
+  };
+  const d = await j(tmdbUrl('/discover/tv', params));
+  // Hindi loses about half of a page to soaps, so take two pages.
+  const d2 = (d?.total_pages || 1) > 1 ? await j(tmdbUrl('/discover/tv', { ...params, page: '2' })) : null;
+  const pool = dedupeRaw([...(d?.results || []), ...(d2?.results || [])]).slice(0, limit + 12);
+  // One detail lookup per candidate, cached 6 h like every TMDB call here.
+  const details = await Promise.all(pool.map(m =>
+    j(tmdbUrl(`/tv/${m.id}`), 4000).catch(() => null)));
+  const kept = pool.filter((m, i) => !(details[i]?.number_of_episodes > SOAP_EPISODES));
+  return dedupe(kept.map(m => fromTmdb(m, 'tv'))).slice(0, limit);
 }
 
 export const GENRES = [
@@ -260,10 +388,18 @@ async function cinemetaSearch(query, limit = 4) {
  * search comes back thin we retry with spelling variants and rank everything
  * by how closely it matches what was actually typed.
  */
-export async function searchAll(q, { limit = 24 } = {}) {
+export async function searchAll(q, { limit = 24, langs = DEFAULT_PREFS.langs } = {}) {
   const query = q?.trim();
   if (!query) return [];
   const scoreQuery = searchKey(query) || query;
+  const pq = prepQuery(scoreQuery);
+
+  // Local index first: synchronous, and it already holds the popular Indian
+  // titles that TMDB's literal search ranks below Hollywood for a prefix.
+  const local = lookupIndex(scoreQuery);
+  // A prefix (or romanisation-prefix) hit in the index means the slow
+  // spelling variants and Cinemeta would only add latency.
+  const strong = local.some(x => x.tier >= TIER.SKEL_WORD_PREFIX);
 
   // Interactive path: a slow speculative lookup must never hold the response.
   // The exact query gets a normal budget; variants and typo repair get a short
@@ -274,44 +410,26 @@ export async function searchAll(q, { limit = 24 } = {}) {
       .then(d => (d?.results || []).filter(isTitle))
       .catch(() => []);
 
-  /**
-   * TMDB's own relevance, kept as a signal rather than thrown away.
-   *
-   * Our similarity() rewards a match at the START of a title, which is wrong
-   * for the way these titles are built: for "ramam" it scored Ramam Raghavam
-   * and even Rama Madhav (which does not contain "ramam" at all) at 0.920,
-   * while Sita Ramam - the film actually wanted, and TMDB's own first result -
-   * got 0.840 and fell to third.
-   *
-   * TMDB ranked it first for a reason. `rank` records the position each result
-   * arrived in so that ordering can break ties, instead of being discarded.
-   */
+  // `__rank` keeps the position TMDB returned each result in. It breaks ties
+  // and lifts TMDB's top few, which can match on an alternative title that
+  // our name matching never sees.
   const withRank = (rows, offset = 0) => rows.map((m, i) => { m.__rank = offset + i; return m; });
 
-  // The exact query ALWAYS runs, in parallel with the spelling variants, and
-  // the results are merged. Normalisation must never cost an exact match: if
-  // what was typed is itself the indexed spelling, it has to win, and if it is
-  // a variant that TMDB happens to know, that must not be dropped either.
+  // The exact query ALWAYS runs, so English and other titles stay findable.
+  // Spelling variants run alongside it only when the index found nothing.
   const [exact, ...alts] = await Promise.all([
-    ask(query, 6000).then(rows => withRank(rows)),
-    ...variants(query).map((v, i) => ask(v, 2500).then(rows => withRank(rows, 100 + i * 100))),
+    ask(query, strong ? 2500 : 6000).then(rows => withRank(rows)),
+    ...(strong ? [] : variants(query).map((v, i) =>
+      ask(v, 2500).then(rows => withRank(rows, 100 + i * 100)))),
   ]);
   let raw = [...exact, ...alts.flat()];
 
-  // Only if nothing convincing came back do we spend requests on typo repair
-  // — ordinary mistyping rather than a spelling choice (pusspa -> pushpa,
-  // kalky -> kalki, kantera -> kantara). Bounded, and skipped on a good hit.
-  // Cinemeta stays a FALLBACK rather than the primary source, measured over 18
-  // queries: it is 3.6x slower (1592ms vs 446ms), it misses series entirely
-  // unless asked separately ("breaking bad" -> El Camino), and quality is
-  // near-even (TMDB better on 2, Cinemeta on 3). But it is genuinely fuzzy
-  // where TMDB is literal, so it must fire whenever TMDB looks unconvincing.
-  //
-  // The bar is deliberately high: TMDB answered "salaar" with "Salar" (0.15),
-  // which a lower gate would have accepted while Cinemeta held the real
-  // Salaar at 1.00. Only a near-exact hit skips the fallback.
-  const best = raw.reduce((n, m) => Math.max(n, similarity(query, m.title || m.name)), 0);
-  if (best < 0.95) {
+  // Typo repair (Cinemeta is fuzzy where TMDB is literal) only when neither
+  // the index nor TMDB produced a near-exact title. The bar is high on
+  // purpose: TMDB answered "salaar" with "Salar", which a lower gate accepted.
+  const best = [...raw, ...local.map(x => x.m)]
+    .reduce((n, m) => Math.max(n, similarity(query, m.title || m.name)), 0);
+  if (!strong && best < 0.95) {
     const [viaCinemeta, ...fixed] = await Promise.all([
       cinemetaSearch(query),
       ...typoFixes(query).map((v, i) => ask(v, 2500).then(rows => withRank(rows, 500 + i * 100))),
@@ -319,31 +437,33 @@ export async function searchAll(q, { limit = 24 } = {}) {
     raw = [...raw, ...viaCinemeta, ...fixed.flat()];
   }
 
-  const seen = new Set();
-  return raw
-    .map(m => ({
-      m,
-      // TMDB often stores an Indian title in `original_title` while its
-      // display title is translated. Treat both as aliases for ranking.
-      score: searchScore(scoreQuery, m),
+  // Merge by (type,id). A live TMDB record wins over the index copy because
+  // it carries the overview and backdrop; the best tier from either is kept.
+  const byKey = new Map();
+  for (const { m, tier } of local) byKey.set(`${m.media_type}-${m.id}`, { m, tier });
+  for (const m of raw) {
+    const k = `${m.media_type}-${m.id}`;
+    // Our own tiers first. Then the older similarity score, scaled below any
+    // prefix tier, for romanisations the tiers miss ("gita govindam").
+    // Then TMDB's own top five, which may match on an alias.
+    const sim = searchScore(scoreQuery, m);
+    const tier = Math.max(
+      tierOf(pq, m),
+      sim >= 0.5 ? 0.7 * Math.min(1, sim) : 0,
+      m.__rank != null && m.__rank < 5 ? 0.4 : 0);
+    const prev = byKey.get(k);
+    const rank = Math.min(m.__rank ?? 999, prev?.m.__rank ?? 999);
+    byKey.set(k, { m: { ...m, __rank: rank }, tier: Math.max(tier, prev?.tier || 0) });
+  }
+
+  return [...byKey.values()]
+    .filter(x => x.tier > 0)
+    .map(x => ({
+      ...x,
+      score: rankScore({ tier: x.tier, lang: x.m.original_language, votes: x.m.vote_count,
+                         popularity: x.m.popularity, year: yearOf(x.m) }, langs),
     }))
-    // Keep a floor so a variant search cannot drag in unrelated titles.
-    .filter(({ m, score }) => {
-      const k = `${m.media_type}-${m.id}`;
-      if (seen.has(k) || score < 0.3) return false;
-      seen.add(k); return true;
-    })
-    // Score, then TMDB's own order, then popularity.
-    //
-    // The score is BUCKETED to 0.1 before comparing: our similarity is a rough
-    // instrument and treating 0.92 as meaningfully better than 0.84 is what
-    // demoted Sita Ramam below a title that merely started with the query.
-    // Within a bucket, whatever TMDB ranked first wins - it has the better
-    // relevance model - and only then does popularity break the tie.
-    .sort((a, b) =>
-      (Math.round(b.score * 10) - Math.round(a.score * 10))
-      || ((a.m.__rank ?? 99) - (b.m.__rank ?? 99))
-      || ((b.m.popularity || 0) - (a.m.popularity || 0)))
+    .sort((a, b) => (b.score - a.score) || ((a.m.__rank ?? 999) - (b.m.__rank ?? 999)))
     .slice(0, limit)
     .map(({ m }) => fromTmdb(m));
 }

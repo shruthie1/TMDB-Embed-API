@@ -1,4 +1,5 @@
 import './globals.css';
+import './tv-compact.css';
 import Dpad from '../components/Dpad';
 import Diagnostics from '../components/Diagnostics';
 import { TopNav, BottomNav } from '../components/Nav';

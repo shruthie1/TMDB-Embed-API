@@ -1,5 +1,6 @@
 import { searchAll } from '../../../lib/catalog';
 import { createCache, TTL_SEC } from '../../../lib/ttl';
+import { parseLangs } from '../../../lib/prefs';
 
 export const revalidate = 3600;
 // Search ranking and provider fallbacks can improve independently of a page
@@ -13,13 +14,17 @@ export const dynamic = 'force-dynamic';
 const cache = createCache({ ttlMs: TTL_SEC.SEARCH * 1000, max: 200 });
 
 export async function GET(req) {
-  const q = (new URL(req.url).searchParams.get('q') || '').trim().toLowerCase();
+  const params = new URL(req.url).searchParams;
+  const q = (params.get('q') || '').trim().toLowerCase();
   if (!q) return Response.json({ q, titles: [] });
+  // Preferred languages change the ranking, so they are part of the key.
+  const langs = parseLangs(params.get('langs'));
+  const key = `${q}|${langs.join(',')}`;
 
-  const hit = cache.get(q);
-  if (hit) return Response.json({ q, titles: hit, cached: true });
+  const hit = cache.get(key);
+  if (hit) return Response.json({ q, langs, titles: hit, cached: true });
 
-  const titles = await searchAll(q);
-  cache.set(q, titles);
-  return Response.json({ q, titles });
+  const titles = await searchAll(q, { langs });
+  cache.set(key, titles);
+  return Response.json({ q, langs, titles });
 }

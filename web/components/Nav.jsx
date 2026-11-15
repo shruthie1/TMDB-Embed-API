@@ -2,6 +2,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import Icon from './Icon';
+import PrefsButton from './PrefsPicker';
 
 const ITEMS = [
   { href: '/', label: 'Home', icon: 'home' },
@@ -33,6 +34,7 @@ export function TopNav() {
           <span>{i.label}</span>
         </Link>
       ))}
+      <PrefsButton />
     </nav>
   );
 }

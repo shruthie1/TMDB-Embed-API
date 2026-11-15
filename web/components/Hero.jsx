@@ -15,7 +15,8 @@ export default function Hero({ titles = [], loading }) {
   const [paused, setPaused] = useState(false);
   const [saved, setSaved] = useState(false);
   const swipeStart = useRef(null);
-  const pool = titles.filter(t => t.backdrop).slice(0, 3);
+  // Six, like the spotlight carousels on Netflix, Prime Video and JioHotstar.
+  const pool = titles.filter(t => t.backdrop).slice(0, 6);
   const current = pool[i % pool.length];
   const move = (direction) => setI(v => (v + direction + pool.length) % pool.length);
 

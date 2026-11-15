@@ -25,6 +25,7 @@ export function useEpisodeProgress({ videoRef, title, season = 0, episode = 0,
         positionSec: Math.floor(video.currentTime),
         durationSec: Math.floor(video.duration),
         title: title.title, poster: title.poster, epTitle,
+        originalLang: title.originalLang || null,
       });
     };
     const id = setInterval(save, 10000);

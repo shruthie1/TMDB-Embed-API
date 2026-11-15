@@ -6,6 +6,7 @@ import Icon from '../../components/Icon';
 import { searchTitles } from '../../lib/api';
 import { getRecent, addRecent, removeRecent, clearRecent } from '../../lib/recent';
 import { abortReason } from '../../lib/abortReason';
+import { getPrefs, PREFS_EVENT } from '../../lib/prefs';
 
 const SUGGEST = [
   { label: 'Telugu', href: '/browse?lang=te' },
@@ -19,11 +20,16 @@ export default function Search() {
   const [q, setQ] = useState('');
   const [state, setState] = useState({ loading: false, titles: [], done: false });
   const [recent, setRecent] = useState([]);
+  // Bumped when prefs change, so the current query re-ranks in place.
+  const [prefsRev, setPrefsRev] = useState(0);
   const inputRef = useRef(null);
 
   useEffect(() => {
     inputRef.current?.focus();
     setRecent(getRecent());
+    const onSave = () => setPrefsRev(n => n + 1);
+    window.addEventListener(PREFS_EVENT, onSave);
+    return () => window.removeEventListener(PREFS_EVENT, onSave);
   }, []);
 
   useEffect(() => {
@@ -31,18 +37,16 @@ export default function Search() {
     setState(s => ({ ...s, loading: true }));
     const ctrl = new AbortController();
     const t = setTimeout(async () => {
-      const res = await searchTitles(q, { signal: ctrl.signal });
+      const res = await searchTitles(q, { signal: ctrl.signal, langs: getPrefs().langs });
       setState({ loading: false, titles: res.ok ? res.body.titles : [], done: true });
       // Only remember a query that actually found something.
       if (res.ok && res.body.titles?.length) { addRecent(q); setRecent(getRecent()); }
     }, 260); // debounce — instant-feel without hammering the API
     return () => { clearTimeout(t); ctrl.abort(abortReason('search superseded by newer query')); };
-  }, [q]);
+  }, [q, prefsRev]);
 
   const drop = useCallback((term) => { removeRecent(term); setRecent(getRecent()); }, []);
 
-  const movies = state.titles.filter(t => t.mediaType === 'movie');
-  const series = state.titles.filter(t => t.mediaType === 'tv');
   const idle = !q.trim();
 
   return (
@@ -110,22 +114,15 @@ export default function Search() {
 
       {!state.loading && !idle && state.titles.length > 0 && (
         <>
-          {movies.length > 0 && (
-            <section className="row-sec" style={{ marginTop: 26 }}>
-              <div className="row-head"><h2 className="row-label">Films</h2></div>
-              <div className="grid-titles" data-focus-group="">
-                {movies.map((t, i) => <Card key={`m-${t.tmdbId}`} title={t} i={i} />)}
-              </div>
-            </section>
-          )}
-          {series.length > 0 && (
-            <section className="row-sec">
-              <div className="row-head"><h2 className="row-label">Series</h2></div>
-              <div className="grid-titles">
-                {series.map((t, i) => <Card key={`t-${t.tmdbId}`} title={t} i={i} />)}
-              </div>
-            </section>
-          )}
+          {/* ONE list in rank order. Splitting films from series hid the best
+              match whenever it was a series, below a full grid of films. */}
+          <section className="row-sec" style={{ marginTop: 26 }}>
+            <div className="grid-titles" data-focus-group="">
+              {state.titles.map((t, i) => (
+                <Card key={`${t.mediaType}-${t.tmdbId}`} title={t} i={i} showType />
+              ))}
+            </div>
+          </section>
         </>
       )}
 

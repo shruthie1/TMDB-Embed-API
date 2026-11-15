@@ -33,7 +33,7 @@ export function CardSkeleton({ i = 0 }) {
   );
 }
 
-export function Card({ title, i = 0, progressPct, showType = false }) {
+export function Card({ title, i = 0, progressPct, showType = false, rank = null }) {
   const epTag = title.mediaType === 'tv' && title.episode
     ? `S${title.season}E${title.episode}` : null;
   // Browse and search mix films and series in one grid; without this a series
@@ -50,7 +50,7 @@ export function Card({ title, i = 0, progressPct, showType = false }) {
       className="card focusable enter"
       data-focus=""
       style={{ '--i': i }}
-      aria-label={`${title.title}${typeTag ? ', series' : ''}${epTag ? `, ${epTag}` : ''}${title.year ? `, ${title.year}` : ''}`}
+      aria-label={`${rank ? `Number ${rank}, ` : ''}${title.title}${typeTag ? ', series' : ''}${epTag ? `, ${epTag}` : ''}${title.year ? `, ${title.year}` : ''}`}
       // Resolve in the background once intent is sustained, so the click
       // usually lands on a warm cache instead of a 6-37s cold resolve.
       {...intentProps(title.mediaType, title.tmdbId,
@@ -62,6 +62,14 @@ export function Card({ title, i = 0, progressPct, showType = false }) {
               onError={() => setImageFailed(true)} />
           : <span className="poster-fallback">{title.title}</span>}
         {typeTag && <span className="card-type">{typeTag}</span>}
+        {/* Top 10 rank, the large numeral every OTT home uses for its chart. */}
+        {rank && (
+          <span aria-hidden="true" style={{
+            position: 'absolute', left: 6, bottom: 2, fontFamily: 'var(--display)',
+            fontWeight: 600, fontSize: 'clamp(34px, 9vw, 54px)', lineHeight: 1,
+            color: 'var(--paper)', textShadow: '0 2px 12px rgba(0,0,0,.85)',
+          }}>{rank}</span>
+        )}
       </div>
       <div className="card-title">{title.title}</div>
       {/* Always rendered, even when empty: a card WITHOUT a meta line (a film

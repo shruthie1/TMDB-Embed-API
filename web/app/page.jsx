@@ -1,42 +1,13 @@
 'use client';
-import { Fragment, useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Row } from '../components/Row';
 import Hero from '../components/Hero';
 import { fetchRow, fetchTitleFull } from '../lib/api';
 import { getContinueWatching, getSeeds } from '../lib/progress';
 import { getList } from '../lib/list';
 import { warmContinueWatching } from '../lib/prefetch';
-
-// `href` gives each row a "See all" into the equivalent browse view, so a
-// rail is an entry point rather than a dead end capped at 18 titles.
-// Ordered as a MIX rather than by category: what is NEW leads the discovery
-// rails, then Indian trending (the hero and the household's default), then the
-// global rows and the per-language rails. Five language rows in a block read as
-// one long Indian section and pushed everything else off the page; interleaving
-// them means scrolling always turns up something different.
-//
-// 'recent' leads because a personal library's freshest additions are the reason
-// to open the app at all - buried last, anything newly added was never seen.
-// The two PERSONAL rails still sit above it: continue-watching is how you
-// resume, and making someone scroll past a discovery row to reach a half-
-// watched film is a worse trade than a slightly later 'new'.
-//
-// 'series' sits last because this is a movie household - measured on the live
-// cache, movies take 473 rows / 627 hits / 45 plays against TV's 37 / 34 / 4.
-// A series rail third was spending prime vertical space on 8% of the watching.
-const ROWS = [
-  { kind: 'continue',     label: 'Continue watching' },
-  { kind: 'list',         label: 'My list', href: '/list' },
-  { kind: 'recent',       label: 'Recently added',
-    href: '/browse?sort=primary_release_date.desc' },
-  { kind: 'trending',     label: 'Trending in India', href: '/browse?sort=popularity.desc' },
-  { kind: 'te',           label: 'Telugu',    href: '/browse?lang=te' },
-  { kind: 'ta',           label: 'Tamil',     href: '/browse?lang=ta' },
-  { kind: 'kn',           label: 'Kannada',   href: '/browse?lang=kn' },
-  { kind: 'ml',           label: 'Malayalam', href: '/browse?lang=ml' },
-  { kind: 'series',       label: 'Indian series',
-    href: '/browse?type=tv&lang=te,ta,kn,ml,hi' },
-];
+import { getPrefs, prefsQuery, PREFS_EVENT } from '../lib/prefs';
+import { homeRows, dedupeRows } from '../lib/homeRows';
 
 export default function Home() {
   // Each row owns its loading state, so rows appear as they arrive
@@ -44,10 +15,28 @@ export default function Home() {
   const [data, setData] = useState({});
   const [rowErrors, setRowErrors] = useState({});
   // Personalised rows, derived from what has actually been watched. Kept
-  // separate from ROWS because their labels and count depend on history.
+  // separate from the discovery rows because their labels and count depend on history.
   const [recs, setRecs] = useState([]);
+  // Defaults on the server render; the stored choice after mount.
+  // null until mounted: the stored choice lives in localStorage, and fetching
+  // rows for the defaults first would load every rail twice.
+  const [prefs, setPrefs] = useState(null);
+  const rows = useMemo(() => (prefs ? homeRows(prefs.langs) : []), [prefs]);
+  const query = prefs ? prefsQuery(prefs) : '';
 
   useEffect(() => {
+    setPrefs(getPrefs());
+    // A save in the header modal refreshes the rails in place.
+    const onSave = () => {
+      setData(d => ({ continue: d.continue, list: d.list }));
+      setPrefs(getPrefs());
+    };
+    window.addEventListener(PREFS_EVENT, onSave);
+    return () => window.removeEventListener(PREFS_EVENT, onSave);
+  }, []);
+
+  useEffect(() => {
+    if (!prefs) return undefined;
     let alive = true;
     const cw = getContinueWatching(3);
     setData(d => ({ ...d, continue: cw, list: getList() }));
@@ -70,10 +59,9 @@ export default function Home() {
     }
     // The most likely next play is whatever you were last watching.
     warmContinueWatching(cw);
-    // "Because you watched X" - ONE row, for the most recent thing watched.
-    // Two rows pushed the discovery rails (Telugu, Tamil, ...) below the fold
-    // and read as repetition, since recent history is usually similar titles.
-    const seeds = getSeeds(1);
+    // "Because you watched X" for up to three recent titles, spread through
+    // the page (see `display`) so they do not stack into one wall.
+    const seeds = getSeeds(3);
     if (seeds.length) {
       Promise.all(seeds.map(sd =>
         fetch(`/api/similar/${sd.mediaType}/${sd.tmdbId}`)
@@ -86,9 +74,9 @@ export default function Home() {
         .then(rows => { if (alive) setRecs(rows.filter(Boolean)); });
     }
 
-    for (const { kind } of ROWS) {
+    for (const { kind } of rows) {
       if (kind === 'continue' || kind === 'list') continue;
-      fetchRow(kind).then(res => {
+      fetchRow(kind, { query }).then(res => {
         if (!alive) return;
         const titles = res.ok ? (res.body?.titles || []) : [];
         setRowErrors(errors => ({
@@ -107,11 +95,11 @@ export default function Home() {
       });
     }
     return () => { alive = false; };
-  }, []);
+  }, [prefs, rows, query]);
 
   const retryRow = (kind) => {
     setRowErrors(errors => ({ ...errors, [kind]: null }));
-    fetchRow(kind).then(res => {
+    fetchRow(kind, { query }).then(res => {
       const titles = res.ok ? (res.body?.titles || []) : [];
       setData(dataNow => ({ ...dataNow, [kind]: titles }));
       setRowErrors(errors => ({
@@ -124,9 +112,9 @@ export default function Home() {
   // Returning viewers lead the carousel with unfinished titles. Trending fills
   // the remaining slots so one Continue Watching item never collapses the
   // hero into a static banner.
-  const heroTitles = data.continue === undefined || data.trending === undefined
+  const heroTitles = data.continue === undefined || data.top10 === undefined
     ? undefined
-    : [...(data.continue || []), ...(data.trending || [])]
+    : [...(data.continue || []), ...(data.top10 || []), ...(data.trending || [])]
       // Continue-watching entries are intentionally lightweight local records
       // and usually have no backdrop. Filter before limiting the pool, or
       // three such records would consume all hero slots and leave no trending
@@ -135,58 +123,62 @@ export default function Home() {
       .filter((title, index, all) => all.findIndex(other =>
         other.mediaType === title.mediaType && other.tmdbId === title.tmdbId
       ) === index)
-      .slice(0, 3);
+      .slice(0, 6);
 
   useEffect(() => {
     if (process.env.NODE_ENV !== 'production') {
       console.info('[chitram home] hero', {
         continueCount: data.continue?.length,
-        trendingCount: data.trending?.length,
+        top10Count: data.top10?.length,
         loading: heroTitles === undefined,
         titles: heroTitles?.map(t => ({ id: t.tmdbId, title: t.title, backdrop: t.backdrop })) || [],
       });
     }
-  }, [data.continue, data.trending, heroTitles]);
+  }, [data.continue, data.top10, heroTitles]);
 
-  // Which row the suggestions follow. Continue watching when it exists (what
-  // to play next belongs beside where you left off); otherwise the first
-  // discovery row, so they never sink below everything else.
-  const recAnchor = data.continue?.length ? 'continue' : 'trending';
+  // "Because you watched" rows: the first after Trending now, the second and
+  // third after the first and second language blocks. Built into ONE ordered
+  // list with the fixed rows so dedupe and render walk the same order.
+  const display = useMemo(() => {
+    const anchors = ['trending', ...rows.filter(r => r.kind.startsWith('series-')).map(r => r.kind)];
+    const out = [];
+    for (const row of rows) {
+      out.push(row);
+      const at = anchors.indexOf(row.kind);
+      if (at >= 0 && recs[at]) out.push({ kind: recs[at].key, label: recs[at].label, thin: 4, rec: true });
+    }
+    return out;
+  }, [rows, recs]);
+  const shown = useMemo(() => dedupeRows(display, {
+    ...data, ...Object.fromEntries(recs.map(r => [r.key, r.titles])),
+  }), [display, data, recs]);
 
   return (
     <div className="home-page">
       <Hero titles={heroTitles || []} loading={heroTitles === undefined} />
 
-      {ROWS.map(({ kind, label, href }) => {
-        const titles = data[kind];
-        // Continue-watching is local and instant; hide it when empty
-        // rather than showing an empty rail.
+      {display.map(({ kind, label, href, thin, ranked, rec }) => {
+        const titles = shown[kind];
+        // Hide a row that is empty, or thin once earlier rows have claimed
+        // their titles, rather than showing a near-empty rail.
+        if (thin && titles && titles.length < thin) return null;
         // Local rows are instant; hide them when empty rather than showing
         // an empty rail or a skeleton that never fills.
         if ((kind === 'continue' || kind === 'list') && (!titles || titles.length === 0)) return null;
         return (
-          <Fragment key={kind}>
-            <Row
-              label={label}
-              href={href}
-              titles={titles || []}
-              loading={titles === undefined}
-              error={rowErrors[kind]}
-              onRetry={() => retryRow(kind)}
-              homeSection
-            />
-            {/* Suggestions sit directly under Continue watching: what to play
-                next belongs beside where you left off, above the generic
-                discovery rows. With no history they anchor to the first
-                discovery row instead, never to the bottom of the page. */}
-            {kind === recAnchor && recs.map(r => (
-              <Row key={r.key} label={r.label} titles={r.titles} homeSection />
-            ))}
-          </Fragment>
+          <Row
+            key={kind}
+            label={label}
+            href={href}
+            titles={titles || []}
+            loading={titles === undefined}
+            error={rec ? null : rowErrors[kind]}
+            onRetry={rec ? undefined : () => retryRow(kind)}
+            ranked={ranked}
+            homeSection
+          />
         );
       })}
-
-
     </div>
   );
 }

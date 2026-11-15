@@ -89,10 +89,14 @@ export const fetchTitle = (type, id, opts) =>
 export const fetchTitleFull = (type, id, opts) =>
   getJson(`/api/title/${type}/${id}/full`, opts);
 
-export const fetchRow = (kind, opts) => getJson(`/api/rows/${kind}`, opts);
+/** `opts.query` is a prepared query string, e.g. prefsQuery(getPrefs()). */
+export const fetchRow = (kind, opts = {}) =>
+  getJson(`/api/rows/${kind}${opts.query ? `?${opts.query}` : ''}`, opts);
 
-export const searchTitles = (q, opts) =>
-  getJson(`/api/search?q=${encodeURIComponent(q)}`, opts);
+/** `opts.langs` ranks those original languages first. */
+export const searchTitles = (q, opts = {}) =>
+  getJson(`/api/search?q=${encodeURIComponent(q)}${
+    opts.langs?.length ? `&langs=${opts.langs.join(',')}` : ''}`, opts);
 
 
 /**

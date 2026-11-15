@@ -14,7 +14,7 @@ import Icon from './Icon';
  * D-pad focus all use the same rail.
  */
 export function Row({ label, titles, loading, skeletonCount = 6, href, emptyHint,
-  error, onRetry, homeSection = false }) {
+  error, onRetry, homeSection = false, ranked = false }) {
   const railRef = useRef(null);
   const [edges, setEdges] = useState({ left: false, right: false });
 
@@ -76,7 +76,7 @@ export function Row({ label, titles, loading, skeletonCount = 6, href, emptyHint
               ? Array.from({ length: skeletonCount }, (_, i) => <CardSkeleton key={i} i={i} />)
               : titles.map((t, i) => (
                   <Card key={`${t.mediaType}-${t.tmdbId}`} title={t} i={i}
-                        progressPct={t.progressPct} />
+                        progressPct={t.progressPct} rank={ranked ? i + 1 : null} />
                 ))}
           </div>
           {edges.right && (

@@ -16,7 +16,7 @@ const idOf = (t, id, s = 0, e = 0) => `${t}:${id}:${s}:${e}`;
 
 export function saveProgress({ mediaType, tmdbId, season = 0, episode = 0,
                                positionSec, durationSec, title, poster,
-                               epTitle = null }) {
+                               epTitle = null, originalLang = null }) {
   if (!durationSec || positionSec == null) return;
   const all = read();
   // Percentage-based, so a 22-min episode and a 3-hour film behave the same.
@@ -24,7 +24,9 @@ export function saveProgress({ mediaType, tmdbId, season = 0, episode = 0,
   const finished = positionSec >= Math.min(durationSec - 30, durationSec * 0.95);
   all[idOf(mediaType, tmdbId, season, episode)] = {
     mediaType, tmdbId, season, episode, positionSec, durationSec,
-    pct, finished, title, poster, epTitle, updatedAt: Date.now(),
+    pct, finished, title, poster, epTitle,
+    // Kept so home rows can follow the languages actually watched.
+    originalLang: originalLang || null, updatedAt: Date.now(),
   };
   write(all);
 }
@@ -148,5 +150,6 @@ export function getSeeds(limit = 3) {
   return [...byTitle.values()]
     .sort((a, b) => b.updatedAt - a.updatedAt)
     .slice(0, limit)
-    .map(p => ({ mediaType: p.mediaType, tmdbId: p.tmdbId, title: p.title }));
+    .map(p => ({ mediaType: p.mediaType, tmdbId: p.tmdbId, title: p.title,
+                 originalLang: p.originalLang || null }));
 }
