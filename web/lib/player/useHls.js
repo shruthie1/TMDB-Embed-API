@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { playableUrl, proxiedSegment, PREFERRED_LANGUAGE } from '../backend';
 import { languageName } from '../subtitles';
+import { probeTsAudio, swapPids } from './tsAudio';
 
 /**
  * HLS allows every audio rendition to be marked DEFAULT=NO. That is valid
@@ -40,6 +41,32 @@ export function initialAudioTrack(tracks = [], preferredLanguage = PREFERRED_LAN
 }
 
 /**
+ * A fragment loader that exposes the audio tracks muxed inside MPEG-TS
+ * segments and plays the chosen one. See tsAudio.js for why: hls.js plays only
+ * the first AAC PID of a TS and offers no way to reach the others, which hid
+ * Telugu on every CastleTV title in production.
+ *
+ * `muxed` is per-attach state: tracks (null = not probed yet), the PID hls.js
+ * reads (`slot`) and the PID the viewer wants (`pid`).
+ */
+export function muxedAudioLoader(Base, muxed) {
+  return class MuxedAudioLoader extends Base {
+    load(context, config, callbacks) {
+      const onSuccess = callbacks.onSuccess;
+      super.load(context, config, {
+        ...callbacks,
+        onSuccess: (response, stats, ctx, details) => {
+          // Never let this break playback: on any surprise the fragment goes
+          // through untouched and plays its default track, as before.
+          try { muxed.transform(response, ctx); } catch { /* play as-is */ }
+          onSuccess(response, stats, ctx, details);
+        },
+      });
+    }
+  };
+}
+
+/**
  * Owns attaching hls.js and everything it reports: the quality ladder, the
  * active level and the audio tracks. Nothing else writes them.
  *
@@ -72,6 +99,7 @@ export function useHls({ videoRef, stream, onFatal, onHlsReady, config = {}, pre
   const [autoLevel, setAutoLevel] = useState(null);       // what ABR chose
   const [audioTracks, setAudioTracks] = useState([]);
   const [currentAudio, setCurrentAudio] = useState(null);
+  const muxedRef = useRef(null);
 
   useEffect(() => {
     if (!stream?.masterUrl) return;
@@ -121,7 +149,43 @@ export function useHls({ videoRef, stream, onFatal, onHlsReady, config = {}, pre
       // A read-only handle on the running version, so a deploy can be checked
       // from the console instead of by grepping bundles.
       try { window.__hlsVersion = Hls.version; } catch { /* SSR */ }
-      const hls = new Hls(cbRef.current.config);
+      // Language tracks hidden inside the TS segments. Probed from the first
+      // MAIN fragments; only used when the manifest declares no renditions of
+      // its own, so a real #EXT-X-MEDIA graph always wins.
+      let hls = null;
+      const muxed = {
+        tracks: null, slot: -1, pid: -1, probes: 0,
+        active() { return Array.isArray(this.tracks) && this.tracks.length > 1; },
+        transform(response, ctx) {
+          if (ctx?.frag?.type !== 'main' || !(response?.data instanceof ArrayBuffer)) return;
+          const u8 = new Uint8Array(response.data);
+          if (this.tracks === null && this.probes < 3) {
+            this.probes += 1;
+            const found = probeTsAudio(u8);
+            if (found && (hls?.audioTracks || []).length) this.tracks = [];
+            else if (found) {
+              this.tracks = found;
+              if (this.active()) {
+                const first = initialAudioTrack(found, wantLangRef.current);
+                this.slot = found[0].pid;
+                this.pid = found[first].pid;
+                if (!cancelled) {
+                  setAudioTracks(found.map((t, i) => ({
+                    id: i, name: languageName(t.lang) || `Track ${i + 1}`, lang: t.lang,
+                  })));
+                  setCurrentAudio(first);
+                }
+              }
+            }
+          }
+          if (this.active() && this.pid !== this.slot) swapPids(u8, this.slot, this.pid);
+        },
+      };
+      muxedRef.current = muxed;
+      const base = cbRef.current.config?.fLoader || Hls.DefaultConfig?.loader;
+      hls = new Hls(base
+        ? { ...cbRef.current.config, fLoader: muxedAudioLoader(base, muxed) }
+        : cbRef.current.config);
       hlsRef.current = hls;
       cbRef.current.onHlsReady?.(hls);
 
@@ -160,6 +224,8 @@ export function useHls({ videoRef, stream, onFatal, onHlsReady, config = {}, pre
       // later event too since a track list can be updated mid-stream.
       const applyAudio = (tracks) => {
         const list = tracks || [];
+        // An empty rendition list says nothing about tracks inside the TS.
+        if (!list.length && muxed.active()) return;
         setAudioTracks(list.map((t, i) => ({
           id: i, name: languageName(t.lang) || t.name || `Track ${i + 1}`,
           lang: t.lang || null,
@@ -176,7 +242,7 @@ export function useHls({ videoRef, stream, onFatal, onHlsReady, config = {}, pre
       hls.on(Hls.Events.MANIFEST_PARSED, (_e, data) => {
         setLevels(hls.levels.map((l, i, all) => describeLevel(l, i, all)).sort((a, b) => b.height - a.height));
         applyAudio(data?.audioTracks);
-        setCurrentAudio(hls.audioTrack >= 0 ? hls.audioTrack : initialAudioTrack(data?.audioTracks || [], wantLangRef.current));
+        if (!muxed.active()) setCurrentAudio(hls.audioTrack >= 0 ? hls.audioTrack : initialAudioTrack(data?.audioTracks || [], wantLangRef.current));
         // A first fragment at the advertised top bitrate can take 10–15s on
         // the connections this catalogue sees. Start with the smallest rung
         // so the first frame arrives quickly; hls.js measures throughput from
@@ -199,7 +265,7 @@ export function useHls({ videoRef, stream, onFatal, onHlsReady, config = {}, pre
       });
       hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, (_e, data) => {
         applyAudio(data?.audioTracks);
-        setCurrentAudio(hls.audioTrack >= 0 ? hls.audioTrack : initialAudioTrack(data?.audioTracks || [], wantLangRef.current));
+        if (!muxed.active()) setCurrentAudio(hls.audioTrack >= 0 ? hls.audioTrack : initialAudioTrack(data?.audioTracks || [], wantLangRef.current));
       });
       hls.on(Hls.Events.AUDIO_TRACK_SWITCHED, (_e, data) => {
         if (typeof data?.id === 'number') setCurrentAudio(data.id);
@@ -273,6 +339,7 @@ export function useHls({ videoRef, stream, onFatal, onHlsReady, config = {}, pre
       // playing (especially on TV Chromium builds).
       const oldHls = hlsRef.current;
       hlsRef.current = null;
+      muxedRef.current = null;
       try { oldHls?.detachMedia(); } catch { /* already detached */ }
       try { oldHls?.destroy(); } catch { /* already destroyed */ }
       try {
@@ -316,8 +383,26 @@ export function useHls({ videoRef, stream, onFatal, onHlsReady, config = {}, pre
   // caller falls through to pairing/substitution when we refuse.
   const pickAudio = useCallback((id) => {
     const hls = hlsRef.current;
-    const list = hls?.audioTracks || [];
     const idx = Number(id);
+    // Tracks muxed inside the TS: point the loader at the new PID and refetch
+    // from the playhead. currentLevel's setter is hls.js's own flush-and-
+    // reload; assigning manualLevel back keeps the viewer's quality mode
+    // (-1 stays auto). The position is kept - the buffer, not the clock, is
+    // what gets thrown away.
+    const muxed = muxedRef.current;
+    if (hls && muxed?.active()) {
+      if (!Number.isInteger(idx) || idx < 0 || idx >= muxed.tracks.length) return false;
+      setCurrentAudio(idx);
+      const next = muxed.tracks[idx].pid;
+      if (next !== muxed.pid) {
+        muxed.pid = next;
+        hls.currentLevel = hls.manualLevel;
+      }
+      const label = languageName(muxed.tracks[idx].lang);
+      if (label) onLanguage?.(label);
+      return true;
+    }
+    const list = hls?.audioTracks || [];
     if (!hls || !Number.isInteger(idx) || idx < 0 || idx >= list.length) return false;
     setCurrentAudio(idx);
     hls.audioTrack = idx;

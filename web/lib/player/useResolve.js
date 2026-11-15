@@ -306,7 +306,11 @@ export function useResolve({ mediaType, tmdbId, season = 0, episode = 0 }) {
     setSources(prev => {
       const merged = [...prev];
       for (const src of found) {
-        const at = merged.findIndex(m => m.provider === src.provider);
+        // Same identity rule as onDone (provider + url + quality). Matching on
+        // the provider NAME alone kept one row per provider, but NetMirror
+        // ships a film as several rows - one per audio language / platform -
+        // so a later row overwrote the earlier one and its language vanished.
+        const at = merged.findIndex(m => sameSource(m, src));
         const entry = { ...src, best: bestLabel(src.variants, src.bestResolution) };
         if (at === -1) merged.push(entry);
         else merged[at] = { ...merged[at], ...entry };

@@ -1965,8 +1965,13 @@ kbd{
      three panel edges, so on a TV that overscans, the bottom row was simply
      cut off. Measured before: the Captions row ended at y=1066 of 1080, and a
      FOCUSED button in it reached 1062.8 with 17.2px to spare. The bar is now
-     inset by a fraction of the panel rather than trusting it. */
-  --tvbar-safe-x:3.5%;
+     inset by a fraction of the panel rather than trusting it.
+
+     5%, not 3.5%: overscan on consumer TVs runs up to 5% per edge, and 3.5%
+     was too little. Measured 2026-10-03 at 1280x720 against a 5% inset:
+     Picture (all three buttons), Close and the last Captions button fell
+     outside it - the bar's bottom padding was 25.2px against 36px lost. */
+  --tvbar-safe-x:5%;
   /* Vertical is a fraction of the panel for the same reason the horizontal
      one is: overscan scales with the screen, not with pixels. A flat 24px was
      2.2% of a 1080p panel but 3.3% of a 720p one - the smaller screen got the
@@ -1976,7 +1981,7 @@ kbd{
      block's WIDTH even for top and bottom, so `3.5%` here measured 67.2px on a
      1920-wide panel - 6.2% of the height, and it pushed the bar back up to
      16.1% of the screen, undoing the size win. Measured, not assumed. */
-  --tvbar-safe-y:3.5vh;
+  --tvbar-safe-y:5vh;
 }
 .tvbar{
   --tvbar-u:8px;

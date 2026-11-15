@@ -14,7 +14,7 @@ import { videoChoices, videoIdOf, videoLabels } from '../lib/player/trackChoices
 import EmbedStage from './player/EmbedStage';
 import { VA_EMBED_ID, vaEmbedChoice, shouldAutoEmbed } from '../lib/player/vaEmbed';
 import { markDead, nextAlive } from '../lib/player/deadSources';
-import { pairSources } from '../lib/backend';
+import { pairSources, listSources as listBackendSources } from '../lib/backend';
 import {
   useResolve, useHls, useRecovery, useControlVisibility,
   useSubtitles, useEpisodeProgress, useDeviceCapability, useCueOverlay,
@@ -549,6 +549,35 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     // mergeSources is a useCallback with no deps, so it is stable.
   }, [menuOpen, useNative, stream, title.mediaType, title.tmdbId, season, episode,
       mergeSources]);
+
+  /**
+   * NetMirror, as its own flow.
+   *
+   * The backend skips NetMirror in the main list whenever Castle's demux
+   * already offers Telugu (apiServer.js GATED_BY_DEMUX): NetMirror takes 5-22s
+   * and rate limits per IP, and the first picture should not wait on it. But
+   * that dropped it entirely - each NetMirror row is a different audio
+   * language / platform (Netflix Telugu, Prime Hindi...), and none of them
+   * reached the Source list.
+   *
+   * So ask for it separately, once per title, after playback has started, and
+   * merge whatever comes back. The picture never waits; the rows appear when
+   * they land. When the main list already carried NetMirror this is a cache
+   * hit on the server and merges onto the same rows.
+   *
+   * Keyed on whether a stream EXISTS, not on the stream object: a source
+   * switch replaces the object, and must not re-ask or cancel this.
+   */
+  const hasStream = Boolean(stream);
+  useEffect(() => {
+    if (!hasStream) return;
+    const ac = new AbortController();
+    listBackendSources(title.mediaType, title.tmdbId,
+      { season, episode, provider: 'netmirror', signal: ac.signal })
+      .then((found) => { if (found?.length) mergeSources(found); })
+      .catch(() => { /* NetMirror is extra; the list we have stands */ });
+    return () => ac.abort(abortReason('netmirror lookup superseded or unmounted'));
+  }, [hasStream, title.mediaType, title.tmdbId, season, episode, mergeSources]);
   const controls = useControlVisibility({
     holdOpen: menuOpen || !playing,
     surface: videoRef.current?.parentElement ?? null,
@@ -1466,6 +1495,9 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
           currentSourceId={currentSourceId}
           onPickSource={pickTvSource}
           sourcesPending={sourcesPending}
+          audioTracks={hls.audioTracks}
+          currentAudio={hls.currentAudio}
+          onPickAudio={hls.pickAudio}
           levels={hls.levels}
           currentLevel={hls.currentLevel}
           autoLevel={hls.autoLevel}

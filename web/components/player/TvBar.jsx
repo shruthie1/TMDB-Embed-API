@@ -1,5 +1,6 @@
 'use client';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { audioOptions } from '../../lib/player/audioOptions';
 
 /**
  * Source and quality controls for a TV, rendered OUTSIDE the video element.
@@ -29,14 +30,28 @@ const IDLE_MS = 6000;
 const HOLD_MS = 10000;
 
 const sourceMeta = (source) => {
-  const bits = [source.best, source.codecs?.video];
+  // Language and quality FIRST, because a provider that ships one stream per
+  // language renders as several buttons with the same provider name: 628241
+  // showed five identical "CastleTV" buttons with nothing to choose between
+  // them. These are what actually distinguish one row entry from the next.
+  const langs = (source.languages || []).join('/');
+  const bits = [langs, source.quality, source.best, source.codecs?.video];
   if ((source.audioTracks?.length || 0) > 1) bits.push(`${source.audioTracks.length} audio`);
   return bits.filter(Boolean).join(' · ');
 };
 
+// Which stream is playing, by IDENTITY not by provider name. Comparing on
+// `provider` marked every CastleTV button as selected at once, so the row
+// could not show which of them was actually on.
+const isCurrent = (s, currentSourceId, currentSource) => (
+  s.id != null && currentSourceId != null
+    ? s.id === currentSourceId
+    : s.provider === currentSource);
+
 export default function TvBar({
-  sources = [], currentSource, onPickSource,
+  sources = [], currentSource, currentSourceId, onPickSource,
   levels = [], currentLevel, autoLevel, onPickLevel,
+  audioTracks = [], currentAudio, onPickAudio,
   sourcesPending = false, onClose,
   fit = 'contain', onSetFit,
   subs = [], currentSub, onPickSub, subLoading = false,
@@ -158,6 +173,22 @@ export default function TvBar({
   const rungs = [{ index: -1, label: autoLevel ? `Auto (${autoLevel})` : 'Auto' },
                  ...levels];
 
+  // Language, the control this bar was missing.
+  //
+  // Silk's native player exposes no audio-track menu, and TvBar rendered
+  // Source/Quality/Captions/Picture but nothing for audio - so on a Fire TV
+  // there was no way to choose a language at all. On a Telugu-first library
+  // that is the single most important switch on the screen.
+  //
+  // audioOptions already answers "what can this title be heard in", whether
+  // the answer is in-file renditions or, as on the native path where hls.js
+  // never attaches and audioTracks is always [], sibling single-language
+  // sources. Reused rather than reimplemented so the TV and the custom player
+  // can never disagree about which languages exist.
+  const audio = useMemo(
+    () => audioOptions({ audioTracks, currentAudio, sources, currentSourceId }),
+    [audioTracks, currentAudio, sources, currentSourceId]);
+
   return (
     <>
       {/* An always-visible opener.
@@ -194,10 +225,14 @@ export default function TvBar({
             buttons as direct children of a flex row they could not. */}
         <div className="tvbar-btns">
           {sources.map(s => (
-            <button key={s.provider} type="button"
-                    className={`tvbar-btn focusable ${s.provider === currentSource ? 'on' : ''}`}
+            // `key={s.provider}` collided whenever one provider ships several
+            // streams - CastleTV returns one PER LANGUAGE, so 628241 rendered
+            // five buttons under one key and React warned it may omit some.
+            // `id` is the stream identity the rest of the player already uses.
+            <button key={s.id ?? s.provider} type="button"
+                    className={`tvbar-btn focusable ${isCurrent(s, currentSourceId, currentSource) ? 'on' : ''}`}
                     data-focus=""
-                    aria-pressed={s.provider === currentSource}
+                    aria-pressed={isCurrent(s, currentSourceId, currentSource)}
                     onClick={() => { onPickSource?.(s); rearm.current(); }}>
               {s.provider}{sourceMeta(s) ? ` · ${sourceMeta(s)}` : ''}
             </button>
@@ -217,6 +252,40 @@ export default function TvBar({
                       aria-pressed={l.index === currentLevel}
                       onClick={() => { onPickLevel?.(l.index); rearm.current(); }}>
                 {l.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Language.
+          Only shown when there is a real choice: a single-language title needs
+          no row, and an empty one would be a dead control on a remote. A
+          'muxed' option switches the track inside the file; a 'sources' option
+          switches to the sibling stream that carries that language, which is
+          how CastleTV ships Telugu/Malayalam/Hindi. */}
+      {audio.options.length > 1 && (
+        <div className="tvbar-row" data-focus-group="">
+          <span className="tvbar-k">Audio</span>
+          <div className="tvbar-btns">
+            {audio.options.map(o => (
+              <button key={`${o.kind}:${o.id}`} type="button"
+                      className={`tvbar-btn focusable ${o.id === audio.current ? 'on' : ''}`}
+                      data-focus="" aria-pressed={o.id === audio.current}
+                      onClick={() => {
+                        // An in-file switch keeps the playback position, so it
+                        // is always preferred when the menu offers one.
+                        if (audio.kind === 'muxed' && onPickAudio?.(o.id) !== false) {
+                          rearm.current();
+                          return;
+                        }
+                        // Otherwise the language lives in another stream:
+                        // onPickSource takes the SOURCE OBJECT, not an id.
+                        const next = sources.find(x => x.id === o.id);
+                        if (next) onPickSource?.(next, o.name);
+                        rearm.current();
+                      }}>
+                {o.name}
               </button>
             ))}
           </div>

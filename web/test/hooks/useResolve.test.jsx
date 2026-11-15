@@ -207,3 +207,24 @@ describe('bestLabel()', () => {
     expect(bestLabel(undefined, null)).toBe('');
   });
 });
+
+describe('useResolve — mergeSources (late providers, e.g. NetMirror fetched on its own)', () => {
+  const nf = { provider: 'NetMirror', masterUrl: 'https://x/nf.m3u8', quality: 'Auto', languages: ['Telugu'] };
+  const pv = { provider: 'NetMirror', masterUrl: 'https://x/pv.m3u8', quality: 'Auto', languages: ['Hindi'] };
+
+  it('keeps every row of a provider that ships several (Netflix AND Prime)', () => {
+    // Matching on the provider NAME alone made the Prime row overwrite the
+    // Netflix one, so a title on two platforms showed one.
+    const api = harness();
+    act(() => api.mergeSources([nf, pv]));
+    expect(api.sources.map((s) => s.masterUrl)).toEqual([nf.masterUrl, pv.masterUrl]);
+  });
+
+  it('updates a row it already has in place instead of duplicating it', () => {
+    const api = harness();
+    act(() => api.mergeSources([nf]));
+    act(() => api.mergeSources([{ ...nf, languages: ['Telugu', 'Hindi'] }]));
+    expect(api.sources).toHaveLength(1);
+    expect(api.sources[0].languages).toEqual(['Telugu', 'Hindi']);
+  });
+});
