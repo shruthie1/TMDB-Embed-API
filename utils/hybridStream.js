@@ -220,7 +220,7 @@ async function probeStartPts(playlistText, playlistUrl, headers, kind = 'a') {
         // playlist body - so fetch it when the caller has no text to hand.
         let text = playlistText;
         if (!text) {
-            const r = await fetch(playlistUrl, { headers: headers || {} });
+            const r = await fetch(playlistUrl, { headers: headers || {}, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
             if (!r.ok) return null;
             text = await r.text();
         }
