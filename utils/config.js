@@ -7,6 +7,16 @@ const { features } = require('../lib/runtime/environment');
 const NEW_OVERRIDE_PATH = fromRoot('utils', 'user-config.json');
 const LEGACY_OVERRIDE_PATH = fromRoot('user-config.json');
 const OVERRIDE_PATH = (fs.existsSync(NEW_OVERRIDE_PATH) || !fs.existsSync(LEGACY_OVERRIDE_PATH)) ? NEW_OVERRIDE_PATH : LEGACY_OVERRIDE_PATH;
+// The real override file is gitignored (it can hold keys). A clean checkout or
+// a `git archive` deploy has only this tracked template, and without it every
+// provider flag defaults to enabled. Reads fall back to it; writes always go
+// to OVERRIDE_PATH, so the first save from the admin UI seeds the real file.
+const EXAMPLE_OVERRIDE_PATH = fromRoot('utils', 'user-config.example.json');
+function overrideReadPath(p = { real: OVERRIDE_PATH, example: EXAMPLE_OVERRIDE_PATH }) {
+  if (fs.existsSync(p.real)) return p.real;
+  if (fs.existsSync(p.example)) return p.example;
+  return null;
+}
 const CONFIG_SCHEMA_VERSION = 1; // Increment when structure / semantics change
 
 function parseJsonMaybe(val) {
@@ -33,8 +43,9 @@ function parseCookies(raw) {
 
 function readOverrideFile() {
   try {
-    if (fs.existsSync(OVERRIDE_PATH)) {
-      const raw = fs.readFileSync(OVERRIDE_PATH, 'utf8');
+    const from = overrideReadPath();
+    if (from) {
+      const raw = fs.readFileSync(from, 'utf8');
       const data = JSON.parse(raw);
       return data && typeof data === 'object' ? data : {};
     }
@@ -261,4 +272,4 @@ function saveConfigPatch(patch) {
   return false;
 }
 
-module.exports = { config, reloadConfig: () => Object.assign(config, loadConfig()), saveConfigPatch, OVERRIDE_PATH, CONFIG_SCHEMA_VERSION };
+module.exports = { config, reloadConfig: () => Object.assign(config, loadConfig()), saveConfigPatch, OVERRIDE_PATH, CONFIG_SCHEMA_VERSION, overrideReadPath };

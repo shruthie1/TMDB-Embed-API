@@ -7,3 +7,7 @@ restart.trigger
 
 # local backups
 *.bak
+
+# Real runtime overrides; may hold keys. Tracked template: utils/user-config.example.json
+/utils/user-config.json
+/user-config.json
