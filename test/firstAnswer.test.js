@@ -65,8 +65,10 @@ test('answers once a Telugu stream exists, without waiting for a slow NetMirror'
     console.log(`[measure] telugu-early first answer ${first.ms}ms`);
     assert.ok(first.ms < 1500, `first answer took ${first.ms}ms`);
     assert.deepEqual(first.d.streams.map((s) => s.provider), ['CastleTV']);
+    assert.equal(first.d.partial, true, 'an early answer is flagged so clients do not cache it');
     await sleep(3000);
     const second = await get(3001);
+    assert.equal(second.d.partial, undefined);
     assert.deepEqual(second.d.streams.map((s) => s.provider).sort(), ['CastleTV', 'NetMirror']);
     assert.equal(calls['netmirror:3001'], 1, 'the background NetMirror result is reused, not re-fetched');
 });

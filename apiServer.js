@@ -798,6 +798,9 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
 
     res.set('Cache-Control', `private, max-age=${STREAMS_CACHE_SECONDS}`);
     const payload = { success:true, tmdbId, imdbId, count: streams.length, providerTimings, streams };
+    // Tells a client cache not to keep this answer: a provider was still
+    // running when it went out, and the next request will include it.
+    if (late.length) payload.partial = true;
     // A response missing a late provider is not memoized, so the next request
     // rebuilds it and picks that provider up from providerHitCache.
     if (!late.length) memoSet(mk, payload);

@@ -43,12 +43,70 @@ async function getJson(path, { timeoutMs = 60000, signal } = {}) {
   if (signal) signal.addEventListener('abort', onAbort, { once: true });
   try {
     const r = await fetch(`${BASE}${path}`, { cache: 'no-store', signal: ac.signal });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    if (!r.ok) { const e = new Error(`HTTP ${r.status}`); e.status = r.status; throw e; }
     return await r.json();
   } finally {
     clearTimeout(timer);
     if (signal) signal.removeEventListener('abort', onAbort);
   }
+}
+
+/**
+ * Waits before the 2nd and 3rd attempt at /api/streams. Exported (and
+ * mutable) only so tests can run without real sleeps.
+ *
+ * A retry is worth it for a dropped connection or a 5xx/429: a VM restart, a
+ * Vercel rewrite hiccup or mobile handover. It is NOT worth it for a 4xx (the
+ * request itself is wrong), a caller cancel, or our own timeout (the backend
+ * already spent its full budget; asking again doubles the wait).
+ */
+export const STREAMS_RETRY_DELAYS_MS = [800, 2500];
+const sleep = (ms, signal) => new Promise((resolve, reject) => {
+  const t = setTimeout(resolve, ms);
+  signal?.addEventListener('abort', () => { clearTimeout(t); reject(signal.reason); }, { once: true });
+});
+const retryable = (err) => (err?.status ? err.status >= 500 || err.status === 429 : !isAbortLike(err));
+function isAbortLike(err) {
+  return err?.name === 'AbortError' || err?.name === 'TimeoutError' || /timeout after|cancel|superseded/i.test(String(err?.message || ''));
+}
+async function getJsonWithRetry(path, opts) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await getJson(path, opts);
+    } catch (err) {
+      if (opts.signal?.aborted || attempt >= STREAMS_RETRY_DELAYS_MS.length || !retryable(err)) throw err;
+      await sleep(STREAMS_RETRY_DELAYS_MS[attempt], opts.signal);
+    }
+  }
+}
+
+/**
+ * Per-title cache of the last COMPLETE /api/streams answer, in sessionStorage.
+ *
+ * The request is no-store (signed urls), so every replay of a title, every
+ * back-navigation and every episode re-open re-ran the whole provider fan-out
+ * (2-10s). Kept 4 minutes: under the backend's own 300s browser TTL and well
+ * under the providers' signed-url lifetimes. A partial early answer (the
+ * backend marks it) is never cached, so the next ask picks up the late rows.
+ * A stale url is handled by the player: a 403 re-resolves with refresh, which
+ * skips this cache. Storage failures (private mode, quota) are ignored.
+ */
+const STREAMS_CACHE_TTL_MS = 4 * 60 * 1000;
+const cacheKey = (type, id, season, episode) => `chitram:streams:${type}:${id}:${season || 0}:${episode || 0}`;
+function cacheGet(key) {
+  try {
+    const raw = globalThis.sessionStorage?.getItem(key);
+    if (!raw) return null;
+    const { at, d } = JSON.parse(raw);
+    if (!(Date.now() - at < STREAMS_CACHE_TTL_MS)) { globalThis.sessionStorage.removeItem(key); return null; }
+    return d;
+  } catch { return null; }
+}
+function cachePut(key, d) {
+  try {
+    if (d?.partial || !Array.isArray(d?.streams) || !d.streams.length) return;
+    globalThis.sessionStorage?.setItem(key, JSON.stringify({ at: Date.now(), d }));
+  } catch { /* private mode or quota: no cache, still plays */ }
 }
 
 /**
@@ -220,8 +278,12 @@ export function resolveLive(type, id, {
   // Fan out fully and let rankSources put the remembered one first.
   emit({ type: 'wave-start', providers: ['all enabled providers'] });
 
-  getJson(endpoint(type, id, { season, episode, provider: null, refresh }),
-    { timeoutMs: 120000, signal: ac.signal })
+  const key = cacheKey(type, id, season, episode);
+  const cached = refresh ? null : cacheGet(key);
+  if (cached) emit({ type: 'cache-hit', provider: 'list from this session' });
+  (cached ? Promise.resolve(cached)
+    : getJsonWithRetry(endpoint(type, id, { season, episode, provider: null, refresh }),
+      { timeoutMs: 120000, signal: ac.signal }).then((d) => { cachePut(key, d); return d; }))
     .then((d) => {
       if (settled) return;
       const raw = Array.isArray(d?.streams) ? d.streams : [];
