@@ -9,6 +9,8 @@ import { readOverride } from '../lib/dpad';
 import { forgetProvider, rememberProvider } from '../lib/lastProvider';
 import { abortReason } from '../lib/abortReason';
 import useAudioSync from '../lib/player/useAudioSync';
+import useSwitchGuard from '../lib/player/useSwitchGuard';
+import { videoChoices, videoIdOf, videoLabels } from '../lib/player/trackChoices';
 import { pairSources } from '../lib/backend';
 import {
   useResolve, useHls, useRecovery, useControlVisibility,
@@ -114,6 +116,27 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   const currentSourceRef = useRef(null);
   sourceListRef.current = sources;
   currentSourceRef.current = currentSource;
+
+  // A manual pick that fails goes back to what was playing, at the same
+  // position, with a one-line notice. See lib/player/useSwitchGuard.js.
+  // `stopSwitchRef` clears the switch overlay; beginSwitch is declared below.
+  const stopSwitchRef = useRef(null);
+  const switchGuard = useSwitchGuard({
+    revert: (prev) => {
+      stopSwitchRef.current?.();
+      resumeAt.current = prev.at || 0;
+      resolve.setError(null);
+      resolve.switchSource(prev);
+    },
+    onRevert: setNotice,
+  });
+  // The label a viewer sees for a row: the same "CastleTV 2" the Servers menu
+  // shows, so the notice names the row they picked.
+  const rowLabel = useCallback((id, fallback) => {
+    const list = videoChoices(sources);
+    const at = list.findIndex((c) => c.id === videoIdOf(id, sources));
+    return at >= 0 ? videoLabels(list)[at] : (fallback || 'That server');
+  }, [sources]);
 
   /**
    * Recover from a dead stream without going back to the network.
@@ -226,6 +249,9 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   }, [title.runtimeMin, recoverBySwitching, reportMetrics, resolve]);
 
   const onFatal = useCallback((data, hls) => {
+    // A viewer's own pick failed: put back what they were watching instead of
+    // jumping to the first source in the list or covering the picture.
+    if (switchGuard.fail()) return;
     // A 403/410 means the signed url went stale. Another provider's url is
     // almost certainly still good, so try that FIRST - it resumes at the same
     // position with no network round-trip - and only re-resolve if this was
@@ -259,7 +285,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       return;
     }
     try { hls?.startLoad(); } catch { /* torn down */ }
-  }, [resolve, recoverBySwitching, reportMetrics]);
+  }, [resolve, recoverBySwitching, reportMetrics, switchGuard]);
 
   // Declared before useHls, which captures it in onHlsReady.
   const hlsInstance = useRef(null);
@@ -993,6 +1019,11 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     switchTimer.current = null;
     setSwitching(null);
   }, []);
+  stopSwitchRef.current = () => {
+    clearTimeout(switchTimer.current);
+    switchTimer.current = null;
+    setSwitching(null);
+  };
 
   useEffect(() => {
     const v = videoRef.current;
@@ -1158,6 +1189,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
         if (!w) return;
         if (alive(w)) return;
         if (Math.abs(w.currentTime - at) >= 0.25) return; // clock is moving
+        if (switchGuard.fail()) return;
         resolve.setError({ message: `${src.provider} is not responding. Try another server.` });
       }, 6000);
     });
@@ -1166,7 +1198,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     resolve.switchSource(src);
     // beginSwitch is a useCallback with no deps, so naming it adds no re-runs.
   }, [currentSource, currentSourceId, recovery, resolve, beginSwitch, wantLang, sources,
-      hls.audioTracks, hls.currentAudio]);
+      hls.audioTracks, hls.currentAudio, switchGuard]);
 
   // Let the recovery path above reach switchSource without reordering hooks.
   switchSourceRef.current = switchSource;
@@ -1231,6 +1263,32 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     return true;
   }, [switchSource, beginSwitch, endSwitch, recovery, resolve, title.tmdbId, title.mediaType]);
   pickPairRef.current = pickPair;
+
+  // What the menus call. Same switch, but remembered first so a failure can
+  // go back: `stream` is the playable shape of what is on screen now.
+  const snapshot = useCallback(() => (stream ? {
+    ...stream, id: currentSourceId, provider: currentSource,
+    label: rowLabel(currentSourceId, currentSource),
+    at: videoRef.current?.currentTime || 0,
+  } : null), [stream, currentSourceId, currentSource, rowLabel]);
+  const pickSource = useCallback((src, lang = null) => {
+    if (src?.id == null || src.id !== currentSourceId) {
+      switchGuard.begin(snapshot(), rowLabel(src?.id, src?.provider));
+    }
+    return switchSource(src, lang);
+  }, [switchSource, switchGuard, snapshot, rowLabel, currentSourceId]);
+  const pickPairGuarded = useCallback((plan) => {
+    switchGuard.begin(snapshot(), plan?.audio?.language || 'That language');
+    return pickPair(plan);
+  }, [pickPair, switchGuard, snapshot]);
+
+  // The new stream decoded a frame: the pick landed, nothing to go back to.
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v || !stream) return;
+    v.addEventListener('loadeddata', switchGuard.landed);
+    return () => v.removeEventListener('loadeddata', switchGuard.landed);
+  }, [stream, switchGuard]);
 
   // Commit an audio offset. The browser absorbs small POSITIVE shifts with a
   // DelayNode and nothing else has to happen; anything it cannot do (audio
@@ -1347,7 +1405,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
           sources={sources}
           currentSource={currentSource}
           currentSourceId={currentSourceId}
-          onPickSource={switchSource}
+          onPickSource={pickSource}
           sourcesPending={sourcesPending}
           levels={hls.levels}
           currentLevel={hls.currentLevel}
@@ -1382,7 +1440,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
           currentSource={currentSource}
           currentSourceId={currentSourceId}
           sourcesPending={sourcesPending}
-          onPickSource={switchSource}
+          onPickSource={pickSource}
           levels={hls.levels}
           currentLevel={hls.currentLevel}
           autoLevel={hls.autoLevel}
@@ -1395,7 +1453,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
           audioTracks={hls.audioTracks}
           currentAudio={hls.currentAudio}
           onPickAudio={hls.pickAudio}
-          onPickPair={pickPair}
+          onPickPair={pickPairGuarded}
           audioSync={{
             value: audioSyncState.offset,
             onPreview: audioSyncState.preview,

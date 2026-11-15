@@ -133,10 +133,11 @@ describe('settings sheet rows are clickable across their whole width', () => {
     expect(checked).toHaveLength(1);
   });
 
-  it('ticks no server row while a cross-provider pair is playing', () => {
-    // pickPair sets the id to `pair-<video>-<audio>`, which is deliberately
-    // not any row in the list: the picture is fused, so no single server row
-    // is the honest answer.
+  it('ticks the PICTURE row while a cross-provider pair is playing', () => {
+    // pickPair sets the id to `pair-<video>-<audio>`. That used to tick no row
+    // at all, which left the viewer unable to tell which server was on (and
+    // the button fell back to the first row's name). The picture is the video
+    // half, so that row is the honest answer.
     const { container } = openServers({
       sources: playable([
         { provider: 'mapple', languages: [], quality: '720p' },
@@ -146,7 +147,8 @@ describe('settings sheet rows are clickable across their whole width', () => {
     });
     const checked = [...container.querySelectorAll('.pmenu-pick [role="menuitemradio"]')]
       .filter((r) => r.getAttribute('aria-checked') === 'true');
-    expect(checked).toHaveLength(0);
+    expect(checked).toHaveLength(1);
+    expect(checked[0].textContent).toContain('mapple');
   });
 
   it('never leaves a dangling separator on a row with no extra detail', () => {

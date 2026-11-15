@@ -23,7 +23,8 @@ import Icon from '../Icon';
  * activate it - there is no dead zone by construction.
  */
 const MenuRow = ({ label, meta, selected, loading, onClick }) => (
-  <button role="menuitemradio" aria-checked={selected}
+  <button role="menuitemradio" aria-checked={Boolean(selected)}
+          aria-current={selected ? 'true' : undefined}
           aria-busy={loading || undefined}
           className={`pmenu-item focusable ${selected ? 'on' : ''}`} data-focus=""
           onClick={onClick}>
@@ -33,7 +34,7 @@ const MenuRow = ({ label, meta, selected, loading, onClick }) => (
       : meta && <span className="pmenu-meta">{meta}</span>}
     {loading
       ? <span className="pmenu-spin" aria-hidden="true" />
-      : selected && <Icon name="check" size={13} />}
+      : selected && <Icon name="check" size={13} className="pmenu-check" />}
   </button>
 );
 

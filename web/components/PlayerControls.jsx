@@ -6,7 +6,7 @@ import QualityMenu from './player/QualityMenu';
 import AudioMenu from './player/AudioMenu';
 import VideoMenu from './player/VideoMenu';
 import { audioOptions } from '../lib/player/audioOptions';
-import { videoChoices, audioChoices, pairingFor } from '../lib/player/trackChoices';
+import { videoChoices, audioChoices, pairingFor, videoIdOf } from '../lib/player/trackChoices';
 import { SIZES } from '../lib/subtitles';
 
 // How long the settings sheet stays open with no interaction. Short, because
@@ -355,8 +355,11 @@ export default function PlayerControls({
               than source or subtitles, and `menu` stays a single value so
               opening one closes the others - two open popups overlapping in a
               390px row is what the one-sheet design was avoiding. */}
+          {/* A pick closes the menu: the button's badge and the tick are the
+              confirmation, and an open list left over the picture after a
+              choice read as "nothing happened". */}
           <QualityMenu levels={levels} currentLevel={currentLevel} autoLevel={autoLevel}
-                       onPickLevel={onPickLevel}
+                       onPickLevel={(i) => { openMenu(null); onPickLevel?.(i); }}
                        open={menu === 'quality'} onTouch={touchSheet}
                        onToggle={() => openMenu(menu === 'quality' ? back : 'quality')} />
 
@@ -364,7 +367,11 @@ export default function PlayerControls({
               answers "which language". Two lists rather than one list of
               fused combinations - see web/lib/player/trackChoices.js. */}
           <VideoMenu choices={videoList} currentId={currentSourceId}
-                     onPick={(c) => { if (c?.source) onPickSource?.(c.source); }}
+                     currentSource={currentSource}
+                     onPick={(c) => {
+                       openMenu(null);
+                       if (c?.source) onPickSource?.(c.source);
+                     }}
                      open={menu === 'video'} onTouch={touchSheet}
                      onToggle={() => openMenu(menu === 'video' ? back : 'video')} />
 
@@ -375,6 +382,7 @@ export default function PlayerControls({
               viewer never has to know the difference. */}
           <AudioMenu audioTracks={mergedAudio} currentAudio={audioMenu.current}
                      onPickAudio={(id) => {
+                       openMenu(null);
                        // An in-file track switch is the cheap path, but the
                        // menu also lists languages from OTHER sources, whose
                        // ids are not hls track indices. pickAudio returns
@@ -402,7 +410,12 @@ export default function PlayerControls({
                        // whether it has to substitute the picture instead.
                        const choice = audioList.find((c) => c.id === id);
                        if (!choice) return;
-                       const video = videoList.find((c) => c.id === currentSourceId);
+                       // The PICTURE that is playing. During a pairing the id
+                       // is `pair-<video>-<audio>`, which is no row, so a
+                       // plain id lookup found nothing and the pick silently
+                       // did nothing; videoIdOf maps it to the video half.
+                       const playingVideo = videoIdOf(currentSourceId, sources);
+                       const video = videoList.find((c) => c.id === playingVideo);
                        const plan = pairingFor(video, choice);
                        onPickPair?.(plan);
                      }}

@@ -133,3 +133,57 @@ export function pairingFor(videoChoice, audioChoice) {
       : null,
   };
 }
+
+/**
+ * Which VIDEO row is on screen, given the id useResolve reports.
+ *
+ * A pairing plays under a synthetic id, `pair-<video id>-<audio id>` (plus
+ * `-n<offset>` after a timing nudge; see Player.jsx pickPair). That id is not
+ * any row, so comparing it to row ids ticked nothing and the Servers button
+ * fell back to the FIRST row's name. Measured 2026-11-16 on movie/811941 with
+ * Telugu standing: picking OneTouchTV pairs it with CastleTV's Telugu (POST
+ * /hybrid/pair answered 200), so the picture really was OneTouchTV while the
+ * menu showed no tick and the button read "CastleTV".
+ *
+ * The picture of a pair is its video half, so that is the row to mark. Ids
+ * contain dashes ("CastleTV-0"), so the prefix is matched against the known
+ * ids rather than split, longest first so "CastleTV-1" never claims
+ * "pair-CastleTV-10-...".
+ */
+export function videoIdOf(currentSourceId, sources = []) {
+  if (currentSourceId == null) return null;
+  const list = (sources || []).filter((s) => s && s.id != null);
+  if (list.some((s) => s.id === currentSourceId)) return currentSourceId;
+  const id = String(currentSourceId);
+  if (!id.startsWith('pair-')) return null;
+  let best = null;
+  for (const s of list) {
+    const sid = String(s.id);
+    if (id.startsWith(`pair-${sid}-`) && (best == null || sid.length > String(best).length)) {
+      best = s.id;
+    }
+  }
+  return best;
+}
+
+/**
+ * One display label per video row, numbering a provider that appears twice.
+ *
+ * Shared by the rows and the Servers button so the button names the exact
+ * row that is ticked ("CastleTV 2"), not just the provider. Numbered once
+ * across the whole list, never per quality group: per-group numbering showed
+ * "CastleTV 1" twice on movie/912649 (2026-09-22).
+ */
+export function videoLabels(choices = []) {
+  const nameOf = (c) => c?.label || c?.provider || 'Server';
+  const total = new Map();
+  for (const c of choices) total.set(nameOf(c), (total.get(nameOf(c)) || 0) + 1);
+  const shown = new Map();
+  return choices.map((c) => {
+    const name = nameOf(c);
+    if ((total.get(name) || 0) < 2) return name;
+    const n = (shown.get(name) || 0) + 1;
+    shown.set(name, n);
+    return `${name} ${n}`;
+  });
+}

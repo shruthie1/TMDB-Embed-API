@@ -108,3 +108,23 @@ describe('pairingFor', () => {
     expect(pairingFor({ id: 'v' }, null).mode).toBe('in-file');
   });
 });
+
+describe('videoIdOf and videoLabels', async () => {
+  const { videoIdOf, videoLabels } = await import('../lib/player/trackChoices');
+  const S = [{ id: 'CastleTV-1' }, { id: 'CastleTV-10' }, { id: 'OneTouchTV-5' }];
+  it('a plain row is itself', () => {
+    expect(videoIdOf('CastleTV-1', S)).toBe('CastleTV-1');
+  });
+  it('a pair, and a nudged pair, map to the video half, longest id first', () => {
+    expect(videoIdOf('pair-OneTouchTV-5-CastleTV-1', S)).toBe('OneTouchTV-5');
+    expect(videoIdOf('pair-CastleTV-10-CastleTV-1-n0.5', S)).toBe('CastleTV-10');
+  });
+  it('an unknown id is no row', () => {
+    expect(videoIdOf('gone-3', S)).toBeNull();
+    expect(videoIdOf(null, S)).toBeNull();
+  });
+  it('numbers a repeated provider once across the list', () => {
+    expect(videoLabels([{ label: 'A' }, { label: 'B' }, { label: 'A' }]))
+      .toEqual(['A 1', 'B', 'A 2']);
+  });
+});
