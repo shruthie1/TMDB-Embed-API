@@ -44,7 +44,10 @@ describe('reporting a playback outcome', () => {
     // on a real device. Deleting the calls would lose that wiring; only the
     // transport is gone.
     expect(api).toMatch(/export function reportPlayback\(/);
-    expect(player.match(/reportPlayback\(/g).length).toBeGreaterThanOrEqual(6);
+    // 6 direct calls until 2026-11-16; fatal errors now report through
+    // recoverBySwitching, so 3 call sites cover the same outcomes.
+    expect(player.match(/reportPlayback\(/g).length).toBeGreaterThanOrEqual(3);
+    expect(player).toMatch(/fatalAction\(data\)/);
   });
 });
 

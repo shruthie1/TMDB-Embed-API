@@ -65,7 +65,15 @@ describe('manual recovery uses the validated ladder', () => {
   });
 
   it('reports fatal decoder/network errors as playback failures', () => {
-    expect(src).toMatch(/reportPlayback\(\{ \.\.\.reportCtx\.current, \.\.\.reportMetrics\(\), ok: false/);
-    expect(src).toMatch(/incompatible codecs/);
+    // Since 2026-11-16 every fatal error fails over through recoverBySwitching,
+    // which reports the abandoned source; the codec wording lives in
+    // lib/player/fatalPolicy.js.
+    const sw = src.slice(src.indexOf('const recoverBySwitching'), src.indexOf('recoverBySwitchingRef.current = recoverBySwitching'));
+    expect(sw).toMatch(/reportPlayback\(\{ \.\.\.reportCtx\.current, \.\.\.reportMetrics\(\), ok: false/);
+    const fatal = src.slice(src.indexOf('const onFatal'), src.indexOf('const onFatal') + 2000);
+    expect(fatal).toMatch(/fatalAction\(data\)/);
+    expect(fatal).toMatch(/recoverBySwitching\(action\.reason\)/);
+    const policy = readFileSync(fileURLToPath(new URL('../lib/player/fatalPolicy.js', import.meta.url)), 'utf8');
+    expect(policy).toMatch(/incompatible codecs/);
   });
 });

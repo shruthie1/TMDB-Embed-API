@@ -6,9 +6,15 @@ import { useCallback, useEffect, useRef, useState } from 'react';
  *
  *   0-2.5s   silent      — invisible; most stalls end here
  *   2.5s     buffering   — acknowledge it, nothing more
- *   20s      recovering  — nudge hls.js to reload the level in place
- *   38s      switching   — re-resolve to another source (up to twice)
- *   55s      stuck       — offer the manual escape hatch
+ *   12s      recovering  — nudge hls.js to reload the level in place
+ *   25s      switching   — fail over to another source (up to twice)
+ *   40s      stuck       — offer the manual escape hatch
+ *
+ * Tuned down from 20/38/55s on 2026-11-16. Every stage gates on fragment
+ * progress (rule 1 below), so a slow-but-moving stream is never cut; a stream
+ * with no bytes for 25s is dead, and the alternate is already validated.
+ * A source that never started fails over too, flagged `startup: true` so the
+ * player switches but does not start a fresh resolve for it.
  *
  * Two rules came from real defects and must not be relaxed:
  *
@@ -20,7 +26,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
  *    meant the later stages never came due and the manual escape hatch never
  *    appeared, stranding the viewer mid-stall.
  */
-const STAGES = { buffering: 2500, recovering: 20000, switching: 38000, stuck: 55000 };
+const STAGES = { buffering: 2500, recovering: 12000, switching: 25000, stuck: 40000 };
 const PROGRESS_WINDOW_MS = 6000;
 
 export function useRecovery({ videoRef, hlsRef, stream, onReResolve }) {
@@ -72,10 +78,10 @@ export function useRecovery({ videoRef, hlsRef, stream, onReResolve }) {
       timers.push(setTimeout(() => {
         if (downloading()) { setStallStage('buffering'); return; }
         const started = v.currentTime > 0.5;
-        if (started && reResolves.current < 2) {
+        if (reResolves.current < 2) {
           reResolves.current += 1;
           setStallStage('switching');
-          cb.current?.();
+          cb.current?.({ startup: !started });
         } else {
           setStallStage('stuck');
         }

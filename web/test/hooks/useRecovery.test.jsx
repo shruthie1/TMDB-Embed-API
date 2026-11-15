@@ -43,9 +43,9 @@ describe('useRecovery', () => {
     // fetches, and each abort restarted the download from zero.
     const { api, video, hlsRef } = harness();
     stall(video);
-    jump(19000);
+    jump(11000);
     act(() => api.noteProgress());      // bytes just arrived
-    jump(2000);
+    jump(2000);                         // past the 12s nudge
     expect(hlsRef.current.startLoad).not.toHaveBeenCalled();
     expect(api.stallStage).toBe('buffering');
   });
@@ -109,5 +109,33 @@ describe('useRecovery', () => {
     expect(api.stallStage).toBeNull(); // 1.6x patience: not yet
     jump(1500);
     expect(api.stallStage).toBe('buffering');
+  });
+
+  it('switches a stalled stream at 25s, not 38s', () => {
+    // The ladder gates on fragment progress, so a slow-but-moving stream is
+    // never cut. A stream with NO bytes for 25s is dead; waiting 38s with a
+    // validated alternative in hand was the slowest part of a failover.
+    const onReResolve = vi.fn();
+    const { video } = harness({ onReResolve });
+    stall(video);
+    jump(26000);
+    expect(onReResolve).toHaveBeenCalledTimes(1);
+    expect(onReResolve).toHaveBeenCalledWith({ startup: false });
+  });
+
+  it('a source that never started also fails over, flagged as startup', () => {
+    // Player's one-shot 15s startup switch covers the FIRST source only. If
+    // the alternate never started either, the ladder required currentTime >
+    // 0.5 to switch, so the viewer sat until "stuck" with sources unused.
+    const onReResolve = vi.fn();
+    const api = {};
+    const video = document.createElement('video');
+    const hlsRef = { current: { bandwidthEstimate: 8_000_000, startLoad: vi.fn() } };
+    function Probe(){ Object.assign(api, useRecovery({ videoRef:{current:video},
+      hlsRef, stream: STREAM, onReResolve })); return null; }
+    render(<Probe />);
+    stall(video);
+    jump(26000);
+    expect(onReResolve).toHaveBeenCalledWith({ startup: true });
   });
 });

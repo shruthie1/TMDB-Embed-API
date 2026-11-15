@@ -14,6 +14,7 @@ import { videoChoices, videoIdOf, videoLabels } from '../lib/player/trackChoices
 import EmbedStage from './player/EmbedStage';
 import { VA_EMBED_ID, vaEmbedChoice, shouldAutoEmbed } from '../lib/player/vaEmbed';
 import { markDead, nextAlive } from '../lib/player/deadSources';
+import { fatalAction } from '../lib/player/fatalPolicy';
 import { pairSources, listSources as listBackendSources } from '../lib/backend';
 import {
   useResolve, useHls, useRecovery, useControlVisibility,
@@ -266,36 +267,31 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     // almost certainly still good, so try that FIRST - it resumes at the same
     // position with no network round-trip - and only re-resolve if this was
     // the last source we had.
-    const is403 = data?.response?.code === 403 || data?.response?.code === 410;
-    if (is403) {
+    const action = fatalAction(data);
+    if (action.kind === 'stale') {
       if (!recoverBySwitching()) resolve.load(true);
       return;
     }
-    if (data?.details === 'manifestIncompatibleCodecsError') {
-      reportPlayback({ ...reportCtx.current, ...reportMetrics(), ok: false, reason: 'incompatible codecs' });
-      resolve.setError({ message: 'This browser cannot decode this stream.' });
+    if (!action.failover) {
+      try { hls?.startLoad(); } catch { /* torn down */ }
       return;
     }
-    // A manifest that never loads means the provider's origin is unreachable -
-    // down, or blocked before it is reached. hls.js's own text for this is
-    // "manifestLoadError", which tells a viewer nothing and names no provider.
-    // Say which server failed and what to do about it, the same wording the
-    // switch backstop uses.
-    const md = data?.details;
-    if (md === 'manifestLoadError' || md === 'manifestLoadTimeOut'
-        || md === 'manifestParsingError') {
-      const who = currentSourceRef.current || 'This server';
-      reportPlayback({ ...reportCtx.current, ...reportMetrics(), ok: false, reason: md });
-      resolve.setError({ message: `${who} is not responding. Try another server.` });
+    // Any other dead source: fail over to the next validated one first. It is
+    // already in memory, so this costs no round trip. recoverBySwitching
+    // marks this source dead and reports why, so the list cannot loop.
+    // Only with nothing left does the viewer see an error.
+    const who = currentSourceRef.current || 'This server';
+    if (recoverBySwitching(action.reason)) {
+      setNotice(`${who} failed. Switched to the next server.`);
       return;
     }
-    if (data?.message) {
-      reportPlayback({ ...reportCtx.current, ...reportMetrics(), ok: false, reason: data.message });
-      resolve.setError({ message: data.message });
-      return;
-    }
-    try { hls?.startLoad(); } catch { /* torn down */ }
-  }, [resolve, recoverBySwitching, reportMetrics, switchGuard]);
+    // (recoverBySwitching already reported this source's failure.)
+    // hls.js's own text ("manifestLoadError") names no provider and tells a
+    // viewer nothing, so an unreachable origin gets plain words.
+    resolve.setError({ message: action.kind === 'unreachable'
+      ? `${who} is not responding, and no other server is left. Try again in a moment.`
+      : action.message });
+  }, [resolve, recoverBySwitching, switchGuard, setNotice]);
 
   // Declared before useHls, which captures it in onHlsReady.
   const hlsInstance = useRef(null);
@@ -419,9 +415,12 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     //
     // recoverBySwitching marks the current source dead first, so the ladder
     // cannot hand back the provider that just failed.
-    onReResolve: () => {
+    // A source that never started (`startup`) only switches: with nothing
+    // left, the ladder's own 'stuck' stage offers the manual escape instead
+    // of a refresh=1 fan-out every 25s against rate-limited providers.
+    onReResolve: ({ startup = false } = {}) => {
       playbackStats.current.recoveries += 1;
-      if (!recoverBySwitching()) resolve.load(true);
+      if (!recoverBySwitching(startup ? 'startup stall' : 'stall') && !startup) resolve.load(true);
     },
   });
 
