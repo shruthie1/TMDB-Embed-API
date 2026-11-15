@@ -146,6 +146,7 @@ export default function PlayerControls({
   subPrefs = { scale: 1, offsetMs: 0 }, onSubPrefs,
   levels = [], currentLevel = -1, autoLevel, onPickLevel,
   audioTracks = [], currentAudio, onPickAudio, onPickPair,
+  embed = null, onPickEmbed,
 }) {
   const [state, setState] = useState({ playing: false, t: 0, dur: 0, buffered: 0, muted: false, vol: 1 });
   // Which picker is open. Visibility itself is owned by the player
@@ -163,6 +164,10 @@ export default function PlayerControls({
   // to read "showsst+CastleTV" and work out which half is which.
   // See web/lib/player/trackChoices.js.
   const videoList = useMemo(() => videoChoices(sources), [sources]);
+  // The Servers rows: our sources, then the VaPlayer embed LAST when the
+  // title has one (lib/player/vaEmbed.js).
+  const serverList = useMemo(
+    () => (embed ? [...videoList, embed] : videoList), [videoList, embed]);
   const audioList = useMemo(
     () => audioChoices(sources, currentSourceId, audioTracks),
     [sources, currentSourceId, audioTracks],
@@ -366,11 +371,12 @@ export default function PlayerControls({
           {/* Picture, as its own control. Answers "whose video"; AudioMenu
               answers "which language". Two lists rather than one list of
               fused combinations - see web/lib/player/trackChoices.js. */}
-          <VideoMenu choices={videoList} currentId={currentSourceId}
+          <VideoMenu choices={serverList} currentId={currentSourceId}
                      currentSource={currentSource}
                      onPick={(c) => {
                        openMenu(null);
-                       if (c?.source) onPickSource?.(c.source);
+                       if (c?.embed) onPickEmbed?.(c);
+                       else if (c?.source) onPickSource?.(c.source);
                      }}
                      open={menu === 'video'} onTouch={touchSheet}
                      onToggle={() => openMenu(menu === 'video' ? back : 'video')} />

@@ -11,6 +11,8 @@ import { abortReason } from '../lib/abortReason';
 import useAudioSync from '../lib/player/useAudioSync';
 import useSwitchGuard from '../lib/player/useSwitchGuard';
 import { videoChoices, videoIdOf, videoLabels } from '../lib/player/trackChoices';
+import EmbedStage from './player/EmbedStage';
+import { VA_EMBED_ID, vaEmbedChoice, shouldAutoEmbed } from '../lib/player/vaEmbed';
 import { pairSources } from '../lib/backend';
 import {
   useResolve, useHls, useRecovery, useControlVisibility,
@@ -116,6 +118,12 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   const currentSourceRef = useRef(null);
   sourceListRef.current = sources;
   currentSourceRef.current = currentSource;
+
+  // The VaPlayer embed is on the stage (see vaEmbed below). Declared here
+  // because the key handler must step aside while it is.
+  const [embedOn, setEmbedOn] = useState(false);
+  const embedOnRef = useRef(false);
+  embedOnRef.current = embedOn;
 
   // A manual pick that fails goes back to what was playing, at the same
   // position, with a one-line notice. See lib/player/useSwitchGuard.js.
@@ -673,6 +681,8 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       const isBack = e.key === 'Escape' || e.key === 'Backspace'
         || e.key === 'BrowserBack' || e.key === 'GoBack'
         || e.keyCode === 461 || e.keyCode === 10009;
+      // Inside the embed their player owns the keys; only Back is ours.
+      if (embedOnRef.current && !isBack) return;
       if (isBack) {
         // A menu is the innermost layer: close that first, so Back means
         // "up one level" rather than always "leave the film".
@@ -1282,6 +1292,53 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     return pickPair(plan);
   }, [pickPair, switchGuard, snapshot]);
 
+  // VaPlayer's own page in an iframe, the last Servers row. See
+  // lib/player/vaEmbed.js. `embedOn` is the one switch: while it is set the
+  // stage shows the frame and our video is paused underneath, so picking our
+  // current source again resumes where it was.
+  const vaEmbed = useMemo(() => vaEmbedChoice({
+    imdbId: title.imdbId, mediaType: title.mediaType, season, episode,
+  }), [title.imdbId, title.mediaType, season, episode]);
+  const autoEmbedUsed = useRef(false);
+  useEffect(() => {
+    setEmbedOn(false);
+    autoEmbedUsed.current = false;
+  }, [title.tmdbId, title.mediaType, season, episode]);
+  const pickEmbed = useCallback(() => {
+    if (!vaEmbed) return;
+    try { videoRef.current?.pause(); } catch { /* element gone */ }
+    setMenuOpen(false);
+    setEmbedOn(true);
+  }, [vaEmbed]);
+  // A Servers row picked from inside the embed: back to our player.
+  const leaveEmbed = useCallback((choice) => {
+    setEmbedOn(false);
+    const src = choice?.source;
+    if (!src) return;
+    if (stream && src.id === currentSourceId) {
+      videoRef.current?.play().catch(() => {});
+      return;
+    }
+    pickSource(src);
+  }, [stream, currentSourceId, pickSource]);
+  // Automatic only when nothing of ours can play: an error with every held
+  // source dead (or none at all). Once per title, so Close is not undone.
+  useEffect(() => {
+    if (embedOn || autoEmbedUsed.current) return;
+    if (!shouldAutoEmbed({ embed: vaEmbed, error, sources, dead: deadSources.current })) return;
+    autoEmbedUsed.current = true;
+    try { videoRef.current?.pause(); } catch { /* element gone */ }
+    setEmbedOn(true);
+  }, [embedOn, vaEmbed, error, sources]);
+  // The TV bar lists sources itself; the embed rides along as one more entry.
+  const tvSources = useMemo(
+    () => (vaEmbed ? [...sources, { ...vaEmbed, provider: vaEmbed.label }] : sources),
+    [sources, vaEmbed]);
+  const pickTvSource = useCallback((s) => {
+    if (s?.id === VA_EMBED_ID) pickEmbed();
+    else pickSource(s);
+  }, [pickEmbed, pickSource]);
+
   // The new stream decoded a frame: the pick landed, nothing to go back to.
   useEffect(() => {
     const v = videoRef.current;
@@ -1400,12 +1457,12 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
 
       {/* On a TV the native bar handles playback and this carries only what it
           cannot: which provider, and which rung. */}
-      {stream && useNative && (
+      {stream && useNative && !embedOn && (
         <TvBar
-          sources={sources}
+          sources={tvSources}
           currentSource={currentSource}
           currentSourceId={currentSourceId}
-          onPickSource={pickSource}
+          onPickSource={pickTvSource}
           sourcesPending={sourcesPending}
           levels={hls.levels}
           currentLevel={hls.currentLevel}
@@ -1426,8 +1483,10 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
         />
       )}
 
-      {stream && !useNative && (
+      {stream && !useNative && !embedOn && (
         <PlayerControls
+          embed={vaEmbed}
+          onPickEmbed={pickEmbed}
           videoRef={videoRef}
           title={title.title}
           subtitle={epTag}
@@ -1519,7 +1578,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
         </div>
       )}
 
-      {!stream && !error && (
+      {!stream && !error && !embedOn && (
         <Resolving stage={stage} title={title.title} meta={epTag || title.year} elapsed={elapsed} log={log}
           providers={providers} onArt={Boolean(title.backdrop)}
           onClose={onClose} onRetry={() => resolve.load(true)} />
@@ -1527,7 +1586,12 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       {notice && !error && (
         <div className="toast" role="status" key={notice.id}>{notice.text}</div>
       )}
-      {error && (
+      {embedOn && vaEmbed && (
+        <EmbedStage url={vaEmbed.url} tv={useNative}
+                    choices={[...videoChoices(sources), vaEmbed]}
+                    onPick={leaveEmbed} onClose={onClose} />
+      )}
+      {error && !embedOn && (
         <PlayerError error={error} embeds={embeds}
           onRetry={() => resolve.load(true)} onClose={onClose} />
       )}

@@ -2938,3 +2938,13 @@ html .pctl-scrub:focus-visible,html .sync-bar:focus-visible{outline:none}
   }
   .pctl .pmenu-sheet-body{padding-bottom:calc(var(--space-3) + var(--safe-b))}
 }
+
+/* VaPlayer embed on the stage (components/player/EmbedStage.jsx): their
+   player fills it, our Close and Servers float top-left and top-right. */
+.embed-stage{position:absolute;inset:0;z-index:var(--z-player);background:var(--color-player-bg)}
+.embed-stage-frame{position:absolute;inset:0;width:100%;height:100%;border:0;background:var(--color-player-bg)}
+.embed-stage-bar{position:absolute;top:calc(env(safe-area-inset-top, 0px) + var(--space-2));left:var(--space-3);right:var(--space-3);
+  display:flex;align-items:center;justify-content:space-between;gap:var(--space-2);pointer-events:none}
+.embed-stage-bar>*{pointer-events:auto}
+.embed-stage-bar .ov-back{position:static}
+.embed-stage-bar .pmenu{top:calc(100% + 10px);bottom:auto}

@@ -33,9 +33,10 @@ export default function VideoMenu({
   // provider name through; rows from one provider are told apart by an
   // ordinal instead (videoLabels), and the Audio button already names the
   // language that is playing.
-  const maxOf = (c) => (
-    c.quality && c.quality !== 'Auto' ? `up to ${c.quality}` : 'Auto quality'
-  );
+  const maxOf = (c) => {
+    if (c.embed) return 'Their player';
+    return c.quality && c.quality !== 'Auto' ? `up to ${c.quality}` : 'Auto quality';
+  };
   const labels = videoLabels(choices);
 
   // Tick exactly ONE row, by POSITION rather than by id equality: ids are
