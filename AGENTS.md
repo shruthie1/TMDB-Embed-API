@@ -23,11 +23,11 @@ taken; re-measure before trusting an old number.
 - Playback path: `web/lib/player/useResolve.js` → `web/lib/backend.js` →
   `GET /api/streams/:type/:tmdbId`.
 
-Test baselines (2026-09-23, both green):
+Test baselines (2026-11-16, both green):
 
 ```
-api   npm test         118 passed, 0 failed
-web   npx vitest run   51 files, 529 passed, 0 failed
+api   npm test         180 passed, 0 failed
+web   npx vitest run   67 files, 642 passed, 0 failed
 ```
 
 ## The one rule that keeps being relearned
@@ -337,6 +337,30 @@ survival of the fleet outranks this app: never restart the fleet to fix it.
   `apt-get -s` showed 149 new packages and 0 upgrades.
 - Rollback: set Vercel `API_ORIGIN` back to `https://tmdb-embed-api-sand.vercel.app`,
   redeploy web, re-alias chtrm2.
+
+## Reliability knobs (2026-11-16)
+
+| Env | Default | Effect |
+|---|---|---|
+| `FIRST_ANSWER_GRACE_MS` | 400 | With `PRIMARY_PROVIDERS` set, once a preferred-language stream exists the rest get this long, then the answer goes out with `partial: true` and they finish in the background. No Telugu stream yet: it still waits for the primaries. |
+| `PROXY_RATE_LIMIT_PER_MIN` | 600 | Per IP, shared by /m3u8-proxy, /ts-proxy, /sub-proxy. 0 = off. |
+| `SHUTDOWN_GRACE_MS` | 8000 | SIGTERM/SIGINT drain. PM2's default kill_timeout is 1600ms, so set `--kill-timeout 10000` on the app to use it. |
+| `CASTLE_DEMUX_FETCH_TIMEOUT_MS` | 8000 | Castle playlist/probe fetch on the /api/streams path. |
+
+- `/api/health` returns uptime, memory (MB), per-provider breakers, `openBreakers`, uncaught/unhandled counts.
+- Every response has `X-Request-Id`; log lines a request causes start with `[<id>]`.
+- Boot exits 1 on an invalid port or malformed `PUBLIC_BASE_URL`; other config problems log `[startup][warning]`.
+- `utils/user-config.json` is gitignored (it held the TMDB key). The loader falls back to the tracked `utils/user-config.example.json`. The key belongs in `.env` as `TMDB_API_KEY`.
+- Web: `/api/streams` retries 5xx/429/network errors twice (0.8s, 2.5s); complete answers are cached per title in sessionStorage for 4 min; any fatal hls.js error fails over to the next source before showing an error; the stall ladder is 12/25/40s and also fails over a source that never started.
+
+## Deploying the API to VM1
+
+`SSHPASS=... scripts/deploy-vm.sh` (add `--dry-run` to stage and check only).
+It ships `git archive HEAD` (no web/, tests, secrets), keeps the VM's `.env`,
+`utils/user-config.json`, `ADMIN_PASSWORD` and node_modules, runs
+`node --check`, backs up to `/root/tmdb-embed-api-backups/`, restarts only
+`tmdb-embed-api`, health-checks local and public, and rolls back on failure.
+It never runs `pm2 save`.
 
 ## Deploying the web app
 
