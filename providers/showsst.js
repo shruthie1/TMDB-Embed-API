@@ -4,88 +4,168 @@
 // Two things make it worth having despite its ceiling:
 //   - it maps on TMDB id directly, so it cannot land on the wrong film the way
 //     a title-matched provider can;
-//   - it answers in well under a second with no auth, no session, no browser.
+//   - it answers in a second or two with no auth, no session, no browser.
 //
-// IT CAPS AT 1080p. Measured 2026-09-21 on Devara (811941): the ladder is
-// 640x268 / 1280x536 / 1920x804 and nothing above. For 4K use mappleapi.
+// HOST HISTORY. The routes (/movie?id=&mode=json, /tv?id=&season=&episode=)
+// never changed; only the host did.
+//   - api.shows.st until 2026-09-11 (Cloudflare blocked the zone for ToS).
+//   - api.vidlove.cc until 2026-11-05: its NS was reset to the registrar's
+//     default (ns1.dnsserv.nu/.se), which answer REFUSED, so every resolver
+//     returns SERVFAIL. Cloudflare also blocked the HLS CDN phantomflix.net.
+//   - api.vidqueen.st and api.vidmario.net since. Found 2026-11-16 in the
+//     network's own site 67movies.st, which now embeds player.vidqueen.st.
+// SHOWSST_API_BASE + SHOWSST_ORIGIN put one more mirror in front.
 //
-// IT CARRIES NO SELECTABLE AUDIO. The same measurement found ZERO
-// #EXT-X-MEDIA:TYPE=AUDIO lines - audio is muxed into each variant as a single
-// mp4a track in whatever language the release used. That is precisely why
-// utils/hybridStream.js exists: this provider supplies the picture, and a
-// rendition-bearing provider (castle-demux, netmirror) supplies the languages.
+// THE API GATES ON BROWSER HEADERS. Measured 2026-11-16: with a bare UA +
+// Referer it answers 200 {"source":null} for every title (even 155). Dropping
+// any one of Accept-Language, Referer, Sec-Fetch-Site/Mode/Dest, sec-ch-ua,
+// sec-ch-ua-platform, priority or compression brings the null back. An Origin
+// that is not one of its players gets 403 "forbidden". /vphint returns
+// {"dc":false} from a residential IP, so a datacenter IP may also be gated.
 //
-// The host has moved before (api.shows.st was Cloudflare-blocked, now
-// api.vidlove.cc) with the routes unchanged, so the base is configurable.
+// WHAT IT SERVES NOW. Only the default source answers (sources=s1..s7 are
+// null on the titles tried): MovieBox MP4 files, one URL per quality, up to
+// 2160p, with byte-range support. The old 1080p HLS ladder ("VidAPI") died
+// with phantomflix.net. HLS is still handled in case it returns.
+//
+// NO SELECTABLE AUDIO. One muxed track in the release language; no language
+// is claimed because the api does not say.
 
-const API_BASE = process.env.SHOWSST_API_BASE || 'https://api.vidlove.cc';
-const PLAYER_ORIGIN = process.env.SHOWSST_ORIGIN || 'https://player.vidlove.cc';
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
-    + '(KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36';
+    + '(KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36';
 const TIMEOUT_MS = Number(process.env.SHOWSST_TIMEOUT_MS) || 12000;
+const PROBE_TIMEOUT_MS = 4000;
 
-// The stream host rejects a request that does not look like it came from the
-// player page, so these travel with every downstream fetch too - they are
-// handed back on the stream so the proxy can replay them.
-function streamHeaders() {
-    return { 'User-Agent': UA, Referer: `${PLAYER_ORIGIN}/`, Origin: PLAYER_ORIGIN };
+const MIRRORS = [
+    ...(process.env.SHOWSST_API_BASE ? [{
+        api: process.env.SHOWSST_API_BASE,
+        player: process.env.SHOWSST_ORIGIN || process.env.SHOWSST_API_BASE.replace('//api.', '//player.'),
+    }] : []),
+    { api: 'https://api.vidqueen.st', player: 'https://player.vidqueen.st' },
+    { api: 'https://api.vidmario.net', player: 'https://player.vidmario.net' },
+].map((m) => ({ api: String(m.api).replace(/\/+$/, ''), player: String(m.player).replace(/\/+$/, '') }));
+const API_BASE = MIRRORS[0].api;
+
+// Headers for the stream host. The MP4 hosts answer 206 with or without a
+// Referer; the player's own Referer is kept as the safe default.
+function streamHeaders(player = MIRRORS[0].player) {
+    return { 'User-Agent': UA, Referer: `${player}/`, Origin: player };
+}
+
+// What Chrome sends on the player's cross-origin fetch. Each one is needed.
+function apiHeaders(player) {
+    return {
+        'User-Agent': UA,
+        Accept: 'application/json',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        Origin: player,
+        Referer: `${player}/`,
+        'Sec-Fetch-Site': 'same-site',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Dest': 'empty',
+        'sec-ch-ua': '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"macOS"',
+        priority: 'u=1, i',
+    };
+}
+
+// MovieBox URLs are `.../api?d=<blob>` with no extension, and the proxy sends
+// anything without `.mp4`/`.mkv` to /m3u8-proxy, which would read an 8 GB file
+// as playlist text. Ask the host what the URL is.
+async function probeContainer(url, headers, fallback) {
+    if (/\.m3u8(\?|$)/i.test(url)) return 'hls';
+    if (/\.(mp4|mkv)(\?|$)/i.test(url)) return 'mp4';
+    try {
+        const res = await fetch(url, {
+            headers: { ...headers, Range: 'bytes=0-15' },
+            signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+        });
+        const type = String(res.headers.get('content-type') || '').toLowerCase();
+        const head = Buffer.from(await res.arrayBuffer()).subarray(0, 16);
+        if (head.toString('latin1').startsWith('#EXTM3U') || /mpegurl/.test(type)) return 'hls';
+        if (head.subarray(4, 8).toString('latin1') === 'ftyp' || /video\/mp4/.test(type)) return 'mp4';
+        if (/matroska|x-mkv/.test(type)) return 'mkv';
+    } catch (e) {
+        console.log(`[showsst] container probe failed: ${e.message}; assuming ${fallback}`);
+    }
+    return fallback;
+}
+
+// A fragment never leaves the client, so `#.mp4` changes nothing upstream but
+// makes processStreamsForProxy pick /ts-proxy (it matches /\.(mp4|mkv)$/).
+function forProxy(url, container) {
+    return container === 'mp4' || container === 'mkv' ? `${url}#.${container}` : url;
+}
+
+async function callMirror(mirror, path) {
+    const res = await fetch(`${mirror.api}${path}`, {
+        headers: apiHeaders(mirror.player),
+        signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
 }
 
 async function getShowsstStreams(tmdbId, mediaType = 'movie', seasonNum = null, episodeNum = null) {
     console.log(`[showsst] Fetching streams for TMDB ID: ${tmdbId}, Type: ${mediaType}`);
-    const base = String(API_BASE).replace(/\/+$/, '');
+    // `season`/`episode` spelled out in full: `s`/`e` get {"error":"missing parameters"}.
+    const path = mediaType === 'tv'
+        ? `/tv?id=${tmdbId}&season=${seasonNum || 1}&episode=${episodeNum || 1}&mode=json`
+        : `/movie?id=${tmdbId}&mode=json`;
 
-    // `season`/`episode` spelled out in full. The old host accepted `s`/`e`;
-    // this one answers those with {"error":"missing parameters"}, which reads
-    // as an ordinary miss and would hide a total TV outage.
-    const url = mediaType === 'tv'
-        ? `${base}/tv?id=${tmdbId}&season=${seasonNum || 1}&episode=${episodeNum || 1}&mode=json`
-        : `${base}/movie?id=${tmdbId}&mode=json`;
-
-    try {
-        const res = await fetch(url, {
-            headers: { Accept: 'application/json', ...streamHeaders() },
-            signal: AbortSignal.timeout(TIMEOUT_MS),
-        });
-        if (!res.ok) {
-            console.log(`[showsst] HTTP ${res.status} for ${tmdbId}`);
-            return [];
+    // Fail over on transport errors and non-2xx only. A null source is the
+    // shared backend's real answer; asking the next mirror repeats it.
+    let body = null; let mirror = null;
+    for (const m of MIRRORS) {
+        try {
+            body = await callMirror(m, path);
+            mirror = m;
+            break;
+        } catch (e) {
+            console.log(`[showsst] ${m.api} failed for ${tmdbId}: ${e.message}`);
         }
-        const body = await res.json().catch(() => null);
-        const source = body && body.source;
-        const streamUrl = source && source.url;
-        if (!streamUrl) {
-            console.log(`[showsst] No source url for ${tmdbId}`);
-            return [];
-        }
-
-        // Subtitles come back alongside and cost nothing to carry.
-        const subtitles = Array.isArray(body.subtitles)
-            ? body.subtitles.filter((s) => s && s.url).map((s, i) => ({
-                url: s.url, lang: s.label || s.lang || `Subtitle ${i + 1}`, id: `sst-${i}`,
-            }))
-            : [];
-
-        console.log(`[showsst] Got 1 stream for ${tmdbId} (${source.label || 'source'})`);
-        return [{
-            url: streamUrl,
-            provider: 'showsst',
-            // No language is claimed. The api does not say, and inventing one
-            // would put a wrong label in the audio menu - worse than silence.
-            languages: [],
-            // Deliberately explicit: the master carries no switchable audio, so
-            // the UI must not offer a menu that cannot do anything.
-            selectableAudio: false,
-            quality: '1080p',
-            container: 'hls',
-            subtitles,
-            headers: streamHeaders(),
-            title: `showsst · ${source.label || 'VidAPI'}`,
-        }];
-    } catch (e) {
-        console.error(`[showsst] fetch error for ${tmdbId}:`, e.message);
+    }
+    const source = body && body.source;
+    if (!source || !source.url) {
+        console.log(`[showsst] No source url for ${tmdbId}`);
         return [];
     }
+
+    const subtitles = Array.isArray(body.subtitles)
+        ? body.subtitles.filter((s) => s && (s.file || s.url)).map((s, i) => ({
+            url: s.file || s.url, lang: s.label || s.lang || `Subtitle ${i + 1}`, id: `sst-${i}`,
+        }))
+        : [];
+
+    const headers = streamHeaders(mirror.player);
+    // HEVC is dropped the way the player drops it when the browser cannot decode it.
+    const variants = Array.isArray(source.qualities) && source.qualities.length
+        ? source.qualities.filter((q) => q && q.url && q.codec !== 'hevc')
+            .map((q) => ({ url: q.url, quality: q.quality || 'Auto' }))
+        : [{ url: source.url, quality: typeof source.manifest === 'string' ? 'Auto' : '1080p' }];
+    if (!variants.length) variants.push({ url: source.url, quality: 'Auto' });
+
+    // One probe: every variant of a source is served by the same host and kind.
+    // When the probe cannot answer (lens.surrealviews.com took >4s for 16 bytes
+    // on 1376856), a per-quality URL list means separate progressive files;
+    // an HLS source carries its ladder inside one master instead.
+    const hasQualities = Array.isArray(source.qualities) && source.qualities.length > 0;
+    const container = await probeContainer(variants[0].url, headers, hasQualities ? 'mp4' : 'hls');
+    const label = source.label || 'source';
+    console.log(`[showsst] Got ${variants.length} stream(s) for ${tmdbId} (${label}, ${container}, ${mirror.api})`);
+    return variants.map((v) => ({
+        url: forProxy(v.url, container),
+        provider: 'showsst',
+        languages: [],
+        selectableAudio: false,
+        quality: v.quality,
+        container,
+        subtitles,
+        headers,
+        title: `showsst · ${label}`,
+    }));
 }
 
-module.exports = { getShowsstStreams, API_BASE, streamHeaders };
+module.exports = { getShowsstStreams, API_BASE, MIRRORS, streamHeaders };
