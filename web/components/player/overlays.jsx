@@ -142,7 +142,7 @@ export function NextUp({ ep, onPlay, onDismiss }) {
     <div className="overlay nextup" role="dialog" aria-label="Next episode">
       <p className="ov-eyebrow">Next episode</p>
       <p className="ov-title">S{ep.season}E{ep.episode} · {ep.title}</p>
-      <div className="actions" style={{ marginTop: 22 }}>
+      <div className="actions nextup-actions">
         <button className="btn primary focusable" data-focus="" onClick={onPlay} autoFocus>
           {held ? 'Play next' : `Play next · ${left}s`}
         </button>

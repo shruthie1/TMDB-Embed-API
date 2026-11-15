@@ -93,8 +93,10 @@ export default function VideoMenu({
               aria-expanded={only ? undefined : Boolean(open)}
               aria-disabled={only || undefined}
               onClick={(e) => { e.stopPropagation(); if (!only) onToggle?.(); }}>
-        <Icon name="quality" size={17} />
+        <Icon name="server" size={17} />
+        <span className="pctl-pick-label">Server</span>
         <span className="pctl-pick-badge">{badge}</span>
+        <Icon name="chevron" size={16} className="pctl-pick-chev" />
       </button>
 
       {open && !only && (

@@ -61,7 +61,7 @@ export function sourceMeta(source) {
  * longer duplicates it.
  */
 function SettingsSheet({ subs, currentSub, onPickSub, subLoading, subPrefs, onSubPrefs,
-                          onClose }) {
+                          onClose, picks }) {
   return (
     <>
       <div className="pmenu-sheet-head">
@@ -71,11 +71,16 @@ function SettingsSheet({ subs, currentSub, onPickSub, subLoading, subPrefs, onSu
         </button>
       </div>
 
+      <div className="pmenu-sheet-body">
       {/* The provider list used to live here. It moved out to its own
           "Servers" control in the row on 2026-09-22: with a dedicated button
           showing the provider and the best quality it supports, repeating the
           same list behind Settings was two places to change one thing, and
           the sheet is now just subtitles. */}
+
+      {/* Phones: quality, server and audio live here, as rows that open their
+          list in place, so the control row keeps one settings button. */}
+      {picks && <div className="pmenu-group sheet-picks">{picks}</div>}
 
       {subs.length > 0 && (
         <div className="pmenu-group">
@@ -126,6 +131,7 @@ function SettingsSheet({ subs, currentSub, onPickSub, subLoading, subPrefs, onSu
           )}
         </div>
       )}
+      </div>
     </>
   );
 }
@@ -202,7 +208,7 @@ export default function PlayerControls({
   // seeking by double-tap rather than by two more buttons in a cramped row.
   const [compact, setCompact] = useState(false);
   useEffect(() => {
-    const mq = window.matchMedia('(max-width:559px), (pointer:coarse) and (max-width:900px)');
+    const mq = window.matchMedia('(max-width:639px), (pointer:coarse) and (max-width:900px)');
     const on = () => setCompact(mq.matches);
     on(); mq.addEventListener('change', on);
     return () => mq.removeEventListener('change', on);
@@ -337,6 +343,76 @@ export default function PlayerControls({
     setTimeout(() => setTapHint(null), 520);
   };
 
+  // Quality, server and audio. In the row on wider screens; on phones they
+  // move into the settings sheet (see SettingsSheet), so the row keeps at most
+  // five buttons. `back` is where closing one of them returns to.
+  const back = compact ? 'all' : null;
+  const sheetOpen = menu === 'all' || (compact && ['quality', 'video', 'audio'].includes(menu));
+  const picks = (
+    <>
+          {/* Quality and audio, each its own control showing its current value.
+              They sit left of the gear because they are reached far more often
+              than source or subtitles, and `menu` stays a single value so
+              opening one closes the others - two open popups overlapping in a
+              390px row is what the one-sheet design was avoiding. */}
+          <QualityMenu levels={levels} currentLevel={currentLevel} autoLevel={autoLevel}
+                       onPickLevel={onPickLevel}
+                       open={menu === 'quality'} onTouch={touchSheet}
+                       onToggle={() => openMenu(menu === 'quality' ? back : 'quality')} />
+
+          {/* Picture, as its own control. Answers "whose video"; AudioMenu
+              answers "which language". Two lists rather than one list of
+              fused combinations - see web/lib/player/trackChoices.js. */}
+          <VideoMenu choices={videoList} currentId={currentSourceId}
+                     onPick={(c) => { if (c?.source) onPickSource?.(c.source); }}
+                     open={menu === 'video'} onTouch={touchSheet}
+                     onToggle={() => openMenu(menu === 'video' ? back : 'video')} />
+
+          {/* One Audio button regardless of how the provider ships languages.
+              A multi-track file switches in place; a provider that ships one
+              stream PER language (Salaar: 13 streams = 6 languages x 2
+              qualities) switches source behind the same control, so the
+              viewer never has to know the difference. */}
+          <AudioMenu audioTracks={mergedAudio} currentAudio={audioMenu.current}
+                     onPickAudio={(id) => {
+                       // An in-file track switch is the cheap path, but the
+                       // menu also lists languages from OTHER sources, whose
+                       // ids are not hls track indices. pickAudio returns
+                       // false when it refuses one, and we fall through to
+                       // the source-switch / pairing paths below rather than
+                       // leaving the label switched and the audio unchanged.
+                       if (audioMenu.kind === 'muxed' && onPickAudio?.(id) !== false) return;
+                       // onPickSource takes the SOURCE OBJECT, not an id:
+                       // switchSource bails on `!src?.masterUrl`, so passing an
+                       // id here would silently do nothing. It preserves the
+                       // playback position (resumeAt), so switching language
+                       // mid-film resumes where the viewer was.
+                       const next = sources.find((sc) => sc.id === id);
+                       if (next) {
+                         // A per-language sibling source. Name the language so
+                         // the choice outlives a later server switch, the same
+                         // way an in-file pick and a pairing do.
+                         const named = audioMenu.options.find((o) => o.id === id);
+                         onPickSource?.(next, named?.name || null);
+                         return;
+                       }
+                       // Not a sibling source: a language living in ANOTHER
+                       // provider, to be paired with the picture already
+                       // playing. pairingFor says whether that is possible or
+                       // whether it has to substitute the picture instead.
+                       const choice = audioList.find((c) => c.id === id);
+                       if (!choice) return;
+                       const video = videoList.find((c) => c.id === currentSourceId);
+                       const plan = pairingFor(video, choice);
+                       onPickPair?.(plan);
+                     }}
+                     sync={audioSync}
+                     open={menu === 'audio'} onTouch={touchSheet}
+                     onToggle={() => openMenu(menu === 'audio' ? back : 'audio')} />
+
+    </>
+  );
+
   const pct = state.dur ? (state.t / state.dur) * 100 : 0;
   const bufPct = state.dur ? (state.buffered / state.dur) * 100 : 0;
 
@@ -425,74 +501,16 @@ export default function PlayerControls({
 
           <span className="pctl-spacer" />
 
-          {/* Quality and audio, each its own control showing its current value.
-              They sit left of the gear because they are reached far more often
-              than source or subtitles, and `menu` stays a single value so
-              opening one closes the others - two open popups overlapping in a
-              390px row is what the one-sheet design was avoiding. */}
-          <QualityMenu levels={levels} currentLevel={currentLevel} autoLevel={autoLevel}
-                       onPickLevel={onPickLevel}
-                       open={menu === 'quality'} onTouch={touchSheet}
-                       onToggle={() => openMenu(menu === 'quality' ? null : 'quality')} />
-
-          {/* Picture, as its own control. Answers "whose video"; AudioMenu
-              answers "which language". Two lists rather than one list of
-              fused combinations - see web/lib/player/trackChoices.js. */}
-          <VideoMenu choices={videoList} currentId={currentSourceId}
-                     onPick={(c) => { if (c?.source) onPickSource?.(c.source); }}
-                     open={menu === 'video'} onTouch={touchSheet}
-                     onToggle={() => openMenu(menu === 'video' ? null : 'video')} />
-
-          {/* One Audio button regardless of how the provider ships languages.
-              A multi-track file switches in place; a provider that ships one
-              stream PER language (Salaar: 13 streams = 6 languages x 2
-              qualities) switches source behind the same control, so the
-              viewer never has to know the difference. */}
-          <AudioMenu audioTracks={mergedAudio} currentAudio={audioMenu.current}
-                     onPickAudio={(id) => {
-                       // An in-file track switch is the cheap path, but the
-                       // menu also lists languages from OTHER sources, whose
-                       // ids are not hls track indices. pickAudio returns
-                       // false when it refuses one, and we fall through to
-                       // the source-switch / pairing paths below rather than
-                       // leaving the label switched and the audio unchanged.
-                       if (audioMenu.kind === 'muxed' && onPickAudio?.(id) !== false) return;
-                       // onPickSource takes the SOURCE OBJECT, not an id:
-                       // switchSource bails on `!src?.masterUrl`, so passing an
-                       // id here would silently do nothing. It preserves the
-                       // playback position (resumeAt), so switching language
-                       // mid-film resumes where the viewer was.
-                       const next = sources.find((sc) => sc.id === id);
-                       if (next) {
-                         // A per-language sibling source. Name the language so
-                         // the choice outlives a later server switch, the same
-                         // way an in-file pick and a pairing do.
-                         const named = audioMenu.options.find((o) => o.id === id);
-                         onPickSource?.(next, named?.name || null);
-                         return;
-                       }
-                       // Not a sibling source: a language living in ANOTHER
-                       // provider, to be paired with the picture already
-                       // playing. pairingFor says whether that is possible or
-                       // whether it has to substitute the picture instead.
-                       const choice = audioList.find((c) => c.id === id);
-                       if (!choice) return;
-                       const video = videoList.find((c) => c.id === currentSourceId);
-                       const plan = pairingFor(video, choice);
-                       onPickPair?.(plan);
-                     }}
-                     sync={audioSync}
-                     open={menu === 'audio'} onTouch={touchSheet}
-                     onToggle={() => openMenu(menu === 'audio' ? null : 'audio')} />
+          {!compact && picks}
 
           <div className="pmenu-wrap pctl-picks">
             <button className="icon-btn focusable" data-focus="" aria-label="Settings"
                     title="Source and subtitle settings"
-                    aria-haspopup="menu" aria-expanded={menu === 'all'}
-                    onClick={e => { e.stopPropagation(); openMenu(menu === 'all' ? null : 'all'); }}>
+                    aria-haspopup="menu" aria-expanded={sheetOpen}
+                    onClick={e => { e.stopPropagation(); openMenu(sheetOpen ? null : 'all'); }}>
               <Icon name="settings" size={18} />
             </button>
-            {menu === 'all' && (
+            {sheetOpen && (
               <div className="pmenu pmenu-sheet" role="menu" data-focus-group=""
                    onClick={e => { e.stopPropagation(); touchSheet(); }}
                    onPointerDown={touchSheet}
@@ -504,6 +522,7 @@ export default function PlayerControls({
                   subLoading={subLoading}
                   subPrefs={subPrefs} onSubPrefs={onSubPrefs}
                   onClose={() => openMenu(null)}
+                  picks={compact ? picks : null}
                 />
               </div>
             )}
@@ -511,6 +530,7 @@ export default function PlayerControls({
 
           {/* Picture fit. Next to fullscreen because they are the same
               question - how the frame meets the screen. */}
+          {!compact && (
           <button className="icon-btn focusable" data-focus=""
                   aria-label={`Picture fit: ${fit === 'contain' ? 'whole frame'
                     : fit === 'cover' ? 'fill and crop' : 'stretch'}`}
@@ -518,6 +538,7 @@ export default function PlayerControls({
             <Icon name={fit === 'contain' ? 'fit-contain'
                       : fit === 'cover' ? 'fit-cover' : 'fit-fill'} size={17} />
           </button>
+          )}
 
           <button className="icon-btn focusable" data-focus="" aria-label="Fullscreen"
                   onClick={() => {

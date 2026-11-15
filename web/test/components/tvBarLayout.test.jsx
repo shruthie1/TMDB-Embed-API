@@ -114,8 +114,9 @@ describe('TvBar CSS contract', () => {
     expect(CSS).toMatch(/\.tvbar \.focusable:focus[\s\S]{0,80}transform:none/);
     const focus = rule('.tvbar-btn:focus,.tvbar-btn:focus-visible');
     expect(focus).toBeTruthy();
-    expect(focus).toMatch(/box-shadow:[^;]*var\(--paper\)/);
     expect(focus).not.toMatch(/scale\(/);
+    // The ring is the app-wide one: an outline, which takes no layout.
+    expect(CSS).toMatch(/html\[data-tv="true"\] \.focusable:focus\{outline:var\(--focus-ring\)/);
   });
 
   it('insets the bar from the panel edges for overscan', () => {
@@ -139,10 +140,14 @@ describe('TvBar CSS contract', () => {
   it('keeps the focus lift for .focusable OUTSIDE the bar', () => {
     // The transform:none override must be scoped to .tvbar descendants, or it
     // would flatten the focus cue on every card and rail in the app.
-    const m = CSS.match(/([^\n{]*)\{\s*transform:none\s*\}/g) || [];
+    // Every selector in such a rule must be scoped to something narrower than
+    // a bare `.focusable` (the bar, or one named control).
+    const m = CSS.match(/([^\n{}]*)\{\s*transform:none\s*\}/g) || [];
     for (const decl of m) {
-      if (!/focusable:focus/.test(decl)) continue;
-      expect(decl).toMatch(/\.tvbar\s/);
+      for (const sel of decl.split('{')[0].split(',')) {
+        if (!/focusable:focus/.test(sel)) continue;
+        expect(sel.trim()).not.toMatch(/^(\[data-tv="true"\]\s+)?\.focusable:focus/);
+      }
     }
   });
 });

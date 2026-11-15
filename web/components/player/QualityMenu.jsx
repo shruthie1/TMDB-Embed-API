@@ -34,7 +34,9 @@ export default function QualityMenu({
               aria-haspopup="menu" aria-expanded={Boolean(open)}
               onClick={e => { e.stopPropagation(); onToggle?.(); }}>
         <Icon name="quality" size={17} />
+        <span className="pctl-pick-label">Quality</span>
         <span className="pctl-pick-badge">{badge}</span>
+        <Icon name="chevron" size={16} className="pctl-pick-chev" />
       </button>
 
       {open && (

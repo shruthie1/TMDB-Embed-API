@@ -57,7 +57,9 @@ export default function AudioMenu({
               aria-disabled={only || undefined}
               onClick={e => { e.stopPropagation(); if (!only) onToggle?.(); }}>
         <Icon name="audio" size={17} />
+        <span className="pctl-pick-label">Audio</span>
         <span className="pctl-pick-badge">{badge}</span>
+        <Icon name="chevron" size={16} className="pctl-pick-chev" />
       </button>
 
       {open && !only && (

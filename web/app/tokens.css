@@ -27,12 +27,27 @@
   --color-surface-2:rgb(var(--rgb-surface) / .75);   /* raised glass */
   --color-surface-3:rgb(var(--rgb-surface) / .92);   /* near-opaque sheet */
   --color-surface-solid:#11131E;                      /* poster placeholder, inputs */
-  --color-border:rgb(var(--rgb-white) / .12);       /* neutral; accent never used for borders */
-  --color-border-strong:rgb(var(--rgb-white) / .24);
+  --color-border:rgb(var(--rgb-white) / .12);       /* the one border; accent never used for borders */
+  --color-border-hover:rgb(var(--rgb-white) / .24); /* hover, and controls that need a visible edge */
+  --color-border-strong:var(--color-border-hover);  /* legacy name */
+  /* Light fills on the dark page, low to high: hover wash, secondary button, pressed. */
+  --color-fill-0:rgb(var(--rgb-white) / .04);
+  --color-fill-1:rgb(var(--rgb-white) / .06);
+  --color-fill-2:rgb(var(--rgb-white) / .1);
+  --color-fill-3:rgb(var(--rgb-white) / .18);
+  /* Dark overlays (scrims and fades) over art, low to high. */
+  --color-overlay-1:rgb(var(--rgb-bg) / .12);
+  --color-overlay-2:rgb(var(--rgb-bg) / .3);
+  --color-overlay-3:rgb(var(--rgb-bg) / .5);
+  --color-overlay-4:rgb(var(--rgb-bg) / .7);
+  --color-overlay-5:rgb(var(--rgb-bg) / .9);
   --color-text-primary:rgb(var(--rgb-text));          /* 17.6:1 on bg */
   --color-text-secondary:#C9CCDB;                     /* 12.6:1 on bg */
   --color-text-muted:#9497AA;                         /* 6.9:1 on bg */
-  --color-text-dim:#6B6E80;                           /* 3.9:1, decorative/large only */
+  --color-text-dim:#6B6E80;
+  --text-faint:rgb(var(--rgb-white) / .25);          /* indicators, decorative only */
+  --indicator:var(--text-faint);
+  --indicator-active:var(--color-text-primary);                           /* 3.9:1, decorative/large only */
   --color-white:#FFFFFF;
   --color-black:#000000;
   --color-accent-from:rgb(var(--rgb-accent-from));
@@ -43,6 +58,7 @@
   --color-accent-gradient:linear-gradient(120deg,var(--color-accent-from),var(--color-accent-to));
   --color-on-accent:#FFFFFF;
   --color-success:rgb(var(--rgb-success));
+  --color-success-bg:rgb(var(--rgb-success) / .12);
   --color-warn:rgb(var(--rgb-warn));
   --color-danger:rgb(var(--rgb-danger));
   --color-success-line:#2E5C45;
@@ -51,18 +67,23 @@
   --color-danger-bg:#2A1414;
   --color-danger-text:#F0B8B8;
   --color-focus:var(--color-accent-to);
-  --color-player-bg:var(--color-black);
+  --color-player-bg:var(--color-bg);   /* player stage and letterbox: the app ground, so no seam against the page */
   --color-scrim:rgb(var(--rgb-bg) / .66);
   --color-accent:var(--color-accent-to);          /* the one accent: progress, active dot/tab, focus */
   --header-scrim:linear-gradient(to bottom,rgb(var(--rgb-black) / .7),rgb(var(--rgb-black) / 0));
   --header-scrim-h:120px;
+  --glass-bg:rgb(var(--rgb-bg) / .72);   /* dark glass: scrolled header and bottom tab bar */
+  --glass-blur:blur(16px) saturate(140%);
+  --glass-hairline:rgb(var(--rgb-white) / .06);
 
   /* ── Buttons and chips ── */
   --btn-primary-bg:var(--color-white);
   --btn-primary-bg-hover:rgb(var(--rgb-white) / .82);
   --btn-primary-fg:var(--color-bg);
-  --btn-secondary-bg:rgb(var(--rgb-white) / .1);
-  --btn-secondary-bg-hover:rgb(var(--rgb-white) / .18);
+  --btn-secondary-bg:var(--color-fill-2);
+  --btn-secondary-bg-hover:var(--color-fill-3);
+  /* Secondary button over art (hero): dark glass so it reads on a light frame. */
+  --btn-on-art-bg:rgb(var(--rgb-black) / .45);
   --btn-secondary-fg:var(--color-text-primary);
   --chip-on-bg:rgb(var(--rgb-white) / .9);
   --chip-on-fg:var(--color-bg);
@@ -72,14 +93,10 @@
   --art-cool:linear-gradient(145deg,#487798,#162C43 64%,#D9A65C);
 
   /* ── Radius ── */
-  --radius-xs:4px;
-  --radius-sm:8px;
-  --radius-md:12px;
-  --radius-lg:16px;
-  --radius-xl:24px;
-  --radius-pill:999px;
-  --radius-round:50%;
-  --radius-card:14px;
+  --radius-sm:6px;     /* badges, menu rows, small controls */
+  --radius-md:10px;    /* cards, posters, inputs, tiles */
+  --radius-lg:16px;    /* sheets, dialogs, panels */
+  --radius-pill:999px; /* buttons, chips, dots, avatars */
 
   /* ── Spacing: 4-based. Half steps keep existing layouts exact. ── */
   --space-0-5:2px;
@@ -130,9 +147,10 @@
   --shadow-sm:0 2px 8px rgb(var(--rgb-black) / .35);
   --shadow-md:0 8px 24px rgb(var(--rgb-black) / .45);
   --shadow-lg:0 24px 64px rgb(var(--rgb-black) / .55);
-  --glow-focus:0 0 0 2px var(--color-focus);   /* a plain ring, no blur */
-  --ring-neutral:2px solid rgb(var(--rgb-white) / .6);   /* player and quiet controls */
-  --ring-offset:2px;
+  /* Focus: ONE ring for every interactive element, applied in globals.css
+     ("Focus: one ring"). Shown on :focus-visible only, never on a click. */
+  --focus-ring:2px solid var(--color-accent);
+  --focus-offset:2px;
 
   /* ── Glass ── */
   --blur-sm:blur(8px);
@@ -147,6 +165,7 @@
   --ease-standard:cubic-bezier(.2,.7,.3,1);
   --ease-out:cubic-bezier(.16,1,.3,1);
   --focus-scale:1.04;
+  --hero-rotate:8s;          /* home carousel interval; ROTATE_MS in components/Hero.jsx */
 
   /* ── Z-index layers ── */
   --z-raised:1;
@@ -170,7 +189,17 @@
   --btn-h:40px;
   --btn-font:15px;
   --control-h:32px;
-  --tabbar-h:56px;               /* phone bottom tab bar, plus the safe area */
+  --tabbar-h:56px;
+  /* Phone home hero (< 640px): 4:5-ish, text stack <= ~32% of it. */
+  --hero-height-phone:min(78svh, 125vw);
+  --hero-title-phone:24px;
+  --hero-title-phone-lh:1.2;
+  --hero-meta-phone:12px;
+  --btn-h-phone:40px;
+  --btn-font-phone:14px;
+  --hero-scrim-phone:linear-gradient(to bottom,transparent 50%,var(--color-overlay-3) 70%,var(--color-overlay-5) 88%,var(--color-bg) 100%);
+  --rail-focus-pad:var(--space-3);
+  --hero-dots-bottom:var(--space-3);  /* carousel bars, centred on the hero */ /* room in a rail for the focus ring and scale */               /* phone bottom tab bar, plus the safe area */
   --header-height:48px;         /* compact header: phone 48, desktop 56, TV 64 */
   --header-pad-y:var(--space-1);
   --header-h:var(--header-height); /* measured and overwritten by HeaderScroll.jsx */
@@ -190,13 +219,13 @@
   --display:var(--font-display);
   --ui:var(--font-sans);
   --telugu:var(--font-telugu);
-  --radius:var(--radius-card);
+  --radius:var(--radius-md);
   --ease:var(--ease-standard);
   --focus-ms:var(--duration-slow);
 }
 
 @media (min-width:720px){
-  :root{--hero-height:min(78vh, 56.25vw);--hero-title-size:clamp(32px,3.6vw,48px);--btn-h:44px;--control-h:34px;--header-height:56px;--header-pad-y:var(--space-1-5)}
+  :root{--header-scrim:linear-gradient(to bottom,rgb(var(--rgb-bg) / .85),rgb(var(--rgb-bg) / 0));--header-scrim-h:160px;--hero-dots-bottom:var(--space-6);--hero-height:min(78vh, 56.25vw);--hero-title-size:clamp(32px,3.6vw,48px);--btn-h:44px;--control-h:34px;--header-height:56px;--header-pad-y:var(--space-1-5)}
 }
 
 @media (prefers-reduced-motion:reduce){
@@ -212,6 +241,9 @@
   --btn-h:52px;
   --btn-font:17px;
   --control-h:44px;
+  --rail-focus-pad:var(--space-5);
+  --glass-bg:rgb(var(--rgb-bg) / .85);
+  --glass-blur:none;
   --text-xs:13px;
   --text-sm:15px;
   --text-md:17px;
@@ -219,5 +251,4 @@
   --text-xl:28px;
   --text-2xl:34px;
   --gap:var(--space-4);
-  --glow-focus:0 0 0 3px var(--color-focus);
 }

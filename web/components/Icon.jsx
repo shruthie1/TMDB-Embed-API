@@ -48,6 +48,9 @@ const P = {
   // Quality: ascending bars, the universal "resolution ladder" read, and it
   // stays legible at 17px where a stacked "HD" wordmark does not.
   quality:    { d: 'M5 19v-5M12 19V9M19 19V5' },
+  // Server: two stacked racks. Servers used the quality bars too, so the row
+  // showed the same glyph twice.
+  server:     { d: 'M4 5h16v5H4zM4 14h16v5H4zM8 7.5h.01M8 16.5h.01' },
   // Audio: a speech/waveform pair. Deliberately NOT the speaker glyph, which
   // `volume` already owns - two buttons sharing a speaker in one row would
   // read as duplicate volume controls rather than language selection.

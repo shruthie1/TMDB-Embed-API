@@ -71,4 +71,33 @@ describe('PrefsModal', () => {
     fireEvent.keyDown(window, { key: 'Escape' });
     expect(dialog()).toBeNull();
   });
+
+  it('opens with every tile in the same state and focus on the dialog, not a tile', () => {
+    render(<PrefsButton />);
+    firstVisit();
+    const tiles = [...document.querySelectorAll('.lang-opt')];
+    expect(tiles).toHaveLength(5);
+    expect(new Set(tiles.map(t => t.className)).size).toBe(1);
+    expect(tiles.every(t => t.getAttribute('aria-pressed') === 'false')).toBe(true);
+    expect(document.activeElement).toBe(dialog());
+  });
+
+  it('selecting toggles aria-pressed and the selected class; focus never does', () => {
+    render(<PrefsButton />);
+    firstVisit();
+    const te = chip('Telugu');
+    act(() => { te.focus(); });
+    expect(te.className).not.toMatch(/\bon\b/);
+    expect(te.getAttribute('aria-pressed')).toBe('false');
+    fireEvent.click(te);
+    expect(te.className).toMatch(/\bon\b/);
+    expect(te.getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByText('1 selected')).toBeTruthy();
+    act(() => { chip('Hindi').focus(); });
+    expect(te.className).toMatch(/\bon\b/);
+    expect(chip('Hindi').className).not.toMatch(/\bon\b/);
+    fireEvent.click(te);
+    expect(te.className).not.toMatch(/\bon\b/);
+    expect(te.getAttribute('aria-pressed')).toBe('false');
+  });
 });

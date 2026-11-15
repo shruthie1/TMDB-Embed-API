@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import Icon from './Icon';
 import { PREF_LANGS, getPrefs, hasPrefs, savePrefs } from '../lib/prefs';
+import { isTv } from '../lib/dpad';
 
 const FOCUSABLE = 'button:not([disabled]), [href], [tabindex]:not([tabindex="-1"])';
 
@@ -23,8 +24,10 @@ export function PrefsModal({ open, onClose, firstVisit = false }) {
     setLangs(firstVisit ? [] : getPrefs().langs);
     const card = cardRef.current;
     const returnTo = document.activeElement;
-    // First language, not the close button, so the dialog opens on a choice.
-    (card?.querySelector('.lang-opt') || card?.querySelector(FOCUSABLE))?.focus();
+    // Focus the dialog itself, so no tile looks different on open. A TV has no
+    // pointer: there the first tile takes focus and shows the ring.
+    if (isTv()) card?.querySelector('.lang-opt')?.focus();
+    else card?.focus();
     // Keep Tab inside the dialog; arrows are scoped by lib/dpad.js.
     const onKey = (e) => {
       if (e.key === 'Escape' && !firstVisit) { e.stopPropagation(); onClose(); return; }
@@ -32,14 +35,24 @@ export function PrefsModal({ open, onClose, firstVisit = false }) {
       const items = [...card.querySelectorAll(FOCUSABLE)];
       if (!items.length) return;
       const first = items[0], last = items[items.length - 1];
-      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      if (e.shiftKey && (document.activeElement === first || document.activeElement === card)) { e.preventDefault(); last.focus(); }
       else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
       else if (!card.contains(document.activeElement)) { e.preventDefault(); first.focus(); }
     };
+    // Focus goes back to the trigger on close, showing the ring only if the
+    // dialog was being used from the keyboard: after a click or tap the ring
+    // would be a stray box on a button nobody is pointing at.
+    let viaKeys = false;
+    const onPointer = () => { viaKeys = false; };
+    const onAnyKey = (e) => { if (e.key === 'Tab' || e.key.startsWith('Arrow') || e.key === 'Enter' || e.key === ' ' || e.key === 'Escape') viaKeys = true; };
     window.addEventListener('keydown', onKey, true);
+    window.addEventListener('keydown', onAnyKey, true);
+    window.addEventListener('pointerdown', onPointer, true);
     return () => {
       window.removeEventListener('keydown', onKey, true);
-      if (returnTo instanceof HTMLElement) returnTo.focus();
+      window.removeEventListener('keydown', onAnyKey, true);
+      window.removeEventListener('pointerdown', onPointer, true);
+      if (returnTo instanceof HTMLElement) returnTo.focus({ focusVisible: viaKeys || isTv() });
     };
   }, [open, firstVisit, onClose]);
 
@@ -55,10 +68,13 @@ export function PrefsModal({ open, onClose, firstVisit = false }) {
     <div className="lang-modal-backdrop">
       {/* role=dialog on an in-flow element: lib/dpad.js scopes arrow keys to
           an open dialog only when it has an offsetParent. */}
-      <div ref={cardRef} className="lang-modal" role="dialog" aria-modal="true"
+      <div ref={cardRef} className="lang-modal" role="dialog" aria-modal="true" tabIndex={-1}
            aria-labelledby="lang-modal-title" aria-describedby="lang-modal-hint">
         <div className="lang-modal-head">
           <h2 id="lang-modal-title" className="lang-modal-title">Your languages</h2>
+          <span className="lang-modal-count" aria-live="polite">
+            {langs.length ? `${langs.length} selected` : ''}
+          </span>
           {!firstVisit && (
             <button type="button" className="icon-btn lang-close focusable" data-focus=""
                     aria-label="Close" onClick={onClose}>
@@ -84,10 +100,8 @@ export function PrefsModal({ open, onClose, firstVisit = false }) {
             );
           })}
         </div>
-        <p className="lang-modal-need" aria-live="polite">
-          {langs.length ? `${langs.length} selected` : 'Pick at least one language'}
-        </p>
         <div className="lang-modal-actions">
+          {!langs.length && <p className="lang-modal-need">Pick at least one language</p>}
           <button type="button" data-focus="" className="btn primary focusable lang-focus"
                   disabled={!langs.length} onClick={() => done({ langs })}>Save</button>
           <button type="button" data-focus="" className="btn focusable lang-focus"

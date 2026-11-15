@@ -6,6 +6,9 @@ import { Badge, Skeleton } from './ui';
 import { inList, toggleList } from '../lib/list';
 import { languageName } from '../lib/subtitles';
 
+/** Auto-advance interval. Must match --hero-rotate in app/tokens.css. */
+const ROTATE_MS = 8000;
+
 /**
  * Rotating hero. Pauses on hover/focus and under reduced-motion, so it never
  * yanks the page out from under someone mid-read.
@@ -39,9 +42,11 @@ export default function Hero({ titles = [], loading }) {
   useEffect(() => {
     if (paused || pool.length < 2) return;
     if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
-    const id = setInterval(() => setI(v => (v + 1) % pool.length), 8000);
-    return () => clearInterval(id);
-  }, [paused, pool.length]);
+    // One timer per slide, restarted on every change (auto or a tapped bar), so
+    // the active indicator's fill (--hero-rotate in tokens.css) stays in step.
+    const id = setTimeout(() => setI(v => (v + 1) % pool.length), ROTATE_MS);
+    return () => clearTimeout(id);
+  }, [paused, pool.length, i]);
 
   if (loading) {
     return (
@@ -65,6 +70,7 @@ export default function Hero({ titles = [], loading }) {
   return (
     <section
       className="home-hero"
+      data-paused={paused || undefined}
       onMouseEnter={() => setPaused(true)}
       onMouseLeave={() => setPaused(false)}
       onFocusCapture={() => setPaused(true)}
@@ -114,18 +120,19 @@ export default function Hero({ titles = [], loading }) {
             {saved ? 'In My List' : '+ My List'}
           </button>
         </div>
-        {pool.length > 1 && (
-          <div className="hero-controls">
-            <div className="hero-dots" role="tablist" aria-label="Featured titles">
-              {pool.map((p, k) => (
-                <button key={p.tmdbId} className={`hero-dot ${k === i ? 'on' : ''}`}
-                        aria-label={`Show ${p.title}`} aria-selected={k === i} role="tab"
-                        onClick={() => setI(k)} />
-              ))}
-            </div>
-          </div>
-        )}
       </div>
+      {/* Outside the text column, so it centres on the whole hero. */}
+      {pool.length > 1 && (
+        <div className="hero-controls">
+          <div className="hero-dots" role="tablist" aria-label="Featured titles">
+            {pool.map((p, k) => (
+              <button key={p.tmdbId} className={`hero-dot ${k === i ? 'on' : ''}`}
+                      aria-label={`Show ${p.title}`} aria-selected={k === i} role="tab"
+                      onClick={() => setI(k)} />
+            ))}
+          </div>
+        </div>
+      )}
     </section>
   );
 }
