@@ -22,6 +22,20 @@ const castleDemux = require('./utils/castleDemux');
 const app = express();
 app.set('trust proxy', 1);
 const { publicBase } = require('./lib/runtime/publicBase');
+const { requestIdMiddleware, patchConsole } = require('./lib/runtime/requestId');
+const { createRateLimit } = require('./lib/runtime/rateLimit');
+const { installGracefulShutdown } = require('./lib/runtime/shutdown');
+const { checkStartupConfig } = require('./lib/runtime/startupCheck');
+
+// Every log line a request causes carries its id (see lib/runtime/requestId).
+patchConsole();
+app.use(requestIdMiddleware);
+
+// Per-IP limit on the open media proxy routes, mounted before them.
+const proxyRateLimit = createRateLimit({
+  max: process.env.PROXY_RATE_LIMIT_PER_MIN === undefined ? 600 : Number(process.env.PROXY_RATE_LIMIT_PER_MIN) || 0,
+});
+app.use(['/m3u8-proxy', '/ts-proxy', '/sub-proxy'], proxyRateLimit);
 
 // Mount proxy routes early so downstream handlers can use them.
 //
@@ -86,10 +100,17 @@ process.on('beforeExit', (code) => {
 process.on('exit', (code) => {
   console.log('[diagnostic] exit code=', code);
 });
+// Logged and counted, not fatal: one provider's stray rejection must not take
+// down every viewer's stream. /api/health reports the counts.
+const processErrors = { uncaughtException: 0, unhandledRejection: 0, last: null };
 process.on('uncaughtException', (err) => {
+  processErrors.uncaughtException++;
+  processErrors.last = { kind: 'uncaughtException', at: new Date().toISOString(), message: String(err && err.message || err).slice(0, 300) };
   console.error('[diagnostic] uncaughtException', err);
 });
 process.on('unhandledRejection', (reason) => {
+  processErrors.unhandledRejection++;
+  processErrors.last = { kind: 'unhandledRejection', at: new Date().toISOString(), message: String(reason && reason.message || reason).slice(0, 300) };
   console.error('[diagnostic] unhandledRejection', reason);
 });
 
@@ -163,7 +184,23 @@ app.post('/api/restart', (req,res) => {
 // --- Basic informational endpoints ---
 
 app.get('/api/health', (req, res) => {
-  res.json({ ok: true, service: 'tmdb-embed-api', time: new Date().toISOString() });
+  const now = Date.now();
+  const mem = process.memoryUsage();
+  const mb = (n) => Math.round(n / 1048576);
+  const breakers = {};
+  for (const [name, h] of Object.entries(metrics.providerHealth || {})) {
+    const open = Boolean(h.trippedUntil && now < h.trippedUntil);
+    breakers[name] = { open, consecutiveMisses: h.consecutiveMisses || 0, trips: h.trips || 0,
+      ...(open ? { reopensInS: Math.ceil((h.trippedUntil - now) / 1000) } : {}) };
+  }
+  res.json({
+    ok: true, service: 'tmdb-embed-api', time: new Date().toISOString(),
+    uptimeS: Math.round(process.uptime()),
+    memory: { rssMB: mb(mem.rss), heapUsedMB: mb(mem.heapUsed), heapTotalMB: mb(mem.heapTotal) },
+    openBreakers: Object.keys(breakers).filter((n) => breakers[n].open),
+    breakers,
+    processErrors,
+  });
 });
 
 // Server-side catalogue search; the TMDB key never reaches the browser.
@@ -297,6 +334,9 @@ const PRIMARY_LIST = (process.env.PRIMARY_PROVIDERS || '')
   .split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
 const isPrimary = (name) => PRIMARY_LIST.length === 0 || PRIMARY_LIST.includes(name);
 const SECONDARY_GRACE_MS = Number(process.env.SECONDARY_GRACE_MS) || 1500;
+// Once a preferred-language stream exists, how long the rest get before the
+// answer goes out without them. Short: they keep running in the background.
+const FIRST_ANSWER_GRACE_MS = Number(process.env.FIRST_ANSWER_GRACE_MS) || 400;
 
 // Per-provider result caches, keyed provider|title. Separate from the breaker:
 // the breaker is about a provider's health, these are about one title.
@@ -592,6 +632,16 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
     // NetMirror does. Skip NetMirror only when Castle's demux already offers
     // the preferred language.
     const preferredLanguage = String(process.env.PREFERRED_AUDIO_LANGUAGE || 'Telugu');
+    const preferredRe = new RegExp(preferredLanguage, 'i');
+    const hasPreferred = (list) => Array.isArray(list)
+      && list.some((s) => s && Array.isArray(s.languages) && s.languages.some((l) => preferredRe.test(l)));
+    // Providers Castle does not gate start NOW, alongside Castle. They used to
+    // start only after Castle (and its demux probe) finished, which put
+    // Castle's ~3s in front of every other provider for no reason: the gate
+    // only decides whether NetMirror runs.
+    const early = new Map(selectedProviders
+      .filter((name) => name !== GATE_PROVIDER && !GATED_BY_DEMUX.includes(name))
+      .map((name) => [name, runProvider(name)]));
     if (selectedProviders.includes(GATE_PROVIDER)) {
       castleStreams = await runProvider(GATE_PROVIDER);
       demuxed = await buildCastleDemuxEntry(castleStreams, serverUrlEarly);
@@ -611,13 +661,31 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
     const remaining = selectedProviders.filter((name) =>
       name !== GATE_PROVIDER && !(gateHolds && GATED_BY_DEMUX.includes(name)));
 
-    const tasks = remaining.map((name) => ({ name, p: runProvider(name) }));
-    await Promise.all(tasks.filter((x) => isPrimary(x.name)).map((x) => x.p));
+    const tasks = remaining.map((name) => ({ name, p: early.get(name) || runProvider(name) }));
+    // Answer early once a stream in the preferred language is in hand: the
+    // viewer can start, and everything still running fills providerHitCache
+    // for the next request (the web app also asks NetMirror on its own after
+    // playback starts). Without a preferred-language stream it keeps waiting
+    // for the primaries, because answering then would hide the one provider
+    // that has Telugu (CLAUDE.md rule 1). Opt-in with PRIMARY_PROVIDERS, like
+    // the rest of the early answer.
+    let foundPreferred;
+    const preferredFound = new Promise((r) => { foundPreferred = r; });
+    if (PRIMARY_LIST.length) {
+      if (gateHolds || hasPreferred(castleStreams)) foundPreferred(true);
+      for (const x of tasks) x.p.then((r) => { if (hasPreferred(r)) foundPreferred(true); });
+    }
+    const answeredEarly = await Promise.race([
+      Promise.all(tasks.filter((x) => isPrimary(x.name)).map((x) => x.p)).then(() => false),
+      preferredFound,
+    ]);
     const LATE = Symbol('late');
     let grace;
-    const graceOver = new Promise((r) => { grace = setTimeout(() => r(LATE), SECONDARY_GRACE_MS); });
+    const graceOver = new Promise((r) => {
+      grace = setTimeout(() => r(LATE), answeredEarly ? FIRST_ANSWER_GRACE_MS : SECONDARY_GRACE_MS);
+    });
     let results = await Promise.all(tasks.map((x) =>
-      isPrimary(x.name) ? x.p : Promise.race([x.p, graceOver])));
+      (isPrimary(x.name) && !answeredEarly) ? x.p : Promise.race([x.p, graceOver])));
     clearTimeout(grace);
     const late = tasks.filter((x, i) => results[i] === LATE);
     results = results.map((r) => (r === LATE ? [] : r));
@@ -774,6 +842,13 @@ app.get('/api/streams/:provider/:type/:tmdbId', async (req,res) => {
 // Vercel imports this module as a serverless handler, while local/Docker runs
 // execute it directly and need a normal listening server.
 if (require.main === module) {
+  const startup = checkStartupConfig(config, process.env, listProviders().map((p) => p.name));
+  for (const w of startup.warnings) console.warn(`[startup][warning] ${w}`);
+  if (startup.errors.length) {
+    for (const e of startup.errors) console.error(`[startup][error] ${e}`);
+    allowControlledExit = true;
+    realProcessExit(1);
+  }
   const PORT = config.port;
   const HOST = process.env.BIND_HOST || '0.0.0.0';
   const server = app.listen(PORT, HOST, () => {
@@ -793,6 +868,7 @@ if (require.main === module) {
   });
 
   server.on('error', (err)=>{ console.error('[diagnostic] server error', err); });
+  installGracefulShutdown(server, { exit: (code) => { allowControlledExit = true; realProcessExit(code); } });
 }
 
 module.exports = app;
