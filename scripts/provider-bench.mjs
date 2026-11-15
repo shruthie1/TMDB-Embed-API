@@ -15,7 +15,7 @@ const OUT = opt('--out', null);
 const TIMEOUT_MS = Number(opt('--timeout', 60000));
 const AGG = args.includes('--aggregate');
 const ONLY_AGG = args.includes('--aggregate-only');
-const PROVIDERS = (opt('--providers', 'castletv,netmirror,onetouchtv,vaplayer,mapple,showsst,__nm_s'))
+const PROVIDERS = (opt('--providers', 'castletv,netmirror,onetouchtv,vaplayer,mapple,showsst'))
   .split(',').filter(Boolean);
 
 export const TITLES = [

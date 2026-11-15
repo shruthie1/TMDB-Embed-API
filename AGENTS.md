@@ -168,6 +168,31 @@ Other NetMirror facts:
 - No ABR/auto for NetMirror: `container: "mp4"`, a single fixed encode. Auto
   quality is an HLS multi-variant behaviour.
 
+### NetMirror state, 2026-10-03 (6 NetMirror-path requests total, no sweep)
+
+- **Netflix (embed-tmdb) works** from VM1: 628241 -> 1 row (Telugu 720p mp4)
+  in 2.2s. Gandhari (1355228) is not on Netflix - 0 there is correct.
+- **newtv (prime/hotstar/disney) is refused upstream**: discovery
+  (`mobiledetects.com/checknewtv.php`) still answers and points at
+  `https://tv.imgcdn.kim`, but `newtv/search.php` returns `403 text/html
+  "Page Not Found"` - logged by us as a JSON parse error. Same from VM1 and
+  Vercel. The `ott` project's resolver uses identical paths, so there is no
+  newer protocol to copy. Not fixable from our side until the cause is known.
+- **Why NetMirror vanished from the list**: `GATED_BY_DEMUX` skips it whenever
+  castle-demux offers Telugu. On Vercel demux was off, so the gate never held;
+  on the VM it holds for most titles. Fixed by making NetMirror its own flow
+  in the web app (`Player.jsx`, once per title after playback starts, merged
+  via `mergeSources`), so the first picture still never waits on it.
+- Two bugs found on the way, both fixed: `mergeSources` matched rows by
+  provider NAME (a second NetMirror row overwrote the first); the per-provider
+  route skipped the header-gated proxy step and returned NetMirror's raw mp4,
+  which its CDN refuses without a Referer. Both routes now share
+  `routeStreamsForBrowser`.
+- `lib/api.js` `listSources` is a stub returning null, so the Player's existing
+  "re-ask after 9s on TV" refresh has never added anything.
+- `providers/__nm_s.js` (an unused older copy of netmirror.js) was deleted
+  2026-11-16; the registry now lists only files with a mapped entry function.
+
 ## Latency
 
 Providers run CONCURRENTLY; total resolve time is set by the SLOWEST one, so a
@@ -257,6 +282,69 @@ already in flight at the advertised top rung. `HLS_CONFIG_HYBRID` sets
 `startLevel: 0` plus `abrBandWidthFactor: 0.7` / `abrBandWidthUpFactor: 0.8`.
 The up-factor is deliberately NOT the TV profile's 0.5: that measured stuck at
 360p for 36s with 87s buffered ahead.
+
+## CastleTV muxed audio in production (browser-side, no ffmpeg)
+
+Castle ships ONE MPEG-TS per title with every language muxed in as its own AAC
+PID, tagged in the PMT (1508168: 0x101-0x105 = hin/mal/tam/tel/kan). The
+playlist declares no `#EXT-X-MEDIA`, and hls.js plays only the first AAC PID.
+castle-demux fixes that server-side but is OFF on Vercel (no ffmpeg, no
+persistent job store), so prod played Hindi with no Audio menu.
+
+`web/lib/player/tsAudio.js` + the fragment loader in `useHls.js` read the PMT
+from the first main fragment and swap the chosen PID into hls.js's slot in
+every packet header. Verified 2026-10-03 on chtrm2 against the real file's
+per-language AAC: 154/154 decoder samples Telugu at start; after switching,
+67/67 Kannada then 36/36 Telugu, 0 cross-language. Limits: AAC (0x0f) tracks
+only; ciphertext/fMP4/native-HLS (Safari) fall back to the default track.
+
+## Hybrid audio (Castle Telugu + another provider's video) needs a VM
+
+Measured 2026-10-03 on 1355228 (Gandhari): every pairing with Castle audio is
+refused on the Vercel API - `409 "the audio source carries no switchable audio
+renditions"` - although showsst/VaPlayer and Castle are the same cut (7000s vs
+7008s). The hybrid path needs ffmpeg (castle-demux, ptsRebase) and in-process
+state (castle-demux jobs, `/hybrid/:id` jobs, streamHeaders) - none of which
+serverless provides. Same code in Docker: VaPlayer+Castle -> 200, Telugu
+DEFAULT, audio-3 rendition with `pts=-1.478556`, segment ffprobes as `aac tel`;
+in the browser a Source click on VaPlayer paired and kept playing in Telugu.
+
+Run the API from `docker-compose.yml` (fixed 2026-10-03: copies lib/ and
+routes/, installs ffmpeg, Node 24, PORT=8787 - PORT outranks the 8790 in
+user-config.json). Behind https set `PUBLIC_BASE_URL`; every absolute url now
+goes through `lib/runtime/publicBase.js` (eight call sites used to ignore it).
+Then point the Vercel web project's `API_ORIGIN` at that https origin.
+
+showsst's CDN (d.phantomflix.net) answers `429` wrapped in a 503 once an IP has
+made a burst of requests; that is what failed showsst pairing locally, not code.
+
+## Production API on VM1 (since 2026-10-03)
+
+The API runs on VM1 of the Telegram fleet (187.127.137.163; access per
+`~/Documents/Projects/local/docs/FLEET-DEBUGGING-RUNBOOK.md`). Session
+survival of the fleet outranks this app: never restart the fleet to fix it.
+
+- Public: `https://tmdb-187-127-137-163.sslip.io` (sslip.io = free DNS; Let's
+  Encrypt cert, certbot.timer renews). Vercel `chtrm` has `API_ORIGIN` = that.
+- Code: `/root/tmdb-embed-api` (shipped tarball, not a git checkout). Secrets in
+  its `.env` (600). Admin password rotated off the public default; plaintext in
+  `/root/tmdb-embed-api/ADMIN_PASSWORD` (600).
+- Process: PM2 app `tmdb-embed-api`, `127.0.0.1:8787` only (ufw is inactive, so
+  never bind 0.0.0.0), `--max-memory-restart 500M`. NOT in `pm2 save` - saving
+  would rewrite the fleet's dump; after a reboot start it again by hand.
+- nginx: `/etc/nginx/sites-available/tmdb-embed-api.conf`, proxy_buffering off.
+- ffmpeg 6.1.1 from apt; installed with `NEEDRESTART_SUSPEND=1` after an
+  `apt-get -s` showed 149 new packages and 0 upgrades.
+- Rollback: set Vercel `API_ORIGIN` back to `https://tmdb-embed-api-sand.vercel.app`,
+  redeploy web, re-alias chtrm2.
+
+## Deploying the web app
+
+`chtrm2.vercel.app` is a MANUAL alias, not a project domain: `vercel --prod`
+moves `chtrm-shettysais-projects.vercel.app` but leaves chtrm2 on the old
+build. After every deploy run
+`vercel alias set <new-deployment-url> chtrm2.vercel.app` and confirm with
+`vercel inspect chtrm2.vercel.app`.
 
 ## Other ruled-out items
 
