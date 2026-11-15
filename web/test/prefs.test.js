@@ -1,15 +1,16 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach } from 'vitest';
-import { getPrefs, savePrefs, hasPrefs, parseLangs, prefsQuery,
+import { getPrefs, savePrefs, hasPrefs, parseLangs, prefsQuery, effectiveLangs,
          DEFAULT_PREFS, INDIA_PROVIDERS } from '../lib/prefs';
 import { homeRows, dedupeRows } from '../lib/homeRows';
 
 beforeEach(() => { localStorage.clear(); });
 
 describe('prefs', () => {
-  it('defaults to the five Indian languages', () => {
+  it('starts with nothing chosen, which means all five Indian languages', () => {
     expect(hasPrefs()).toBe(false);
-    expect(getPrefs()).toEqual({ langs: ['te', 'ta', 'hi', 'ml', 'kn'] });
+    expect(getPrefs()).toEqual({ langs: [] });
+    expect(effectiveLangs(getPrefs())).toEqual(['te', 'ta', 'hi', 'ml', 'kn']);
   });
 
   it('saves in order, drops unknown codes, and ignores an old providers field', () => {
@@ -20,11 +21,13 @@ describe('prefs', () => {
     expect(getPrefs()).toEqual({ langs: ['ta'] });
   });
 
-  it('falls back to defaults on an empty choice or corrupt storage', () => {
+  it('stores Skip as an empty choice that still counts as answered', () => {
     savePrefs({ langs: [] });
-    expect(getPrefs()).toEqual({ ...DEFAULT_PREFS });
+    expect(hasPrefs()).toBe(true);
+    expect(getPrefs()).toEqual({ langs: [] });
+    expect(effectiveLangs(getPrefs())).toEqual(DEFAULT_PREFS.langs);
     localStorage.setItem('chitram:prefs:v1', '{bad');
-    expect(getPrefs().langs).toEqual(DEFAULT_PREFS.langs);
+    expect(effectiveLangs(getPrefs())).toEqual(DEFAULT_PREFS.langs);
   });
 
   it('parses query params defensively', () => {

@@ -5,20 +5,28 @@ import { PREFS_EVENT } from '../../lib/prefs';
 
 vi.mock('next/link', () => ({ default: ({ children, ...p }) => <a {...p}>{children}</a> }));
 
-const dialog = () => screen.getByRole('dialog', { hidden: true });
-const isOpen = () => dialog().closest('.fpanel').classList.contains('open');
+const dialog = () => screen.queryByRole('dialog');
+const chip = (name) => screen.getByRole('button', { name: new RegExp(`^${name}`) });
+const firstVisit = () => { act(() => { vi.runAllTimers(); }); };
 
-beforeEach(() => { localStorage.clear(); });
-afterEach(() => { cleanup(); });
+beforeEach(() => { localStorage.clear(); vi.useFakeTimers(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 describe('PrefsModal', () => {
-  it('opens by itself on a first visit and is not dismissed by an outside tap', () => {
+  it('opens after load on a first visit, with nothing selected, and is sticky', () => {
     render(<PrefsButton />);
-    expect(isOpen()).toBe(true);
-    fireEvent.click(document.body.querySelector('.sheet-scrim'));
+    expect(dialog()).toBeNull();           // not before the page has painted
+    firstVisit();
+    const d = dialog();
+    expect(d.getAttribute('aria-modal')).toBe('true');
+    for (const l of ['Telugu', 'Tamil', 'Hindi', 'Malayalam', 'Kannada']) {
+      expect(chip(l).getAttribute('aria-pressed')).toBe('false');
+    }
+    expect(screen.getByRole('button', { name: 'Save' }).disabled).toBe(true);
+    expect(screen.getByText('Pick at least one language')).toBeTruthy();
+    fireEvent.click(document.body.querySelector('.lang-modal-backdrop'));
     fireEvent.keyDown(window, { key: 'Escape' });
-    expect(isOpen()).toBe(true);
-    // No close (X) button on the first visit: Save or Use defaults only.
+    expect(dialog()).not.toBeNull();
     expect(screen.queryByLabelText('Close')).toBeNull();
   });
 
@@ -27,34 +35,40 @@ describe('PrefsModal', () => {
     const onSave = (e) => seen.push(e.detail);
     window.addEventListener(PREFS_EVENT, onSave);
     const first = render(<PrefsButton />);
-    // Clear the defaults, then pick Hindi then Telugu.
-    // Selected chips carry their rank ("2. Tamil"), which renumbers as they go.
-    for (const lang of ['Telugu', 'Tamil', 'Hindi', 'Malayalam', 'Kannada']) {
-      fireEvent.click(screen.getByRole('button', { name: new RegExp(`^\\d\\. ${lang}$`), hidden: true }));
-    }
-    fireEvent.click(screen.getByRole('button', { name: 'Hindi', hidden: true }));
-    fireEvent.click(screen.getByRole('button', { name: 'Telugu', hidden: true }));
-    expect(screen.getByRole('button', { name: '1. Hindi', hidden: true })).toBeTruthy();
-    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Save', hidden: true })); });
+    firstVisit();
+    fireEvent.click(chip('Hindi'));
+    fireEvent.click(chip('Telugu'));
+    expect(chip('Hindi').getAttribute('aria-pressed')).toBe('true');
+    expect(chip('Hindi').className).toContain('on');
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Save' })); });
     window.removeEventListener(PREFS_EVENT, onSave);
 
-    expect(isOpen()).toBe(false);
+    expect(dialog()).toBeNull();
     expect(JSON.parse(localStorage.getItem('chitram:prefs:v1'))).toEqual({ langs: ['hi', 'te'] });
     expect(seen.at(-1).langs).toEqual(['hi', 'te']);
     first.unmount();
 
     render(<PrefsButton />);
-    expect(isOpen()).toBe(false);
+    firstVisit();
+    expect(dialog()).toBeNull();
   });
 
-  it('reopens from the header button, with a close option', () => {
+  it('Skip stores an empty choice, meaning all languages', () => {
+    render(<PrefsButton />);
+    firstVisit();
+    fireEvent.click(screen.getByRole('button', { name: 'Skip' }));
+    expect(dialog()).toBeNull();
+    expect(JSON.parse(localStorage.getItem('chitram:prefs:v1'))).toEqual({ langs: [] });
+  });
+
+  it('reopens from the header button with the saved choice and a close option', () => {
     localStorage.setItem('chitram:prefs:v1', JSON.stringify({ langs: ['ta'] }));
     render(<PrefsButton />);
-    expect(isOpen()).toBe(false);
+    firstVisit();
+    expect(dialog()).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Your languages' }));
-    expect(isOpen()).toBe(true);
-    fireEvent.click(screen.getByRole('button', { name: 'Use defaults', hidden: true }));
-    expect(JSON.parse(localStorage.getItem('chitram:prefs:v1')))
-      .toEqual({ langs: ['te', 'ta', 'hi', 'ml', 'kn'] });
+    expect(chip('Tamil').getAttribute('aria-pressed')).toBe('true');
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(dialog()).toBeNull();
   });
 });

@@ -6,7 +6,7 @@ import { fetchRow, fetchTitleFull } from '../lib/api';
 import { getContinueWatching, getSeeds } from '../lib/progress';
 import { getList } from '../lib/list';
 import { warmContinueWatching } from '../lib/prefetch';
-import { getPrefs, prefsQuery, PREFS_EVENT } from '../lib/prefs';
+import { getPrefs, prefsQuery, effectiveLangs, PREFS_EVENT } from '../lib/prefs';
 import { homeRows, dedupeRows } from '../lib/homeRows';
 
 export default function Home() {
@@ -21,7 +21,7 @@ export default function Home() {
   // null until mounted: the stored choice lives in localStorage, and fetching
   // rows for the defaults first would load every rail twice.
   const [prefs, setPrefs] = useState(null);
-  const rows = useMemo(() => (prefs ? homeRows(prefs.langs) : []), [prefs]);
+  const rows = useMemo(() => (prefs ? homeRows(effectiveLangs(prefs)) : []), [prefs]);
   const query = prefs ? prefsQuery(prefs) : '';
 
   useEffect(() => {

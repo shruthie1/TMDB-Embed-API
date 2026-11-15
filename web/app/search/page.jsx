@@ -6,7 +6,7 @@ import Icon from '../../components/Icon';
 import { searchTitles } from '../../lib/api';
 import { getRecent, addRecent, removeRecent, clearRecent } from '../../lib/recent';
 import { abortReason } from '../../lib/abortReason';
-import { getPrefs, PREFS_EVENT } from '../../lib/prefs';
+import { getPrefs, effectiveLangs, PREFS_EVENT } from '../../lib/prefs';
 
 const SUGGEST = [
   { label: 'Telugu', href: '/browse?lang=te' },
@@ -37,7 +37,7 @@ export default function Search() {
     setState(s => ({ ...s, loading: true }));
     const ctrl = new AbortController();
     const t = setTimeout(async () => {
-      const res = await searchTitles(q, { signal: ctrl.signal, langs: getPrefs().langs });
+      const res = await searchTitles(q, { signal: ctrl.signal, langs: effectiveLangs(getPrefs()) });
       setState({ loading: false, titles: res.ok ? res.body.titles : [], done: true });
       // Only remember a query that actually found something.
       if (res.ok && res.body.titles?.length) { addRecent(q); setRecent(getRecent()); }

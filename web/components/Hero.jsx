@@ -87,8 +87,9 @@ export default function Hero({ titles = [], loading }) {
       aria-label="Featured"
       aria-roledescription="carousel"
     >
-      <div className="home-hero-art" key={t.tmdbId}
-           style={{ backgroundImage: `url(${poster(t.backdrop, 'w1280')})` }} aria-hidden="true" />
+      <div className="home-hero-art page-backdrop" key={t.tmdbId}
+           style={{ '--bg-lg': `url(${poster(t.backdrop, 'w1280')})`, '--bg-sm': `url(${poster(t.backdrop, 'w780')})` }}
+           aria-hidden="true" />
       <div className="home-hero-in">
         <h1 className="home-hero-title">{t.title}</h1>
         <div className="detail-meta">

@@ -1,0 +1,223 @@
+/* Chitram design tokens. The ONLY file that holds raw colour, radius, shadow,
+   spacing and motion values. Everything else reads these variables.
+   Docs: web/docs/design-tokens.md
+
+   Breakpoints (CSS variables cannot be used inside @media, so these are the
+   documented values every media query must use):
+     mobile   < 720px    phone, bottom tab bar
+     desktop  >= 720px   pointer, top nav
+     tv       [data-tv="true"] on <html>, set by lib/dpad.js (1920x1080, D-pad)
+   TV changes tokens only, in the block at the end of this file. */
+:root{
+  /* ── Colour channels (r g b), for alpha use: rgb(var(--rgb-bg) / .6) ── */
+  --rgb-bg:6 7 12;
+  --rgb-surface:20 22 35;
+  --rgb-text:238 240 250;
+  --rgb-white:255 255 255;
+  --rgb-black:0 0 0;
+  --rgb-accent-from:124 92 255;
+  --rgb-accent-to:34 211 238;
+  --rgb-success:127 208 163;
+  --rgb-warn:217 176 112;
+  --rgb-danger:224 139 132;
+
+  /* ── Colour ── */
+  --color-bg:rgb(var(--rgb-bg));
+  --color-surface-1:rgb(var(--rgb-surface) / .55);   /* glass panel */
+  --color-surface-2:rgb(var(--rgb-surface) / .75);   /* raised glass */
+  --color-surface-3:rgb(var(--rgb-surface) / .92);   /* near-opaque sheet */
+  --color-surface-solid:#11131E;                      /* poster placeholder, inputs */
+  --color-border:rgb(var(--rgb-white) / .12);       /* neutral; accent never used for borders */
+  --color-border-strong:rgb(var(--rgb-white) / .24);
+  --color-text-primary:rgb(var(--rgb-text));          /* 17.6:1 on bg */
+  --color-text-secondary:#C9CCDB;                     /* 12.6:1 on bg */
+  --color-text-muted:#9497AA;                         /* 6.9:1 on bg */
+  --color-text-dim:#6B6E80;                           /* 3.9:1, decorative/large only */
+  --color-white:#FFFFFF;
+  --color-black:#000000;
+  --color-accent-from:rgb(var(--rgb-accent-from));
+  --color-accent-to:rgb(var(--rgb-accent-to));
+  /* Use as `background:var(--color-accent-gradient) border-box no-repeat`:
+     painted from the padding box, it tiled under a transparent border and a
+     cyan sliver showed at the left edge of every pill. */
+  --color-accent-gradient:linear-gradient(120deg,var(--color-accent-from),var(--color-accent-to));
+  --color-on-accent:#FFFFFF;
+  --color-success:rgb(var(--rgb-success));
+  --color-warn:rgb(var(--rgb-warn));
+  --color-danger:rgb(var(--rgb-danger));
+  --color-success-line:#2E5C45;
+  --color-warn-line:#5C5330;
+  --color-danger-line:#5C3030;
+  --color-danger-bg:#2A1414;
+  --color-danger-text:#F0B8B8;
+  --color-focus:var(--color-accent-to);
+  --color-player-bg:var(--color-black);
+  --color-scrim:rgb(var(--rgb-bg) / .66);
+  --color-accent:var(--color-accent-to);          /* the one accent: progress, active dot/tab, focus */
+  --header-scrim:linear-gradient(to bottom,rgb(var(--rgb-black) / .7),rgb(var(--rgb-black) / 0));
+  --header-scrim-h:120px;
+
+  /* ── Buttons and chips ── */
+  --btn-primary-bg:var(--color-white);
+  --btn-primary-bg-hover:rgb(var(--rgb-white) / .82);
+  --btn-primary-fg:var(--color-bg);
+  --btn-secondary-bg:rgb(var(--rgb-white) / .1);
+  --btn-secondary-bg-hover:rgb(var(--rgb-white) / .18);
+  --btn-secondary-fg:var(--color-text-primary);
+  --chip-on-bg:rgb(var(--rgb-white) / .9);
+  --chip-on-fg:var(--color-bg);
+
+  /* Lab demo art: fixed illustrative gradients, not UI colour. */
+  --art-warm:linear-gradient(145deg,#795743,#251B18 66%,#B68C5C);
+  --art-cool:linear-gradient(145deg,#487798,#162C43 64%,#D9A65C);
+
+  /* ── Radius ── */
+  --radius-xs:4px;
+  --radius-sm:8px;
+  --radius-md:12px;
+  --radius-lg:16px;
+  --radius-xl:24px;
+  --radius-pill:999px;
+  --radius-round:50%;
+  --radius-card:14px;
+
+  /* ── Spacing: 4-based. Half steps keep existing layouts exact. ── */
+  --space-0-5:2px;
+  --space-1:4px;
+  --space-1-5:6px;
+  --space-2:8px;
+  --space-2-5:10px;
+  --space-3:12px;
+  --space-3-5:14px;
+  --space-4:16px;
+  --space-4-5:18px;
+  --space-5:20px;
+  --space-5-5:22px;
+  --space-6:24px;
+  --space-7:28px;
+  --space-8:32px;
+  --space-9:36px;
+  --space-10:40px;
+  --space-11:44px;
+  --space-12:48px;
+  --space-14:56px;
+  --space-15:60px;
+  --space-16:64px;
+  --space-18:72px;
+  --space-20:80px;
+  --space-21:84px;
+  --space-22:88px;
+  --space-24:96px;
+
+  /* ── Type ── */
+  --font-sans:var(--font-inter),"Inter",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --font-display:var(--font-grotesk),"Space Grotesk",var(--font-sans);
+  --font-telugu:var(--font-te),"Noto Serif Telugu","Gautami",serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --text-xs:11px;   --lh-xs:1.4;
+  --text-sm:13px;   --lh-sm:1.45;
+  --text-md:15px;   --lh-md:1.55;
+  --text-lg:18px;   --lh-lg:1.4;
+  --text-xl:22px;   --lh-xl:1.3;
+  --text-2xl:28px;  --lh-2xl:1.2;
+  --text-3xl:40px;  --lh-3xl:1.1;
+  --weight-regular:400;
+  --weight-medium:500;
+  --weight-semibold:600;
+  --weight-bold:700;
+
+  /* ── Shadow and glow ── */
+  --shadow-sm:0 2px 8px rgb(var(--rgb-black) / .35);
+  --shadow-md:0 8px 24px rgb(var(--rgb-black) / .45);
+  --shadow-lg:0 24px 64px rgb(var(--rgb-black) / .55);
+  --glow-focus:0 0 0 2px var(--color-focus);   /* a plain ring, no blur */
+  --ring-neutral:2px solid rgb(var(--rgb-white) / .6);   /* player and quiet controls */
+  --ring-offset:2px;
+
+  /* ── Glass ── */
+  --blur-sm:blur(8px);
+  --blur-glass:blur(18px) saturate(140%);
+  --blur-scrim:blur(4px);
+  --art-blur:24px;            /* player loading backdrop */
+
+  /* ── Motion ── */
+  --duration-fast:150ms;
+  --duration-base:180ms;
+  --duration-slow:280ms;
+  --ease-standard:cubic-bezier(.2,.7,.3,1);
+  --ease-out:cubic-bezier(.16,1,.3,1);
+  --focus-scale:1.04;
+
+  /* ── Z-index layers ── */
+  --z-raised:1;
+  --z-focus:2;
+  --z-header:20;
+  --z-bottom-nav:30;
+  --z-scrim:40;
+  --z-panel:41;
+  --z-player:60;
+  --z-modal:80;
+  --z-toast:90;
+
+  /* ── Layout ── */
+  --gap:var(--space-4);
+  --detail-band:64vw;            /* phone detail: backdrop band height (16:9 x 1.14) */
+  --detail-band-overlap:var(--space-18); /* title + meta sit on the band's faded bottom edge */
+  /* Hero height: enough of a 16:9 backdrop to read the whole frame.
+     Phone ~ 16:9 x 1.25; desktop up to the full 16:9 height; TV 70vh. */
+  --hero-height:min(62vh, 70vw);
+  --hero-title-size:28px;
+  --btn-h:40px;
+  --btn-font:15px;
+  --control-h:32px;
+  --tabbar-h:56px;               /* phone bottom tab bar, plus the safe area */
+  --header-height:48px;         /* compact header: phone 48, desktop 56, TV 64 */
+  --header-pad-y:var(--space-1);
+  --header-h:var(--header-height); /* measured and overwritten by HeaderScroll.jsx */
+  --safe-b:env(safe-area-inset-bottom,0px);
+
+  /* ── Legacy names, kept so older selectors keep working. New code uses the
+        names above. ── */
+  --ink:var(--color-bg);
+  --surface:var(--color-surface-solid);
+  --raised:var(--color-surface-solid);
+  --line:var(--color-border);
+  --mid:var(--color-text-muted);
+  --dim:var(--color-text-dim);
+  --paper-2:var(--color-text-secondary);
+  --paper:var(--color-text-primary);
+  --fg:var(--color-text-primary);
+  --display:var(--font-display);
+  --ui:var(--font-sans);
+  --telugu:var(--font-telugu);
+  --radius:var(--radius-card);
+  --ease:var(--ease-standard);
+  --focus-ms:var(--duration-slow);
+}
+
+@media (min-width:720px){
+  :root{--hero-height:min(78vh, 56.25vw);--hero-title-size:clamp(32px,3.6vw,48px);--btn-h:44px;--control-h:34px;--header-height:56px;--header-pad-y:var(--space-1-5)}
+}
+
+@media (prefers-reduced-motion:reduce){
+  :root{--duration-fast:0ms;--duration-base:0ms;--duration-slow:0ms;--focus-scale:1}
+}
+
+/* TV: tokens only. 10-foot viewing needs larger type and a heavier ring. */
+[data-tv="true"]{
+  --header-height:64px;
+  --header-pad-y:var(--space-2);
+  --hero-height:70vh;
+  --hero-title-size:clamp(36px,3vw,52px);
+  --btn-h:52px;
+  --btn-font:17px;
+  --control-h:44px;
+  --text-xs:13px;
+  --text-sm:15px;
+  --text-md:17px;
+  --text-lg:20px;
+  --text-xl:28px;
+  --text-2xl:34px;
+  --gap:var(--space-4);
+  --glow-focus:0 0 0 3px var(--color-focus);
+}

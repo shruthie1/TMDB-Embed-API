@@ -64,11 +64,7 @@ export function Card({ title, i = 0, progressPct, showType = false, rank = null 
         {typeTag && <span className="card-type">{typeTag}</span>}
         {/* Top 10 rank, the large numeral every OTT home uses for its chart. */}
         {rank && (
-          <span aria-hidden="true" style={{
-            position: 'absolute', left: 6, bottom: 2, fontFamily: 'var(--display)',
-            fontWeight: 600, fontSize: 'clamp(34px, 9vw, 54px)', lineHeight: 1,
-            color: 'var(--paper)', textShadow: '0 2px 12px rgba(0,0,0,.85)',
-          }}>{rank}</span>
+          <span aria-hidden="true" className="card-rank">{rank}</span>
         )}
       </div>
       <div className="card-title">{title.title}</div>

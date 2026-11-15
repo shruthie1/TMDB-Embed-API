@@ -2,7 +2,11 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-const css = readFileSync(fileURLToPath(new URL('../app/globals.css', import.meta.url)), 'utf8');
+const read = (f) => readFileSync(fileURLToPath(new URL(f, import.meta.url)), 'utf8');
+// Spacing comes from design tokens; resolve them so the maths below sees px.
+const space = Object.fromEntries(
+  [...read('../app/tokens.css').matchAll(/(--space-[\w-]+):(\d+px);/g)].map(m => [m[1], m[2]]));
+const css = read('../app/globals.css').replace(/var\((--space-[\w-]+)\)/g, (m, k) => space[k] || m);
 
 /** The declarations of one rule, by exact selector. */
 function rule(selector) {

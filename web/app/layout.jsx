@@ -1,10 +1,19 @@
+import { Inter, Space_Grotesk, Noto_Serif_Telugu } from 'next/font/google';
+import './tokens.css';
 import './globals.css';
 import './tv-compact.css';
+import './prefs-modal.css';
 import Dpad from '../components/Dpad';
+import HeaderScroll from '../components/HeaderScroll';
 import Diagnostics from '../components/Diagnostics';
 import { TopNav, BottomNav } from '../components/Nav';
 import Shortcuts from '../components/Shortcuts';
 import InstallPrompt from '../components/InstallPrompt';
+
+// Self-hosted by next/font; the CSS variables feed --font-* in tokens.css.
+const inter = Inter({ subsets: ['latin'], variable: '--font-inter', display: 'swap' });
+const grotesk = Space_Grotesk({ subsets: ['latin'], weight: ['400', '500', '600', '700'], variable: '--font-grotesk', display: 'swap' });
+const telugu = Noto_Serif_Telugu({ subsets: ['telugu'], weight: ['300'], variable: '--font-te', display: 'swap' });
 
 export const metadata = {
   title: { default: 'Chitram', template: '%s · Chitram' },
@@ -25,7 +34,7 @@ export const metadata = {
 };
 
 export const viewport = {
-  themeColor: '#08080A',
+  themeColor: '#06070C', // = --color-bg; metadata cannot read CSS variables
   width: 'device-width',
   initialScale: 1,
   viewportFit: 'cover',
@@ -33,7 +42,7 @@ export const viewport = {
 
 export default function RootLayout({ children }) {
   return (
-    <html lang="en">
+    <html lang="en" className={`${inter.variable} ${grotesk.variable} ${telugu.variable}`}>
       <head>
         {/* Chrome's standard PWA capability marker. Keep the Apple-specific
             metadata below for iOS, where this standard name is ignored. */}
@@ -42,12 +51,6 @@ export default function RootLayout({ children }) {
             referer=localhost -> 403, no referer -> 200). Browsers forbid JS from
             setting Referer, so we suppress it document-wide instead. */}
         <meta name="referrer" content="no-referrer" />
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="" />
-        <link
-          rel="stylesheet"
-          href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,200;9..144,400;9..144,600&family=Inter+Tight:wght@300;400;500&family=Noto+Serif+Telugu:wght@300&display=swap"
-        />
       </head>
       <body>
         <header className="topbar">
@@ -57,6 +60,7 @@ export default function RootLayout({ children }) {
           </a>
           <TopNav />
         </header>
+        <HeaderScroll />
         <main>{children}</main>
         <BottomNav />
         <Shortcuts />

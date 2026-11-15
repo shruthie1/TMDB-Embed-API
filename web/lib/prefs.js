@@ -57,19 +57,26 @@ export function hasPrefs() {
   try { return Boolean(localStorage.getItem(KEY)); } catch { return false; }
 }
 
-/** Stored prefs; an old `providers` field is ignored. */
+/**
+ * Stored prefs; an old `providers` field is ignored. `langs: []` is a real
+ * choice (Skip): no preference, so every language counts. Nothing stored
+ * also means no preference.
+ */
 export function getPrefs() {
   try {
-    const langs = cleanLangs(JSON.parse(localStorage.getItem(KEY) || 'null')?.langs);
-    return { langs: langs.length ? langs : [...DEFAULT_PREFS.langs] };
+    return { langs: cleanLangs(JSON.parse(localStorage.getItem(KEY) || 'null')?.langs) };
   } catch {
-    return { langs: [...DEFAULT_PREFS.langs] };
+    return { langs: [] };
   }
 }
 
+/** The languages rows and search should use: the choice, or all of them. */
+export function effectiveLangs(prefs) {
+  return prefs?.langs?.length ? prefs.langs : [...DEFAULT_PREFS.langs];
+}
+
 export function savePrefs({ langs }) {
-  const clean = cleanLangs(langs);
-  const next = { langs: clean.length ? clean : [...DEFAULT_PREFS.langs] };
+  const next = { langs: cleanLangs(langs) };
   try { localStorage.setItem(KEY, JSON.stringify(next)); } catch { /* private mode */ }
   try { window.dispatchEvent(new CustomEvent(PREFS_EVENT, { detail: next })); } catch { /* server */ }
   return next;

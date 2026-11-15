@@ -124,7 +124,8 @@ export default function TitlePage() {
         <span>Back</span>
       </button>
       <div className="hero">
-        {bg && <div className="hero-art" style={{ backgroundImage: `url(${bg})` }} aria-hidden="true" />}
+        {bg && <div className="hero-art page-backdrop" aria-hidden="true"
+                    style={{ '--bg-lg': `url(${bg})`, '--bg-sm': `url(${poster(t.backdrop, 'w780')})` }} />}
         <div className="hero-inner">
           {pos && (
             <div className="hero-poster enter">

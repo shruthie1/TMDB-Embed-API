@@ -213,8 +213,9 @@ describe('web app manifest', () => {
   });
 
   it('uses the dark app theme', () => {
-    expect(m.theme_color).toBe('#08080A');
-    expect(m.background_color).toBe('#08080A');
+    // Must match --color-bg in app/tokens.css (6 7 12).
+    expect(m.theme_color).toBe('#06070C');
+    expect(m.background_color).toBe('#06070C');
   });
 
   it('declares a 192 and a 512 PNG plus a maskable icon', () => {

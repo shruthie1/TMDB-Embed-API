@@ -104,7 +104,6 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
 
   const isTv = title.mediaType === 'tv' && episode > 0;
   const epTag = isTv ? `S${season}E${episode}` : null;
-  const heading = isTv ? `${title.title} · ${epTag}` : title.title;
 
   // switchSource is declared further down (it depends on beginSwitch), so the
   // recovery path reaches it through a ref rather than being reordered around
@@ -1463,8 +1462,9 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       )}
 
       {!stream && !error && (
-        <Resolving stage={stage} title={heading} elapsed={elapsed} log={log}
-          providers={providers} onArt={Boolean(title.backdrop)} />
+        <Resolving stage={stage} title={title.title} meta={epTag || title.year} elapsed={elapsed} log={log}
+          providers={providers} onArt={Boolean(title.backdrop)}
+          onClose={onClose} onRetry={() => resolve.load(true)} />
       )}
       {notice && !error && (
         <div className="toast" role="status" key={notice.id}>{notice.text}</div>

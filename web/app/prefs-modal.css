@@ -1,0 +1,74 @@
+/* Language picker: a compact, calm centred dialog on every screen size.
+   Values come from app/tokens.css only. Selected tiles use the chip-on set;
+   Save is the white primary button. No gradient, no glow. */
+.lang-modal-backdrop{
+  position:fixed;inset:0;z-index:var(--z-modal);display:grid;place-items:center;padding:var(--space-4);
+  background:var(--color-scrim);
+  -webkit-backdrop-filter:var(--blur-scrim);backdrop-filter:var(--blur-scrim);
+  animation:lang-fade var(--duration-base) var(--ease-standard);
+}
+.lang-modal{
+  width:min(90vw,380px);max-height:calc(100vh - var(--space-8));overflow-y:auto;
+  background:var(--color-surface-3);border:1px solid var(--color-border);border-radius:var(--radius-xl);
+  -webkit-backdrop-filter:var(--blur-glass);backdrop-filter:var(--blur-glass);
+  padding:var(--space-5);box-shadow:var(--shadow-lg);
+  animation:lang-in var(--duration-slow) var(--ease-out);
+}
+@keyframes lang-fade{from{opacity:0}to{opacity:1}}
+@keyframes lang-in{from{opacity:0;transform:scale(.96)}to{opacity:1;transform:none}}
+.lang-modal-head{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3)}
+.lang-modal-title{
+  font-family:var(--font-display);font-weight:var(--weight-semibold);
+  font-size:var(--text-lg);line-height:var(--lh-lg);margin:0;
+}
+.lang-modal-hint{color:var(--color-text-muted);font-size:var(--text-sm);line-height:var(--lh-sm);margin:var(--space-1) 0 var(--space-4)}
+.lang-options{display:grid;grid-template-columns:1fr 1fr;gap:var(--space-2)}
+
+/* Unselected: neutral tile. */
+.lang-opt{
+  display:flex;align-items:center;justify-content:space-between;gap:var(--space-2);
+  height:var(--space-11);padding:0 var(--space-3);
+  border:1px solid var(--color-border-strong);border-radius:var(--radius-md);
+  background:transparent;color:var(--color-text-secondary);
+  font:inherit;font-size:var(--text-sm);text-align:left;cursor:pointer;
+  transition:background var(--duration-fast) var(--ease-standard),border-color var(--duration-fast) var(--ease-standard),
+             color var(--duration-fast) var(--ease-standard);
+}
+.lang-opt:hover{border-color:var(--color-border-strong);color:var(--color-text-primary)}
+.lang-opt-label{min-width:0}
+.lang-opt-mark{flex:none;display:grid;place-items:center;width:var(--space-4);height:var(--space-4);color:var(--chip-on-fg)}
+
+/* Selected: the chip-on fill (near white, dark text) and a small check. */
+.lang-opt.on{
+  background:var(--chip-on-bg);border-color:transparent;
+  color:var(--chip-on-fg);font-weight:var(--weight-medium);
+}
+
+/* Focus (keyboard, D-pad): a bright neutral edge. No glow, no scale. */
+.lang-focus.focusable:focus,.lang-focus.focusable:focus-visible{
+  outline:none;transform:none;box-shadow:var(--glow-focus);border-color:transparent;
+}
+
+.lang-modal-need{font-size:var(--text-xs);color:var(--color-text-muted);margin:var(--space-3) 0}
+.lang-modal-actions{display:flex;align-items:center;justify-content:flex-end;gap:var(--space-2)}
+/* Save: the white primary button, compact. */
+.lang-modal-actions .btn{padding:var(--space-2) var(--space-5);font-size:var(--text-sm);min-height:var(--space-10)}
+.lang-modal-actions .btn.primary{box-shadow:none}
+.lang-modal-actions .btn.primary.focusable:focus,.lang-modal-actions .btn.primary.focusable:focus-visible{
+  box-shadow:var(--glow-focus)}
+/* Skip: the secondary button (translucent white). */
+.lang-modal-actions .btn:not(.primary){background:var(--btn-secondary-bg);color:var(--btn-secondary-fg);border-color:transparent}
+.lang-modal-actions .btn:not(.primary):hover{background:var(--btn-secondary-bg-hover)}
+.lang-modal-actions .btn:not(.primary).focusable:focus,.lang-modal-actions .btn:not(.primary).focusable:focus-visible{
+  box-shadow:var(--glow-focus)}
+
+/* Close: a plain icon, no ring or outline; hover and focus fill a soft circle. */
+.lang-modal .icon-btn{min-width:var(--space-9);min-height:var(--space-9);border:0;border-radius:var(--radius-round);
+  background:none;color:var(--color-text-muted);transition:background var(--duration-fast) var(--ease-standard),color var(--duration-fast) var(--ease-standard)}
+.lang-modal .icon-btn:hover{background:rgb(var(--rgb-white) / .08);color:var(--color-text-primary)}
+.lang-modal .lang-close,.lang-modal .lang-close:focus,.lang-modal .lang-close:focus-visible{
+  outline:none;border:0;box-shadow:none;transform:none}
+.lang-modal .lang-close:focus-visible{background:rgb(var(--rgb-white) / .14);color:var(--color-text-primary)}
+
+[data-tv="true"] .lang-modal{width:min(36vw,480px);padding:var(--space-6)}
+[data-tv="true"] .lang-opt{height:var(--space-14);font-size:var(--text-md)}

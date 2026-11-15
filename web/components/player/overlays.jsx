@@ -1,13 +1,11 @@
 'use client';
 import { useEffect, useState } from 'react';
+import Icon from '../Icon';
 
 /**
  * The player's overlays: the resolving progress, the end-of-episode card and
  * the error state. Presentational only - they hold no playback state.
  */
-const STAGES = ['Finding a source', 'Checking playback', 'Starting'];
-
-/** Progressive, named stages — the wait is legible, not blank. */
 /**
  * What each provider is doing, right now.
  *
@@ -45,41 +43,59 @@ function ProviderTrack({ providers }) {
   );
 }
 
-export function Resolving({ stage, title, elapsed = 0, log = [], providers = [], onArt = false }) {
+/** One short, friendly status line. Internal words stay in Details. */
+function statusLine(stage, providers) {
+  if (stage === 1) return 'Checking playback…';
+  if (stage === 2) return 'Starting…';
+  return providers.some(p => p.state === 'failed') ? 'Trying another source…' : 'Getting your stream ready';
+}
+
+/**
+ * Loading screen while a stream is resolved: blurred backdrop (Player.jsx),
+ * one ring spinner, the title, one status line, and a source counter when the
+ * provider count is known. Back is always there; Try again appears after 8s.
+ * The provider track and log stay available under Details for debugging.
+ */
+export function Resolving({ stage, title, meta, elapsed = 0, log = [], providers = [], onArt = false,
+                            onClose, onRetry }) {
   const secs = Math.floor(elapsed / 1000);
-  const active = providers.filter(p => ['queued', 'opening', 'validating'].includes(p.state));
+  const total = providers.length;
+  const started = providers.filter(p => p.state !== 'queued').length;
+  const status = statusLine(stage, providers);
   return (
-    <div className={`overlay${onArt ? ' on-art' : ''}`}>
-      <p className="ov-eyebrow">{title}</p>
-      <p className="ov-title">{STAGES[stage]}…</p>
-      <div className="steps" role="progressbar" aria-valuetext={STAGES[stage]}>
-        {STAGES.map((s, i) => (
-          <span key={s} className={`step ${i === stage ? 'active' : ''} ${i < stage ? 'done' : ''}`} />
-        ))}
+    <div className={`overlay ov-screen${onArt ? ' on-art' : ''}`}>
+      {onClose && (
+        <button type="button" className="ov-back focusable" data-focus="" onClick={onClose} aria-label="Back">
+          <Icon name="back" size={18} /><span>Back</span>
+        </button>
+      )}
+      <div className="ov-card" role="status" aria-live="polite">
+        <div className="ov-spinner" role="progressbar" aria-label={status} aria-valuetext={status} />
+        <p className="ov-name">{title}</p>
+        {meta && <p className="ov-meta">{meta}</p>}
+        <p className="ov-status">{status}</p>
+        {total > 1 && stage === 0 && (
+          <p className="ov-count">Source {Math.max(1, started)} of {total}</p>
+        )}
+        {secs >= 8 && onRetry && (
+          <div className="ov-actions" data-focus-group="">
+            <button type="button" className="btn focusable" data-focus="" onClick={onRetry}>Try again</button>
+          </div>
+        )}
+        {(total > 0 || log.length > 0) && (
+          <details className="ov-details">
+            <summary className="focusable" data-focus="">Details</summary>
+            <ProviderTrack providers={providers} />
+            {/* Older lines dim toward the top, via --age (see globals.css). */}
+            <ul className="ov-log">
+              {log.map((l, i) => (
+                <li key={l.id} className="ov-log-line" style={{ '--age': log.length - 1 - i }}>{l.line}</li>
+              ))}
+            </ul>
+            <p className="ov-hint dim ov-elapsed">{secs}s elapsed</p>
+          </details>
+        )}
       </div>
-      <div className="bar" style={{ width: 210, marginTop: 18 }} />
-      <ProviderTrack providers={providers} />
-      {/* Older lines dim toward the top. The opacity is a CSS custom property
-          rather than an inline `opacity`, because `.enter` animates with
-          fill-mode `both` and its final keyframe (opacity:1) would override an
-          inline value outright - which left the whole log invisible or
-          full-brightness depending on timing. */}
-      <ul className="ov-log" aria-live="polite">
-        {log.map((l, i) => (
-          <li key={l.id} className="ov-log-line"
-              style={{ '--age': log.length - 1 - i }}>
-            {l.line}
-          </li>
-        ))}
-      </ul>
-      {secs >= 3 && (
-        <p className="ov-hint dim" style={{ fontVariantNumeric: 'tabular-nums' }}>{secs}s</p>
-      )}
-      {secs >= 15 && active.length > 0 && (
-        <p className="ov-hint dim ov-wait-note">
-          Still working — {active.length} source{active.length === 1 ? '' : 's'} in progress.
-        </p>
-      )}
     </div>
   );
 }
@@ -173,7 +189,7 @@ export function EmbedFallback({ embeds, onClose }) {
     );
   }
   return (
-    <div className="actions" style={{ marginTop: 14, flexWrap: 'wrap', justifyContent: 'center' }}>
+    <div className="actions ov-embeds">
       {embeds.map(e => (
         <button key={e.provider} className="btn focusable" data-focus=""
           onClick={() => setActive(e)}>Try {e.provider}’s player</button>
@@ -183,34 +199,44 @@ export function EmbedFallback({ embeds, onClose }) {
 }
 
 export function PlayerError({ error, embeds, onClose, onRetry }) {
+  const more = error.detail || error.tried?.length > 0;
   return (
-    <div className="overlay">
-      <p className="ov-title">Couldn’t start playback</p>
-      <p className="ov-hint">{error.message}</p>
-      {/* A configuration fault needs the specifics, or it reads as "the film
-          is unavailable" when the deployment is simply misconfigured. */}
-      {error.detail && <p className="ov-hint dim" style={{ maxWidth: '52ch' }}>{error.detail}</p>}
-      {error.tried?.length > 0 && (
-        <p className="ov-hint dim">Tried: {error.tried.join(', ')}</p>
-      )}
-      <div className="actions" style={{ marginTop: 20 }}>
-        <button className="btn primary focusable" data-focus="" onClick={onRetry}>Try again</button>
-        <button className="btn focusable" data-focus="" onClick={onClose}>Back</button>
-      </div>
-      {/* Only after our own player has failed. */}
-      <EmbedFallback embeds={embeds} onClose={onClose} />
-      {error.providers?.length > 0 && (
-        <div className="providers">
-          <p className="ov-hint dim">Or open a source directly:</p>
-          <div className="provider-list">
-            {error.providers.map(p => (
-              <a key={p.name} className="chip focusable" data-focus="" href={p.url} target="_blank" rel="noreferrer">
-                {p.name}
-              </a>
-            ))}
-          </div>
+    <div className="overlay ov-screen">
+      <button type="button" className="ov-back focusable" data-focus="" onClick={onClose} aria-label="Back">
+        <Icon name="back" size={18} /><span>Back</span>
+      </button>
+      <div className="ov-card ov-card-error" role="alert">
+        <span className="ov-error-icon" aria-hidden="true">!</span>
+        <p className="ov-name">Couldn’t start playback</p>
+        <p className="ov-status">{error.message}</p>
+        <div className="ov-actions" data-focus-group="">
+          <button className="btn primary focusable" data-focus="" onClick={onRetry}>Retry</button>
+          <button className="btn focusable" data-focus="" onClick={onClose}>Back</button>
         </div>
-      )}
+        {/* A configuration fault needs the specifics, or it reads as "the
+            film is unavailable" when the deployment is simply misconfigured. */}
+        {more && (
+          <details className="ov-details">
+            <summary className="focusable" data-focus="">Details</summary>
+            {error.detail && <p className="ov-hint dim">{error.detail}</p>}
+            {error.tried?.length > 0 && <p className="ov-hint dim">Tried: {error.tried.join(', ')}</p>}
+          </details>
+        )}
+        {/* Only after our own player has failed. */}
+        <EmbedFallback embeds={embeds} onClose={onClose} />
+        {error.providers?.length > 0 && (
+          <div className="providers">
+            <p className="ov-hint dim">Or open a source directly:</p>
+            <div className="provider-list">
+              {error.providers.map(p => (
+                <a key={p.name} className="chip focusable" data-focus="" href={p.url} target="_blank" rel="noreferrer">
+                  {p.name}
+                </a>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

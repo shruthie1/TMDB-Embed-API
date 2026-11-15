@@ -21,8 +21,8 @@ export default function manifest() {
     // can lock the player during fullscreen. The player still stays portrait
     // while browsing and requests landscape only for playback.
     orientation: 'any',
-    background_color: '#08080A',
-    theme_color: '#08080A',
+    background_color: '#06070C', // = --color-bg (tokens.css)
+    theme_color: '#06070C',
     categories: ['entertainment', 'video'],
     icons: [
       {

@@ -60,4 +60,21 @@ describe('search index', () => {
     expect(titles('sala').some(t => /^Salaar/.test(t))).toBe(true);
     expect(titles('kalk').some(t => /^Kalki 2898/.test(t))).toBe(true);
   });
+  // 'rrr' is not here: the local index misses it and the TMDB half of
+  // searchAll supplies it (rank 1 on /api/search).
+  it('ranks every prefix query target in the top five', () => {
+    const top5 = (q) => lookupIndex(q).slice(0, 5).map(x => x.m.title || x.m.name);
+    for (const [q, re] of [['pu', /^Pushpa/], ['push', /^Pushpa/], ['kal', /^Kalki 2898/],
+      ['dev', /^Devara/], ['sal', /^Salaar/], ['bah', /^Baahubali|^Bāhubali/],
+      ['manjum', /^Manjummel/], ['kan', /^Kantara/]]) {
+      expect(top5(q).some(t => re.test(t)), `${q} -> ${top5(q).join(' | ')}`).toBe(true);
+    }
+  });
+  it('finds the title through a one-letter typo or loose romanisation', () => {
+    const top5 = (q) => lookupIndex(q).slice(0, 5).map(x => x.m.title || x.m.name);
+    for (const [q, re] of [['puspa', /^Pushpa/], ['bahubali', /^Baahubali|^Bāhubali/],
+      ['salar', /^Salaar/], ['kalky', /^Kalki/], ['devra', /^Devara/], ['manjumal', /^Manjummel/]]) {
+      expect(top5(q).some(t => re.test(t)), `${q} -> ${top5(q).join(' | ')}`).toBe(true);
+    }
+  });
 });

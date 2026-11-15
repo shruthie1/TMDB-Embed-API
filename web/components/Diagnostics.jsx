@@ -82,8 +82,8 @@ export default function Diagnostics() {
   return (
     <div style={{
       position: 'fixed', left: 0, bottom: 0, zIndex: 9999, maxWidth: '100%',
-      background: 'rgba(0,0,0,.85)', color: '#0f0', font: '11px/1.35 monospace',
-      padding: '6px 8px', pointerEvents: 'none', whiteSpace: 'pre-wrap',
+      background: 'var(--color-scrim)', color: 'var(--color-success)', font: '11px/1.35 monospace',
+      padding: 'var(--space-1-5) var(--space-2)', pointerEvents: 'none', whiteSpace: 'pre-wrap',
     }}>
       {`UA ${navigator.userAgent.slice(0, 96)}
 tv=${document.documentElement.dataset.tv || 'no'}  focusables=${document.querySelectorAll('[data-focus]').length}

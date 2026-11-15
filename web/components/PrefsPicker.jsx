@@ -1,76 +1,104 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Chip, Button } from './ui';
 import Icon from './Icon';
-import { PREF_LANGS, DEFAULT_PREFS, getPrefs, hasPrefs, savePrefs }
-  from '../lib/prefs';
+import { PREF_LANGS, getPrefs, hasPrefs, savePrefs } from '../lib/prefs';
+
+const FOCUSABLE = 'button:not([disabled]), [href], [tabindex]:not([tabindex="-1"])';
 
 /**
- * Preferred languages as a modal; tap order is rank order.
+ * Preferred languages, as a small centred dialog. Tap order is still saved
+ * as rank order (rows follow it), but the UI no longer shows numbers.
  *
- * Opens by itself once, on a first visit with no stored choice. It is sticky:
- * a tap outside or Escape does not dismiss it, so the first choice is always
- * made on purpose (Save or Use defaults). The header button reopens it.
+ * First visit: nothing is selected, it opens after the home page has painted,
+ * and it is sticky (no outside-tap or Escape dismiss). Save needs at least one
+ * language; Skip stores an empty choice, which means all languages.
  */
 export function PrefsModal({ open, onClose, firstVisit = false }) {
-  const [langs, setLangs] = useState(DEFAULT_PREFS.langs);
-  const panelRef = useRef(null);
+  const [langs, setLangs] = useState([]);
+  const cardRef = useRef(null);
 
   useEffect(() => {
-    if (!open) return;
-    setLangs(getPrefs().langs);
-    panelRef.current?.querySelector('[data-focus]')?.focus();
-  }, [open]);
+    if (!open) return undefined;
+    setLangs(firstVisit ? [] : getPrefs().langs);
+    const card = cardRef.current;
+    const returnTo = document.activeElement;
+    // First language, not the close button, so the dialog opens on a choice.
+    (card?.querySelector('.lang-opt') || card?.querySelector(FOCUSABLE))?.focus();
+    // Keep Tab inside the dialog; arrows are scoped by lib/dpad.js.
+    const onKey = (e) => {
+      if (e.key === 'Escape' && !firstVisit) { e.stopPropagation(); onClose(); return; }
+      if (e.key !== 'Tab' || !card) return;
+      const items = [...card.querySelectorAll(FOCUSABLE)];
+      if (!items.length) return;
+      const first = items[0], last = items[items.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      else if (!card.contains(document.activeElement)) { e.preventDefault(); first.focus(); }
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => {
+      window.removeEventListener('keydown', onKey, true);
+      if (returnTo instanceof HTMLElement) returnTo.focus();
+    };
+  }, [open, firstVisit, onClose]);
+
+  if (!open) return null;
 
   // Functional update: two quick taps must not read the same stale list.
-  const toggle = (set, v) =>
-    set(list => (list.includes(v) ? list.filter(x => x !== v) : [...list, v]));
+  const toggle = (code) =>
+    setLangs(list => (list.includes(code) ? list.filter(x => x !== code) : [...list, code]));
   const done = (next) => { savePrefs(next); onClose(); };
 
   return (
-    <>
-      {/* No onClick: an outside tap must not dismiss the choice by accident. */}
-      <div className={`sheet-scrim ${open ? 'on' : ''}`} aria-hidden={!open} />
-      <aside ref={panelRef} className={`fpanel ${open ? 'open' : ''}`} aria-hidden={!open}>
-        {/* role=dialog sits on an inner element: lib/dpad.js scopes arrow
-            keys to the open dialog only if it has an offsetParent, which a
-            position:fixed element never has. On the aside itself, the D-pad
-            walked out of the pop-up into the rows behind it. */}
-        <div role="dialog" aria-label="Your languages" aria-modal={open ? 'true' : undefined}
-             style={{ display: 'flex', flexDirection: 'column', flex: '1 0 auto' }}>
-        <div className="fpanel-grab" />
-        <div className="fpanel-head">
-          <h2 className="row-label">Your languages</h2>
+    // No onClick on the backdrop: an outside tap must not dismiss the choice.
+    <div className="lang-modal-backdrop">
+      {/* role=dialog on an in-flow element: lib/dpad.js scopes arrow keys to
+          an open dialog only when it has an offsetParent. */}
+      <div ref={cardRef} className="lang-modal" role="dialog" aria-modal="true"
+           aria-labelledby="lang-modal-title" aria-describedby="lang-modal-hint">
+        <div className="lang-modal-head">
+          <h2 id="lang-modal-title" className="lang-modal-title">Your languages</h2>
           {!firstVisit && (
-            <button className="icon-btn focusable" data-focus="" aria-label="Close"
-                    onClick={onClose}>
+            <button type="button" className="icon-btn lang-close focusable" data-focus=""
+                    aria-label="Close" onClick={onClose}>
               <Icon name="close" size={16} />
             </button>
           )}
         </div>
-        <div className="fgroup">
-          <p className="flabel">First tapped ranks first</p>
-          <div className="chips">
-            {PREF_LANGS.map(l => (
-              <Chip key={l.code} active={langs.includes(l.code)}
-                    onClick={() => toggle(setLangs, l.code)}>
-                {langs.includes(l.code) ? `${langs.indexOf(l.code) + 1}. ` : ''}{l.label}
-              </Chip>
-            ))}
-          </div>
+        <p id="lang-modal-hint" className="lang-modal-hint">
+          Pick the languages you watch.
+        </p>
+        <div className="lang-options" data-focus-group="">
+          {PREF_LANGS.map(l => {
+            const on = langs.includes(l.code);
+            return (
+              <button key={l.code} type="button" data-focus=""
+                      className={`lang-opt focusable lang-focus${on ? ' on' : ''}`}
+                      aria-pressed={on} onClick={() => toggle(l.code)}>
+                <span className="lang-opt-label">{l.label}</span>
+                <span className="lang-opt-mark" aria-hidden="true">
+                  {on ? <Icon name="check" size={14} /> : null}
+                </span>
+              </button>
+            );
+          })}
         </div>
-        <div className="fpanel-foot chips">
-          <Button variant="primary" onClick={() => done({ langs })}>Save</Button>
-          <Button onClick={() => done(DEFAULT_PREFS)}>Use defaults</Button>
+        <p className="lang-modal-need" aria-live="polite">
+          {langs.length ? `${langs.length} selected` : 'Pick at least one language'}
+        </p>
+        <div className="lang-modal-actions">
+          <button type="button" data-focus="" className="btn primary focusable lang-focus"
+                  disabled={!langs.length} onClick={() => done({ langs })}>Save</button>
+          <button type="button" data-focus="" className="btn focusable lang-focus"
+                  onClick={() => done({ langs: [] })}>Skip</button>
         </div>
-        </div>
-      </aside>
-    </>
+      </div>
+    </div>
   );
 }
 
-/** Header button plus the modal; auto-opens once on a first visit. */
+/** Header button plus the dialog; opens once on a first visit, after load. */
 export default function PrefsButton() {
   const [open, setOpen] = useState(false);
   const [first, setFirst] = useState(false);
@@ -78,7 +106,14 @@ export default function PrefsButton() {
 
   useEffect(() => {
     setMounted(true);
-    if (!hasPrefs()) { setFirst(true); setOpen(true); }
+    if (hasPrefs()) return undefined;
+    // After the page has loaded and painted, so the home page is visible
+    // behind the dimmed backdrop rather than replaced by it.
+    let t;
+    const show = () => { t = setTimeout(() => { setFirst(true); setOpen(true); }, 700); };
+    if (document.readyState === 'complete') show();
+    else window.addEventListener('load', show, { once: true });
+    return () => { clearTimeout(t); window.removeEventListener('load', show); };
   }, []);
 
   return (
@@ -90,7 +125,7 @@ export default function PrefsButton() {
       </button>
       {/* Portalled to <body>: inside the sticky header it shared the
           header's stacking context (z-index 20), so on a phone the bottom
-          tab bar (z-index 30) covered the Save button. */}
+          tab bar (z-index 30) covered the buttons. */}
       {mounted && createPortal(
         <PrefsModal open={open} firstVisit={first}
                     onClose={() => { setOpen(false); setFirst(false); }} />,

@@ -117,7 +117,7 @@ function Copy({ text }) {
 
 /** The rows behind one title: urls, ladders, and a live test per source. */
 function TitleDetail({ t }) {
-  const [rows, setRows] = useState(null);
+  const [rows] = useState(null);
   const [err, setErr] = useState(null);
   const [tests, setTests] = useState({});
 
