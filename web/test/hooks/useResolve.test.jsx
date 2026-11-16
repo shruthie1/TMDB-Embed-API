@@ -228,3 +228,18 @@ describe('useResolve — mergeSources (late providers, e.g. NetMirror fetched on
     expect(api.sources[0].languages).toEqual(['Telugu', 'Hindi']);
   });
 });
+
+describe('useResolve — replaceSource (an expired signed url renewed)', () => {
+  it('swaps the url on the same row, keeping its id and place', () => {
+    const api = harness();
+    const castle = { id: 'CastleTV-0', provider: 'CastleTV', masterUrl: 'https://x/c.m3u8' };
+    const otv = { id: 'OneTouchTV-11', provider: 'OneTouchTV', masterUrl: 'https://x/old.m3u8' };
+    act(() => api.mergeSources([castle, otv]));
+    act(() => api.replaceSource('OneTouchTV-11',
+      { id: 'OneTouchTV-0', provider: 'OneTouchTV', masterUrl: 'https://x/new.m3u8' }));
+    expect(api.sources.map((s) => [s.id, s.masterUrl])).toEqual([
+      ['CastleTV-0', 'https://x/c.m3u8'],
+      ['OneTouchTV-11', 'https://x/new.m3u8'],
+    ]);
+  });
+});

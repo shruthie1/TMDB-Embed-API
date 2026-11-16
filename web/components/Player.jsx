@@ -10,6 +10,7 @@ import { forgetProvider, rememberProvider } from '../lib/lastProvider';
 import { abortReason } from '../lib/abortReason';
 import useAudioSync from '../lib/player/useAudioSync';
 import useSwitchGuard from '../lib/player/useSwitchGuard';
+import useStaleRefresh from '../lib/player/staleRefresh';
 import { videoChoices, videoIdOf, videoLabels } from '../lib/player/trackChoices';
 import EmbedStage from './player/EmbedStage';
 import { VA_EMBED_ID, vaEmbedChoice, shouldAutoEmbed } from '../lib/player/vaEmbed';
@@ -118,8 +119,10 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   const recoverBySwitchingRef = useRef(null);
   const sourceListRef = useRef([]);
   const currentSourceRef = useRef(null);
+  const currentSourceIdRef = useRef(null);
   sourceListRef.current = sources;
   currentSourceRef.current = currentSource;
+  currentSourceIdRef.current = currentSourceId;
 
   // The VaPlayer embed is on the stage (see vaEmbed below). Declared here
   // because the key handler must step aside while it is.
@@ -139,6 +142,19 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       resolve.switchSource(prev);
     },
     onRevert: setNotice,
+  });
+  // A pick whose signed url expired while the page sat open gets one fresh
+  // url from its provider before the guard reverts. See staleRefresh.js.
+  const staleRefresh = useStaleRefresh({
+    fetchRows: (target) => listBackendSources(title.mediaType, title.tmdbId, {
+      season, episode, provider: String(target.provider).toLowerCase(), refresh: true,
+    }),
+    apply: (target, fresh) => {
+      resolve.replaceSource(target.id, fresh);
+      resolve.switchSource({ ...target, ...fresh, id: target.id });
+    },
+    giveUp: () => { switchGuard.fail(); },
+    currentId: () => currentSourceIdRef.current,
   });
   // The label a viewer sees for a row: the same "CastleTV 2" the Servers menu
   // shows, so the notice names the row they picked.
@@ -262,6 +278,11 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   const onFatal = useCallback((data, hls) => {
     // A viewer's own pick failed: put back what they were watching instead of
     // jumping to the first source in the list or covering the picture.
+    // An expired signed url on the viewer's own pick: renew it once before
+    // going back to the previous server.
+    if (switchGuard.isPending() && fatalAction(data).kind === 'stale'
+        && staleRefresh.tryRefresh(
+          sourceListRef.current.find((s) => s.id === currentSourceIdRef.current))) return;
     if (switchGuard.fail()) return;
     // A 403/410 means the signed url went stale. Another provider's url is
     // almost certainly still good, so try that FIRST - it resumes at the same
@@ -291,7 +312,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     resolve.setError({ message: action.kind === 'unreachable'
       ? `${who} is not responding, and no other server is left. Try again in a moment.`
       : action.message });
-  }, [resolve, recoverBySwitching, switchGuard, setNotice]);
+  }, [resolve, recoverBySwitching, switchGuard, staleRefresh, setNotice]);
 
   // Declared before useHls, which captures it in onHlsReady.
   const hlsInstance = useRef(null);
@@ -945,7 +966,9 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   // the same title deliberately keep the one-fallback guard armed.
   useEffect(() => {
     startupFallbackUsedRef.current = false;
-  }, [title.mediaType, title.tmdbId, season, episode]);
+    // Row ids repeat across titles ("OneTouchTV-11"), so a new title starts clean.
+    staleRefresh.reset();
+  }, [title.mediaType, title.tmdbId, season, episode, staleRefresh]);
 
   // A server-side validation only proves that bytes exist from the VM. On a
   // user's device the first frame can still take 14-19s, especially when a
@@ -1373,9 +1396,10 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   useEffect(() => {
     const v = videoRef.current;
     if (!v || !stream) return;
-    v.addEventListener('loadeddata', switchGuard.landed);
-    return () => v.removeEventListener('loadeddata', switchGuard.landed);
-  }, [stream, switchGuard]);
+    const landed = () => { switchGuard.landed(); staleRefresh.reset(); };
+    v.addEventListener('loadeddata', landed);
+    return () => v.removeEventListener('loadeddata', landed);
+  }, [stream, switchGuard, staleRefresh]);
 
   // Commit an audio offset. The browser absorbs small POSITIVE shifts with a
   // DelayNode and nothing else has to happen; anything it cannot do (audio

@@ -320,7 +320,18 @@ export function useResolve({ mediaType, tmdbId, season = 0, episode = 0 }) {
     setSourcesPending(false);
   }, []);
 
+  /**
+   * Put a fresh signed url on an EXISTING row, keeping its id and position.
+   *
+   * mergeSources matches rows by url, so a renewed url would land as a second
+   * copy of the same server. See lib/player/staleRefresh.js.
+   */
+  const replaceSource = useCallback((id, fresh) => {
+    if (id == null || !fresh?.masterUrl) return;
+    setSources(prev => prev.map(s => (s.id === id ? { ...s, ...fresh, id: s.id } : s)));
+  }, []);
+
   return { stream, sources, currentSource, currentSourceId, sourcesPending, log, stage, error, providers,
-           mergeSources, requestedAt,
+           mergeSources, replaceSource, requestedAt,
            load, switchSource, setError };
 }
