@@ -115,7 +115,7 @@ restarts() { pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('
 echo "[vm] swap: $DIR -> $PREV, $STAGE -> $DIR"
 mv "$DIR" "$PREV"
 mv "$STAGE" "$DIR"
-pm2 restart "$APP" --update-env >/dev/null
+pm2 restart "$APP" --kill-timeout 10000 --update-env >/dev/null
 sleep 3
 R0="$(restarts)"
 if health && sleep 10 && [ "$(restarts)" = "$R0" ] && health \
@@ -130,7 +130,7 @@ pm2 logs "$APP" --lines 40 --nostream 2>&1 | tail -40 >&2 || true
 rm -rf "$DIR.failed-$SHA"
 mv "$DIR" "$DIR.failed-$SHA"
 mv "$PREV" "$DIR"
-pm2 restart "$APP" --update-env >/dev/null
+pm2 restart "$APP" --kill-timeout 10000 --update-env >/dev/null
 if health; then echo "[vm] rolled back; previous build is serving" >&2; else echo "[vm] ROLLBACK ALSO UNHEALTHY: restore from $BACKUP" >&2; fi
 exit 5
 REMOTE
