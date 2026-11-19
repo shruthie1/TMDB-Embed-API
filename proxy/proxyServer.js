@@ -313,11 +313,21 @@ function inferContentType(upstreamCT, targetUrl) {
     const bad = !upstreamCT || disguised || /application\/octet-stream/i.test(upstreamCT) || /application\/(x-)?zip/i.test(upstreamCT) || /application\/javascript/i.test(upstreamCT);
     if (!bad) return upstreamCT;
     if (/\.mkv(\?|$)/i.test(targetUrl)) return 'video/x-matroska';
-    if (/\.mp4(\?|$)/i.test(targetUrl)) return 'video/mp4';
+    if (/\.(mp4|m4s)(\?|$)/i.test(targetUrl)) return 'video/mp4';
     if (/\.m3u8(\?|$)/i.test(targetUrl)) return 'application/vnd.apple.mpegurl';
     // Anything else reaching ts-proxy is a media segment whatever it is named,
     // and mp2t is what every one of these providers actually ships.
     return 'video/mp2t';
+}
+
+// An fMP4 segment or init file starts with a box whose type sits at bytes 4-8.
+// Disguised fMP4 (mapple) otherwise falls through to video/mp2t. Only used
+// where the body is already in memory; the streaming path keeps the URL guess.
+const FMP4_BOXES = new Set(['styp', 'ftyp', 'moof']);
+function sniffSegmentType(ct, buf) {
+    if (ct !== 'video/mp2t' || !buf || !(buf.byteLength >= 8)) return ct;
+    const b = new Uint8Array(buf.buffer || buf, buf.byteOffset || 0, 8);
+    return FMP4_BOXES.has(String.fromCharCode(b[4], b[5], b[6], b[7])) ? 'video/mp4' : ct;
 }
 
 function extractOriginalUrl(proxyUrl) {
@@ -685,7 +695,7 @@ function createProxyRoutes(app) {
         if (!isCacheDisabled()) {
             const cached = getCachedSegment(targetUrl);
             if (cached) {
-                const ct = inferContentType(cached.headers['content-type'], targetUrl);
+                const ct = sniffSegmentType(inferContentType(cached.headers['content-type'], targetUrl), cached.data);
                 res.setHeader('Content-Type', ct);
                 res.setHeader('Cache-Control', 'public, max-age=3600');
                 res.setHeader('Access-Control-Allow-Origin', '*');
@@ -984,6 +994,7 @@ function processStreamsForProxy(streams, serverUrl) {
 
 module.exports = {
     createProxyRoutes, processStreamsForProxy, rewriteM3u8,
+    inferContentType, sniffSegmentType,
     // Exposed for tests.
     _segmentCache: { cacheSegment, getCachedSegment, stats: () => ({ entries: segmentCache.size, bytes: segmentCacheBytes, maxBytes: CACHE_MAX_BYTES }) },
 };

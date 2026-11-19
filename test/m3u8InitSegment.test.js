@@ -24,3 +24,20 @@ test('EXT-X-MAP init segment is routed through ts-proxy, absolute and relative',
     assert.match(maps[0], /URI="https:\/\/api\.example\/ts-proxy\?url=https%3A%2F%2Fcdn\.example%2Fvideo%2Finit\.mp4&headers=/);
     assert.match(maps[1], /URI="https:\/\/api\.example\/ts-proxy\?url=https%3A%2F%2Fcdn\.example%2Fvideo%2Finit2\.mp4&headers=.*",BYTERANGE="720@0"/);
 });
+
+// fMP4 segments and init files (mapple) start with a styp/ftyp/moof box but
+// arrive disguised, so the URL guess labelled them video/mp2t.
+test('fMP4 segment bodies are labelled video/mp4, TS stays video/mp2t', () => {
+    const { inferContentType, sniffSegmentType } = require('../proxy/proxyServer');
+    const box = (type) => new Uint8Array([0, 0, 0, 24, ...Buffer.from(type, 'latin1'), 0, 0, 0, 0]);
+    for (const type of ['styp', 'ftyp', 'moof']) {
+        assert.equal(sniffSegmentType('video/mp2t', box(type)), 'video/mp4', type);
+    }
+    const ts = new Uint8Array(188); ts[0] = 0x47;
+    assert.equal(sniffSegmentType('video/mp2t', ts), 'video/mp2t');
+    assert.equal(sniffSegmentType('video/mp2t', new Uint8Array(4)), 'video/mp2t');
+    // A real upstream type is never overridden.
+    assert.equal(sniffSegmentType('video/iso.segment', box('styp')), 'video/iso.segment');
+    assert.equal(inferContentType('image/jpeg', 'https://cdn.example/seg1.m4s'), 'video/mp4');
+    assert.equal(inferContentType(null, 'https://cdn.example/seg1.jpg'), 'video/mp2t');
+});

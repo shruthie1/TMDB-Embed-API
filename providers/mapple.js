@@ -139,14 +139,26 @@ async function getSession(mediaType, mediaId) {
 
 // Pull the ladder out of the master so the UI can show a real quality menu and
 // so a 2160p title is visibly 2160p rather than "Auto".
+//
+// The same fetch also checks the master is playable. Prod 2026-11-19, 1376856
+// (The Paradise): a front answered with a stream_url whose master body was
+// only "#EXTM3U" (8 bytes). That row cannot play but was still offered, so it
+// is now treated like `playback-unavailable` and the sweep moves on.
+// `empty` is true only when a body was read and has neither tag. A failed or
+// timed-out fetch says nothing about the stream, so the row is kept.
+function isEmptyPlaylist(text) {
+    return !/#EXT-X-STREAM-INF/i.test(text) && !/#EXTINF/i.test(text);
+}
+
 async function readLadder(url) {
     try {
         const ac = new AbortController();
         const timer = setTimeout(() => ac.abort(), STEP_TIMEOUT_MS);
         const r = await fetch(url, { headers: streamHeaders(), signal: ac.signal })
             .finally(() => clearTimeout(timer));
-        if (!r.ok) return [];
+        if (!r.ok) return { levels: [], empty: false };
         const text = await r.text();
+        if (isEmptyPlaylist(text)) return { levels: [], empty: true, bytes: text.length };
         const levels = [];
         const re = /RESOLUTION=(\d+)x(\d+)[^\n]*/g;
         const bw = /BANDWIDTH=(\d+)/;
@@ -158,9 +170,9 @@ async function readLadder(url) {
                 levels.push({ height, bandwidth: b ? Number(b[1]) : null });
             }
         }
-        return levels;
+        return { levels, empty: false };
     } catch {
-        return [];
+        return { levels: [], empty: false };
     }
 }
 
@@ -229,7 +241,11 @@ async function getMappleStreams(tmdbId, mediaType = 'movie', seasonNum = null, e
             // have it" - a 200 with a placeholder url, not an error status.
             if (!streamUrl || streamUrl.includes('playback-unavailable')) continue;
 
-            const levels = await readLadder(streamUrl);
+            const { levels, empty, bytes } = await readLadder(streamUrl);
+            if (empty) {
+                console.warn(`[mapple] ${tmdbId} on ${source}: empty master (${bytes}B), trying next front`);
+                continue;
+            }
             const best = levels.length ? Math.max(...levels.map((l) => l.height)) : 0;
 
             console.log(`[mapple] ${tmdbId} on ${source} in ${Date.now() - t0}ms`
@@ -278,4 +294,4 @@ async function getMappleStreams(tmdbId, mediaType = 'movie', seasonNum = null, e
     }
 }
 
-module.exports = { REQUEST_TOKEN_PATH, PLAYBACK_INIT_PATH, getMappleStreams, solvePow, SOURCES, BASE, streamHeaders };
+module.exports = { REQUEST_TOKEN_PATH, isEmptyPlaylist, PLAYBACK_INIT_PATH, getMappleStreams, solvePow, SOURCES, BASE, streamHeaders };
