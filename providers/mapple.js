@@ -56,6 +56,14 @@ const SOURCES = ['mapple', ...[...RANKED, ...UNSEEN].map((n) => `s${n}`)];
 // aggregate stream request open far past the point the UI has given up.
 const SWEEP_BUDGET_MS = Number(process.env.MAPPLE_SWEEP_BUDGET_MS) || 12000;
 const STEP_TIMEOUT_MS = Number(process.env.MAPPLE_STEP_TIMEOUT_MS) || 8000;
+// Per-call cap for a front's encrypt and signed stream requests, further cut
+// to the sweep time left. Measured on VM1 2026-11-19 (fetch timer, 9 front
+// calls per sweep, 6 sweeps): the slowest call that answered was 4277ms (s9
+// signed, 690957); the slowest call on the front that gave the row was 594ms.
+// The prod log had 3 sweeps die at 16-19s on "This operation was aborted":
+// one 8s hang ate the 12s budget before s4 was reached. 5s keeps the 4.3s call
+// and leaves room for s4 after one hung front.
+const FRONT_STEP_MS = Number(process.env.MAPPLE_FRONT_STEP_MS) || 5000;
 
 // readLadder runs after a front already gave a stream, so it must never cost
 // that row. The registry drops the whole provider at PROVIDER_DEADLINE_MS
@@ -105,24 +113,54 @@ function absorb(jar, res) {
     }
 }
 
-async function go(jar, url, opt = {}) {
+function request(jar, url, opt, signal) {
+    return fetch(url, {
+        ...opt,
+        signal,
+        headers: {
+            'user-agent': UA,
+            origin: BASE,
+            referer: `${BASE}/`,
+            ...(opt.headers || {}),
+            ...(jar.size ? { cookie: cookieHeader(jar) } : {}),
+        },
+        redirect: 'manual',
+    });
+}
+
+async function go(jar, url, opt = {}, timeoutMs = STEP_TIMEOUT_MS) {
     const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), STEP_TIMEOUT_MS);
+    const timer = setTimeout(() => ac.abort(), timeoutMs);
     try {
-        const r = await fetch(url, {
-            ...opt,
-            signal: ac.signal,
-            headers: {
-                'user-agent': UA,
-                origin: BASE,
-                referer: `${BASE}/`,
-                ...(opt.headers || {}),
-                ...(jar.size ? { cookie: cookieHeader(jar) } : {}),
-            },
-            redirect: 'manual',
-        });
+        const r = await request(jar, url, opt, ac.signal);
         absorb(jar, r);
         return r;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+// One front step (encrypt or signed stream request) as JSON, with the timer
+// held over the body read too: go() clears its timer once headers arrive, so a
+// body that stalls after that was never cut. An abort or network error throws,
+// so the sweep can count it as a failed front. A body that is not JSON is null,
+// the same "no answer from this front" as before.
+async function goJson(jar, url, opt, timeoutMs) {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), Math.max(0, timeoutMs));
+    const aborted = new Promise((_, reject) => {
+        ac.signal.addEventListener('abort', () => reject(new Error('This operation was aborted')));
+    });
+    aborted.catch(() => {});
+    try {
+        const r = await Promise.race([request(jar, url, opt, ac.signal), aborted]);
+        absorb(jar, r);
+        try {
+            return await Promise.race([r.json(), aborted]);
+        } catch (e) {
+            if (ac.signal.aborted) throw e;
+            return null;
+        }
     } finally {
         clearTimeout(timer);
     }
@@ -265,8 +303,17 @@ async function getMappleStreams(tmdbId, mediaType = 'movie', seasonNum = null, e
             return [];
         }
 
+        // Errors are per front: one front that hangs or aborts must not end
+        // the sweep. If every front tried failed with an error and none said
+        // "not here", the provider throws so the registry records an error
+        // (da157dd); fronts that only had no stream give [].
+        let failed = 0;
+        let answered = 0;
+        let lastError = null;
+        const sweepEnd = t0 + SWEEP_BUDGET_MS;
+
         for (const source of SOURCES) {
-            if (Date.now() - t0 > SWEEP_BUDGET_MS) {
+            if (Date.now() > sweepEnd) {
                 console.warn(`[mapple] sweep budget hit for ${tmdbId} at ${source}`);
                 break;
             }
@@ -274,20 +321,31 @@ async function getMappleStreams(tmdbId, mediaType = 'movie', seasonNum = null, e
             const data = { mediaId, mediaType: type, tv_slug: '', source };
             if (base.season != null) { data.season = base.season; data.episode = base.episode; }
 
-            const enc = await json(await go(jar, `${BASE}/api/encrypt`, {
-                method: 'POST',
-                headers: { 'content-type': 'application/json' },
-                // requestToken twice, deliberately - see the header note.
-                body: JSON.stringify({ data, endpoint: 'stream-encrypted', requestToken }),
-            }));
-            if (!enc?.url) continue;
+            const f0 = Date.now();
+            const stepMs = () => Math.min(FRONT_STEP_MS, STEP_TIMEOUT_MS, sweepEnd - Date.now());
+            let streamUrl = '';
+            try {
+                const enc = await goJson(jar, `${BASE}/api/encrypt`, {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json' },
+                    // requestToken twice, deliberately - see the header note.
+                    body: JSON.stringify({ data, endpoint: 'stream-encrypted', requestToken }),
+                }, stepMs());
+                if (enc?.url) {
+                    const signed = `${BASE}${enc.url}`
+                        + `&requestToken=${encodeURIComponent(requestToken)}`
+                        + `&token=${encodeURIComponent(init.token)}`;
+                    const out = await goJson(jar, signed, { headers: { accept: 'application/json' } }, stepMs());
+                    streamUrl = out?.data?.stream_url || '';
+                }
+            } catch (e) {
+                failed++;
+                lastError = e;
+                console.warn(`[mapple] ${tmdbId} front ${source} failed: ${e.message} (${Date.now() - f0}ms)`);
+                continue;
+            }
+            answered++;
 
-            const signed = `${BASE}${enc.url}`
-                + `&requestToken=${encodeURIComponent(requestToken)}`
-                + `&token=${encodeURIComponent(init.token)}`;
-            const out = await json(await go(jar, signed, { headers: { accept: 'application/json' } }));
-
-            const streamUrl = out?.data?.stream_url || '';
             // `playback-unavailable` is mapple's in-band "this front does not
             // have it" - a 200 with a placeholder url, not an error status.
             if (!streamUrl || streamUrl.includes('playback-unavailable')) continue;
@@ -319,12 +377,22 @@ async function getMappleStreams(tmdbId, mediaType = 'movie', seasonNum = null, e
             }];
         }
 
-        console.log(`[mapple] no front carried ${tmdbId} (${Date.now() - t0}ms)`);
+        if (failed > 0 && answered === 0) {
+            const err = new Error(`all ${failed} fronts tried failed, last: ${lastError.message}`);
+            err.mappleAllFrontsFailed = true;
+            throw err;
+        }
+        console.log(`[mapple] no front carried ${tmdbId} (${Date.now() - t0}ms)`
+            + (failed ? `, ${failed} front(s) failed` : ''));
         return [];
     } catch (e) {
         // A dead session is the common failure; drop it so the next request
         // re-bootstraps rather than replaying a stale token forever.
         session = null;
+        if (e?.mappleAllFrontsFailed) {
+            console.error(`[mapple] error for ${tmdbId}: ${e.message} (${Date.now() - t0}ms)`);
+            throw e;
+        }
 
         // Name TLS interception rather than letting it read as "mapple is
         // down". Measured 2026-09-22 on this network: mapple.fun's leaf came
