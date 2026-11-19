@@ -22,11 +22,11 @@ import Icon from '../Icon';
  * The whole row is one <button>, so the label, the gap and the meta all
  * activate it - there is no dead zone by construction.
  */
-const MenuRow = ({ label, meta, selected, loading, onClick }) => (
+const MenuRow = ({ label, meta, selected, loading, dim, onClick }) => (
   <button role="menuitemradio" aria-checked={Boolean(selected)}
           aria-current={selected ? 'true' : undefined}
           aria-busy={loading || undefined}
-          className={`pmenu-item focusable ${selected ? 'on' : ''}`} data-focus=""
+          className={`pmenu-item focusable ${selected ? 'on' : ''}${dim ? ' dim' : ''}`} data-focus=""
           onClick={onClick}>
     <span className="pmenu-text">{label}</span>
     {loading

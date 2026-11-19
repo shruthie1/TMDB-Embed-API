@@ -18,6 +18,11 @@ export function fatalAction(data) {
     return { kind: 'codecs', failover: true, reason: 'incompatible codecs',
       message: 'This browser cannot decode this stream.' };
   }
+  // Raised by useNoPictureGuard, not hls.js: audio plays, no frame decodes.
+  if (d === 'noVideoFrames') {
+    return { kind: 'novideo', failover: true, reason: 'no video frames',
+      message: 'This device cannot show the picture for this stream.' };
+  }
   if (d === 'manifestLoadError' || d === 'manifestLoadTimeOut' || d === 'manifestParsingError') {
     return { kind: 'unreachable', failover: true, reason: d };
   }

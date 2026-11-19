@@ -1,4 +1,5 @@
 const { resolveImdbId } = require('../utils/tmdb');
+const { masterCodecs } = require('../lib/media/hlsManifest');
 
 const STREAM_API = 'https://streamdata.vaplayer.ru/api.php';
 const PLAYER_ORIGIN = 'https://nextgencloudfabric.com';
@@ -163,7 +164,7 @@ async function mediaKey(url) {
         // The master also states the real ladder. We already have the body, so
         // reading RESOLUTION here costs nothing and replaces the filename guess
         // below with what the stream actually offers.
-        return { key: hashes.join(','), heights: parseHeights(body) };
+        return { key: hashes.join(','), heights: parseHeights(body), codecs: masterCodecs(body) };
     } catch {
         return null;
     }
@@ -213,11 +214,14 @@ async function toStreams(streamUrls, labelSuffix = '', fileName = '') {
     const seen = new Set();
     const unique = [];
     let heights = [];
+    // CODECS per kept url, so the player can skip a codec it cannot decode.
+    const codecsByUrl = new Map();
     streamUrls.forEach((url, i) => {
         const probe = probes[i];
         if (!probe || seen.has(probe.key)) return;
         seen.add(probe.key);
         unique.push(url);
+        codecsByUrl.set(url, probe.codecs || null);
         if (probe.heights && probe.heights.length > heights.length) heights = probe.heights;
     });
 
@@ -245,6 +249,7 @@ async function toStreams(streamUrls, labelSuffix = '', fileName = '') {
         // The real ladder, so a player can build a quality menu without
         // re-fetching the master. Empty when no master could be read.
         levels: heights.map((h) => ({ height: h, quality: heightToLabel(h) })),
+        codecs: codecsByUrl.get(url) || null,
         provider: 'VaPlayer',
         headers: {
             'Referer': `${PLAYER_ORIGIN}/`,

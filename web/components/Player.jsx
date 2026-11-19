@@ -16,6 +16,7 @@ import EmbedStage from './player/EmbedStage';
 import { VA_EMBED_ID, vaEmbedChoice, shouldAutoEmbed } from '../lib/player/vaEmbed';
 import { markDead, nextAlive } from '../lib/player/deadSources';
 import { fatalAction } from '../lib/player/fatalPolicy';
+import useNoPictureGuard from '../lib/player/useNoPictureGuard';
 import { pairSources, listSources as listBackendSources } from '../lib/backend';
 import {
   useResolve, useHls, useRecovery, useControlVisibility,
@@ -303,7 +304,9 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     // Only with nothing left does the viewer see an error.
     const who = currentSourceRef.current || 'This server';
     if (recoverBySwitching(action.reason)) {
-      setNotice(`${who} failed. Switched to the next server.`);
+      setNotice(action.kind === 'novideo'
+        ? `${who} shows no picture on this device. Switched to the next server.`
+        : `${who} failed. Switched to the next server.`);
       return;
     }
     // (recoverBySwitching already reported this source's failure.)
@@ -373,6 +376,17 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   const hls = useHls({ videoRef, stream, onFatal, config: hlsConfig,
     preferredLanguage: wantLang, onLanguage: setWantLang,
     onHlsReady: (h) => { hlsInstance.current = h; } });
+
+  // Audio playing over a black screen raises no hls.js error (HEVC on Chrome
+  // Android, The Paradise 2026-11-19). Treat it as fatal so the normal
+  // failover path and its toast run. Not for the embed or an audio-only row.
+  useNoPictureGuard({
+    videoRef,
+    streamKey: stream?.masterUrl || null,
+    enabled: !embedOn && !stream?.audioOnly,
+    onNoPicture: () => onFatal({ details: 'noVideoFrames', fatal: true,
+      message: 'This device cannot show the picture for this stream.' }, hlsInstance.current),
+  });
 
   // A browser can report the network back before hls.js has decided to retry
   // its last fragment. Nudge it once, and retry playback if the element was

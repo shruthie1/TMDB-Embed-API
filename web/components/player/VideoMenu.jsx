@@ -35,6 +35,7 @@ export default function VideoMenu({
   // language that is playing.
   const maxOf = (c) => {
     if (c.embed) return 'Their player';
+    if (c.unsupported) return 'Not supported on this device';
     return c.quality && c.quality !== 'Auto' ? `up to ${c.quality}` : 'Auto quality';
   };
   const labels = videoLabels(choices);
@@ -81,6 +82,7 @@ export default function VideoMenu({
           {choices.map((c, i) => (
             <MenuRow key={c.id ?? i} label={labels[i]} meta={maxOf(c)}
                      selected={i === selectedIndex}
+                     dim={c.unsupported}
                      onClick={() => onPick?.(c)} />
           ))}
         </div>

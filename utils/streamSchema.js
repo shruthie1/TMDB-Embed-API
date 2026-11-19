@@ -23,6 +23,10 @@
 //   headers    object   request headers the URL needs.
 //   container  string   "hls" | "mp4" | "mkv" | null
 //   selectableAudio bool true = the URL exposes switchable audio renditions.
+//   codecs     string   RFC 6381 CODECS of the HLS master, e.g.
+//                       "hvc1.1.6.L150.90,mp4a.40.2". null when unknown.
+//   videoCodec string   "hevc" | "avc" | "av1" | "vp9" | null (unknown).
+//                       Lets a player skip a codec its browser cannot decode.
 //
 // `language` (joined string) and `name` are still emitted for backward
 // compatibility with the current UI; they are DERIVED from languages, never
@@ -32,7 +36,7 @@ const QUALITIES = ['2160p', '1440p', '1080p', '720p', '480p', '360p', 'Auto'];
 // Snapping a pixel height to a display tier is HLS knowledge, and it already
 // lives in the manifest parser. Reuse it so 804p cannot mean 720p in one place
 // and something else in another.
-const { heightToTier } = require('../lib/media/hlsManifest');
+const { heightToTier, videoCodecFamily } = require('../lib/media/hlsManifest');
 
 // ISO 639-2 and the loose spellings providers actually use.
 const LANG_CANON = {
@@ -188,6 +192,7 @@ function normaliseStream(raw) {
                     height,
                     quality: (l && l.quality) || heightToTier(height) || 'Auto',
                     bandwidth: Number(l && l.bandwidth) || null,
+                    codecs: (l && l.codecs) || null,
                 };
             })
             .filter(Boolean)
@@ -222,6 +227,8 @@ function normaliseStream(raw) {
             ? Boolean(raw.selectableAudio)
             : audio.length > 1,
         headers: raw.headers || {},
+        codecs: raw.codecs || null,
+        videoCodec: raw.videoCodec || videoCodecFamily(raw.codecs) || null,
 
         // Derived, for the current UI. watch.js reads `name` for the [lang]
         // bracket and `language` for the details line; keep both consistent

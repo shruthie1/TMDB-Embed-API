@@ -1128,6 +1128,8 @@ kbd{
 }
 .pmenu-item:hover,.pmenu-item:focus-visible{background:rgb(var(--rgb-text) / .07);color:var(--paper)}
 .pmenu-item.on{color:var(--paper)}
+/* A row this device cannot decode (lib/player/codecSupport.js). Still tappable. */
+.pmenu-item.dim{opacity:.55}
 /* The label takes the slack, so the gap between it and the meta is part of
    the button rather than an ambiguous strip. */
 .pmenu-text{flex:1 1 auto;min-width:0;text-align:left;

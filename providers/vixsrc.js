@@ -1,4 +1,5 @@
 const axios = require('axios');
+const { masterCodecs } = require('../lib/media/hlsManifest');
 
 const BASE_URL = 'https://vixsrc.to';
 const VIXSRC_HEADERS = {
@@ -115,6 +116,7 @@ function parsePlaylist(content, masterUrl, pageApiUrl) {
         title: `Vixsrc - ${bestResolution}p`,
         url: masterUrl,
         quality: `${bestResolution}p`,
+        codecs: masterCodecs(content),
         provider: 'Vixsrc',
         headers: {
             'Referer': pageApiUrl,

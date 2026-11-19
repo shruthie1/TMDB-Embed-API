@@ -27,6 +27,7 @@
 //     only appears on s9.
 
 const { createHash } = require('crypto');
+const hls = require('../lib/media/hlsManifest');
 
 const BASE = process.env.MAPPLE_BASE || 'https://mapple.fun';
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
@@ -150,27 +151,52 @@ function isEmptyPlaylist(text) {
     return !/#EXT-X-STREAM-INF/i.test(text) && !/#EXTINF/i.test(text);
 }
 
+async function fetchStep(url, asBytes = false) {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), STEP_TIMEOUT_MS);
+    try {
+        const r = await fetch(url, { headers: streamHeaders(), signal: ac.signal });
+        if (!r.ok) return null;
+        return asBytes ? Buffer.from(await r.arrayBuffer()) : await r.text();
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+// The video codec, when the master does not state it. Prod 2026-11-19, The
+// Paradise (1376856): the s4 master had no CODECS attribute, its fMP4 init
+// segment held hev1/hvcC, and Chrome on Android (no HEVC in MediaSource)
+// played the audio over a black screen with no error. Reads the top variant
+// and its #EXT-X-MAP init segment (3248 bytes on that title). Any failure
+// answers null ("unknown"), never a guess.
+async function probeVideoCodec(levels, masterUrl) {
+    try {
+        const top = levels.find((l) => l.url);
+        if (!top) return null;
+        const media = await fetchStep(hls.resolveUri(top.url, masterUrl));
+        const init = media && hls.mapUri(media, hls.resolveUri(top.url, masterUrl));
+        if (!init) return null;
+        const bytes = await fetchStep(init, true);
+        return bytes ? hls.initVideoCodec(bytes) : null;
+    } catch {
+        return null;
+    }
+}
+
 async function readLadder(url) {
     try {
-        const ac = new AbortController();
-        const timer = setTimeout(() => ac.abort(), STEP_TIMEOUT_MS);
-        const r = await fetch(url, { headers: streamHeaders(), signal: ac.signal })
-            .finally(() => clearTimeout(timer));
-        if (!r.ok) return { levels: [], empty: false };
-        const text = await r.text();
+        const text = await fetchStep(url);
+        if (text == null) return { levels: [], empty: false };
         if (isEmptyPlaylist(text)) return { levels: [], empty: true, bytes: text.length };
-        const levels = [];
-        const re = /RESOLUTION=(\d+)x(\d+)[^\n]*/g;
-        const bw = /BANDWIDTH=(\d+)/;
-        let m;
-        while ((m = re.exec(text)) !== null) {
-            const height = Number(m[2]);
-            const b = m[0].match(bw);
-            if (Number.isFinite(height) && height > 0) {
-                levels.push({ height, bandwidth: b ? Number(b[1]) : null });
-            }
-        }
-        return { levels, empty: false };
+        // parseLevels also reads CODECS, so a row can say it is HEVC and a
+        // browser without HEVC decode can skip it (see videoCodecFamily).
+        const parsed = hls.parseLevels(text, url);
+        const levels = parsed
+            .filter((l) => Number.isFinite(l.height) && l.height > 0)
+            .map((l) => ({ height: l.height, bandwidth: l.bandwidth, codecs: l.codecs }));
+        const codecs = hls.masterCodecs(text);
+        const videoCodec = hls.videoCodecFamily(codecs) || await probeVideoCodec(parsed, url);
+        return { levels, empty: false, codecs, videoCodec };
     } catch {
         return { levels: [], empty: false };
     }
@@ -241,7 +267,7 @@ async function getMappleStreams(tmdbId, mediaType = 'movie', seasonNum = null, e
             // have it" - a 200 with a placeholder url, not an error status.
             if (!streamUrl || streamUrl.includes('playback-unavailable')) continue;
 
-            const { levels, empty, bytes } = await readLadder(streamUrl);
+            const { levels, empty, bytes, codecs = null, videoCodec = null } = await readLadder(streamUrl);
             if (empty) {
                 console.warn(`[mapple] ${tmdbId} on ${source}: empty master (${bytes}B), trying next front`);
                 continue;
@@ -249,7 +275,7 @@ async function getMappleStreams(tmdbId, mediaType = 'movie', seasonNum = null, e
             const best = levels.length ? Math.max(...levels.map((l) => l.height)) : 0;
 
             console.log(`[mapple] ${tmdbId} on ${source} in ${Date.now() - t0}ms`
-                + (best ? ` (${best}p)` : ''));
+                + (best ? ` (${best}p)` : '') + (videoCodec ? ` ${videoCodec}` : ''));
 
             return [{
                 url: streamUrl,
@@ -260,6 +286,8 @@ async function getMappleStreams(tmdbId, mediaType = 'movie', seasonNum = null, e
                 languages: [],
                 selectableAudio: false,
                 levels,
+                codecs,
+                videoCodec,
                 container: 'hls',
                 headers: streamHeaders(),
                 title: source === 'mapple' ? 'mapple' : `mapple · ${source}`,

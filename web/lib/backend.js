@@ -26,6 +26,7 @@
 // origin and there is no CORS to configure. Set NEXT_PUBLIC_API_BASE only to
 // point a local UI at a remote backend.
 import { abortReason } from './abortReason';
+import { isUnsupported } from './player/codecSupport';
 
 const BASE = process.env.NEXT_PUBLIC_API_BASE || '';
 
@@ -163,6 +164,14 @@ export function toSource(s, i = 0) {
     // the ranking treats it as the top tier.
     hybrid: Boolean(s.hybrid),
     subtitles: Array.isArray(s.subtitles) ? s.subtitles : [],
+    // The video codec the backend measured ("hevc", "avc", ...; null when not
+    // known) and the master's CODECS string. `unsupported` is true only when
+    // this browser is known NOT to decode it: such a row plays audio over a
+    // black screen (The Paradise, 1376856, HEVC on Chrome Android), so it is
+    // ranked last and marked in the server menu. It can still be picked.
+    videoCodec: s.videoCodec || null,
+    codecString: typeof s.codecs === 'string' ? s.codecs : null,
+    unsupported: isUnsupported({ videoCodec: s.videoCodec, codecString: s.codecs }),
   };
 }
 
@@ -211,6 +220,10 @@ export function rankSources(sources) {
     return 4;
   };
   return [...sources].sort((a, b) => {
+    // A row this browser cannot decode loses to every row it can, whatever
+    // its tier: a black picture in the right language is not a result.
+    const u = (a.unsupported ? 1 : 0) - (b.unsupported ? 1 : 0);
+    if (u !== 0) return u;
     const t = tier(a) - tier(b);
     if (t !== 0) return t;
     // A progressive source has no ladder and no audio menu, so within a tier
@@ -306,10 +319,12 @@ export function resolveLive(type, id, {
       if (provider) {
         const want = String(provider).toLowerCase();
         const isWanted = (s) => String(s.provider).toLowerCase() === want;
-        const best = sources.find((s) => s.selectableAudio) || null;
-        const pinned = sources.filter((s) => isWanted(s) && s !== best);
-        const rest = sources.filter((s) => !isWanted(s) && s !== best);
-        sources = [...(best ? [best] : []), ...pinned, ...rest];
+        // Nor may it lift a row this browser cannot decode: those stay last.
+        const best = sources.find((s) => s.selectableAudio && !s.unsupported) || null;
+        const pinned = sources.filter((s) => isWanted(s) && s !== best && !s.unsupported);
+        const rest = sources.filter((s) => !isWanted(s) && s !== best && !s.unsupported);
+        const last = sources.filter((s) => s.unsupported);
+        sources = [...(best ? [best] : []), ...pinned, ...rest, ...last];
       }
 
       // Report per provider from what actually came back. The backend also

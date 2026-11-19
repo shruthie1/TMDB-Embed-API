@@ -45,6 +45,9 @@ export function videoChoices(sources = []) {
   return [...sources]
     .filter((s) => s && s.masterUrl)
     .sort((a, b) => {
+      // A row this browser cannot decode goes to the bottom of the menu.
+      const u = (a.unsupported ? 1 : 0) - (b.unsupported ? 1 : 0);
+      if (u !== 0) return u;
       // A progressive file has no ladder and no ABR, so it loses to an HLS
       // source of the same height.
       const p = (a.progressive ? 1 : 0) - (b.progressive ? 1 : 0);
@@ -56,6 +59,7 @@ export function videoChoices(sources = []) {
       label: s.provider,
       quality: s.quality,
       height: heightOf(s),
+      unsupported: Boolean(s.unsupported),
       source: s,
     }));
 }
