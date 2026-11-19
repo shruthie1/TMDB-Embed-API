@@ -57,6 +57,19 @@ const SOURCES = ['mapple', ...[...RANKED, ...UNSEEN].map((n) => `s${n}`)];
 const SWEEP_BUDGET_MS = Number(process.env.MAPPLE_SWEEP_BUDGET_MS) || 12000;
 const STEP_TIMEOUT_MS = Number(process.env.MAPPLE_STEP_TIMEOUT_MS) || 8000;
 
+// readLadder runs after a front already gave a stream, so it must never cost
+// that row. The registry drops the whole provider at PROVIDER_DEADLINE_MS
+// (20000). Three 8s steps in a row (master, media playlist, init segment) could
+// reach 24s. So every readLadder step is cut to the time left before the
+// registry deadline minus a margin, and the codec probe gets at most
+// PROBE_BUDGET_MS for both of its fetches together. Read from env, not
+// required from registry.js, because registry.js requires this file.
+const REGISTRY_DEADLINE_MS = Number(process.env.PROVIDER_DEADLINE_MS) || 20000;
+const DEADLINE_MARGIN_MS = Number(process.env.MAPPLE_DEADLINE_MARGIN_MS) || 2000;
+const PROBE_BUDGET_MS = Number(process.env.MAPPLE_PROBE_BUDGET_MS) || 2000;
+// Below this, the probe is skipped: the row ships with videoCodec null.
+const PROBE_MIN_MS = 300;
+
 let session = null; // { jar: Map, requestToken, at }
 let inFlight = null; // single-flight, so a burst of titles bootstraps once
 
@@ -151,15 +164,17 @@ function isEmptyPlaylist(text) {
     return !/#EXT-X-STREAM-INF/i.test(text) && !/#EXTINF/i.test(text);
 }
 
-async function fetchStep(url, asBytes = false) {
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), STEP_TIMEOUT_MS);
+// `signal`, when given, is a caller's shared budget (the codec probe) and
+// replaces the per-step timer.
+async function fetchStep(url, asBytes = false, timeoutMs = STEP_TIMEOUT_MS, signal = null) {
+    const ac = signal ? null : new AbortController();
+    const timer = ac && setTimeout(() => ac.abort(), timeoutMs);
     try {
-        const r = await fetch(url, { headers: streamHeaders(), signal: ac.signal });
+        const r = await fetch(url, { headers: streamHeaders(), signal: signal || ac.signal });
         if (!r.ok) return null;
         return asBytes ? Buffer.from(await r.arrayBuffer()) : await r.text();
     } finally {
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
     }
 }
 
@@ -168,24 +183,32 @@ async function fetchStep(url, asBytes = false) {
 // segment held hev1/hvcC, and Chrome on Android (no HEVC in MediaSource)
 // played the audio over a black screen with no error. Reads the top variant
 // and its #EXT-X-MAP init segment (3248 bytes on that title). Any failure
-// answers null ("unknown"), never a guess.
-async function probeVideoCodec(levels, masterUrl) {
+// answers null ("unknown"), never a guess. Both fetches share one budget of
+// `budgetMs`, so a slow init segment cannot hold the row.
+async function probeVideoCodec(levels, masterUrl, budgetMs) {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), budgetMs);
     try {
         const top = levels.find((l) => l.url);
         if (!top) return null;
-        const media = await fetchStep(hls.resolveUri(top.url, masterUrl));
+        const media = await fetchStep(hls.resolveUri(top.url, masterUrl), false, budgetMs, ac.signal);
         const init = media && hls.mapUri(media, hls.resolveUri(top.url, masterUrl));
         if (!init) return null;
-        const bytes = await fetchStep(init, true);
+        const bytes = await fetchStep(init, true, budgetMs, ac.signal);
         return bytes ? hls.initVideoCodec(bytes) : null;
     } catch {
         return null;
+    } finally {
+        clearTimeout(timer);
     }
 }
 
-async function readLadder(url) {
+// `deadline` is the epoch ms after which this provider call must be done.
+async function readLadder(url, deadline = Date.now() + REGISTRY_DEADLINE_MS - DEADLINE_MARGIN_MS) {
     try {
-        const text = await fetchStep(url);
+        const masterMs = Math.min(STEP_TIMEOUT_MS, deadline - Date.now());
+        if (masterMs <= 0) return { levels: [], empty: false };
+        const text = await fetchStep(url, false, masterMs);
         if (text == null) return { levels: [], empty: false };
         if (isEmptyPlaylist(text)) return { levels: [], empty: true, bytes: text.length };
         // parseLevels also reads CODECS, so a row can say it is HEVC and a
@@ -195,8 +218,10 @@ async function readLadder(url) {
             .filter((l) => Number.isFinite(l.height) && l.height > 0)
             .map((l) => ({ height: l.height, bandwidth: l.bandwidth, codecs: l.codecs }));
         const codecs = hls.masterCodecs(text);
-        const videoCodec = hls.videoCodecFamily(codecs) || await probeVideoCodec(parsed, url);
-        return { levels, empty: false, codecs, videoCodec };
+        let videoCodec = hls.videoCodecFamily(codecs);
+        const probeMs = Math.min(PROBE_BUDGET_MS, deadline - Date.now());
+        if (!videoCodec && probeMs >= PROBE_MIN_MS) videoCodec = await probeVideoCodec(parsed, url, probeMs);
+        return { levels, empty: false, codecs, videoCodec: videoCodec || null };
     } catch {
         return { levels: [], empty: false };
     }
@@ -267,7 +292,7 @@ async function getMappleStreams(tmdbId, mediaType = 'movie', seasonNum = null, e
             // have it" - a 200 with a placeholder url, not an error status.
             if (!streamUrl || streamUrl.includes('playback-unavailable')) continue;
 
-            const { levels, empty, bytes, codecs = null, videoCodec = null } = await readLadder(streamUrl);
+            const { levels, empty, bytes, codecs = null, videoCodec = null } = await readLadder(streamUrl, t0 + REGISTRY_DEADLINE_MS - DEADLINE_MARGIN_MS);
             if (empty) {
                 console.warn(`[mapple] ${tmdbId} on ${source}: empty master (${bytes}B), trying next front`);
                 continue;
