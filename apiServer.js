@@ -804,11 +804,19 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
       streams = sortStreamsCanonically(streams);
     }
 
-    res.set('Cache-Control', `private, max-age=${STREAMS_CACHE_SECONDS}`);
     const payload = { success:true, tmdbId, imdbId, count: streams.length, providerTimings, streams };
     // Tells a client cache not to keep this answer: a provider was still
     // running when it went out, and the next request will include it.
     if (late.length) payload.partial = true;
+    // A provider that threw is down right now, not missing the title. The
+    // browser must not keep this answer either (HTTP cache or the web app's
+    // sessionStorage), or a short upstream blip hides that server for minutes.
+    if (erroredProviders.length) {
+      payload.providerErrors = [...erroredProviders];
+      res.set('Cache-Control', 'no-store');
+    } else {
+      res.set('Cache-Control', `private, max-age=${STREAMS_CACHE_SECONDS}`);
+    }
     // A response missing a late provider is not memoized, so the next request
     // rebuilds it and picks that provider up from providerHitCache.
     if (!late.length && !erroredProviders.length) memoSet(mk, payload);

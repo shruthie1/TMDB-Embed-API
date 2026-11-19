@@ -82,6 +82,22 @@ describe('per-title session cache', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it('an answer with a provider error is not cached, so the next ask retries that provider', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(res(200, body([STREAM], { providerErrors: ['onetouchtv'] })));
+    vi.stubGlobal('fetch', fetchMock);
+    await run({ id: 25 });
+    await run({ id: 25 });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('an empty providerErrors list is still cached', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(res(200, body([STREAM], { providerErrors: [] })));
+    vi.stubGlobal('fetch', fetchMock);
+    await run({ id: 26 });
+    await run({ id: 26 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('an expired entry is ignored', async () => {
     const now = vi.spyOn(Date, 'now');
     now.mockReturnValue(1_000_000);

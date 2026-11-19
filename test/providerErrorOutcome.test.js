@@ -52,17 +52,24 @@ test('a thrown provider error is recorded as error and not cached as empty', asy
     };
     const errBefore = (metrics.providerHealth.onetouchtv || {}).error || 0;
     const emptyBefore = (metrics.providerHealth.onetouchtv || {}).empty || 0;
-    const first = await get('/api/streams/movie/3001');
+    const firstRes = await fetch(`${base}/api/streams/movie/3001`);
+    const first = await firstRes.json();
     assert.deepEqual(first.streams.map((s) => s.provider), ['CastleTV']);
+    // The browser must not keep an answer with an errored provider.
+    assert.equal(firstRes.headers.get('cache-control'), 'no-store');
+    assert.deepEqual(first.providerErrors, ['onetouchtv']);
     assert.equal(metrics.providerHealth.onetouchtv.error, errBefore + 1);
     assert.equal(metrics.providerHealth.onetouchtv.empty || 0, emptyBefore, 'not counted as empty');
 
     // Upstream recovers. Without ?refresh the next request must still ask
     // OneTouchTV, because the error was not cached as an empty.
     up = true;
-    const second = await get('/api/streams/movie/3001');
+    const secondRes = await fetch(`${base}/api/streams/movie/3001`);
+    const second = await secondRes.json();
     assert.equal(calls['onetouchtv:3001'], 2);
     assert.ok(second.streams.some((s) => s.provider === 'OneTouchTV'));
+    assert.equal(second.providerErrors, undefined);
+    assert.match(secondRes.headers.get('cache-control'), /^private, max-age=\d+$/);
 });
 
 test('a real empty is still cached as empty', async () => {

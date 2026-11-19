@@ -88,6 +88,7 @@ async function getJsonWithRetry(path, opts) {
  * (2-10s). Kept 4 minutes: under the backend's own 300s browser TTL and well
  * under the providers' signed-url lifetimes. A partial early answer (the
  * backend marks it) is never cached, so the next ask picks up the late rows.
+ * Nor is an answer where a provider errored (`providerErrors`).
  * A stale url is handled by the player: a 403 re-resolves with refresh, which
  * skips this cache. Storage failures (private mode, quota) are ignored.
  */
@@ -105,6 +106,9 @@ function cacheGet(key) {
 function cachePut(key, d) {
   try {
     if (d?.partial || !Array.isArray(d?.streams) || !d.streams.length) return;
+    // A provider threw on this answer (backend lists it in providerErrors).
+    // Caching it would hide that server for 4 minutes after a short blip.
+    if (Array.isArray(d.providerErrors) && d.providerErrors.length) return;
     globalThis.sessionStorage?.setItem(key, JSON.stringify({ at: Date.now(), d }));
   } catch { /* private mode or quota: no cache, still plays */ }
 }
