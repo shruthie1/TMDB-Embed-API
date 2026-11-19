@@ -176,8 +176,11 @@ function createFetchFunction(providerInfo) {
       return normaliseStreams(result.map(s => ({ ...s, provider: s.provider || providerInfo.name })));
 
     } catch (e) {
+      // Rethrow. The caller records a provider failure as an 'error' and
+      // does not cache it; returning [] here made every upstream outage look
+      // like "this title has no streams" for PROVIDER_EMPTY_TTL_MS.
       console.error(`[registry] ${providerInfo.name} fetch error:`, e.message);
-      return [];
+      throw e;
     }
   };
 }

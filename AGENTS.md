@@ -26,7 +26,7 @@ taken; re-measure before trusting an old number.
 Test baselines (2026-11-16, both green):
 
 ```
-api   npm test         180 passed, 0 failed
+api   npm test         195 passed, 0 failed
 web   npx vitest run   67 files, 642 passed, 0 failed
 ```
 

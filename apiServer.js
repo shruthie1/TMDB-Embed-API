@@ -575,6 +575,10 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
     // its breaker, so The Paradise (1376856) returned 0 streams instantly for
     // 10 minutes while /api/streams/netmirror/movie/1376856 returned 1.
     const skippedByBreaker = [];
+    // Providers that threw on this request. The response is then not
+    // memoized, or one short upstream blip would pin a result without that
+    // provider for STREAMS_MEMO_MS.
+    const erroredProviders = [];
     const refresh = req.query.refresh === '1';
     const titleKey = `${type}:${tmdbId}:${season ?? ''}:${episode ?? ''}`;
     const runProvider = async (name, { bypassBreaker = false } = {}) => {
@@ -615,7 +619,11 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
       } catch (e) {
         console.error(`[api] provider ${name} failed:`, e.message);
         providerTimings[name] = null;
-        recordProviderOutcome(name, 'error', Date.now()-t0, 0);
+        erroredProviders.push(name);
+        // Never cached in providerEmptyCache: an error says the provider is
+        // down right now, not that the title is missing. titleKey keeps one
+        // title's repeated failures from tripping the breaker for all titles.
+        recordProviderOutcome(name, 'error', Date.now()-t0, 0, titleIsResolvable, titleKey);
         const h = metrics.providerHealth[name];
         if (h) h.lastErr = String(e.message || e).slice(0, 200);
         return [];
@@ -803,7 +811,7 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
     if (late.length) payload.partial = true;
     // A response missing a late provider is not memoized, so the next request
     // rebuilds it and picks that provider up from providerHitCache.
-    if (!late.length) memoSet(mk, payload);
+    if (!late.length && !erroredProviders.length) memoSet(mk, payload);
     res.json(payload);
   } catch (e) {
     metrics.lastError = e.message;
@@ -829,13 +837,18 @@ app.get('/api/streams/:provider/:type/:tmdbId', async (req,res) => {
     const tmdbType = type === 'movie' ? 'movie' : 'tv';
     const imdbId = await resolveImdbId(tmdbType, tmdbId); if (imdbId) metrics.tmdbToImdbLookups++;
     const t0 = Date.now();
-    let streams = await prov.fetch({ tmdbId, type, season, episode, imdbId, filters:{} });
+    // A provider failure keeps this route's old contract (200, count 0) and
+    // says why in providerError, instead of a 500.
+    let providerError = null;
+    let streams = await prov.fetch({ tmdbId, type, season, episode, imdbId, filters:{} })
+      .catch((e) => { providerError = String(e && e.message || e).slice(0, 200); return []; });
     const providerTimings = { [prov.name]: Date.now()-t0 };
     streams = applyFilters(streams, prov.name, config.minQualities, config.excludeCodecs);
     metrics.streamsReturned += streams.length;
     streams = sortStreamsCanonically(streams);
     streams = routeStreamsForBrowser(streams, publicBase(req));
-    res.json({ success:true, provider: prov.name, tmdbId, imdbId, count: streams.length, providerTimings, streams });
+    res.json({ success:true, provider: prov.name, tmdbId, imdbId, count: streams.length, providerTimings,
+      ...(providerError ? { providerError } : {}), streams });
   } catch (e) {
     metrics.lastError = e.message;
     res.status(500).json({ success:false, error:'INTERNAL_ERROR', message:e.message });

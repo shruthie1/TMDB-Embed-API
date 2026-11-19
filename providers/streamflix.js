@@ -164,7 +164,7 @@ async function getStreamflixStreams(tmdbId, mediaType = 'movie', seasonNum = nul
         return [];
     } catch (err) {
         console.error(`[StreamFlix] Error: ${err.message}`);
-        return [];
+        throw err; // an upstream failure is an error, not "no streams"
     }
 }
 

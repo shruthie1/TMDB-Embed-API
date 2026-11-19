@@ -58,10 +58,21 @@ async function fetchEncryptedOnce(url) {
         headers: FETCH_HEADERS,
         signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status} from ${url}`);
+    if (!res.ok) {
+        const err = new Error(`HTTP ${res.status} from ${url}`);
+        err.status = res.status;
+        throw err;
+    }
     const text = await res.text();
     const parsed = decrypt(text);
     return parsed.result;
+}
+
+// Retry only what can change on a second try: network errors, timeouts and
+// 5xx. A 4xx is the origin's answer; asking again three times only added
+// ~1.2s before the same 404 (prod 2026-11-19 08:28 UTC, episode endpoint).
+function isRetryable(err) {
+    return !err || err.status === undefined || err.status >= 500;
 }
 
 async function fetchEncrypted(path, cacheTtlMs = CACHE_TTL_MS) {
@@ -80,6 +91,7 @@ async function fetchEncrypted(path, cacheTtlMs = CACHE_TTL_MS) {
             return data;
         } catch (err) {
             lastErr = err;
+            if (!isRetryable(err)) break;
             if (attempt < FETCH_RETRIES) {
                 console.warn(`[OneTouchTV] fetch failed (attempt ${attempt + 1}): ${err.message}`);
                 await sleep(FETCH_RETRY_DELAY_MS * (attempt + 1));
@@ -129,35 +141,34 @@ function findBestOttMatch(results, title, year, stremioType, targetSeason) {
     return best ? best.raw : null;
 }
 
+// A search 404 means "no such keyword": the endpoint answers 404 for some
+// spellings (see the macron note below), so it is an empty result and the
+// next spelling is tried. Any other failure is the upstream being down and
+// is thrown, so the fan-out records an error instead of caching an empty.
 async function searchContent(keyword) {
     const path = `/vod/search?keyword=${encodeURIComponent(keyword)}`;
     try {
         const results = await fetchEncrypted(path);
         return Array.isArray(results) ? results : [];
     } catch (err) {
+        if (err && err.status === 404) return [];
         console.error(`[OneTouchTV] search failed for "${keyword}": ${err.message}`);
-        return [];
+        throw err;
     }
 }
 
+// Detail and episode run only after a search hit, so the title exists. A
+// failure here, 404 included, is an upstream fault and is thrown. Prod
+// 2026-11-19 08:28 UTC: the episode endpoint answered 404 for ~40s, the old
+// `return null` made that an empty, and the fan-out cached it for 3 minutes.
 async function getDetail(id) {
-    try {
-        const result = await fetchEncrypted(`/vod/${id}/detail`);
-        return result ?? null;
-    } catch (err) {
-        console.error(`[OneTouchTV] detail failed for ${id}: ${err.message}`);
-        return null;
-    }
+    const result = await fetchEncrypted(`/vod/${id}/detail`);
+    return result ?? null;
 }
 
 async function getEpisodeStreams(id, playId) {
-    try {
-        const result = await fetchEncrypted(`/vod/${id}/episode/${playId}`, 0);
-        return result ?? null;
-    } catch (err) {
-        console.error(`[OneTouchTV] episode fetch failed ${id}/${playId}: ${err.message}`);
-        return null;
-    }
+    const result = await fetchEncrypted(`/vod/${id}/episode/${playId}`, 0);
+    return result ?? null;
 }
 
 function resolveQuality(quality) {
@@ -354,9 +365,10 @@ async function getOnetouchtvStreams(tmdbId, mediaType = 'movie', seasonNum = nul
         console.log(`[OneTouchTV] Got ${streams.length} stream(s) for "${matchResult.title}"`);
         return streams;
     } catch (err) {
+        // Rethrow: an upstream failure is an error, not "no streams".
         console.error(`[OneTouchTV] Error: ${err.message}`);
-        return [];
+        throw err;
     }
 }
 
-module.exports = { getOnetouchtvStreams, STREAM_HEADERS };
+module.exports = { getOnetouchtvStreams, STREAM_HEADERS, _internal: { isRetryable, cache } };

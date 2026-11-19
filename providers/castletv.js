@@ -542,7 +542,7 @@ async function getCastletvStreams(tmdbId, mediaType = 'movie', seasonNum = null,
         return streams;
     } catch (err) {
         console.error(`[CastleTV] Error: ${err.message}`);
-        return [];
+        throw err; // an upstream failure is an error, not "no streams"
     }
 }
 

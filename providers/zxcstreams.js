@@ -302,7 +302,7 @@ async function getZxcstreamsStreams(tmdbId, mediaType = 'movie', seasonNum = nul
         return streams;
     } catch (err) {
         console.error(`[ZXCStreams] Error: ${err.message}`);
-        return [];
+        throw err; // an upstream failure is an error, not "no streams"
     }
 }
 

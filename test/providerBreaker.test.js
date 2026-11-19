@@ -35,10 +35,18 @@ test('callers without a title key keep the old counting', () => {
     assert.equal(m.breakerOpen('x'), true);
 });
 
-test('errors still count on every call, even for one title', () => {
+// Errors now follow the same-title rule. Since 2026-11-19 an upstream 404 on
+// one title's episode page is an 'error', not an 'empty' (it is no longer
+// cached as empty), so five retries of that one title must not trip the
+// provider for every title. Errors across titles still trip it.
+test('errors for one title count once; errors across titles trip', () => {
     const m = fresh();
     for (let i = 0; i < m.BREAKER_THRESHOLD; i++) {
         m.recordProviderOutcome('y', 'error', 1, 0, true, 'movie:1::');
     }
-    assert.equal(m.breakerOpen('y'), true);
+    assert.equal(m.breakerOpen('y'), false);
+    for (let i = 0; i < m.BREAKER_THRESHOLD; i++) {
+        m.recordProviderOutcome('z', 'error', 1, 0, true, `movie:${i}::`);
+    }
+    assert.equal(m.breakerOpen('z'), true);
 });

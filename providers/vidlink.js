@@ -140,7 +140,7 @@ async function getVidlinkStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
         return streams;
     } catch (err) {
         console.error(`[Vidlink] Error: ${err.message}`);
-        return [];
+        throw err; // an upstream failure is an error, not "no streams"
     }
 }
 

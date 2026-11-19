@@ -273,7 +273,7 @@ async function getVaplayerStreams(tmdbId, mediaType = 'movie', seasonNum = null,
         return streams;
     } catch (err) {
         console.error(`[VaPlayer] Error: ${err.message}`);
-        return [];
+        throw err; // an upstream failure is an error, not "no streams"
     }
 }
 

@@ -121,7 +121,7 @@ async function getHdghartvStreams(tmdbId, mediaType = 'movie', seasonNum = null,
         return linksToStreams(episodeData.streamingLinks, `S${season}E${episode}`);
     } catch (err) {
         console.error(`[HDGharTV] Error: ${err.message}`);
-        return [];
+        throw err; // an upstream failure is an error, not "no streams"
     }
 }
 
