@@ -52,12 +52,15 @@ const RANKED = [9, 4, 17, 2, 25, 3, 5, 6, 10, 12, 19, 1, 24];
 const UNSEEN = [7, 8, 11, 13, 14, 15, 16, 18, 20, 21, 22, 23];
 const SOURCES = ['mapple', ...[...RANKED, ...UNSEEN].map((n) => `s${n}`)];
 
-// A whole-sweep ceiling. 25 fronts x a slow one each would otherwise hold the
-// aggregate stream request open far past the point the UI has given up.
+// A whole-sweep ceiling: no new front starts after it. 25 fronts x a slow one
+// each would otherwise hold the aggregate stream request open far past the
+// point the UI has given up. A front that already started is not cut by it
+// (see FRONT_END_RESERVE_MS): on VM1 2026-11-19, 3 of 23 rows came from a
+// front that started before 12s and answered at 12143, 12491 and 12869ms.
 const SWEEP_BUDGET_MS = Number(process.env.MAPPLE_SWEEP_BUDGET_MS) || 12000;
 const STEP_TIMEOUT_MS = Number(process.env.MAPPLE_STEP_TIMEOUT_MS) || 8000;
 // Per-call cap for a front's encrypt and signed stream requests, further cut
-// to the sweep time left. Measured on VM1 2026-11-19 (fetch timer, 9 front
+// to the front deadline (see FRONT_END_RESERVE_MS). Measured on VM1 2026-11-19 (fetch timer, 9 front
 // calls per sweep, 6 sweeps): the slowest call that answered was 4277ms (s9
 // signed, 690957); the slowest call on the front that gave the row was 594ms.
 // The prod log had 3 sweeps die at 16-19s on "This operation was aborted":
@@ -77,6 +80,11 @@ const DEADLINE_MARGIN_MS = Number(process.env.MAPPLE_DEADLINE_MARGIN_MS) || 2000
 const PROBE_BUDGET_MS = Number(process.env.MAPPLE_PROBE_BUDGET_MS) || 2000;
 // Below this, the probe is skipped: the row ships with videoCodec null.
 const PROBE_MIN_MS = 300;
+// A started front's requests end by t0 + REGISTRY_DEADLINE_MS -
+// DEADLINE_MARGIN_MS - this reserve (16s by default), so readLadder still has
+// this long for the master fetch before its own 18s deadline, and the
+// provider stays under the 20s registry deadline.
+const FRONT_END_RESERVE_MS = Number(process.env.MAPPLE_FRONT_END_RESERVE_MS) || 2000;
 
 let session = null; // { jar: Map, requestToken, at }
 let inFlight = null; // single-flight, so a burst of titles bootstraps once
@@ -311,6 +319,8 @@ async function getMappleStreams(tmdbId, mediaType = 'movie', seasonNum = null, e
         let answered = 0;
         let lastError = null;
         const sweepEnd = t0 + SWEEP_BUDGET_MS;
+        const ladderEnd = t0 + REGISTRY_DEADLINE_MS - DEADLINE_MARGIN_MS;
+        const frontEnd = ladderEnd - FRONT_END_RESERVE_MS;
 
         for (const source of SOURCES) {
             if (Date.now() > sweepEnd) {
@@ -322,7 +332,7 @@ async function getMappleStreams(tmdbId, mediaType = 'movie', seasonNum = null, e
             if (base.season != null) { data.season = base.season; data.episode = base.episode; }
 
             const f0 = Date.now();
-            const stepMs = () => Math.min(FRONT_STEP_MS, STEP_TIMEOUT_MS, sweepEnd - Date.now());
+            const stepMs = () => Math.min(FRONT_STEP_MS, STEP_TIMEOUT_MS, frontEnd - Date.now());
             let streamUrl = '';
             try {
                 const enc = await goJson(jar, `${BASE}/api/encrypt`, {
@@ -350,7 +360,7 @@ async function getMappleStreams(tmdbId, mediaType = 'movie', seasonNum = null, e
             // have it" - a 200 with a placeholder url, not an error status.
             if (!streamUrl || streamUrl.includes('playback-unavailable')) continue;
 
-            const { levels, empty, bytes, codecs = null, videoCodec = null } = await readLadder(streamUrl, t0 + REGISTRY_DEADLINE_MS - DEADLINE_MARGIN_MS);
+            const { levels, empty, bytes, codecs = null, videoCodec = null } = await readLadder(streamUrl, ladderEnd);
             if (empty) {
                 console.warn(`[mapple] ${tmdbId} on ${source}: empty master (${bytes}B), trying next front`);
                 continue;
