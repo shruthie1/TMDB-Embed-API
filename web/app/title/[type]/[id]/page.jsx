@@ -14,6 +14,8 @@ import { inList, toggleList } from '../../../../lib/list';
 import { prewarmStreams } from '../../../../lib/backend';
 import { languageName } from '../../../../lib/subtitles';
 import Icon from '../../../../components/Icon';
+import TitleSkeleton from '../../../../components/TitleSkeleton';
+import ErrorScreen from '../../../../components/ErrorScreen';
 
 function runtime(min) {
   if (!min) return null;
@@ -56,14 +58,34 @@ export default function TitlePage() {
   const [resume, setResume] = useState(null);
   const [saved, setSaved] = useState(false);
   const [toast, setToast] = useState(null);
+  // Set only when BOTH title requests failed: without it a failed or timed-out
+  // API left the skeleton up forever, which read as a click that did nothing.
+  const [loadError, setLoadError] = useState(null);
+  const [attempt, setAttempt] = useState(0);
+
+  // Opening a card from "More like this" swaps the route params but keeps this
+  // page mounted, so the scroll position carried over and the new title opened
+  // scrolled to the bottom. Reset to the top whenever the title id changes.
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [type, id]);
 
   useEffect(() => {
     let alive = true;
+    setLoadError(null);
     // Fast record first for an early paint, but it is only worth the extra
     // request while it actually arrives sooner; the full one overwrites it.
-    fetchTitle(type, id).then(r => { if (alive && r.ok) setT(v => v ?? r.body); });
-    fetchTitleFull(type, id).then(r => {
-      if (!alive || !r.ok) return;
+    const fast = fetchTitle(type, id).then(r => { if (alive && r.ok) setT(v => v ?? r.body); return r; });
+    fetchTitleFull(type, id).then(async r => {
+      if (!alive) return;
+      if (!r.ok) {
+        const f = await fast;
+        if (alive && !f.ok && !r.aborted) {
+          console.warn('[title] load failed', type, id, r.status || r.error, f.status || f.error);
+          setLoadError({ message: r.error || `title request failed (${r.status})` });
+        }
+        return;
+      }
       setT(r.body); setFull(true);
       if (type === 'tv') setResume(getNextUp(tmdbId, r.body.seasonList));
     });
@@ -75,7 +97,7 @@ export default function TitlePage() {
     // boundary is respected (S1E7 -> S2E1, never S1E8).
     setSaved(inList(type, tmdbId));
     return () => { alive = false; };
-  }, [type, id, tmdbId]);
+  }, [type, id, tmdbId, attempt]);
 
   // The detail page is already a strong play intent: the viewer has opened a
   // title, then usually spends a few seconds reading before pressing Resume.
@@ -110,7 +132,8 @@ export default function TitlePage() {
     setTimeout(() => setToast(null), 2200);
   }, [t]);
 
-  if (!t) return <TitleSkeleton onBack={() => router.back()} />;
+  if (!t && loadError) return <ErrorScreen error={loadError} onRetry={() => setAttempt(n => n + 1)} />;
+  if (!t) return <TitleSkeleton />;
 
   // What the Play button does, and what it should say. For a series this is
   // an episode; for a film, a position. Falls back to S1E1 for a new show.
@@ -261,55 +284,5 @@ export default function TitlePage() {
       )}
       <Toast message={toast} />
     </article>
-  );
-}
-
-/**
- * Stands in for the title page until its data lands. Same markup and classes
- * as the loaded page (Back, the backdrop, poster, title, meta, synopsis,
- * actions, Cast, More like this), each text bar inside the real element, so
- * every block sits where the loaded one will and nothing moves on arrival.
- */
-function TitleSkeleton({ onBack }) {
-  return (
-    <div className="detail title-skeleton" aria-busy="true" aria-label="Loading title">
-      {/* The real Back: it works before the data arrives, and the page below
-          it starts at the same offset as the loaded one. */}
-      <button type="button" className="detail-back focusable" data-focus="" onClick={onBack} aria-label="Go back">
-        <Icon name="back" size={16} />
-        <span>Back</span>
-      </button>
-      <div className="hero">
-        {/* .page-backdrop, as on the loaded hero: without it main gains the
-            header's top padding and the page dropped when data landed. */}
-        <Skeleton className="hero-art page-backdrop" />
-        <div className="hero-inner">
-          <Skeleton className="hero-poster" />
-          <div className="hero-text">
-            <h1 className="detail-title"><span className="skel skel-line" style={{ width: '56%' }} /></h1>
-            <div className="detail-meta">
-              <span><span className="skel skel-line" style={{ width: '12em' }} /></span>
-              <span><span className="badge skel skel-ghost">English</span></span>
-            </div>
-            <p className="detail-overview">
-              <span className="skel skel-line" style={{ width: '100%' }} />
-              <span className="skel skel-line" style={{ width: '94%' }} />
-              <span className="skel skel-line" style={{ width: '62%' }} />
-            </p>
-            {/* Same class as the real "Read more", so it shows exactly where
-                that one does (phones) and nowhere else. */}
-            <span className="detail-overview-toggle"><span className="skel skel-line" style={{ width: '5em' }} /></span>
-          </div>
-          <div className="hero-actions">
-            <div className="actions">
-              <span className="btn primary skel skel-btn" style={{ width: '8em' }} />
-              <span className="btn skel skel-btn" style={{ width: '8em' }} />
-            </div>
-          </div>
-        </div>
-      </div>
-      <CastRowSkeleton />
-      <Row label="More like this" titles={[]} loading />
-    </div>
   );
 }
