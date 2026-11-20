@@ -13,12 +13,12 @@ const STREAM_CACHE_TTL = 25 * 60 * 1000;
 // masquerade as a lasting "no streams" answer, and so repeated page loads
 // stop re-probing a provider that is currently refusing us.
 const EMPTY_CACHE_TTL = Number(process.env.NETMIRROR_EMPTY_TTL_MS) || 90 * 1000;
-// 'disney' was here too, but PLATFORM_MAP gives it the same `ott: 'hs'` as
+// 'disney' was here too, but PLATFORM_MAP gave it the same `ott: 'hs'` as
 // hotstar, and `ott` is the only thing that varies between platform requests
 // (newTvHeaders). It searched the same endpoint with the same headers for the
 // same title and returned the same rows - three extra requests per lookup, for
-// a provider that rate limits per IP. Dropped.
-const PLATFORM_ORDER = ['netflix', 'primevideo', 'hotstar', 'disney'];
+// a provider that rate limits per IP. Dropped (2026-11-20, N4).
+const PLATFORM_ORDER = ['netflix', 'primevideo', 'hotstar'];
 
 const UA_POOL = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -134,10 +134,7 @@ const NEW_TV_DOMAINS = [
     'aHR0cHM6Ly9tb2JpZGV0ZWN0Lnh5eg=='
 ];
 
-// disney rides the hotstar catalogue (same `hs` ott) - that is upstream's
-// mapping, and it is a separate CATALOGUE query, not a duplicate of hotstar:
-// the two return different rows for the same title.
-const PLATFORM_MAP = { netflix: { ott: 'nf' }, primevideo: { ott: 'pv' }, hotstar: { ott: 'hs' }, disney: { ott: 'hs' } };
+const PLATFORM_MAP = { netflix: { ott: 'nf' }, primevideo: { ott: 'pv' }, hotstar: { ott: 'hs' } };
 
 // Spacing between platform chains. newtv rate limits per IP and answers an
 // over-limit request with HTTP 200 and a substituted video, or eventually with
@@ -563,25 +560,51 @@ function audioFromMaster(body, postLangs = []) {
     return out;
 }
 
-// newtv answers a lookup the catalogue does not have with an HTML "Page Not
-// Found" page (or a 404), not JSON. Prod audit 2026-11-20: response.json()
-// threw on it for primevideo/hotstar/disney, the throw became upstreamError,
-// and the whole NetMirror answer (Netflix rows included) went uncached as a
-// partial, so the title was asked again: 11 errors + 6 partials a day. That
-// page means "no rows here", so it returns null. Anything else that is not
-// JSON (a 5xx, a challenge page) still throws: that is an unknown, not an empty.
+// The HTML "Page Not Found" page is newtv REFUSING us, not an empty catalogue.
+// Measured 2026-11-20 17:30Z with one identical script (same checknewtv base
+// https://tv.imgcdn.kim, same headers, no cookie) from both hosts:
+//   prod VM  search.php?s=Kalki 2898 AD -> 403 text/html "Page Not Found" (CF BOM)
+//   Mac      same request               -> 200 application/json, the Kalki row
+// It is an IP block of the datacenter address. Reading it as "no rows" cached
+// a block as an answer and never let the base be rediscovered, so it throws:
+// the caller counts it (noteNewTvFailure) and reports an upstream failure.
+// A bare 404 without that page is still "no rows here".
 const PAGE_NOT_FOUND_RE = /page\s+not\s+found/i;
 async function readNewTvJson(response) {
     const text = await response.text();
     try {
         return JSON.parse(text);
     } catch (err) {
-        if (response.status === 404 || PAGE_NOT_FOUND_RE.test(text)) return null;
+        if (PAGE_NOT_FOUND_RE.test(text)) throw new Error(`HTTP ${response.status}: newtv refused (Page Not Found)`);
+        if (response.status === 404) return null;
         throw new Error(`HTTP ${response.status}: ${err.message}`);
     }
 }
 
-async function fetchPlatform(platform, title, type, season, episode) {
+// One newtv search.php / post.php answer per lookup. The unlabelled-mp4 path
+// (netflixLanguageFromPost) and the Netflix catalogue row (fetchPlatform) ask
+// the same two URLs; the memo makes the second ask free, so resolving the
+// Netflix catalogue costs one player.php more, not three requests. A refusal
+// is memoised too: the same URL will not answer 1.2s later in the same lookup.
+async function newTvJson(memo, url, ott, extra) {
+    const key = `${ott} ${url}`;
+    if (memo && memo.has(key)) {
+        const hit = memo.get(key);
+        if (hit.error) throw hit.error;
+        return hit.data;
+    }
+    try {
+        const data = await readNewTvJson(await nmFetch(url,
+            { headers: newTvHeaders(ott, extra), signal: AbortSignal.timeout(15000) }));
+        if (memo) memo.set(key, { data });
+        return data;
+    } catch (error) {
+        if (memo) memo.set(key, { error });
+        throw error;
+    }
+}
+
+async function fetchPlatform(platform, title, type, season, episode, memo) {
     try {
         const config = PLATFORM_MAP[platform];
         const api = await resolveNewTvApi();
@@ -593,11 +616,8 @@ async function fetchPlatform(platform, title, type, season, episode) {
         // to spaces return the real entries. Try the TMDB spelling first, then
         // progressively looser ones, and stop at the first query that matches.
         for (const query of searchSpellings(title)) {
-            const searchResponse = await nmFetch(
-                `${api}/newtv/search.php?s=${encodeURIComponent(query)}`,
-                { headers: newTvHeaders(config.ott), signal: AbortSignal.timeout(15000) }
-            );
-            const searchData = await readNewTvJson(searchResponse);
+            const searchData = await newTvJson(memo,
+                `${api}/newtv/search.php?s=${encodeURIComponent(query)}`, config.ott);
             if (searchData === null) {
                 console.log(`[NetMirror] ${platform} catalogue: page not found for "${query}" - no rows`);
                 return [];
@@ -619,7 +639,7 @@ async function fetchPlatform(platform, title, type, season, episode) {
         const out = [];
         let err = null;
         for (const match of matches.slice(0, MAX_LANGUAGE_ROWS)) {
-            const rows = await resolveMatch(api, config, platform, match, title, type, season, episode);
+            const rows = await resolveMatch(api, config, platform, match, title, type, season, episode, memo);
             if (rows.upstreamError) err = rows.upstreamError;
             out.push(...rows);
         }
@@ -636,15 +656,12 @@ async function fetchPlatform(platform, title, type, season, episode) {
 // this is capped rather than unbounded.
 const MAX_LANGUAGE_ROWS = Number(process.env.NETMIRROR_MAX_LANG_ROWS) || 4;
 
-async function resolveMatch(api, config, platform, match, title, type, season, episode) {
+async function resolveMatch(api, config, platform, match, title, type, season, episode, memo) {
     const first = match.item;
     try {
 
-        const postResponse = await nmFetch(
-            `${api}/newtv/post.php?id=${encodeURIComponent(first.id)}`,
-            { headers: newTvHeaders(config.ott, { Lastep: '', Usertoken: '' }), signal: AbortSignal.timeout(15000) }
-        );
-        const postData = await readNewTvJson(postResponse);
+        const postData = await newTvJson(memo,
+            `${api}/newtv/post.php?id=${encodeURIComponent(first.id)}`, config.ott, { Lastep: '', Usertoken: '' });
         if (postData === null) {
             console.log(`[NetMirror] ${platform} post: page not found for id ${first.id} - no rows`);
             return [];
@@ -738,6 +755,7 @@ async function resolveMatch(api, config, platform, match, title, type, season, e
         }];
     } catch (error) {
         console.log(`[NetMirror] ${platform} failed: ${error.message}`);
+        noteNewTvFailure();
         return failure(`${platform}: ${error.message}`);
     }
 }
@@ -756,15 +774,13 @@ async function resolveMatch(api, config, platform, match, title, type, season, e
 // post.php, no retry, no loop. The caller runs it only for unlabelled rows,
 // and the evidence it writes labels the file on later probes, so it does not
 // repeat for the same file.
-async function netflixLanguageFromPost(title, type, year) {
+async function netflixLanguageFromPost(title, type, year, memo) {
     try {
         const ott = PLATFORM_MAP.netflix.ott;
         const api = await resolveNewTvApi();
         const query = searchSpellings(title)[0] || title;
-        const searchData = await readNewTvJson(await nmFetch(
-            `${api}/newtv/search.php?s=${encodeURIComponent(query)}`,
-            { headers: newTvHeaders(ott), signal: AbortSignal.timeout(15000) }
-        ));
+        const searchData = await newTvJson(memo,
+            `${api}/newtv/search.php?s=${encodeURIComponent(query)}`, ott);
         if (searchData === null) return null;
         noteNewTvOk();
         const match = pickSearchMatches(searchData.searchResult || [], title)[0];
@@ -772,10 +788,8 @@ async function netflixLanguageFromPost(title, type, year) {
             console.log(`[NetMirror] netflix-lang no catalogue match for "${title}"`);
             return null;
         }
-        const post = await readNewTvJson(await nmFetch(
-            `${api}/newtv/post.php?id=${encodeURIComponent(match.item.id)}`,
-            { headers: newTvHeaders(ott, { Lastep: '', Usertoken: '' }), signal: AbortSignal.timeout(15000) }
-        ));
+        const post = await newTvJson(memo,
+            `${api}/newtv/post.php?id=${encodeURIComponent(match.item.id)}`, ott, { Lastep: '', Usertoken: '' });
         if (post === null) return null;
         if (type === 'movie' && (post.type === 't' || (post.episodes || []).filter(Boolean).length)) {
             console.log(`[NetMirror] netflix-lang "${title}" matched a series entry - skipped`);
@@ -795,6 +809,7 @@ async function netflixLanguageFromPost(title, type, year) {
         return langs[0];
     } catch (error) {
         console.log(`[NetMirror] netflix-lang failed: ${error.message}`);
+        noteNewTvFailure();
         return null;
     }
 }
@@ -997,29 +1012,37 @@ async function getNetmirrorStreams(tmdbId, mediaType = 'movie', seasonNum = null
                 (stream) => stream && (stream.language || (stream.languages || []).length));
             // Unlabelled Netflix rows: ask Netflix's own post.php for the
             // language before the other catalogues (one search + one post).
+            // Both answers are memoised for this lookup, so the Netflix
+            // catalogue row below reuses them.
+            const memo = new Map();
             let askedNetflix = false;
             if (collected.length && !labelled(collected)) {
                 askedNetflix = true;
                 const year = Number(String((details && (details.release_date || details.first_air_date)) || '')
                     .slice(0, 4)) || null;
-                const lang = await netflixLanguageFromPost(title, type, year);
+                const lang = await netflixLanguageFromPost(title, type, year, memo);
                 if (lang) {
                     console.log(`[NetMirror] netflix-lang ${tmdbId} labelled ${lang} from post.php`);
                     collected = labelNetflixRows(collected, lang,
                         { tmdbId, type: mediaType === 'tv' ? 'tv' : 'movie', season, episode });
                 }
             }
-            const haveLanguages = labelled(collected);
-            if (!haveLanguages) {
-                let asked = askedNetflix ? 1 : 0;
-                for (const platform of PLATFORM_ORDER) {
-                    // netflix already ran as `direct` (the embed-tmdb path).
-                    if (platform === 'netflix') continue;
-                    if (asked++) await sleep(PLATFORM_GAP_MS);
-                    const found = await fetchPlatform(platform, title, type, season, episode);
-                    if (found.upstreamError) upstreamError = found.upstreamError;
-                    if (found.length) collected.push(...found);
-                }
+            // Every catalogue is asked, labelled mp4 or not. A labelled mp4 used
+            // to stop the lookup here, and that was a loss: the mp4 is ONE
+            // audio track, while the catalogues list the rest. Kalki 801688,
+            // 2026-11-20: Prime post.php lists Kannada/Malayalam/Tamil/Telugu,
+            // we returned the Telugu mp4 only.
+            //
+            // netflix is asked too: embed-tmdb (`direct`) gives the single-
+            // audio mp4, the nf catalogue gives the HLS master with its
+            // EXT-X-MEDIA audio. Both rows stay: the mp4 is a picture-quality
+            // choice, the master is the language choice.
+            let asked = askedNetflix ? 1 : 0;
+            for (const platform of PLATFORM_ORDER) {
+                if (asked++) await sleep(PLATFORM_GAP_MS);
+                const found = await fetchPlatform(platform, title, type, season, episode, memo);
+                if (found.upstreamError) upstreamError = found.upstreamError;
+                if (found.length) collected.push(...found);
             }
             // Check the CDN BEFORE caching. The 429 comes from the file host,
             // not the API, so without this a throttled url is stored as a good

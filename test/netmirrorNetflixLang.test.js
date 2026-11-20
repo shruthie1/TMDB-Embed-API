@@ -21,7 +21,6 @@ const { getNetmirrorStreams } = require('../providers/netmirror');
 const { getStore, mediaIdentityOf } = require('../utils/store');
 
 const json = (body) => ({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body), arrayBuffer: async () => new ArrayBuffer(0), headers: new Map() });
-const notFound = () => ({ ok: false, status: 404, json: async () => { throw new Error('x'); }, text: async () => '<html>Page Not Found</html>', arrayBuffer: async () => new ArrayBuffer(0), headers: new Map() });
 
 let calls;
 function route(postLang) {
@@ -36,7 +35,7 @@ function route(postLang) {
             const ott = init && init.headers && init.headers.Ott;
             calls.search.push(ott);
             // Only Netflix carries the title; other catalogues have nothing.
-            return ott === 'nf' ? json({ searchResult: [{ id: '81000001', t: 'Krack' }] }) : notFound();
+            return ott === 'nf' ? json({ searchResult: [{ id: '81000001', t: 'Krack' }] }) : json({ searchResult: [] });
         }
         if (u.includes('/newtv/post.php')) {
             calls.post.push(u);
@@ -54,9 +53,12 @@ test('post.php with exactly one language labels the row and writes provider evid
     assert.equal(out.length, 1);
     assert.deepEqual(out[0].languages, ['Telugu']);
     assert.equal(out[0].audio[0].language, 'Telugu', 'the single und track carries it');
-    assert.deepEqual(calls.search, ['nf'], 'one Netflix search; labelled, so no other catalogue');
+    // Every catalogue is asked even once labelled (N2); the nf catalogue row
+    // reuses netflix-lang's search and post (N3), so nf is searched once.
+    assert.equal(calls.search.filter((o) => o === 'nf').length, 1, 'one Netflix search');
+    assert.ok(calls.search.includes('pv') && calls.search.includes('hs'), 'each other catalogue asked');
     assert.equal(calls.post.length, 1, 'one post.php');
-    assert.equal(calls.player, 0, 'never player.php');
+    assert.equal(calls.player, 1, 'one player.php, for the nf catalogue row');
     const ev = getStore().audioEvidenceFor(mediaIdentityOf(out[0].url));
     assert.ok(ev.some((r) => r.source === 'provider' && r.lang === 'Telugu'), 'provider evidence stored');
 });
@@ -68,7 +70,7 @@ test('post.php listing several languages leaves the row unlabelled', async () =>
     assert.equal(out[0].languages, undefined, 'no guess');
     assert.equal(out[0].audio[0].language, null);
     assert.equal(calls.post.length, 1, 'still one post.php, no retry');
-    assert.equal(calls.player, 0);
+    assert.equal(calls.player, 1, 'nf catalogue row only');
     assert.equal(calls.search.filter((o) => o === 'nf').length, 1, 'one Netflix search');
     const ev = getStore().audioEvidenceFor(mediaIdentityOf(out[0].url));
     assert.equal(ev.filter((r) => r.source === 'provider').length, 0, 'no evidence written');

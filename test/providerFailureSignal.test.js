@@ -106,7 +106,7 @@ test('netmirror: Netflix 503 + newtv refused -> throws, then backs off without r
         master: '',
     });
     const { getNetmirrorStreams } = fresh('netmirror');
-    await assert.rejects(getNetmirrorStreams('5001', 'movie'), /HTTP 503|search|JSON|Unexpected/);
+    await assert.rejects(getNetmirrorStreams('5001', 'movie'), /HTTP 503|search|JSON|Unexpected|refused/);
     const before = global.fetch.seen.length;
     await assert.rejects(getNetmirrorStreams('5001', 'movie'), /backing off/);
     assert.equal(global.fetch.seen.length, before, 'backoff served from the netmirror cache, no new upstream calls');

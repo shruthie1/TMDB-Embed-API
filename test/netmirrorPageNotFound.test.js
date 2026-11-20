@@ -3,11 +3,11 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const path = require('path');
 
-// Prod audit 2026-11-20: newtv answered the primevideo/hotstar/disney search
-// with an HTML "Page Not Found" page. response.json() threw, the throw became
-// upstreamError, and the whole NetMirror answer (Netflix rows included) went
-// out as an uncached partial, so the title was asked again: 11 errors and 6
-// partials a day. That page means "this catalogue has no rows".
+// Prod audit 2026-11-20: newtv answered every primevideo/hotstar search from
+// the VM with `403 text/html Page Not Found`, while the Mac got JSON for the
+// same request: an IP block, not an empty catalogue. It was read as "no rows"
+// and cached; it is now an upstream failure that counts toward rediscovering
+// the newtv base. Netflix rows are still returned with it.
 process.env.NETMIRROR_PLATFORM_GAP_MS = '1';
 function stub(rel, exports) {
     const id = require.resolve(path.join(__dirname, '..', rel));
@@ -42,17 +42,16 @@ function route(newtvSearch) {
     };
 }
 
-test('a catalogue answering Page Not Found keeps the Netflix rows, no error, cached', async () => {
+test('a catalogue answering Page Not Found is a failure; Netflix rows kept and backed off', async () => {
     route(() => html(200, PAGE_NOT_FOUND));
     const out = await getNetmirrorStreams(5001, 'movie');
-    assert.equal(out.upstreamError, undefined, 'Page Not Found is not an upstream error');
+    assert.match(String(out.upstreamError), /refused \(Page Not Found\)/, 'Page Not Found is a refusal');
     assert.deepEqual(out.map((s) => s.url), ['https://cdn.example/nf/1080.mp4']);
-    // 4 = one Netflix search for the unlabelled row's language (post.php
-    // recovery, providers/netmirror.js netflixLanguageFromPost) + primevideo,
-    // hotstar and disney each asked once.
-    assert.equal(calls.search, 4, 'netflix-lang once, then each catalogue once');
+    // 3 = netflix-lang's nf search (the nf catalogue reuses its memoised
+    // refusal) + primevideo + hotstar. disney is gone (same hs catalogue).
+    assert.equal(calls.search, 3, 'each catalogue asked once');
 
-    // Cached as a full answer: the next call makes no upstream request.
+    // Backed off for 90s with the Netflix rows: no upstream request.
     const before = { ...calls };
     const again = await getNetmirrorStreams(5001, 'movie');
     assert.deepEqual(again.map((s) => s.url), ['https://cdn.example/nf/1080.mp4']);
