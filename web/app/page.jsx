@@ -157,6 +157,21 @@ export default function Home() {
     <div className="home-page">
       <Hero titles={heroTitles || []} loading={heroTitles === undefined} />
 
+      {/* Before mount (server render, and the seconds a TV spends loading
+          JS) prefs is null and `display` is empty, so the hero skeleton stood
+          alone above a blank screen. The first two discovery rows have fixed
+          labels whatever the languages, so they show as skeletons in the same
+          place the real rows land. TV only (nav.css); phone and desktop keep
+          their current first paint. */}
+      {!prefs && (
+        <div className="home-boot-rows">
+          {homeRows([]).filter(r => r.kind !== 'continue' && r.kind !== 'list').slice(0, 2)
+            .map(({ kind, label, ranked }) => (
+              <Row key={kind} label={label} titles={[]} loading ranked={ranked} homeSection />
+            ))}
+        </div>
+      )}
+
       {display.map(({ kind, label, href, thin, ranked, rec }) => {
         const titles = shown[kind];
         // Hide a row that is empty, or thin once earlier rows have claimed

@@ -29,8 +29,10 @@ function loadSw(origin = 'https://chtrm.vercel.app') {
       delete: async () => true,
     },
     __puts: [],
-    fetch: async () => ({ ok: true, status: 200, clone: () => ({}) }),
+    fetch: async () => new Response('x', { status: 200 }),
     URL,
+    Headers,
+    Response,
     console,
   };
   const self = {
@@ -67,6 +69,23 @@ describe('service worker: video is never cached or intercepted', () => {
     ['.mp4 file', `${o}/media/movie.mp4`],
     ['.m3u8 file', `${o}/media/index.m3u8`],
     ['other api route', `${o}/api/search?q=arjun`],
+    // Stream resolution answers carry expiring CDN urls.
+    ['express streams', `${o}/api/streams/movie/12345`],
+    ['express streams query', `${o}/api/streams/tv/1399:1:1?lang=te`],
+    ['resolve bare', `${o}/api/resolve`],
+    ['m3u8 proxy', `${o}/m3u8-proxy?url=https%3A%2F%2Fcdn%2Fx.m3u8`],
+    ['ts proxy', `${o}/ts-proxy?url=https%3A%2F%2Fcdn%2Fx`],
+    ['hybrid master', `${o}/hybrid/abc123/master`],
+    ['pts rebase', `${o}/pts-rebase?u=x`],
+    ['castle demux', `${o}/castle-demux/a/b`],
+    ['providers api', `${o}/api/providers`],
+    ['capabilities', `${o}/api/capabilities`],
+    ['status', `${o}/api/status`],
+    ['unknown title subroute', `${o}/api/title/movie/12345/resolve`],
+    ['unknown api route', `${o}/api/somethingnew/1`],
+    ['rsc flight data', `${o}/title/movie/1?_rsc=abc`],
+    ['operator page', `${o}/stats`],
+    ['segment on an image host', 'https://image.tmdb.org/x/seg.ts'],
   ];
 
   for (const [label, url] of mustBypass) {
@@ -87,8 +106,11 @@ describe('service worker: video is never cached or intercepted', () => {
     expect(sw.self.shouldBypass(`${o}/_next/static/chunk.js`, 'POST')).toBe(true);
   });
 
-  it('leaves cross-origin requests alone', () => {
-    expect(sw.self.shouldBypass('https://image.tmdb.org/t/p/w500/a.jpg', 'GET')).toBe(true);
+  it('leaves cross-origin requests alone, except the artwork hosts', () => {
+    expect(sw.self.shouldBypass('https://fonts.googleapis.com/css2?family=x', 'GET')).toBe(true);
+    // No CORS header: an opaque body would cost ~7MB of quota each.
+    expect(sw.self.shouldBypass('https://images.metahub.space/poster/small/tt1/img', 'GET')).toBe(true);
+    expect(sw.self.shouldBypass('https://cdn.example/x.jpg', 'GET')).toBe(true);
   });
 
   it('the fetch handler does not call respondWith for a segment', () => {
@@ -96,6 +118,7 @@ describe('service worker: video is never cached or intercepted', () => {
     sw.listeners.fetch({
       request: { url: `${o}/api/seg?u=x`, method: 'GET', headers: { get: () => null } },
       respondWith: () => { respondedWith = true; },
+      waitUntil: () => {},
     });
     expect(respondedWith).toBe(false);
   });
@@ -105,6 +128,7 @@ describe('service worker: video is never cached or intercepted', () => {
     sw.listeners.fetch({
       request: { url: `${o}/x/seg.ts`, method: 'GET', headers: { get: () => null } },
       respondWith: () => { respondedWith = true; },
+      waitUntil: () => {},
     });
     expect(respondedWith).toBe(false);
   });
@@ -141,6 +165,7 @@ describe('service worker: video is never cached or intercepted', () => {
       const event = {
         request: { url, method: 'GET', headers: { get: () => null } },
         respondWith: (p) => { event.__promise = p; },
+        waitUntil: () => {},
       };
       fresh.listeners.fetch(event);
       if (event.__promise) await event.__promise;
@@ -159,6 +184,7 @@ describe('service worker: video is never cached or intercepted', () => {
         headers: { get: (h) => (h === 'range' ? 'bytes=0-100' : null) },
       },
       respondWith: () => { respondedWith = true; },
+      waitUntil: () => {},
     });
     expect(respondedWith).toBe(false);
   });
@@ -191,9 +217,42 @@ describe('service worker: the app shell IS cached', () => {
         headers: { get: () => null },
       },
       respondWith: () => { respondedWith = true; },
+      waitUntil: () => {},
     });
     expect(respondedWith).toBe(true);
   });
+});
+
+describe('service worker: artwork and catalogue strategies', () => {
+  let sw;
+  beforeAll(() => { sw = loadSw(); });
+  const o = 'https://chtrm.vercel.app';
+
+  const cases = [
+    ['https://image.tmdb.org/t/p/w342/a.jpg', 'GET', 'no-cors', 'image'],
+    ['https://m.media-amazon.com/images/M/x._V1_SX300.jpg', 'GET', 'no-cors', 'image'],
+    [`${o}/api/rows/top10?langs=te`, 'GET', 'cors', 'catalog'],
+    [`${o}/api/title/movie/12345`, 'GET', 'cors', 'catalog'],
+    [`${o}/api/title/tv/1399/full`, 'GET', 'cors', 'catalog'],
+    [`${o}/api/season/1399/2`, 'GET', 'cors', 'catalog'],
+    [`${o}/api/similar/movie/12345`, 'GET', 'cors', 'catalog'],
+    [`${o}/api/person/287`, 'GET', 'cors', 'catalog'],
+    [`${o}/api/discover?genre=28`, 'GET', 'cors', 'catalog'],
+    [`${o}/_next/static/chunks/main-abc.js`, 'GET', 'no-cors', 'static'],
+    [`${o}/icons/icon-192.png`, 'GET', 'no-cors', 'asset'],
+    [`${o}/`, 'GET', 'navigate', 'navigate'],
+    [`${o}/title/movie/12345`, 'GET', 'navigate', 'navigate'],
+    [`${o}/api/rows/top10`, 'POST', 'cors', 'bypass'],
+    [`${o}/api/streams/movie/1`, 'GET', 'cors', 'bypass'],
+    [`${o}/api/search?q=x`, 'GET', 'cors', 'bypass'],
+    [`${o}/some/data.json`, 'GET', 'cors', 'bypass'],
+  ];
+
+  for (const [url, method, mode, want] of cases) {
+    it(`${method} ${url.replace(o, '')} (${mode}) -> ${want}`, () => {
+      expect(sw.self.classify(url, method, mode)).toBe(want);
+    });
+  }
 });
 
 describe('web app manifest', () => {

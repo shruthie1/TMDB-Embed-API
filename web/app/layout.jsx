@@ -11,6 +11,7 @@ import Diagnostics from '../components/Diagnostics';
 import { TopNav, AppNav } from '../components/Nav';
 import Shortcuts from '../components/Shortcuts';
 import InstallPrompt from '../components/InstallPrompt';
+import { TV_BOOT_SCRIPT } from '../lib/tvBoot';
 
 // Self-hosted by next/font; the CSS variables feed --font-* in tokens.css.
 const inter = Inter({ subsets: ['latin'], variable: '--font-inter', display: 'swap' });
@@ -44,8 +45,13 @@ export const viewport = {
 
 export default function RootLayout({ children }) {
   return (
-    <html lang="en" className={`${inter.variable} ${grotesk.variable} ${telugu.variable}`}>
+    // suppressHydrationWarning: TV_BOOT_SCRIPT adds data-tv to <html> before
+    // React hydrates, which the server render cannot know about.
+    <html lang="en" className={`${inter.variable} ${grotesk.variable} ${telugu.variable}`} suppressHydrationWarning>
       <head>
+        {/* TV layout from the first frame, so the rail and its offset are
+            there during the loading skeleton. See lib/tvBoot.js. */}
+        <script dangerouslySetInnerHTML={{ __html: TV_BOOT_SCRIPT }} />
         {/* Chrome's standard PWA capability marker. Keep the Apple-specific
             metadata below for iOS, where this standard name is ignored. */}
         <meta name="mobile-web-app-capable" content="yes" />

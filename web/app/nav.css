@@ -24,8 +24,23 @@ html[data-tv="true"] .topbar::before,html[data-tv="true"] .topbar::after{display
 /* The rail has Home; the wordmark is not a D-pad stop (dpad.js skips
    pointer-events:none). */
 html[data-tv="true"] .topbar .brand{pointer-events:none}
-/* Detail page: Back sits top-left, so the wordmark moves top-right. */
+/* Detail page: Back sits top-left, so the wordmark moves top-right. On TV and
+   phone the right nav is hidden, so the wordmark has that corner to itself. On
+   desktop the nav lives on the right, so the wordmark stays left (it has header
+   room there and does not touch Back). */
 html[data-tv="true"] body:has(.detail) .topbar{justify-content:flex-end}
+@media (max-width:899px){
+  html:not([data-tv="true"]) body:has(.detail) .topbar{justify-content:flex-end}
+}
+/* Overscan room above Back and the hero: the backdrop page has no header
+   padding, so Back sat at y=2 and a TV that crops ~3% per edge cut it off.
+   16px + 3vh (48px at 1080p). Scroll-to-top (dpad.js) lands at 0, so this
+   also keeps the hero clear after Play takes focus. */
+html[data-tv="true"] .detail{padding-top:calc(var(--space-4) + 3vh)}
+/* Phone/desktop web detail is also a backdrop page with no header padding, so
+   Back sat at y=2 under the status/address bar. Clear it with the status-bar
+   inset (viewport-fit=cover is set). Desktop inset is 0, so this is a no-op there. */
+html:not([data-tv="true"]) .detail{padding-top:calc(var(--space-3) + env(safe-area-inset-top,0px))}
 html[data-tv="true"] body:not(:has(.page-backdrop)) main{padding-top:var(--header-h)}
 /* Browsers without :has() put every page below the wordmark. */
 @supports not selector(:has(a)){
@@ -62,7 +77,7 @@ html[data-tv="true"] body:not(:has(.page-backdrop)) main{padding-top:var(--heade
 html[data-tv="true"]{
   --tv-safe-x:clamp(8px,.8vw,16px);
   --tv-gap:clamp(16px,1.6vw,32px);
-  --rail-icon:clamp(44px,2.5vw,52px);
+  --rail-icon:clamp(52px,3vw,60px);
   --rail-w:calc(var(--tv-safe-x) + var(--rail-icon) + var(--space-1));
   --rail-open-w:calc(var(--rail-w) + clamp(150px,11vw,210px));
 }
@@ -79,7 +94,7 @@ html[data-tv="true"] .app-nav{
   display:flex;flex-direction:column;justify-content:center;gap:var(--space-1);
   position:fixed;top:0;bottom:0;left:0;z-index:var(--z-header);
   width:var(--rail-w);padding:0 var(--space-1) 0 var(--tv-safe-x);overflow:hidden;
-  background:linear-gradient(to right,rgb(var(--rgb-bg) / .9),rgb(var(--rgb-bg) / .55) 75%,rgb(var(--rgb-bg) / 0));
+  background:linear-gradient(to right,rgb(var(--rgb-bg) / .72),rgb(var(--rgb-bg) / .38) 75%,rgb(var(--rgb-bg) / 0));
   transition:width var(--duration-base) var(--ease-out),box-shadow var(--duration-base) var(--ease-out);
 }
 /* Open while focus is inside. The page behind dims instead of reflowing. */
@@ -90,11 +105,11 @@ html[data-tv="true"] .app-nav:focus-within{
 }
 html[data-tv="true"] .app-nav-item{
   display:flex;align-items:center;gap:var(--space-5);flex:none;
-  height:var(--rail-icon);width:100%;min-width:var(--rail-icon);padding:0 calc((var(--rail-icon) - 24px) / 2);border:0;border-radius:var(--radius-pill);
+  height:var(--rail-icon);width:100%;min-width:var(--rail-icon);padding:0 calc((var(--rail-icon) - 28px) / 2);border:0;border-radius:var(--radius-pill);
   background:none;font:inherit;font-size:clamp(18px,1.15vw,22px);white-space:nowrap;
   color:var(--color-text-muted);text-align:left;
 }
-html[data-tv="true"] .app-nav-item svg{width:24px;height:24px;flex:none}
+html[data-tv="true"] .app-nav-item svg{width:28px;height:28px;flex:none}
 html[data-tv="true"] .app-nav-item.on{color:var(--color-white)}
 html[data-tv="true"] .app-nav-item.on svg{stroke-width:2.4}
 html[data-tv="true"] .app-nav-label{opacity:0;transition:opacity var(--duration-base) var(--ease-out)}
@@ -108,3 +123,8 @@ html[data-tv="true"] .app-nav .app-nav-item:focus,
 html[data-tv="true"] .app-nav .app-nav-item:focus svg{color:var(--ink)}
 /* Beats the open-rail colours above, which left a white label on white. */
 html[data-tv="true"] .app-nav:focus-within .app-nav-item:focus{color:var(--ink)}
+
+/* Home skeleton rows painted before mount (app/page.jsx). TV only: there the
+   JS takes seconds and the hero skeleton otherwise stands above a blank
+   screen. Phone and desktop keep their existing first paint. */
+html:not([data-tv="true"]) .home-boot-rows{display:none}
