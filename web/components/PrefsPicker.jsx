@@ -11,7 +11,7 @@ const FOCUSABLE = 'button:not([disabled]), [href], [tabindex]:not([tabindex="-1"
  * Preferred languages, as a small centred dialog. Tap order is still saved
  * as rank order (rows follow it), but the UI no longer shows numbers.
  *
- * First visit: nothing is selected, it opens after the home page has painted,
+ * First visit: Telugu is pre-selected, it opens after the home page has painted,
  * and it is sticky (no outside-tap or Escape dismiss). Save needs at least one
  * language; Skip stores an empty choice, which means all languages.
  */
@@ -21,7 +21,10 @@ export function PrefsModal({ open, onClose, firstVisit = false }) {
 
   useEffect(() => {
     if (!open) return undefined;
-    setLangs(firstVisit ? [] : getPrefs().langs);
+    // First visit opens with Telugu already chosen and ready to save - Telugu
+    // is the library's standing default, so a first-time viewer lands on it
+    // without hunting. They can still add or clear languages before saving.
+    setLangs(firstVisit ? ['te'] : getPrefs().langs);
     const card = cardRef.current;
     const returnTo = document.activeElement;
     // Focus the dialog itself, so no tile looks different on open. A TV has no
