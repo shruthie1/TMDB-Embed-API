@@ -154,15 +154,42 @@ async function extractTrack(segmentBuffer, streamIndex, ptsOffsetSeconds = 0) {
     }
 }
 
+// The memory cache is keyed on the signed playlist url, which Castle re-signs
+// on every resolve, so it only helps within one burst. The persisted layer
+// (audio_evidence, utils/store.js) is keyed on the MEDIA identity - query and
+// the rotating `_<NNN>.m3u8` suffix dropped, as castletv.js mediaIdentity() -
+// so a probe of this file in any earlier request or process is reused and the
+// segment fetch + ffprobe are skipped. The layout (stream indices, language
+// tags) is a property of the file, so it does not go stale.
 function getProbe(playlistUrl) {
     const hit = probeCache.get(playlistUrl);
     if (hit && hit.expiresAt > Date.now()) return hit.value;
     probeCache.delete(playlistUrl);
+    try {
+        const { getStore, mediaIdentityOf, resolveAudioEvidence } = require('./store');
+        const ev = resolveAudioEvidence(getStore().audioEvidenceFor(mediaIdentityOf(playlistUrl)), 'castle');
+        if (ev.probe && Array.isArray(ev.probe.audio)) {
+            probeCache.set(playlistUrl, { value: ev.probe, expiresAt: Date.now() + PROBE_TTL_MS });
+            return ev.probe;
+        }
+    } catch (e) {
+        console.warn(`[castle-demux] evidence read failed: ${e.message}`);
+    }
     return null;
 }
 
 function setProbe(playlistUrl, value) {
     probeCache.set(playlistUrl, { value, expiresAt: Date.now() + PROBE_TTL_MS });
+    // A probe that found no audio may be one bad segment, not the file:
+    // keep it for the memory TTL only, never persist it.
+    if (!value || !Array.isArray(value.audio) || !value.audio.length) return;
+    try {
+        const { getStore, mediaIdentityOf } = require('./store');
+        getStore().putAudioEvidence({ mediaIdentity: mediaIdentityOf(playlistUrl), provider: 'castletv',
+            source: 'ffprobe', lang: '', detail: { kind: 'castle', value } });
+    } catch (e) {
+        console.warn(`[castle-demux] evidence write failed: ${e.message}`);
+    }
 }
 
 setInterval(() => {

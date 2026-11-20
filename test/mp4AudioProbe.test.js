@@ -24,7 +24,14 @@ const lastArgs = () => {
     return JSON.parse(lines[lines.length - 1]);
 };
 
-beforeEach(() => { _cache.clear(); try { fs.unlinkSync(LOG); } catch { /* first run */ } });
+// audio_evidence persists probe answers per file (utils/store.js). These tests
+// reuse one path with different fake-ffprobe fragments, so each starts on an
+// empty store as well as an empty memory cache.
+const { openStore, _setStore } = require('../utils/store');
+beforeEach(() => {
+    _cache.clear(); _setStore(openStore(':memory:'));
+    try { fs.unlinkSync(LOG); } catch { /* first run */ }
+});
 
 test('reads language, codec and channels off the audio streams only', async () => {
     const tracks = await probeAudioTracks('https://cdn.test/a.mp4#multi');

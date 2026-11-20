@@ -8,6 +8,8 @@
 #   1. git archive HEAD (no web/, no tests, no screenshots; secrets are never tracked).
 #   2. Uploads it to VM1 and stages it in a COPY of the live dir, so .env,
 #      utils/user-config.json, ADMIN_PASSWORD and node_modules carry over.
+#      The live SQLite store is excluded from copy and backup; it is moved
+#      across only while the app is stopped.
 #      Code files removed in git are removed from the stage.
 #   3. npm ci only when package-lock.json changed. `node --check` on every file.
 #   4. Backs up the live dir, swaps the stage in, restarts ONLY the PM2 app
@@ -69,12 +71,32 @@ BACKUP="/root/tmdb-embed-api-backups/$TS.tgz"
 
 pm2 describe "$APP" >/dev/null || { echo "pm2 app $APP not found; not deploying" >&2; exit 4; }
 
+# The learning store (data/learning.sqlite + -wal/-shm) is written live. A copy
+# taken mid-write can pair a db with a WAL from a different moment, so it is
+# never copied or backed up here. It is MOVED to the new dir only while the
+# app is stopped (see carry_db), so learning survives a deploy intact.
+DB_FILES=(learning.sqlite learning.sqlite-wal learning.sqlite-shm)
+DB_EXCLUDES=(--exclude=./data/learning.sqlite --exclude=./data/learning.sqlite-wal --exclude=./data/learning.sqlite-shm)
+carry_db() {  # carry_db FROM_DIR TO_DIR; app must be stopped
+  local f
+  mkdir -p "$2/data"
+  for f in "${DB_FILES[@]}"; do
+    rm -f "$2/data/$f"
+    if [ -e "$1/data/$f" ]; then mv "$1/data/$f" "$2/data/$f"; fi
+  done
+}
+
 echo "[vm] backup $DIR -> $BACKUP (without node_modules)"
-tar czf "$BACKUP" --exclude=node_modules -C "$(dirname "$DIR")" "$(basename "$DIR")"
+tar czf "$BACKUP" --exclude=node_modules \
+  --exclude="$(basename "$DIR")/data/learning.sqlite" \
+  --exclude="$(basename "$DIR")/data/learning.sqlite-wal" \
+  --exclude="$(basename "$DIR")/data/learning.sqlite-shm" \
+  -C "$(dirname "$DIR")" "$(basename "$DIR")"
 
 echo "[vm] stage in $STAGE"
 rm -rf "$STAGE"
-cp -a "$DIR" "$STAGE"
+mkdir -p "$STAGE"
+tar cf - "${DB_EXCLUDES[@]}" -C "$DIR" . | tar xf - -C "$STAGE"
 LIST="$(mktemp)"
 tar tzf "$TGZ" | sed 's|/$||' > "$LIST"
 tar xzf "$TGZ" -C "$STAGE"
@@ -113,8 +135,10 @@ health() {
 restarts() { pm2 jlist | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s).find(p=>p.name===process.argv[1]);console.log(a?a.pm2_env.restart_time:-1)})" "$APP"; }
 
 echo "[vm] swap: $DIR -> $PREV, $STAGE -> $DIR"
+pm2 stop "$APP" >/dev/null
 mv "$DIR" "$PREV"
 mv "$STAGE" "$DIR"
+carry_db "$PREV" "$DIR"
 pm2 restart "$APP" --kill-timeout 10000 --update-env >/dev/null
 sleep 3
 R0="$(restarts)"
@@ -128,8 +152,10 @@ fi
 echo "[vm] UNHEALTHY on $SHA: rolling back" >&2
 pm2 logs "$APP" --lines 40 --nostream 2>&1 | tail -40 >&2 || true
 rm -rf "$DIR.failed-$SHA"
+pm2 stop "$APP" >/dev/null || true
 mv "$DIR" "$DIR.failed-$SHA"
 mv "$PREV" "$DIR"
+carry_db "$DIR.failed-$SHA" "$DIR"
 pm2 restart "$APP" --kill-timeout 10000 --update-env >/dev/null
 if health; then echo "[vm] rolled back; previous build is serving" >&2; else echo "[vm] ROLLBACK ALSO UNHEALTHY: restore from $BACKUP" >&2; fi
 exit 5

@@ -39,6 +39,20 @@ stub('providers/registry.js', {
 });
 process.env.PRIMARY_PROVIDERS = 'castletv,netmirror';
 process.env.PREFERRED_AUDIO_LANGUAGE = 'Telugu';
+// No outbound network. The test only calls its own loopback server; every
+// other fetch (e.g. a byte-check of the fake cdn.example urls) is recorded
+// and refused, and the last test asserts none happened.
+const realFetch = globalThis.fetch;
+const outbound = [];
+globalThis.fetch = (url, opts) => {
+    const u = String(url && url.url ? url.url : url);
+    if (/^http:\/\/127\.0\.0\.1:/.test(u)) return realFetch(url, opts);
+    outbound.push(u);
+    return Promise.reject(new Error(`outbound fetch blocked in test: ${u}`));
+};
+// The byte-check is covered by test/segmentVerify.test.js. Here it is a
+// pass-through so the fake cdn.example urls are never fetched.
+stub('lib/media/segmentVerify.js', { ...require('../lib/media/segmentVerify'), verifyTopStreams: async (s) => s });
 const realTmdb = require('../utils/tmdb');
 stub('utils/tmdb.js', { ...realTmdb, resolveImdbId: async () => 'tt0000001' });
 const app = require('../apiServer');
@@ -94,4 +108,8 @@ test('with no Telugu stream yet it still waits for the primaries (no silent lang
     console.log(`[measure] no-telugu first answer ${first.ms}ms`);
     assert.ok(first.d.streams.some((s) => s.provider === 'NetMirror' && s.languages.includes('Telugu')),
         'the Telugu NetMirror row must be in the first answer');
+});
+
+test('makes no outbound network call', () => {
+    assert.deepStrictEqual(outbound, []);
 });

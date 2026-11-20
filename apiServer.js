@@ -7,12 +7,14 @@ const { requireAuth, getSession } = require('./utils/auth');
 const { registerAuthRoutes } = require('./routes/auth');
 const path = require('path');
 const { paths: appPaths } = require('./lib/runtime/paths');
-const { metrics, recordProviderOutcome, breakerOpen, requestCounter } = require('./lib/runtime/metrics');
+const { metrics, recordProviderOutcome, breakerOpen, budgetFor, latencyEwma, requestCounter } = require('./lib/runtime/metrics');
+const { getStore, storeStatus, mediaIdentityOf } = require('./utils/store');
 const runtime = require('./lib/runtime/environment');
-const { listProviders, getProvider, getCookieStats } = require('./providers/registry');
+const { listProviders, getProvider, getCookieStats, PROVIDER_DEADLINE_MS } = require('./providers/registry');
 const { QUALITIES: STREAM_QUALITIES, normaliseStream, normaliseStreams } = require('./utils/streamSchema');
 const { resolveMany } = require('./lib/media/capabilities');
 const streamHeaders = require('./lib/media/streamHeaders');
+const { verifyTopStreams } = require('./lib/media/segmentVerify');
 const { registerCapabilityRoutes } = require('./routes/capabilities');
 const { createProxyRoutes, processStreamsForProxy } = require('./proxy/proxyServer');
 const { resolveImdbId, searchTitles } = require('./utils/tmdb');
@@ -199,6 +201,7 @@ app.get('/api/health', (req, res) => {
     memory: { rssMB: mb(mem.rss), heapUsedMB: mb(mem.heapUsed), heapTotalMB: mb(mem.heapTotal) },
     openBreakers: Object.keys(breakers).filter((n) => breakers[n].open),
     breakers,
+    ...storeStatus(),
     processErrors,
   });
 });
@@ -290,6 +293,75 @@ app.get('/api/status', (req,res) => {
 registerCapabilityRoutes(app);
 
 // Providers list
+// Bound every field of a playback report (ott server.js /api/playback-report).
+// The endpoint is unauthenticated and the browser is not trusted: a malformed
+// report is refused or clamped, never stored as sent. Returns null when the
+// report cannot be keyed to a title and provider.
+function clampPlaybackReport(b) {
+  b = b && typeof b === 'object' ? b : {};
+  const tmdbId = Number(b.tmdbId);
+  if (!Number.isSafeInteger(tmdbId) || tmdbId < 1 || tmdbId > 1e9) return null;
+  const provider = typeof b.provider === 'string' ? b.provider.trim().toLowerCase().slice(0, 40) : '';
+  if (!/^[a-z0-9][a-z0-9+._ -]*$/.test(provider)) return null;
+  const boundedInt = (value, max = 86400000) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? Math.max(0, Math.min(max, Math.round(n))) : 0;
+  };
+  const small = (v) => boundedInt(v, 100000);
+  const type = (b.type || b.mediaType) === 'tv' || (b.type || b.mediaType) === 'series' ? 'tv' : 'movie';
+  const str = (v, n) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, n) : null);
+  const lang = str(b.audioLang, 24);
+  const identity = str(b.mediaIdentity, 300) || mediaIdentityOf(str(b.mediaUrl, 4000));
+  return {
+    tmdbId, type, provider,
+    season: type === 'tv' ? small(b.season) : 0,
+    episode: type === 'tv' ? small(b.episode) : 0,
+    mediaIdentity: identity || '',
+    // `ok` is the field the player has always sent; playedOk is the new name.
+    ok: (b.playedOk ?? b.ok) === true,
+    reason: str(b.reason, 60) || (b.ok === true || b.playedOk === true ? null : 'unknown'),
+    startupMs: boundedInt(b.startupMs),
+    // Nullable: an older client sends no waitMs, and 0 would read as instant.
+    waitMs: b.waitMs == null ? null : boundedInt(b.waitMs),
+    stallCount: boundedInt(b.stallCount, 1000),
+    stallMs: boundedInt(b.stallMs),
+    recoveryCount: boundedInt(b.recoveryCount, 1000),
+    device: str(b.device, 24),
+    connection: str(b.connection, 24),
+    audioLang: lang && /^[\p{L} ()-]+$/u.test(lang) ? lang : null,
+    // Only an explicit boolean is a statement about the language.
+    langOk: typeof b.langOk === 'boolean' ? b.langOk : null,
+  };
+}
+
+// What a real device saw when it played a source - the only ground truth the
+// ranking has. Fire-and-forget from the player (web/lib/api.js
+// reportPlayback): it never starts a resolve, and a bad report is a 400, not
+// an error. Feeds source_stats (G1 ranking) and audio_evidence (G10).
+app.post('/api/playback-report', (req, res) => {
+  const r = clampPlaybackReport(req.body);
+  if (!r) return res.status(400).json({ ok: false, error: 'tmdbId and provider required' });
+  try {
+    const store = getStore();
+    store.recordPlayback(r);
+    // A viewer saying the labelled language is NOT what played is
+    // authoritative. A confirmation is recorded too, so a later probe that
+    // reads `und` cannot erase a language a viewer heard.
+    if (r.langOk !== null && r.audioLang && r.mediaIdentity) {
+      store.putAudioEvidence({ tmdbId: r.tmdbId, type: r.type, season: r.season, episode: r.episode,
+        provider: r.provider, mediaIdentity: r.mediaIdentity, lang: r.audioLang,
+        source: 'viewer', refuted: r.langOk === false });
+    }
+    console.log(`[learn] playback-report ${r.ok ? 'ok' : 'fail'} ${r.type}/${r.tmdbId} s${r.season}e${r.episode} `
+      + `provider=${r.provider} identity=${r.mediaIdentity ? 'yes' : 'no'} startupMs=${r.startupMs}`
+      + `${r.langOk === null ? '' : ` langOk=${r.langOk}`}`);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(`[learn] playback-report write failed: ${e.message}`);
+    res.status(500).json({ ok: false, error: 'STORE_WRITE_FAILED' });
+  }
+});
+
 app.get('/api/providers', (req,res) => {
   res.json({ success: true, providers: listProviders() });
 });
@@ -345,8 +417,26 @@ const FIRST_ANSWER_GRACE_MS = Number(process.env.FIRST_ANSWER_GRACE_MS) || 400;
 //   PROVIDER_EMPTY_TTL_MS. Kept short because an empty can be a transient
 //   upstream failure (NetMirror reports resets as empty). ?refresh=1 skips both.
 const { createTtlCache } = require('./lib/runtime/ttlCache');
-const providerHitCache = createTtlCache({
-  ttlMs: Number(process.env.PROVIDER_HIT_TTL_MS) || 10 * 60 * 1000, maxEntries: 2000 });
+const PROVIDER_HIT_TTL_MS = Number(process.env.PROVIDER_HIT_TTL_MS) || 10 * 60 * 1000;
+const providerHitCache = createTtlCache({ ttlMs: PROVIDER_HIT_TTL_MS, maxEntries: 2000 });
+// Signed URLs carry their own expiry (e=, expire=, internal_token). A cache
+// entry lives at most until its first row's URL dies, and a read that finds an
+// expired row drops the whole entry so the provider is asked again: serving
+// the surviving rows alone could hide the expired one (often the Telugu row).
+const urlExpiry = require('./lib/urlExpiry');
+function providerHitSet(ck, rows) {
+  const ttl = urlExpiry.cappedTtlMs(PROVIDER_HIT_TTL_MS, rows);
+  if (ttl > 0) providerHitCache.set(ck, rows, ttl);
+}
+function providerHitGet(ck) {
+  const rows = providerHitCache.get(ck);
+  if (rows && urlExpiry.anyStreamExpired(rows)) {
+    providerHitCache.delete(ck);
+    console.log(`[api] url-expired cache=provider key=${ck} - re-resolving`);
+    return undefined;
+  }
+  return rows;
+}
 const providerEmptyCache = createTtlCache({
   ttlMs: Number(process.env.PROVIDER_EMPTY_TTL_MS) || 3 * 60 * 1000, maxEntries: 5000 });
 
@@ -370,7 +460,22 @@ function fetchProviderShared(prov, ck, ctx, { titleIsResolvable, titleKey }) {
     const t0 = Date.now();
     try {
       console.log(`[api] invoking provider ${name} for tmdbId=${ctx.tmdbId}`);
-      const r = await prov.fetch(ctx);
+      // Probation (ott budgetFor): a provider judged on >= 5 attempts that has
+      // never once succeeded gets 8s, not the full deadline. Healthy and
+      // unknown providers keep PROVIDER_DEADLINE_MS untouched.
+      const budget = budgetFor(name, PROVIDER_DEADLINE_MS);
+      let r;
+      if (budget < PROVIDER_DEADLINE_MS) {
+        let timer;
+        const run = prov.fetch(ctx);
+        run.catch(() => {});
+        r = await Promise.race([run, new Promise((resolve) => {
+          timer = setTimeout(() => { const out = []; out.timedOut = true; resolve(out); }, budget);
+        })]).finally(() => clearTimeout(timer));
+        if (r && r.timedOut) console.log(`[api] provider-probation ${name} cut at ${budget}ms (never succeeded)`);
+      } else {
+        r = await prov.fetch(ctx);
+      }
       if (r && r.timedOut) {
         // Unknown, not empty: never cached, and the caller keeps the whole
         // response out of the memo and the browser cache.
@@ -390,7 +495,7 @@ function fetchProviderShared(prov, ck, ctx, { titleIsResolvable, titleKey }) {
         return { outcome: 'partial', ms, streams: Array.isArray(r) ? r : [], error: String(r.upstreamError).slice(0, 200) };
       }
       recordProviderOutcome(name, n > 0 ? 'hit' : 'empty', ms, n, titleIsResolvable, titleKey);
-      if (n > 0) providerHitCache.set(ck, r);
+      if (n > 0) providerHitSet(ck, r);
       else if (titleIsResolvable) providerEmptyCache.set(ck, true);
       console.log(`[api] provider ${name} returned ${n} streams`);
       return { outcome: n > 0 ? 'hit' : 'empty', ms, streams: Array.isArray(r) ? r : [] };
@@ -438,13 +543,22 @@ function memoKey(type, tmdbId, season, episode, withCaps) {
   return `${type}:${tmdbId}:${season ?? ''}:${episode ?? ''}:${withCaps ? 'caps' : 'plain'}`;
 }
 function memoGet(key) {
-  return streamsMemo.get(key) || null;
+  const payload = streamsMemo.get(key) || null;
+  // An expired URL in the memo means the whole answer is stale: drop it so
+  // the route rebuilds (and re-resolves) instead of serving a dead link.
+  if (payload && urlExpiry.anyStreamExpired(payload.streams)) {
+    streamsMemo.delete(key);
+    console.log(`[api] url-expired cache=memo key=${key} - re-resolving`);
+    return null;
+  }
+  return payload;
 }
 function memoSet(key, payload) {
   // Never cache an empty result: a transient upstream failure would otherwise
   // be pinned for the full TTL, turning one bad moment into ten dead minutes.
   if (!payload || !Array.isArray(payload.streams) || payload.streams.length === 0) return;
-  streamsMemo.set(key, payload);
+  const ttl = urlExpiry.cappedTtlMs(STREAMS_MEMO_MS, payload.streams);
+  if (ttl > 0) streamsMemo.set(key, payload, ttl);
 }
 setInterval(() => {
   streamsMemo.prune(); providerHitCache.prune(); providerEmptyCache.prune();
@@ -482,13 +596,70 @@ function effectiveQuality(stream) {
   return stream && stream.quality;
 }
 
-function sortStreamsCanonically(streams) {
+// What a real browser saw, applied INSIDE a language group (ott RANK,
+// resolver/index.js). Language stays the primary key; learning only reorders
+// within it and sinks proven-bad rows. Nothing is ever dropped.
+//
+//   1. play_fails >= 2 sinks (it failed again after a success cleared it)
+//   2. browser-confirmed (played_ok_at) before unconfirmed
+//   3. score = 1.5*quality + speed + 1.5*startup, each in [0, 1]
+//        quality = min(height, 2160) / 2160
+//        speed   = clamp((30000 - provider latency EWMA) / 27000, 0, 1)
+//        startup = clamp((30000 - startup_ms) / 27000, 0, 1)
+//      an unknown term scores 0, as in ott.
+//
+// `learn` names the title ({ tmdbId, type, season, episode }). Without it,
+// rows have no browser history and only quality + speed apply.
+function heightOf(q) {
+  const m = String(q || '').match(/(\d{3,4})p/);
+  return m ? Number(m[1]) : 0;
+}
+function unit(ms) {
+  return ms == null ? 0 : Math.max(0, Math.min(1, (30000 - ms) / 27000));
+}
+function learnedIndex(learn) {
+  if (!learn || !learn.tmdbId) return null;
+  try {
+    const idx = new Map();
+    for (const r of getStore().sourceStatsFor(learn)) idx.set(`${r.provider}|${r.media_identity}`, r);
+    return idx;
+  } catch (e) {
+    console.warn(`[learn] source_stats read failed: ${e.message}`);
+    return null;
+  }
+}
+function learnedFacts(s, idx, ewmaCache) {
+  const provider = String((s && s.provider) || '').toLowerCase();
+  // Exact file first, then the provider-level row for this title (what a
+  // client that does not send mediaIdentity reports against).
+  const st = idx ? (idx.get(`${provider}|${mediaIdentityOf(s && s.url)}`) || idx.get(`${provider}|`) || null) : null;
+  if (!ewmaCache.has(provider)) ewmaCache.set(provider, latencyEwma(provider));
+  const startup = st && st.played_ok_at && !st.play_fails ? st.startup_ms : null;
+  return {
+    sink: st && st.play_fails >= 2 ? 1 : 0,
+    unconfirmed: st && st.played_ok_at ? 0 : 1,
+    score: 1.5 * (Math.min(heightOf(effectiveQuality(s)), 2160) / 2160)
+      + unit(ewmaCache.get(provider)) + 1.5 * unit(startup),
+  };
+}
+
+function sortStreamsCanonically(streams, learn = null) {
+  const idx = learnedIndex(learn);
+  const ewmaCache = new Map();
   return streams
-    .map((s, i) => ({ s, i }))
+    .map((s, i) => ({ s, i, l: learnedFacts(s, idx, ewmaCache) }))
     .sort((a, b) => {
       const pa = hasPreferredLanguage(a.s) ? 0 : 1;
       const pb = hasPreferredLanguage(b.s) ? 0 : 1;
       if (pa !== pb) return pa - pb;
+      // Proven dead bytes (lib/media/segmentVerify.js) sink inside their
+      // language group. Never across it, and never out of the list.
+      const da = a.s && a.s.byteCheck && a.s.byteCheck.ok === false ? 1 : 0;
+      const db = b.s && b.s.byteCheck && b.s.byteCheck.ok === false ? 1 : 0;
+      if (da !== db) return da - db;
+      if (a.l.sink !== b.l.sink) return a.l.sink - b.l.sink;
+      if (a.l.unconfirmed !== b.l.unconfirmed) return a.l.unconfirmed - b.l.unconfirmed;
+      if (Math.abs(a.l.score - b.l.score) > 1e-9) return b.l.score - a.l.score;
       const qa = qualityRank(effectiveQuality(a.s));
       const qb = qualityRank(effectiveQuality(b.s));
       if (qa !== qb) return qa - qb;
@@ -621,7 +792,11 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
     if (cached) {
       metrics.memoHits = (metrics.memoHits || 0) + 1;
       res.set('Cache-Control', `private, max-age=${STREAMS_CACHE_SECONDS}`);
-      return res.json({ ...cached, cached: true });
+      // The memo holds the order from when it was built. Re-rank on every
+      // read so a playback report that landed since takes effect now, not
+      // after STREAMS_MEMO_MS.
+      return res.json({ ...cached,
+        streams: sortStreamsCanonically(cached.streams, { tmdbId, type, season, episode }), cached: true });
     }
     metrics.memoMisses = (metrics.memoMisses || 0) + 1;
     const tmdbType = type === 'movie' ? 'movie' : 'tv';
@@ -663,7 +838,7 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
       if (!prov || !prov.enabled) return [];
       const ck = `${name}|${titleKey}`;
       if (!refresh) {
-        const hit = providerHitCache.get(ck);
+        const hit = providerHitGet(ck);
         if (hit) { providerTimings[name] = 0; return hit; }
         if (providerEmptyCache.has(ck)) { providerTimings[name] = 0; return []; }
       }
@@ -678,7 +853,7 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
       // error, timeout and partial all leave this title's answer UNKNOWN for
       // the provider, so the response must not be cached (see below).
       if (o.outcome !== 'hit' && o.outcome !== 'empty') erroredProviders.push(name);
-      return o.streams;
+      return urlExpiry.dropExpiredStreams(o.streams);
     };
 
     const serverUrlEarly = publicBase(req);
@@ -781,6 +956,13 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
       erroredProviders.push(name);
     }
     let streams = [...castleStreams, ...results.flat()];
+    // A provider can hand back a URL already past its stated expiry; it would
+    // only 403 on play.
+    const liveCount = urlExpiry.dropExpiredStreams(streams).length;
+    if (liveCount !== streams.length) {
+      console.log(`[api] url-expired dropped=${streams.length - liveCount} tmdbId=${tmdbId}`);
+      streams = urlExpiry.dropExpiredStreams(streams);
+    }
     streams = applyFilters(streams, 'aggregate', config.minQualities, config.excludeCodecs);
     metrics.streamsReturned += streams.length;
     const serverUrl = serverUrlEarly;
@@ -828,7 +1010,12 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
       }
     }
 
-    streams = sortStreamsCanonically(streams);
+    const learn = { tmdbId, type, season, episode };
+    streams = sortStreamsCanonically(streams, learn);
+    // Read the first bytes of the top candidates before serving them. Runs
+    // before routeStreamsForBrowser, which strips the upstream headers the
+    // origin needs. Failures are demoted by the re-sort, never removed.
+    streams = sortStreamsCanonically(await verifyTopStreams(streams, { skipPrefix: serverUrl }), learn);
     streams = routeStreamsForBrowser(streams, serverUrl);
     // Every call here fans out to a dozen providers, and NetMirror rate limits
     // per IP ("Too Many Requests in Short Period of Time"). A plain page reload
@@ -864,7 +1051,7 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
       });
       // Re-sort: the ranking above ran on claimed values, and a correction may
       // have changed the order.
-      streams = sortStreamsCanonically(streams);
+      streams = sortStreamsCanonically(streams, learn);
     }
 
     const payload = { success:true, tmdbId, imdbId, count: streams.length, providerTimings, streams };
@@ -917,7 +1104,7 @@ app.get('/api/streams/:provider/:type/:tmdbId', async (req,res) => {
     const titleKey = `${type}:${tmdbId}:${season ?? ''}:${episode ?? ''}`;
     const ck = `${prov.name}|${titleKey}`;
     const refresh = req.query.refresh === '1';
-    let raw = refresh ? undefined : providerHitCache.get(ck);
+    let raw = refresh ? undefined : providerHitGet(ck);
     // A provider failure keeps this route's old contract (200, count 0) and
     // says why in providerError, instead of a 500.
     let providerError = null;
@@ -928,11 +1115,14 @@ app.get('/api/streams/:provider/:type/:tmdbId', async (req,res) => {
       if (o.outcome !== 'hit' && o.outcome !== 'empty') providerError = o.error || o.outcome;
       raw = o.streams;
     }
-    let streams = raw;
+    let streams = urlExpiry.dropExpiredStreams(raw);
+    if (streams.length !== raw.length) {
+      console.log(`[api] url-expired dropped=${raw.length - streams.length} provider=${prov.name} tmdbId=${tmdbId}`);
+    }
     const providerTimings = { [prov.name]: Date.now()-t0 };
     streams = applyFilters(streams, prov.name, config.minQualities, config.excludeCodecs);
     metrics.streamsReturned += streams.length;
-    streams = sortStreamsCanonically(streams);
+    streams = sortStreamsCanonically(streams, { tmdbId, type, season, episode });
     streams = routeStreamsForBrowser(streams, publicBase(req));
     res.json({ success:true, provider: prov.name, tmdbId, imdbId, count: streams.length, providerTimings,
       ...(providerError ? { providerError } : {}), streams });
