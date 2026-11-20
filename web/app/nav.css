@@ -18,7 +18,7 @@
   /* Pages without hero art start below the wordmark; art pages run under it. */
   html:not([data-tv="true"]) body:not(:has(.page-backdrop)) main{padding-top:var(--header-h)}
 }
-html[data-tv="true"] .topbar{position:absolute;top:0;left:var(--rail-w);right:0;padding-left:var(--space-12)}
+html[data-tv="true"] .topbar{position:absolute;top:0;left:var(--rail-w);right:0;padding-left:var(--tv-gap);padding-right:var(--tv-gap)}
 html[data-tv="true"] .topbar .nav{display:none}
 html[data-tv="true"] .topbar::before,html[data-tv="true"] .topbar::after{display:none}
 /* The rail has Home; the wordmark is not a D-pad stop (dpad.js skips
@@ -53,14 +53,30 @@ html[data-tv="true"] body:not(:has(.page-backdrop)) main{padding-top:var(--heade
 }
 
 /* ── TV: left rail ── */
-html[data-tv="true"]{--rail-w:112px;--rail-open-w:340px}
-html[data-tv="true"] main{margin-left:var(--rail-w)}
+/* Sizes scale with the screen: a VIDAA panel may report 1280x720 CSS px.
+   --tv-safe-x is overscan room (about 3%): a panel that crops its edges
+   must not crop the rail or the first poster. --tv-gap is clear space
+   between the rail and the first poster, and the page's side margin. */
+html[data-tv="true"]{
+  --tv-safe-x:clamp(24px,3vw,64px);
+  --tv-gap:clamp(32px,3vw,64px);
+  --rail-icon:clamp(56px,3.75vw,72px);
+  --rail-w:calc(var(--tv-safe-x) + var(--rail-icon) + var(--space-3));
+  --rail-open-w:calc(var(--rail-w) + clamp(180px,12vw,240px));
+}
+html[data-tv="true"] main{margin-left:var(--rail-w);padding-left:var(--tv-gap);padding-right:var(--tv-gap)}
+html[data-tv="true"] .home-hero{margin-inline:calc(-1 * var(--tv-gap));padding-inline:var(--tv-gap)}
+html[data-tv="true"] .rail-wrap{--rail-gutter:var(--tv-gap)}
+/* Room inside the row's scroll box for the focus frame and the lift, so the
+   first and last poster are never shaved by the row's own clipping. Cards
+   keep their position: the padding is taken back with a negative margin. */
+html[data-tv="true"] .rail{padding-inline:var(--space-4);margin-inline:calc(-1 * var(--space-4));scroll-padding-inline:var(--space-4)}
 /* Hero art still runs to the left edge, under the rail. */
 html[data-tv="true"] .page-backdrop{left:calc(-1 * var(--rail-w))}
 html[data-tv="true"] .app-nav{
   display:flex;flex-direction:column;justify-content:center;gap:var(--space-2);
   position:fixed;top:0;bottom:0;left:0;z-index:var(--z-header);
-  width:var(--rail-w);padding:0 var(--space-5);overflow:hidden;
+  width:var(--rail-w);padding:0 var(--space-3) 0 var(--tv-safe-x);overflow:hidden;
   background:linear-gradient(to right,rgb(var(--rgb-bg) / .9),rgb(var(--rgb-bg) / .55) 75%,rgb(var(--rgb-bg) / 0));
   transition:width var(--duration-base) var(--ease-out),box-shadow var(--duration-base) var(--ease-out);
 }
@@ -72,7 +88,7 @@ html[data-tv="true"] .app-nav:focus-within{
 }
 html[data-tv="true"] .app-nav-item{
   display:flex;align-items:center;gap:var(--space-5);flex:none;
-  height:64px;width:100%;padding:0 22px;border:0;border-radius:var(--radius-pill);
+  height:64px;width:100%;min-width:var(--rail-icon);padding:0 calc((var(--rail-icon) - 28px) / 2);border:0;border-radius:var(--radius-pill);
   background:none;font:inherit;font-size:24px;white-space:nowrap;
   color:var(--color-text-muted);text-align:left;
 }
