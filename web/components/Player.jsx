@@ -14,6 +14,7 @@ import useSwitchGuard from '../lib/player/useSwitchGuard';
 import useStaleRefresh from '../lib/player/staleRefresh';
 import { videoChoices, videoIdOf, videoLabels } from '../lib/player/trackChoices';
 import EmbedStage from './player/EmbedStage';
+import useFocusTrap from './useFocusTrap';
 import { VA_EMBED_ID, vaEmbedChoice, shouldAutoEmbed } from '../lib/player/vaEmbed';
 import { markDead, nextAlive, qualityHeight } from '../lib/player/deadSources';
 import { fatalAction } from '../lib/player/fatalPolicy';
@@ -715,6 +716,8 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
 
   /** The player root — the element that goes fullscreen, and the cue-lift base. */
   const playerRef = useRef(null);
+  // aria-modal: Tab stays in the player instead of walking to the page behind.
+  useFocusTrap(playerRef);
   const revealControls = controls.reveal;
   // The bar control a remote last stood on: revealing the bar returns there.
   const lastBarFocus = useRef(null);

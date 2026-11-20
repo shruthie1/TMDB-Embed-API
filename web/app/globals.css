@@ -452,6 +452,8 @@ main{padding:0 var(--space-5) var(--space-24)}
   transition:border-color .2s var(--ease);
 }
 .search-input::placeholder{color:var(--dim)}
+/* The page draws its own clear button; Chrome's native one made two. */
+.search-input::-webkit-search-cancel-button,.search-input::-webkit-search-decoration{-webkit-appearance:none;appearance:none;display:none}
 .search-input:focus{border-bottom-color:var(--color-border-hover)}
 .rail.grid{
   display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));
@@ -611,6 +613,11 @@ main{padding:0 var(--space-5) var(--space-24)}
 .row-actions{display:flex;align-items:center;gap:var(--space-0-5)}
 .see-all{font-size:11.5px;color:var(--dim);letter-spacing:.03em}
 .see-all:hover,.see-all:focus-visible{color:var(--paper)}
+/* A bigger hit area, same look: the text box is 38x18 on a phone. z-index
+   lifts it over the rail's top padding (the rail is positioned and later);
+   the posters start below the 11px it reaches down. */
+.see-all{position:relative;z-index:1}
+.see-all::after{content:"";position:absolute;inset:-11px -6px}
 
 /* Scroll affordance: a small chevron in the page's side margin, only on a
    side that can still scroll. Nothing is drawn over a poster: the old edge
@@ -655,6 +662,9 @@ main{padding:0 var(--space-5) var(--space-24)}
    EPISODES
    --------------------------------------------------------------- */
 .season-tabs{display:flex;gap:var(--space-2);flex-wrap:wrap;margin:0 0 var(--space-4)}
+/* Chips are 32px tall on a phone; the hit area reaches 40px into the row gap. */
+.season-tabs .chip{position:relative}
+.season-tabs .chip::after{content:"";position:absolute;inset:-4px 0}
 .ep-list{display:flex;flex-direction:column}
 .ep{
   display:flex;gap:var(--space-3-5);padding:var(--space-3-5) 0;text-align:left;width:100%;
@@ -1668,7 +1678,10 @@ kbd{
 [data-tv="true"] .row-sec{margin-bottom:var(--space-10)}
 [data-tv="true"] .rail-wrap{--rail-gutter:var(--space-12)}
 [data-tv="true"] .rail-mini-arrow{height:80px;top:calc(50% - 40px)}
-[data-tv="true"] .rail-mini-arrow svg{width:28px;height:28px}
+/* Never wider than the gutter it sits in: the gutter is clamp(16px,1.6vw,32px)
+   on TV (nav.css), 20.5px at 1280, and a fixed 28px icon poked 7.5px past the
+   viewport, so every TV page scrolled sideways (scrollWidth 1288 of 1280). */
+[data-tv="true"] .rail-mini-arrow svg{width:min(28px,var(--rail-gutter));height:min(28px,var(--rail-gutter))}
 
 /* ── Player controls on a phone ────────────────────────────────────────────
    Measured: the single row needed 500px inside 350px, so Quality, Subtitles
@@ -2650,6 +2663,17 @@ body:not(:has(.page-backdrop)) .topbar::after{opacity:1}
 .hero-dot{flex:1 1 0;min-width:0;width:auto;height:3px;border-radius:var(--radius-pill);
   background:var(--indicator);position:relative;overflow:hidden}
 .hero-dot.on{background:var(--indicator)}
+/* Hit area: the bar is 3px tall. Transparent borders make it 40px (8px up to
+   the buttons above, 29px down over the row heading) and 3px each side in
+   place of the 6px gap; the negative margins give the layout back and the
+   background stops at the padding box, so the bars look and sit the same
+   (measured 28x3 at x=80, 114.3, 148.7 before and after, 360px).
+   Not a pseudo-element: overflow:hidden would clip its hits. */
+.hero-dots{gap:0}
+.hero-dot{box-sizing:content-box;border:solid transparent;border-width:8px 3px 29px;
+  margin:-8px 0 -29px;background-clip:padding-box}
+.hero-dot:first-child{margin-left:-3px}
+.hero-dot:last-child{margin-right:-3px}
 .hero-dot.on::after{content:"";position:absolute;inset:0;border-radius:inherit;background:var(--indicator-active);
   transform-origin:left center;animation:hero-fill var(--hero-rotate) linear both}
 .home-hero[data-paused] .hero-dot.on::after{animation:none}

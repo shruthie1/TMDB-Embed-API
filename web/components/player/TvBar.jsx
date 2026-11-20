@@ -200,7 +200,7 @@ export default function TvBar({
           hidden: it is the one thing that must always be reachable. */}
       {!shown && active && (
         <button type="button" className="tvbar-open focusable" data-focus=""
-                aria-label="Sources and picture settings"
+                aria-label="Server and picture settings"
                 onClick={() => { setShown(true); rearm.current(); }}>
           {/* An icon, not the word: a label sitting over the picture reads as
               clutter, and the sliders glyph is the same one the phone and
@@ -218,7 +218,7 @@ export default function TvBar({
 
     <div className={`tvbar ${shown ? 'show' : ''}`} data-focus-group="">
       <div className="tvbar-row" data-focus-group="">
-        <span className="tvbar-k">Source</span>
+        <span className="tvbar-k">Server</span>
         {/* The buttons live in their own box so the row can be a two-column
             grid: a fixed label column, then everything else. That is what
             makes every row's first button share one left edge - with the
@@ -304,7 +304,7 @@ export default function TvBar({
           unreadable from across a room. */}
       {subs.length > 0 && (
         <div className="tvbar-row" data-focus-group="">
-          <span className="tvbar-k">Captions</span>
+          <span className="tvbar-k">Subtitles</span>
           <div className="tvbar-btns">
             <button type="button"
                     className={`tvbar-btn focusable ${!currentSub ? 'on' : ''}`}

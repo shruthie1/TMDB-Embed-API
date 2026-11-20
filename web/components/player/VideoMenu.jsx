@@ -78,7 +78,7 @@ export default function VideoMenu({
              onClick={(e) => { e.stopPropagation(); onTouch?.(); }}
              onPointerDown={onTouch} onKeyDown={onTouch}
              onScroll={onTouch} onWheel={onTouch}>
-          <p className="pmenu-label">Servers</p>
+          <p className="pmenu-label">Server</p>
           {choices.map((c, i) => (
             <MenuRow key={c.id ?? i} label={labels[i]} meta={maxOf(c)}
                      selected={i === selectedIndex}

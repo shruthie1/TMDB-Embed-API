@@ -90,7 +90,7 @@ describe('TvBar audio row (Fire TV / Silk native path)', () => {
   it('marks only the stream that is playing, not every one of its provider', () => {
     render(<TvBar sources={SOURCES} currentSource="CastleTV" currentSourceId="c-0"
                   audioTracks={[]} />);
-    const on = [...within(row('Source')).getAllByRole('button')]
+    const on = [...within(row('Server')).getAllByRole('button')]
       .filter((b) => b.getAttribute('aria-pressed') === 'true');
     expect(on).toHaveLength(1);
     expect(on[0].textContent).toContain('Telugu');
@@ -99,7 +99,7 @@ describe('TvBar audio row (Fire TV / Silk native path)', () => {
   it('distinguishes same-provider streams by language and quality', () => {
     render(<TvBar sources={SOURCES} currentSource="CastleTV" currentSourceId="c-0"
                   audioTracks={[]} />);
-    const labels = [...within(row('Source')).getAllByRole('button')]
+    const labels = [...within(row('Server')).getAllByRole('button')]
       .map((b) => b.textContent);
     // Five CastleTV entries must not all read the bare provider name.
     expect(new Set(labels).size).toBe(labels.length);
@@ -109,7 +109,7 @@ describe('TvBar audio row (Fire TV / Silk native path)', () => {
   it('still renders the other rows', () => {
     render(<TvBar sources={SOURCES} currentSource="CastleTV" currentSourceId="c-0"
                   audioTracks={[]} />);
-    expect(row('Source')).not.toBeNull();
+    expect(row('Server')).not.toBeNull();
     expect(row('Picture')).not.toBeNull();
   });
 });

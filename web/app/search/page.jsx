@@ -16,6 +16,13 @@ const SUGGEST = [
   { label: 'Top rated', href: '/browse?sort=vote_average.desc' },
 ];
 
+// Keystrokes typed before hydration. React resets a controlled input to its
+// state ('') when it hydrates, so on a slow phone or TV "Devara" typed early
+// became "vara" (measured on chtrm2, 2026-11-20). This runs with the server
+// HTML, records what the input holds, and the page adopts it on mount.
+const EARLY_INPUT_KEY = '__chitramEarlySearch';
+const EARLY_INPUT_SCRIPT = `(function(){var k='${EARLY_INPUT_KEY}';function r(e){var t=e.target;if(t&&t.classList&&t.classList.contains('search-input'))window[k]=t.value}document.addEventListener('input',r,true);window[k+'Off']=function(){document.removeEventListener('input',r,true)}})()`;
+
 export default function Search() {
   const [q, setQ] = useState('');
   const [state, setState] = useState({ loading: false, titles: [], done: false });
@@ -25,6 +32,11 @@ export default function Search() {
   const inputRef = useRef(null);
 
   useEffect(() => {
+    const w = window;
+    w[`${EARLY_INPUT_KEY}Off`]?.();
+    const early = w[EARLY_INPUT_KEY];
+    delete w[EARLY_INPUT_KEY];
+    if (typeof early === 'string' && early) setQ(early);
     inputRef.current?.focus();
     setRecent(getRecent());
     const onSave = () => setPrefsRev(n => n + 1);
@@ -62,6 +74,7 @@ export default function Search() {
           placeholder="Search films and series"
           aria-label="Search films and series"
         />
+        <script dangerouslySetInnerHTML={{ __html: EARLY_INPUT_SCRIPT }} />
         {q && (
           <button className="icon-btn focusable" data-focus="" aria-label="Clear search" onClick={() => { setQ(''); inputRef.current?.focus(); }}>
             <Icon name="close" size={15} />
