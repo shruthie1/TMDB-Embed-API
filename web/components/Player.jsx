@@ -24,6 +24,7 @@ import {
 import { createWarmScheduler } from '../lib/player/warmSources';
 import useNoPictureGuard from '../lib/player/useNoPictureGuard';
 import { pairSources, listSources as listBackendSources } from '../lib/backend';
+import { pairDecodable } from '../lib/player/codecSupport';
 import {
   useResolve, useHls, useRecovery, useControlVisibility, HIDE_MS, HIDE_TV_MS,
   useSubtitles, useEpisodeProgress, useDeviceCapability, useCueOverlay,
@@ -1587,6 +1588,14 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       endSwitch(pairTimer);
       return false;
     }
+    // The pair is real but this browser cannot decode what it declares (an
+    // HEVC picture or AC-3 donor on Chrome Android): switching would play a
+    // black or silent stream, so take the refused path instead (H8).
+    if (pairDecodable(paired.codecs) === false) {
+      console.warn(`[pair] undecodable here, not switching: video=${(paired.codecs?.video || []).join('|')} audio=${paired.codecs?.audio}`);
+      endSwitch(pairTimer);
+      return false;
+    }
     resumeAt.current = videoRef.current?.currentTime || 0;
     recovery.clearStall();
     // Kept so the Audio timing bar can rebuild this exact pairing with a
@@ -1704,7 +1713,8 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     const syncTimer = beginSwitch('Adjusting audio timing…', null, { replacesStream: true });
     const paired = await pairSources(pair.video, pair.audio,
       { nudge: want, tmdbId: title.tmdbId, mediaType: title.mediaType });
-    if (!paired?.url) {
+    if (!paired?.url || pairDecodable(paired.codecs) === false) {
+      if (paired?.url) console.warn(`[pair] undecodable here, keeping current timing: video=${(paired.codecs?.video || []).join('|')} audio=${paired.codecs?.audio}`);
       endSwitch(syncTimer);
       return;
     }

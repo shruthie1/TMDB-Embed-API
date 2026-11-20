@@ -46,24 +46,41 @@ const FFPROBE = process.env.FFPROBE_PATH || 'ffprobe';
 // correct something no viewer can see.
 const NEGLIGIBLE_SECONDS = 0.05;
 
-/** The PTS a segment's first frame carries, in seconds. null when unreadable. */
-async function startPts(segmentBuffer, kind = 'a') {
+/**
+ * What ffprobe reads off a segment's first `kind` stream: its start PTS in
+ * seconds, codec_name and profile. Each field is null when unreadable.
+ *
+ * An fMP4 media segment is unreadable alone ("no tfhd was found"): the caller
+ * must hand init segment + media segment as one buffer. ffprobe sniffs the
+ * container from the bytes, so the temp file's .ts name does not matter.
+ */
+async function segmentInfo(segmentBuffer, kind = 'a') {
     const tmp = path.join(os.tmpdir(), `pts-${crypto.randomBytes(8).toString('hex')}.ts`);
     try {
         await fs.writeFile(tmp, segmentBuffer);
         const { stdout } = await execFileAsync(FFPROBE, [
             '-v', 'error',
             '-select_streams', `${kind}:0`,
-            '-show_entries', 'stream=start_time',
+            '-show_entries', 'stream=start_time,codec_name,profile',
             '-of', 'json', tmp,
         ], { maxBuffer: 1024 * 1024 });
-        const v = Number(((JSON.parse(stdout).streams || [])[0] || {}).start_time);
-        return Number.isFinite(v) ? v : null;
+        const s = (JSON.parse(stdout).streams || [])[0] || {};
+        const v = Number(s.start_time);
+        return {
+            pts: s.start_time != null && Number.isFinite(v) ? v : null,
+            codecName: s.codec_name || null,
+            profile: s.profile || null,
+        };
     } catch {
-        return null;
+        return { pts: null, codecName: null, profile: null };
     } finally {
         fs.unlink(tmp).catch(() => {});
     }
+}
+
+/** The PTS a segment's first frame carries, in seconds. null when unreadable. */
+async function startPts(segmentBuffer, kind = 'a') {
+    return (await segmentInfo(segmentBuffer, kind)).pts;
 }
 
 /**
@@ -89,7 +106,12 @@ function offsetFor(videoPts, audioPts) {
  * self-consistent across segment boundaries; `-output_ts_offset` then shifts
  * that whole preserved timeline by a constant. Stream copy, never a re-encode.
  */
-async function rebaseSegment(segmentBuffer, offsetSeconds) {
+// Failed shifts since start, read by /api/status and /api/metrics. The fallback
+// below is silent to the viewer (bad sync, not an error), so this and the
+// "[pts-rebase] FAILED" log line are the only trace that it happened.
+const stats = { failures: 0, lastFailureAt: null, lastFailureReason: null };
+
+async function rebaseSegment(segmentBuffer, offsetSeconds, ctx = {}) {
     if (!offsetSeconds) return segmentBuffer;
     const id = crypto.randomBytes(8).toString('hex');
     const inFile = path.join(os.tmpdir(), `reb-in-${id}.ts`);
@@ -106,9 +128,16 @@ async function rebaseSegment(segmentBuffer, offsetSeconds) {
             '-f', 'mpegts', outFile, '-y',
         ], { maxBuffer: 64 * 1024 * 1024 });
         return await fs.readFile(outFile);
-    } catch {
+    } catch (e) {
         // A segment we cannot shift is still a segment. Serving it unshifted
         // keeps playback going with bad sync; failing the request stalls it.
+        const reason = String((e && (e.stderr || e.message)) || e).trim().split('\n')[0].slice(0, 200);
+        stats.failures += 1;
+        stats.lastFailureAt = Date.now();
+        stats.lastFailureReason = reason;
+        console.warn(`[pts-rebase] FAILED serving unshifted url=${ctx.url || 'unknown'}`
+            + ` offset=${offsetSeconds} bytes=${segmentBuffer.length} reason=${reason}`
+            + ` failures=${stats.failures}`);
         return segmentBuffer;
     } finally {
         fs.unlink(inFile).catch(() => {});
@@ -129,6 +158,6 @@ function ptsFromQuery(query) {
 }
 
 module.exports = {
-    NEGLIGIBLE_SECONDS,
-    startPts, offsetFor, rebaseSegment, withPts, ptsFromQuery,
+    NEGLIGIBLE_SECONDS, stats,
+    segmentInfo, startPts, offsetFor, rebaseSegment, withPts, ptsFromQuery,
 };

@@ -112,17 +112,76 @@ function totalSeconds(playlist) {
 // so it needs its own parse rather than the variant walk below.
 function parseAudioRenditions(master, baseUrl) {
     const out = [];
-    for (const line of String(master || '').split('\n')) {
+    const lines = String(master || '').split('\n');
+    for (const line of lines) {
         if (!line.startsWith('#EXT-X-MEDIA:') || !/TYPE=AUDIO/.test(line)) continue;
         const uri = (line.match(/URI="([^"]+)"/) || [])[1];
         if (!uri) continue;
+        const codecs = renditionAudioCodec(line, lines);
         out.push({
             name: (line.match(/NAME="([^"]+)"/) || [])[1] || 'Audio',
             language: (line.match(/LANGUAGE="([^"]+)"/) || [])[1] || '',
             url: new URL(uri, baseUrl).href,
+            ...(codecs ? { codecs } : {}),
         });
     }
     return out;
+}
+
+// RFC 6381 entries that are picture, not sound.
+const VIDEO_CODEC_RE = /^(avc1|avc3|hvc1|hev1|dvh1|dvhe|av01|vp09|vp08|mp4v)\b/i;
+
+/**
+ * A CODECS value safe to write back into a playlist attribute, or null.
+ * Only comma-separated RFC 6381 tokens pass: a quote or newline in a value
+ * from a request body would otherwise inject playlist lines.
+ */
+function cleanCodecs(value) {
+    const s = String(value || '').trim();
+    if (!s || !/^[A-Za-z0-9.\-]+(\s*,\s*[A-Za-z0-9.\-]+)*$/.test(s)) return null;
+    return s.split(',').map((c) => c.trim()).join(',');
+}
+function videoPart(codecs) {
+    const c = cleanCodecs(codecs);
+    return c ? c.split(',').filter((x) => VIDEO_CODEC_RE.test(x)).join(',') || null : null;
+}
+function audioPart(codecs) {
+    const c = cleanCodecs(codecs);
+    return c ? c.split(',').filter((x) => !VIDEO_CODEC_RE.test(x))[0] || null : null;
+}
+
+// The audio codec of one EXT-X-MEDIA line: its own CODECS when present, else
+// the audio entry of a variant bound to its GROUP-ID (that is where masters
+// usually state it: CODECS="avc1.640028,ec-3",AUDIO="aud").
+function renditionAudioCodec(mediaLine, lines) {
+    const own = audioPart((mediaLine.match(/CODECS="([^"]+)"/) || [])[1]);
+    if (own) return own;
+    const group = (mediaLine.match(/GROUP-ID="([^"]+)"/) || [])[1];
+    if (!group) return null;
+    for (const l of lines) {
+        if (!l.startsWith('#EXT-X-STREAM-INF') || !l.includes(`AUDIO="${group}"`)) continue;
+        const a = audioPart((l.match(/CODECS="([^"]+)"/) || [])[1]);
+        if (a) return a;
+    }
+    return null;
+}
+
+// ffprobe's codec_name/profile as an RFC 6381 audio codec. null when unknown,
+// so the caller keeps its own fallback rather than inventing one.
+function audioCodecFromProbe(info) {
+    const name = String((info && info.codecName) || '').toLowerCase();
+    const profile = String((info && info.profile) || '').toLowerCase();
+    if (name === 'aac') {
+        if (profile === 'he-aacv2') return 'mp4a.40.29';
+        if (profile === 'he-aac') return 'mp4a.40.5';
+        return 'mp4a.40.2';
+    }
+    if (name === 'ac3') return 'ac-3';
+    if (name === 'eac3') return 'ec-3';
+    if (name === 'mp3') return 'mp4a.40.34';
+    if (name === 'opus') return 'opus';
+    if (name === 'flac') return 'fLaC';
+    return null;
 }
 
 function parseVariants(master, baseUrl) {
@@ -180,20 +239,96 @@ function avcCodecFromSegment(buffer) {
     return null;
 }
 
+// The first media segment of a playlist, plus its EXT-X-MAP init segment when
+// it is fMP4. An fMP4 media segment alone is unreadable: its codec config and
+// track ids live in the init segment.
+function firstSegmentRefs(playlistText, playlistUrl) {
+    const lines = String(playlistText || '').split('\n');
+    let init = null;
+    for (const line of lines) {
+        const l = line.trim();
+        if (!l) continue;
+        if (l.startsWith('#EXT-X-MAP:')) {
+            const uri = (l.match(/URI="([^"]+)"/) || [])[1];
+            if (uri) init = new URL(uri, playlistUrl).href;
+            continue;
+        }
+        if (l.startsWith('#')) continue;
+        return { init, segment: new URL(l, playlistUrl).href };
+    }
+    return null;
+}
+
+async function fetchBytes(url, headers, what) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(
+        new DOMException(`hybrid ${what} probe timeout`, 'AbortError')), FETCH_TIMEOUT_MS);
+    try {
+        const resp = await fetch(url, { headers: headers || {}, signal: controller.signal });
+        if (!resp.ok) return null;
+        return Buffer.from(await resp.arrayBuffer());
+    } finally { clearTimeout(timer); }
+}
+
+// The bytes ffprobe needs to read the head of a playlist: init + first
+// segment for fMP4, the first segment alone for TS.
+async function headBytes(refs, headers, what) {
+    const [init, seg] = await Promise.all([
+        refs.init ? fetchBytes(refs.init, headers, what) : Promise.resolve(null),
+        fetchBytes(refs.segment, headers, what),
+    ]);
+    if (!seg || (refs.init && !init)) return null;
+    return init ? Buffer.concat([init, seg]) : seg;
+}
+
+// Codec strings from an fMP4 init segment's avcC / hvcC box.
+function codecFromInit(buf) {
+    const avcc = buf.indexOf('avcC');
+    if (avcc >= 0 && avcc + 8 < buf.length) {
+        const hex = (n) => n.toString(16).padStart(2, '0');
+        const [profile, constraint, level] = [buf[avcc + 5], buf[avcc + 6], buf[avcc + 7]];
+        if (profile && level) {
+            const entry = buf.indexOf('avc3') >= 0 && buf.indexOf('avc3') < avcc ? 'avc3' : 'avc1';
+            return `${entry}.${hex(profile)}${hex(constraint)}${hex(level)}`;
+        }
+    }
+    const hvcc = buf.indexOf('hvcC');
+    if (hvcc >= 0 && hvcc + 17 < buf.length) {
+        const b = hvcc + 4;
+        const spaceTierProfile = buf[b + 1];
+        const space = ['', 'A', 'B', 'C'][spaceTierProfile >> 6];
+        const tier = (spaceTierProfile >> 5) & 1 ? 'H' : 'L';
+        const profile = spaceTierProfile & 0x1f;
+        // Compatibility flags are written bit-reversed (ISO/IEC 14496-15 E.3).
+        let compat = buf.readUInt32BE(b + 2);
+        let rev = 0;
+        for (let i = 0; i < 32; i += 1) { rev = (rev << 1) | (compat & 1); compat >>>= 1; }
+        const constraints = [];
+        for (let i = 0; i < 6; i += 1) constraints.push(buf[b + 6 + i]);
+        while (constraints.length && constraints[constraints.length - 1] === 0) constraints.pop();
+        const level = buf[b + 12];
+        const entry = buf.indexOf('hev1') >= 0 && buf.indexOf('hev1') < hvcc ? 'hev1' : 'hvc1';
+        return [`${entry}.${space}${profile}`, (rev >>> 0).toString(16), `${tier}${level}`,
+            ...constraints.map((c) => c.toString(16).toUpperCase())].join('.');
+    }
+    return null;
+}
+
 async function probeVideoCodec(playlistText, playlistUrl, headers) {
     try {
-        const segment = String(playlistText).split('\n')
-            .find((line) => line.trim() && !line.startsWith('#'));
-        if (!segment) return null;
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(
-            new DOMException('hybrid codec probe timeout', 'AbortError')), FETCH_TIMEOUT_MS);
-        try {
-            const resp = await fetch(new URL(segment, playlistUrl).href,
-                { headers: headers || {}, signal: controller.signal });
-            if (!resp.ok) return null;
-            return avcCodecFromSegment(Buffer.from(await resp.arrayBuffer()));
-        } finally { clearTimeout(timer); }
+        const refs = firstSegmentRefs(playlistText, playlistUrl);
+        if (!refs) return null;
+        if (refs.init) {
+            // fMP4: the SPS sits in the init segment's config box, never as an
+            // Annex-B NAL in the media segment, so scanning the segment for
+            // start codes would find nothing (or noise).
+            const init = await fetchBytes(refs.init, headers, 'codec');
+            const codec = init ? codecFromInit(init) : null;
+            console.log(`[hybrid] codec probe fMP4 init: ${codec || 'unreadable'}`);
+            return codec;
+        }
+        const seg = await fetchBytes(refs.segment, headers, 'codec');
+        return seg ? avcCodecFromSegment(seg) : null;
     } catch (_e) {
         return null;
     }
@@ -214,39 +349,36 @@ async function probeVideoCodec(playlistText, playlistUrl, headers) {
 //
 // It is MEASURED per pairing rather than hardcoded, because 1.478556 is what
 // this title happens to carry, not a property of the provider.
-async function probeStartPts(playlistText, playlistUrl, headers, kind = 'a') {
+async function probeSegmentInfo(playlistText, playlistUrl, headers, kind = 'a') {
+    const none = { pts: null, codecName: null, profile: null };
     try {
         // A rendition is known only by its URL - parseAudioRenditions carries no
         // playlist body - so fetch it when the caller has no text to hand.
         let text = playlistText;
         if (!text) {
             const r = await fetch(playlistUrl, { headers: headers || {}, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
-            if (!r.ok) return null;
+            if (!r.ok) return none;
             text = await r.text();
         }
-        const segment = String(text).split('\n')
-            .find((line) => line.trim() && !line.startsWith('#'));
-        if (!segment) return null;
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(
-            new DOMException('hybrid pts probe timeout', 'AbortError')), FETCH_TIMEOUT_MS);
-        let buf;
-        try {
-            const resp = await fetch(new URL(segment, playlistUrl).href,
-                { headers: headers || {}, signal: controller.signal });
-            if (!resp.ok) return null;
-            buf = Buffer.from(await resp.arrayBuffer());
-        } finally { clearTimeout(timer); }
-        return await ptsRebase.startPts(buf, kind);
+        const refs = firstSegmentRefs(text, playlistUrl);
+        if (!refs) return none;
+        const buf = await headBytes(refs, headers, 'pts');
+        if (!buf) return none;
+        return await ptsRebase.segmentInfo(buf, kind);
     } catch (_e) {
-        return null;
+        return none;
     }
+}
+
+async function probeStartPts(playlistText, playlistUrl, headers, kind = 'a') {
+    return (await probeSegmentInfo(playlistText, playlistUrl, headers, kind)).pts;
 }
 
 module.exports = {
     DURATION_TOLERANCE_SECONDS, PREFERRED_LANGUAGE,
     heightOf, getText, totalSeconds, parseAudioRenditions, parseVariants,
     resolveMediaPlaylist, avcCodecFromSegment, probeVideoCodec, probeStartPts,
+    probeSegmentInfo, codecFromInit, cleanCodecs, videoPart, audioPart, audioCodecFromProbe,
 };
 
 // ---------------------------------------------------------------------------
@@ -534,7 +666,10 @@ function withPts(url, ptsOffset, opts = {}) {
     return `${url}${sep}pts=${ptsOffset}${remote}`;
 }
 
-function buildMaster(plan, serverUrl, videoCodec, ptsOffset = 0) {
+// audioCodec: the donor's audio codec when measured (probe or stream.codecs).
+// Each rendition's own codec from its master wins over it; mp4a.40.2 is the
+// fallback only when neither is known.
+function buildMaster(plan, serverUrl, videoCodec, ptsOffset = 0, audioCodec = null) {
     const { video, audio } = plan;
     const renditions = audio.desc.audio.renditions;
     const preferred = PREFERRED_LANGUAGE.toLowerCase();
@@ -566,7 +701,7 @@ function buildMaster(plan, serverUrl, videoCodec, ptsOffset = 0) {
             'GROUP-ID="hybrid-audio"',
             `NAME="${String(r.name).replace(/"/g, '')}"`,
             r.language ? `LANGUAGE="${r.language}"` : null,
-            `CODECS="${DEFAULT_AUDIO_CODEC}"`,
+            `CODECS="${cleanCodecs(r.codecs) || audioCodec || DEFAULT_AUDIO_CODEC}"`,
             `DEFAULT=${i === defaultIndex ? 'YES' : 'NO'}`,
             'AUTOSELECT=YES',
             `URI="${withPts(proxied(serverUrl, inner.url, hdrs), ptsOffset, { remote })}"`,
@@ -597,9 +732,8 @@ function buildMaster(plan, serverUrl, videoCodec, ptsOffset = 0) {
         // variant makes hls.js reconcile embedded audio against the group and
         // throw fragParsingError.
         const originCodecs = (v.attrs.match(/CODECS="([^"]+)"/) || [])[1];
-        const videoOnly = originCodecs
-            ? originCodecs.split(',').map((c) => c.trim()).filter((c) => !/^mp4a/i.test(c)).join(',')
-            : '';
+        // videoPart drops every non-video entry (mp4a, ac-3, ec-3, ...).
+        const videoOnly = videoPart(originCodecs) || '';
         const codecs = videoOnly || videoCodec || DEFAULT_VIDEO_CODEC;
         lines.push(`#EXT-X-STREAM-INF:BANDWIDTH=${bandwidth}`
             + (resAttr ? `,RESOLUTION=${resAttr}` : '')
@@ -623,16 +757,27 @@ async function realisePlan(plan, serverUrl) {
     // demuxed from one source file and therefore share a baseline, so probing
     // one is probing all of them.
     const firstAudio = (plan.audio.desc.audio.renditions || [])[0];
-    const [codec, videoPts, audioPts] = await Promise.all([
-        probeVideoCodec(
+    // The provider's own measured CODECS (stream.codecs, e.g. mapple's
+    // "hvc1.1.6.L150.90,mp4a.40.2") beats a probe that reads H.264 only.
+    const statedVideo = videoPart(plan.video.stream.codecs);
+    const [probed, videoPts, audioInfo] = await Promise.all([
+        statedVideo ? Promise.resolve(null) : probeVideoCodec(
             plan.video.desc.video.text, plan.video.desc.video.url, plan.video.desc.headers),
         probeStartPts(
             plan.video.desc.video.text, plan.video.desc.video.url,
             plan.video.desc.headers, 'v'),
         firstAudio
-            ? probeStartPts(null, firstAudio.url, plan.audio.desc.headers, 'a')
-            : Promise.resolve(null),
+            ? probeSegmentInfo(null, firstAudio.url, plan.audio.desc.headers, 'a')
+            : Promise.resolve({ pts: null }),
     ]);
+    const codec = statedVideo || probed;
+    const audioPts = audioInfo.pts;
+    const statedAudio = audioPart(plan.audio.stream.codecs);
+    const probedAudio = audioCodecFromProbe(audioInfo);
+    const audioCodec = (firstAudio && cleanCodecs(firstAudio.codecs)) || statedAudio || probedAudio || null;
+    console.log(`[hybrid] codecs: video ${statedVideo ? 'stream.codecs' : (probed ? 'probe' : 'default')}=`
+        + `${codec || DEFAULT_VIDEO_CODEC} audio ${firstAudio && cleanCodecs(firstAudio.codecs) ? 'master'
+            : (statedAudio ? 'stream.codecs' : (probedAudio ? 'probe' : 'default'))}=${audioCodec || DEFAULT_AUDIO_CODEC}`);
 
     // Shift the audio so its zero lands on the video's zero. Either probe
     // failing means we do not KNOW the offset, and guessing one would be worse
@@ -650,8 +795,11 @@ async function realisePlan(plan, serverUrl) {
         + `delta=${plan.delta.toFixed(1)}s codec=${codec || DEFAULT_VIDEO_CODEC} `
         + `vpts=${videoPts} apts=${audioPts} auto=${auto} nudge=${nudge} `
         + `ptsOffset=${ptsOffset}`);
+    const playlist = buildMaster(plan, serverUrl, codec, ptsOffset, audioCodec);
     return {
-        playlist: buildMaster(plan, serverUrl, codec, ptsOffset),
+        playlist,
+        codecs: masterCodecs(playlist),
+        audioCodec: audioCodec || DEFAULT_AUDIO_CODEC,
         ptsOffset,
         videoProvider: plan.video.stream.provider,
         audioProvider: plan.audio.stream.provider,
@@ -659,6 +807,18 @@ async function realisePlan(plan, serverUrl) {
         height: plan.height,
         delta: plan.delta,
     };
+}
+
+// What a built master asks the browser to decode: the distinct variant video
+// codecs, and the DEFAULT rendition's audio codec. /hybrid/pair returns this so
+// the player can check MediaSource support before it switches (H8).
+function masterCodecs(playlist) {
+    const video = [...new Set([...String(playlist).matchAll(/#EXT-X-STREAM-INF:[^\n]*CODECS="([^"]+)"/g)]
+        .map((m) => m[1]))];
+    const media = String(playlist).split('\n').filter((l) => l.startsWith('#EXT-X-MEDIA:'));
+    const def = media.find((l) => l.includes('DEFAULT=YES')) || media[0] || '';
+    const audio = (def.match(/CODECS="([^"]+)"/) || [])[1] || null;
+    return { video, audio };
 }
 
 // A stable id for a pairing, so a lazily-built master can be addressed by URL
@@ -721,6 +881,7 @@ function describePlansAsStreams(plans, serverUrl) {
 
 module.exports.buildMaster = buildMaster;
 module.exports.realisePlan = realisePlan;
+module.exports.masterCodecs = masterCodecs;
 module.exports.planId = planId;
 module.exports.describePlansAsStreams = describePlansAsStreams;
 module.exports.proxied = proxied;

@@ -230,6 +230,9 @@ app.get('/api/metrics', (req,res) => {
     streamsReturned: metrics.streamsReturned,
     tmdbToImdbLookups: metrics.tmdbToImdbLookups,
     lastRequestAt: metrics.lastRequestAt,
+    // Hybrid audio segments served UNSHIFTED because ffmpeg could not rebase
+    // them (utils/ptsRebase.js; log prefix "[pts-rebase] FAILED").
+    ptsRebase: require('./utils/ptsRebase').stats,
     memoryMB: Math.round(process.memoryUsage().rss/1024/1024),
     loadAvg: os.loadavg ? os.loadavg() : [],
     nodeVersion: process.version,
@@ -283,6 +286,9 @@ app.get('/api/status', (req,res) => {
     streamsReturned: metrics.streamsReturned,
     tmdbToImdbLookups: metrics.tmdbToImdbLookups,
     lastRequestAt: metrics.lastRequestAt,
+    // Hybrid audio segments served UNSHIFTED because ffmpeg could not rebase
+    // them (utils/ptsRebase.js; log prefix "[pts-rebase] FAILED").
+    ptsRebase: require('./utils/ptsRebase').stats,
     memoryMB: Math.round(process.memoryUsage().rss/1024/1024),
     providerHealth: metrics.providerHealth
   }, endpoints, providers });

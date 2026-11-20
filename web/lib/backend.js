@@ -439,17 +439,20 @@ export function playableUrl(masterUrl) { return masterUrl; }
  * different films, since CastleTV matches by TITLE - so a 409 here means "this
  * combination is not real", not "the server failed".
  *
- * @returns {Promise<{url: string, delta: number, padded: boolean}|null>} null when
+ * @returns {Promise<{url: string, delta: number, padded: boolean, codecs: ({video: string[], audio: string|null}|null)}|null>} null when
  * not pairable. `padded` true means the two halves are the same film but cut
  * with different ad/intro padding, so the automatic PTS probe cannot close the
  * gap and the viewer may need the Audio timing bar.
  */
 export async function pairSources(video, audio, opts = {}) {
   if (!video?.masterUrl || !audio?.masterUrl) return null;
-  const body = {
-    video: { url: video.masterUrl, provider: video.provider, quality: video.quality },
-    audio: { url: audio.masterUrl, provider: audio.provider, quality: audio.quality },
-  };
+  // `codecs`: the CODECS the provider measured, so the server need not guess
+  // them for an fMP4/HEVC source (docs/PENDING-WORK.md H6).
+  const side = (s) => ({
+    url: s.masterUrl, provider: s.provider, quality: s.quality,
+    ...(s.codecString ? { codecs: s.codecString } : {}),
+  });
+  const body = { video: side(video), audio: side(audio) };
   // Which title this is, so the server can ask TMDB for the runtime.
   //
   // The runtime is what lets a PADDED source pair at all: without it the only

@@ -84,3 +84,26 @@ export function videoCodecSupported(s, env) {
 export function isUnsupported(s, env) {
   return videoCodecSupported(s, env) === false;
 }
+
+/**
+ * Can this browser decode a fused /hybrid/pair master? `codecs` is the pair
+ * response's { video: [...variant codecs], audio } (docs/PENDING-WORK.md H8).
+ *
+ * true when at least one video level decodes together with the audio: hls.js
+ * drops the levels it cannot play by itself. false when none does. null when
+ * the server stated nothing or there is no way to ask: only false stops a
+ * switch, so an unknown pair still plays and the no-picture guard covers it.
+ */
+export function pairDecodable(codecs, env) {
+  const video = Array.isArray(codecs?.video) ? codecs.video.filter(Boolean) : [];
+  if (!video.length) return null;
+  const e = env || defaultEnv();
+  if (!e.isTypeSupported && !e.canPlayType) return null;
+  const ask = (type) => {
+    try { return e.isTypeSupported ? Boolean(e.isTypeSupported(type)) : Boolean(e.canPlayType(type)); } catch { return false; }
+  };
+  // hls.js feeds video and audio to separate SourceBuffers, so ask per kind.
+  const audioOk = !codecs.audio || ask(`audio/mp4; codecs="${codecs.audio}"`);
+  if (!audioOk) return false;
+  return video.some((v) => ask(`video/mp4; codecs="${v}"`));
+}
