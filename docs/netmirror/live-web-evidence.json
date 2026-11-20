@@ -1,0 +1,40 @@
+{
+  "scope": "Local website, provider-isolated real backend route; no synthetic media responses",
+  "title": "Ala Vaikunthapurramuloo (2020)",
+  "providerResponse": {
+    "status": 200,
+    "count": 2,
+    "providerError": "netmirror-budget",
+    "languages": [
+      "Telugu"
+    ],
+    "containers": [
+      "mp4",
+      "hls"
+    ]
+  },
+  "browserPlayback": {
+    "currentTime": 2.026897,
+    "videoWidth": 960,
+    "videoHeight": 540,
+    "readyState": 4
+  },
+  "sourceMenu": [
+    {
+      "label": "NetMirror 1 Auto quality",
+      "checked": true
+    },
+    {
+      "label": "NetMirror 2 up to 720p",
+      "checked": false
+    }
+  ],
+  "webTestsPassed": 893,
+  "backendTestsPassed": 416,
+  "limits": [
+    "No remote deployment",
+    "No live multi-language switch test",
+    "Local provider request budget retained"
+  ],
+  "cleanup": "Paused playback and closed isolated test context"
+}

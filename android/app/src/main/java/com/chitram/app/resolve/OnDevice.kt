@@ -27,6 +27,7 @@ class OnDeviceResolver(
     private val titleFor: suspend (type: String, id: Long) -> Triple<String, Int?, String?>? = { t, i -> api?.titleFull(if (t == "tv") "tv" else "movie", i)?.let { Triple(it.title, it.year, it.originalTitle) } },
     private val castle: CastleResolver? = null,
     private val multimovies: MultiMoviesResolver? = null,
+    private val netmirror: NetmirrorResolver? = null,
     private val now: () -> Long = System::currentTimeMillis,
 ) {
 
@@ -43,16 +44,46 @@ class OnDeviceResolver(
 
     /** The providers [launch] starts, in its order. MultiMovies only when the VM is not expected to answer. */
     fun names(vmDown: Boolean): List<String> =
-        listOf(MAPPLE, VAPLAYER) + listOfNotNull(CASTLE.takeIf { castle != null }, MULTIMOVIES.takeIf { vmDown && multimovies != null })
+        listOf(MAPPLE, VAPLAYER) + listOfNotNull(NETMIRROR.takeIf { netmirror != null }, CASTLE.takeIf { castle != null }, MULTIMOVIES.takeIf { vmDown && multimovies != null })
 
     fun launch(scope: CoroutineScope, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, preferred: String = "Telugu", title: String? = null, vmDown: Boolean = false): List<Deferred<Source?>> =
         names(vmDown).map { n -> scope.async { resolveOne(n, type, id, season, episode, codecs, preferred, fresh = false, title = title) } }
+
+    /** Providers may return several distinct catalogs/dubs; keep every row. */
+    fun launchAll(scope: CoroutineScope, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, preferred: String = "Telugu", title: String? = null, vmDown: Boolean = false): List<Deferred<List<Source>>> =
+        names(vmDown).map { n -> scope.async { resolveAll(n, type, id, season, episode, codecs, preferred, title = title) } }
+
+    suspend fun resolveAll(name: String, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, preferred: String = "Telugu", fresh: Boolean = false, title: String? = null): List<Source> {
+        if (name != NETMIRROR) return listOfNotNull(resolveOne(name, type, id, season, episode, codecs, preferred, fresh, title))
+        if (!fresh && isOpen(name)) return emptyList()
+        return guarded(name) {
+            val cfg = config.get().netmirror
+            if (!cfg.enabled) return@guarded emptyList()
+            var timedOut = true
+            val completed = mutableListOf<Resolved>()
+            val rows = withTimeoutOrNull(cfg.budgetMs) {
+                val t = withTimeoutOrNull(TITLE_WAIT_MS) {
+                    try { titleFor(type, id) } catch (e: Exception) {
+                        if (e is kotlinx.coroutines.CancellationException) throw e
+                        null
+                    }
+                }?.takeIf { it.first.isNotBlank() }
+                    ?: title?.let { Triple(it, null, null) }
+                val result = if (t == null) emptyList() else netmirror?.resolve(cfg, type, t.first, t.second, season, episode, fresh) { completed += it }.orEmpty()
+                timedOut = false
+                result
+            }
+            if (timedOut && completed.isEmpty()) throw StepException(name, 0, "budget ${cfg.budgetMs}ms spent")
+            (rows ?: completed).map { toSource(it, codecs) }
+        }.orEmpty()
+    }
 
     /**
      * One provider, bounded by its budget, never throws. `fresh` = recovery after a
      * playback error: a new mapple session, a new vaplayer token for the current IP.
      */
     suspend fun resolveOne(name: String, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, preferred: String = "Telugu", fresh: Boolean = false, title: String? = null): Source? {
+        if (name == NETMIRROR) return com.chitram.app.data.Ranking.rank(resolveAll(name, type, id, season, episode, codecs, preferred, fresh, title), preferred).firstOrNull()
         if (!fresh && isOpen(name)) {
             android.util.Log.i("Chitram", "on-device $name: skipped, breaker open")
             return null
@@ -108,7 +139,7 @@ class OnDeviceResolver(
         }?.let { toSource(it, codecs) }
     }
 
-    private suspend fun guarded(name: String, block: suspend () -> Resolved?): Resolved? {
+    private suspend fun <T> guarded(name: String, block: suspend () -> T?): T? {
         val t0 = now()
         return try {
             block().also {
@@ -136,6 +167,7 @@ class OnDeviceResolver(
         const val VAPLAYER = "vaplayer"
         const val CASTLE = "castletv"
         const val MULTIMOVIES = "multimovies"
+        const val NETMIRROR = "netmirror"
         const val CASTLE_BUDGET_MS = 25_000L
         const val MULTIMOVIES_BUDGET_MS = 15_000L
         private const val TITLE_WAIT_MS = 4_000L
@@ -146,6 +178,7 @@ class OnDeviceResolver(
             VAPLAYER -> VAPLAYER
             CASTLE -> CASTLE
             MULTIMOVIES -> MULTIMOVIES
+            NETMIRROR -> NETMIRROR
             else -> null
         }
         const val BREAKER_FAILS = 3
@@ -155,7 +188,7 @@ class OnDeviceResolver(
         fun toSource(r: Resolved, codecs: CodecSupport): Source {
             val top = r.levels.maxOfOrNull { it.height } ?: 0
             return Source(
-                id = "device-${r.provider}",
+                id = "device-${r.key ?: r.provider}",
                 provider = r.provider,
                 label = r.label,
                 url = r.url,
@@ -164,10 +197,10 @@ class OnDeviceResolver(
                 levels = r.levels,
                 // From the master's EXT-X-MEDIA renditions, in master order: the
                 // language ranking needs them (never drop a language tag).
-                languages = Hls.languages(r.audio),
+                languages = (Hls.languages(r.audio) + r.languages).distinctBy { it.lowercase() },
                 selectableAudio = r.audio.size > 1 && !r.muxed,
                 hybrid = false,
-                subtitles = emptyList(),
+                subtitles = r.subtitles,
                 videoCodec = null,
                 codecString = r.codecs,
                 unsupported = codecs.supports(null, r.codecs) == false,

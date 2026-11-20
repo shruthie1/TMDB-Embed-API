@@ -1,0 +1,24 @@
+{
+  "title": "Ala Vaikunthapurramuloo",
+  "year": 2020,
+  "platform": "nf",
+  "tokenIssued": true,
+  "steps": {
+    "checknewtv.php": 200,
+    "otp.php": 200,
+    "search.php": 200,
+    "post.php": 200,
+    "player.php": 200,
+    "master": 200
+  },
+  "playerStatus": "ok",
+  "catalogLanguages": [
+    "Telugu"
+  ],
+  "masterAudioRenditions": 0,
+  "videoFileIds": [
+    "81252029"
+  ],
+  "titleIdMatched": true,
+  "limits": "One title/catalog only. No media segments downloaded, actual playback/audio switching unverified. Credentials and signed stream URLs omitted."
+}

@@ -32,10 +32,20 @@ class StartRace(
     /** `backend` null: the VM breaker is open, so no VM call went out. */
     @OptIn(ExperimentalCoroutinesApi::class)
     suspend fun first(backend: Deferred<List<Source>>?, device: List<Deferred<Source?>>, preferred: String): First {
+        return firstReady(backend, preferred,
+            ready = { device.filter { it.isCompleted && !it.isCancelled }.mapNotNull { runCatching { it.getCompleted() }.getOrNull() } },
+            allDone = { device.all { it.isCompleted } })
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    suspend fun firstMany(backend: Deferred<List<Source>>?, device: List<Deferred<List<Source>>>, preferred: String): First =
+        firstReady(backend, preferred,
+            ready = { device.filter { it.isCompleted && !it.isCancelled }.flatMap { runCatching { it.getCompleted() }.getOrDefault(emptyList()) } },
+            allDone = { device.all { it.isCompleted } })
+
+    private suspend fun firstReady(backend: Deferred<List<Source>>?, preferred: String, ready: () -> List<Source>, allDone: () -> Boolean): First {
         val t0 = now()
         fun good(s: Source) = !s.unsupported && Ranking.tier(s, preferred) <= 2
-        fun ready(): List<Source> = device.filter { it.isCompleted && !it.isCancelled }.mapNotNull { runCatching { it.getCompleted() }.getOrNull() }
-        fun allDone() = device.all { it.isCompleted }
 
         // 1. The VM's lead: wait for it, but never past VM_LEAD_MS when a device row can play.
         while (backend != null && !backend.isCompleted) {
@@ -75,7 +85,8 @@ class StartRace(
          */
         fun splitTwins(backend: List<Source>, device: List<Source>): Pair<List<Source>, Map<String, Source>> {
             val vmProviders = backend.map { it.provider.lowercase() }.toSet()
-            val (twins, shown) = device.partition { it.provider.lowercase() in vmProviders }
+            // NetMirror catalogs carry different language/quality offerings; never hide them by provider name.
+            val (twins, shown) = device.partition { it.provider.lowercase() != "netmirror" && it.provider.lowercase() in vmProviders }
             return shown to twins.associateBy { it.provider.lowercase() }
         }
     }

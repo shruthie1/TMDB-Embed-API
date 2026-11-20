@@ -96,6 +96,7 @@ async function nmFetch(url, options = {}, fetchImpl = fetch) {
 // The old in-memory streamCache lives in the guard now, so it survives a
 // restart too.
 const { guard } = require('../utils/netmirrorGuard');
+const { createNewTvSession } = require('../utils/netmirrorSession');
 const { urlExpiresAt, earliestStreamExpiry } = require('../lib/urlExpiry');
 
 const GATE_REASON = {
@@ -177,7 +178,16 @@ const NEW_TV_DOMAINS = [
     'aHR0cHM6Ly9tb2JpZGV0ZWN0LnN0b3Jl',
     'aHR0cHM6Ly9tb2JpZGV0ZWN0LnZpcA==',
     'aHR0cHM6Ly9tb2JpZGV0ZWN0Lndpa2k=',
-    'aHR0cHM6Ly9tb2JpZGV0ZWN0Lnh5eg=='
+    'aHR0cHM6Ly9tb2JpZGV0ZWN0Lnh5eg==',
+    'aHR0cHM6Ly9tb2JpZGV0ZWN0cy5hcnQ=',
+    'aHR0cHM6Ly9tb2JpZGV0ZWN0cy5jYw==',
+    'aHR0cHM6Ly9tb2JpZGV0ZWN0cy5pbmZv',
+    'aHR0cHM6Ly9tb2JpZGV0ZWN0cy5pbms=',
+    'aHR0cHM6Ly9tb2JpZGV0ZWN0cy5saXZl',
+    'aHR0cHM6Ly9tb2JpZGV0ZWN0cy5wcm8=',
+    'aHR0cHM6Ly9tb2JpZGV0ZWN0cy5zdG9yZQ==',
+    'aHR0cHM6Ly9tb2JpZGV0ZWN0cy50b3A=',
+    'aHR0cHM6Ly9tb2JpZGV0ZWN0cy54eXo='
 ];
 
 const PLATFORM_MAP = { netflix: { ott: 'nf' }, primevideo: { ott: 'pv' }, hotstar: { ott: 'hs' } };
@@ -249,7 +259,7 @@ function newTvHeaders(ott, extra = {}) {
         'X-Requested-With': 'NetmirrorNewTV v1.0',
         'Accept': 'application/json, text/plain, */*',
         'Ott': ott,
-        'User-Agent': nextUA(),
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:136.0) Gecko/20100101 Firefox/136.0 /OS.GatuNewTV v1.0',
         'Accept-Language': nextLang(),
         ...extra
     };
@@ -276,7 +286,9 @@ async function resolveNewTvApi() {
             });
             const data = await response.json();
             if (data.token_hash) {
-                resolvedApiUrl = Buffer.from(data.token_hash, 'base64').toString('utf8').replace(/\/$/, '');
+                const decoded = new URL(Buffer.from(data.token_hash, 'base64').toString('utf8'));
+                if (decoded.protocol !== 'https:' || decoded.username || decoded.password) continue;
+                resolvedApiUrl = decoded.href.replace(/\/$/, '');
                 resolvedApiAt = Date.now();
                 return resolvedApiUrl;
             }
@@ -448,15 +460,15 @@ async function getEpisodes(api, showId, postData, config) {
 
     if (postData.nextPageShow === 1 && selectedSeasonId) {
         try {
-            const response = await newtvFetch(
-                `${api}/newtv/episodes.php?id=${encodeURIComponent(selectedSeasonId)}&page=2`,
-                { headers: newTvHeaders(config.ott), signal: AbortSignal.timeout(15000) }
-            );
-            const data = await response.json();
+            const data = await authenticatedNewTvJson(api, config.ott,
+                `/newtv/episodes.php?id=${encodeURIComponent(selectedSeasonId)}&page=2`);
+            requireMetadata(data);
             for (const episode of data.episodes || []) {
                 if (episode) add(episode, selectedSeason >= 0 ? selectedSeason + 1 : null);
             }
-        } catch {
+        } catch (error) {
+            // Auth and budget failures are unknown, not a missing episode.
+            if (error.gate || error.code === 'NETMIRROR_AUTH_REQUIRED') throw error;
             // The first page is still useful when pagination is unavailable.
         }
     }
@@ -636,8 +648,9 @@ function audioFromMaster(body, postLangs = []) {
 const PAGE_NOT_FOUND_RE = /page\s+not\s+found/i;
 async function readNewTvJson(response) {
     const text = await response.text();
+    let data;
     try {
-        return JSON.parse(text);
+        data = JSON.parse(text);
     } catch (err) {
         if (PAGE_NOT_FOUND_RE.test(text)) {
             // N7: an IP block, not a blip. Stop asking newtv for 6h (one
@@ -648,6 +661,41 @@ async function readNewTvJson(response) {
         }
         if (response.status === 404) return null;
         throw new Error(`HTTP ${response.status}: ${err.message}`);
+    }
+    if (response.status >= 400) {
+        if (response.status === 404) return null;
+        throw new Error(`HTTP ${response.status}: newtv request failed`);
+    }
+    return data;
+}
+
+// Search, post, episodes and player all use the same credential path. A
+// status:otp is an auth challenge, not metadata and not proof of throttling.
+// Every exchange and replay still spends the existing newtv call budget.
+const newTvSession = createNewTvSession({
+    exchange: async (api, otp) => readNewTvJson(await newtvFetch(`${api}/newtv/otp.php`, {
+        redirect: 'error', // Custom OTP headers must never follow a redirect to another origin.
+        headers: newTvHeaders('nf', { Otp: otp,
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:136.0) Gecko/20100101 Firefox/136.0 /OS.Gatu v1.0' }),
+        signal: AbortSignal.timeout(15000),
+    })),
+});
+
+async function authenticatedNewTvJson(api, ott, pathQuery, extra = {}) {
+    return newTvSession.request(api, async (token) => readNewTvJson(await newtvFetch(`${api}${pathQuery}`, {
+        redirect: 'error', // fetch does not strip custom Usertoken headers across redirects.
+        // Token is last: legacy call sites cannot accidentally override it.
+        headers: newTvHeaders(ott, { ...extra, Usertoken: token }),
+        signal: AbortSignal.timeout(15000),
+    })));
+}
+
+function requireMetadata(data) {
+    if (data?.status === 'otp') {
+        // Without an OTP configured, keep the existing pause rather than
+        // persisting the challenge as a seven-day empty catalogue answer.
+        guard.throttleOpen('otp');
+        throw gateError('NM_THROTTLED');
     }
 }
 
@@ -702,8 +750,9 @@ async function newTvJson(memo, ott, pathQuery, extra) {
     }
     try {
         const api = await resolveNewTvApi();
-        const data = trimNewTv(pathQuery, await readNewTvJson(await newtvFetch(`${api}${pathQuery}`,
-            { headers: newTvHeaders(ott, extra), signal: AbortSignal.timeout(15000) })));
+        const raw = await authenticatedNewTvJson(api, ott, pathQuery, extra);
+        requireMetadata(raw);
+        const data = trimNewTv(pathQuery, raw);
         if (memo) memo.set(key, { data });
         guard.cacheSet(key, data, newTvTtl(pathQuery, data));
         return data;
@@ -786,11 +835,8 @@ const MAX_LANGUAGE_ROWS = Number(process.env.NETMIRROR_MAX_LANG_ROWS) || 4;
 // A master proven real closes the cool-down and resets its doubling.
 async function resolvePlayer(config, platform, targetId, title, postLangs) {
     const api = await resolveNewTvApi();
-    const playerResponse = await newtvFetch(
-        `${api}/newtv/player.php?id=${encodeURIComponent(targetId)}`,
-        { headers: newTvHeaders(config.ott, { Usertoken: '' }), signal: AbortSignal.timeout(15000) }
-    );
-    const player = await readNewTvJson(playerResponse);
+    const player = await authenticatedNewTvJson(api, config.ott,
+        `/newtv/player.php?id=${encodeURIComponent(targetId)}`);
     if (player === null) {
         console.log(`[NetMirror] ${platform} player: page not found for id ${targetId} - no rows`);
         return [];
@@ -849,7 +895,7 @@ async function resolveMatch(config, platform, match, title, type, season, episod
     try {
 
         const postData = await newTvJson(memo, config.ott,
-            `/newtv/post.php?id=${encodeURIComponent(first.id)}`, { Lastep: '', Usertoken: '' });
+            `/newtv/post.php?id=${encodeURIComponent(first.id)}`, { Lastep: '' });
         if (postData === null) {
             console.log(`[NetMirror] ${platform} post: page not found for id ${first.id} - no rows`);
             return [];
@@ -952,7 +998,7 @@ async function netflixLanguageFromPost(title, type, year, memo) {
             return null;
         }
         const post = await newTvJson(memo, ott,
-            `/newtv/post.php?id=${encodeURIComponent(match.item.id)}`, { Lastep: '', Usertoken: '' });
+            `/newtv/post.php?id=${encodeURIComponent(match.item.id)}`, { Lastep: '' });
         if (post === null) return null;
         if (type === 'movie' && (post.type === 't' || (post.episodes || []).filter(Boolean).length)) {
             console.log(`[NetMirror] netflix-lang "${title}" matched a series entry - skipped`);

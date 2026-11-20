@@ -23,6 +23,9 @@ data class Resolved(
     val codecs: String?,
     /** Several languages in one TS file (CastleTV muxed): not selectable in the player, swapped by TsAudioSwap. */
     val muxed: Boolean = false,
+    val key: String? = null,
+    val subtitles: List<com.chitram.app.data.SubtitleRef> = emptyList(),
+    val languages: List<String> = emptyList(),
 )
 
 /**

@@ -44,6 +44,21 @@ describe('toSource', () => {
   });
 });
 
+describe('NetMirror supplemental catalog identity', () => {
+  const netflix = { provider: 'NetMirror', url: 'https://proxy.test/m3u8-proxy?url=nf.m3u8', container: 'hls', quality: 'Auto', languages: ['Telugu'] };
+  const prime = { ...netflix, url: 'https://proxy.test/m3u8-proxy?url=pv.m3u8', languages: ['Hindi', 'Telugu'], audio: [{ language: 'Hindi' }, { language: 'Telugu' }], selectableAudio: true };
+  it('keeps the same source ID in the aggregate and supplemental responses', () => {
+    expect(toSource(netflix, 9).id).toBe(toSource(netflix, 0).id);
+    expect(toSource(prime, 10).id).toBe(toSource(prime, 0).id);
+  });
+  it('keeps distinct catalog/language rows distinct even at the same array index', () => {
+    expect(toSource(netflix, 0).id).not.toBe(toSource(prime, 0).id);
+    expect(toSource(prime).languages).toEqual(['Hindi', 'Telugu']);
+    expect(toSource(prime).selectableAudio).toBe(true);
+    expect(toSource(prime).progressive).toBe(false);
+  });
+});
+
 // Shapes from GET /api/streams/movie/811941 (Devara) and 770906 (Salaar),
 // captured 2026-09-22.
 const HYBRID = {

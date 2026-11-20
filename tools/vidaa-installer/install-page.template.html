@@ -61,6 +61,8 @@ function log(msg, cls) {
   var t = new Date();
   line.appendChild(document.createTextNode("[" + t.toTimeString().slice(0, 8) + "] " + msg));
   el.insertBefore(line, el.firstChild);
+  // Mirror each line to the Mac: the installer's HTTP server logs the request path.
+  try { new Image().src = "/tvlog?" + encodeURIComponent(String(msg).slice(0, 600)) + "&_=" + t.getTime(); } catch (e) {}
 }
 
 function safeCall(name) {

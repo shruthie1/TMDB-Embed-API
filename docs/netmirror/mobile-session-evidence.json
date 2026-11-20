@@ -1,0 +1,77 @@
+{
+  "probe": {
+    "observedAt": "2026-11-20T18:37:26.044Z",
+    "configStatus": 200,
+    "home": "https://net52.cc/mobile/home?app=1",
+    "status": 200,
+    "serverDate": "Fri, 20 Nov 2026 18:37:25 GMT",
+    "cookieAttributes": [
+      {
+        "name": "addhash",
+        "domain": ".net52.cc",
+        "path": "/",
+        "httpOnly": false,
+        "secure": false,
+        "sameSite": "Lax",
+        "expires": 1795200445.304,
+        "valueLength": 94
+      }
+    ],
+    "bodyChallenge": {
+      "parts": [
+        {
+          "index": 0,
+          "length": 32,
+          "hex32": true,
+          "decimal": false
+        },
+        {
+          "index": 1,
+          "length": 32,
+          "hex32": true,
+          "decimal": false
+        },
+        {
+          "index": 2,
+          "length": 10,
+          "hex32": false,
+          "decimal": true
+        },
+        {
+          "index": 3,
+          "length": 2,
+          "hex32": false,
+          "decimal": false
+        }
+      ],
+      "cookieEqualsBodyHash": false,
+      "cookieDecodedEqualsBodyHash": true,
+      "timeEqualsThirdPart": true
+    },
+    "verify": {
+      "status": 200,
+      "body": "{\"c\":\"n\",\"statusup\":\"Waiting for your ads click.\"}",
+      "setCookieNames": []
+    },
+    "reload": {
+      "status": 200,
+      "sameHash": true,
+      "gatePresent": true
+    },
+    "externalScripts": [
+      " type=\"text/javascript\" src=\"//code.jquery.com/jquery-1.11.0.min.js\""
+    ],
+    "hasUsertoken": false,
+    "note": "No scripts executed, no advertiser contacted, no cookie values or challenge values emitted"
+  },
+  "waitOnly": {
+    "observedAt": "2026-11-20T18:38:15.819Z",
+    "waitedMs": 21267,
+    "status": 200,
+    "body": "{\"c\":\"n\",\"statusup\":\"Waiting for your ads click.\"}",
+    "cookieNames": [
+      "addhash"
+    ],
+    "note": "Waited without opening the support/ad URL or executing any page scripts"
+  }
+}

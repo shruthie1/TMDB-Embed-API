@@ -80,9 +80,10 @@ test('A1: every field ResolveConfig.kt reads is present with the right JSON type
       if (reader === 'hosts') obj[key].forEach((h) => assert.match(h, /^https:\/\//));
     }
   };
-  for (const k of ['version', 'ttlSec', 'mapple', 'vaplayer']) assert.ok(k in cfg, `${k} missing`);
+  for (const k of ['version', 'ttlSec', 'mapple', 'vaplayer', 'netmirror']) assert.ok(k in cfg, `${k} missing`);
   check(cfg.mapple, readsIn('mapple'), 'mapple');
   check(cfg.vaplayer, readsIn('vaplayer'), 'vaplayer');
+  check(cfg.netmirror, readsIn('netmirror'), 'netmirror');
 });
 
 test('A1: values equal the app defaults exactly', async () => {
@@ -92,4 +93,5 @@ test('A1: values equal the app defaults exactly', async () => {
   assert.equal(cfg.ttlSec, top.ttlSec);
   assert.deepStrictEqual(cfg.mapple, defaultsOf('MappleConfig'));
   assert.deepStrictEqual(cfg.vaplayer, defaultsOf('VaplayerConfig'));
+  assert.deepStrictEqual(cfg.netmirror, defaultsOf('NetmirrorConfig'));
 });

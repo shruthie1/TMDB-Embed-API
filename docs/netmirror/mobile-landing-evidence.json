@@ -1,0 +1,71 @@
+{
+  "landing": {
+    "at": "2026-11-20T18:40:16.790Z",
+    "baseline": "{\"c\":\"n\",\"statusup\":\"Waiting for your ads click.\"}",
+    "landing": {
+      "status": 301,
+      "contentType": "text/html; charset=UTF-8",
+      "location": "https://whatdidheseehe.com?9MhCO=1418793",
+      "cookieNames": [],
+      "body": ""
+    },
+    "afterLanding": "{\"c\":\"y\",\"statusup\":\"Waiting for your ads click.\"}",
+    "cookies": [
+      {
+        "name": "addhash",
+        "domain": ".net52.cc",
+        "path": "/",
+        "httpOnly": false,
+        "secure": false,
+        "expires": 1795200615.878,
+        "length": 94
+      }
+    ],
+    "note": "Only firstparty landing GET; redirects disabled; scripts not executed"
+  },
+  "wait": {
+    "at": "2026-11-20T18:41:07.879Z",
+    "baseline": {
+      "status": 200,
+      "body": "{\"c\":\"n\",\"statusup\":\"Waiting for your ads click.\"}",
+      "cookieNames": []
+    },
+    "landing": {
+      "status": 301,
+      "location": "https://whatdidheseehe.com?9MhCO=1418793",
+      "cookieNames": []
+    },
+    "immediately": {
+      "status": 200,
+      "body": "{\"c\":\"y\",\"statusup\":\"Waiting for your ads click.\"}",
+      "cookieNames": []
+    },
+    "delayed": {
+      "status": 200,
+      "body": "{\"c\":\"y\",\"statusup\":\"Waiting for your ads click.\"}",
+      "cookieNames": []
+    },
+    "elapsedMs": 26016,
+    "reload": {
+      "status": 200,
+      "adGate": true,
+      "mentionsUsertoken": false,
+      "scriptSources": [
+        "//code.jquery.com/jquery-1.11.0.min.js"
+      ],
+      "title": "NetMirror - Watch Movies and Series on Mobile"
+    },
+    "cookies": [
+      {
+        "name": "addhash",
+        "domain": ".net52.cc",
+        "path": "/",
+        "httpOnly": false,
+        "secure": false,
+        "expires": 1795200641.624,
+        "length": 94
+      }
+    ],
+    "note": "First-party support landing only, redirects disabled; no advertiser fetched or page scripts executed"
+  }
+}

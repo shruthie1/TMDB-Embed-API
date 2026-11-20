@@ -79,11 +79,26 @@ data class VaplayerConfig(
     }
 }
 
+/** TV discovery is public configuration; OTP and issued sessions stay on the device. */
+data class NetmirrorConfig(
+    val enabled: Boolean = true,
+    val domains: List<String> = listOf("https://mobiledetects.com", "https://mobiledetect.app", "https://mobidetect.art", "https://mobidetect.cc", "https://mobidetect.click", "https://mobidetect.ink", "https://mobidetect.live", "https://mobidetect.pro", "https://mobidetect.shop", "https://mobidetect.site", "https://mobidetect.space", "https://mobidetect.store", "https://mobidetect.vip", "https://mobidetect.wiki", "https://mobidetect.xyz", "https://mobidetects.art", "https://mobidetects.cc", "https://mobidetects.info", "https://mobidetects.ink", "https://mobidetects.live", "https://mobidetects.pro", "https://mobidetects.store", "https://mobidetects.top", "https://mobidetects.xyz"),
+    val budgetMs: Long = 50_000,
+    val maxCalls: Int = 24,
+    val budgetWindowMs: Long = 5 * 60 * 1000L,
+    val cooldownMs: Long = 10 * 60 * 1000L,
+    val apiTtlMs: Long = 10 * 60 * 1000L,
+    val sessionTtlMs: Long = 30 * 60 * 1000L,
+    val metadataTtlMs: Long = 7 * 24 * 60 * 60 * 1000L,
+    val playerTtlMs: Long = 30_000,
+)
+
 data class ResolveConfig(
     val version: Int = 1,
     val ttlSec: Long = 6 * 3600L,
     val mapple: MappleConfig = MappleConfig(),
     val vaplayer: VaplayerConfig = VaplayerConfig(),
+    val netmirror: NetmirrorConfig = NetmirrorConfig(),
 ) {
     companion object {
         private val json = Json { ignoreUnknownKeys = true; isLenient = true }
@@ -97,6 +112,7 @@ data class ResolveConfig(
                 ttlSec = root.long("ttlSec")?.coerceIn(60, 7 * 86400L) ?: d.ttlSec,
                 mapple = (root["mapple"] as? JsonObject)?.let { mapple(it) } ?: d.mapple,
                 vaplayer = (root["vaplayer"] as? JsonObject)?.let { vaplayer(it) } ?: d.vaplayer,
+                netmirror = (root["netmirror"] as? JsonObject)?.let { netmirror(it) } ?: d.netmirror,
             )
         }
 
@@ -145,6 +161,22 @@ data class ResolveConfig(
                 stepTimeoutMs = o.long("stepTimeoutMs")?.coerceIn(1000, 60_000) ?: d.stepTimeoutMs,
                 budgetMs = o.long("budgetMs")?.coerceIn(3000, 90_000) ?: d.budgetMs,
                 probeSegment = o.bool("probeSegment") ?: d.probeSegment,
+            )
+        }
+
+        private fun netmirror(o: JsonObject): NetmirrorConfig {
+            val d = NetmirrorConfig()
+            return NetmirrorConfig(
+                enabled = o.bool("enabled") ?: d.enabled,
+                domains = o.hosts("domains") ?: d.domains,
+                budgetMs = o.long("budgetMs")?.coerceIn(3000, 90_000) ?: d.budgetMs,
+                maxCalls = o.int("maxCalls")?.coerceIn(1, 50) ?: d.maxCalls,
+                budgetWindowMs = o.long("budgetWindowMs")?.coerceIn(60_000, 3_600_000) ?: d.budgetWindowMs,
+                cooldownMs = o.long("cooldownMs")?.coerceIn(60_000, 7_200_000) ?: d.cooldownMs,
+                apiTtlMs = o.long("apiTtlMs")?.coerceIn(60_000, 3_600_000) ?: d.apiTtlMs,
+                sessionTtlMs = o.long("sessionTtlMs")?.coerceIn(60_000, 3_600_000) ?: d.sessionTtlMs,
+                metadataTtlMs = o.long("metadataTtlMs")?.coerceIn(60_000, 604_800_000) ?: d.metadataTtlMs,
+                playerTtlMs = o.long("playerTtlMs")?.coerceIn(0, 60_000) ?: d.playerTtlMs,
             )
         }
 

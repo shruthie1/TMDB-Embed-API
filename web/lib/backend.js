@@ -167,7 +167,11 @@ export function toSource(s, i = 0) {
   if (!s || !s.url) return null;
   const languages = Array.isArray(s.languages) ? s.languages : [];
   return {
-    id: `${s.provider || 'src'}-${i}`,
+    // Aggregate and supplemental NetMirror replies have different indexes.
+    // Identify a catalog/quality row by the same URL identity used by mergeSources.
+    id: String(s.provider || '').toLowerCase() === 'netmirror'
+      ? `netmirror-${encodeURIComponent(JSON.stringify([s.url, s.quality || 'Auto']))}`
+      : `${s.provider || 'src'}-${i}`,
     provider: s.provider || s.name || 'Unknown',
     label: s.title || s.provider || 'Stream',
     masterUrl: s.url,

@@ -63,6 +63,7 @@ class App : Application(), ImageLoaderFactory {
             VaplayerResolver(api.client, hosts) { runCatching { assets.open("va.wasm").use { it.readBytes() } }.getOrNull() },
             castle = com.chitram.app.resolve.CastleResolver(api.client),
             multimovies = com.chitram.app.resolve.MultiMoviesResolver(api.client),
+            netmirror = com.chitram.app.resolve.NetmirrorResolver(api.client, otp = { kv.get("netmirror.otp") ?: "111111" }),
         )
         appScope.launch { resolveConfig.get() }
     }

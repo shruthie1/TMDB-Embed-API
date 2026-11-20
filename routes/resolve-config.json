@@ -3,14 +3,36 @@
   "ttlSec": 21600,
   "mapple": {
     "enabled": true,
-    "bases": ["https://mapple.fun"],
+    "bases": [
+      "https://mapple.fun"
+    ],
     "watchPath": "/watch/{type}/{id}",
     "sessionPath": "/api/ui/session",
     "mediaSessionPath": "/api/media-session",
     "encryptPath": "/api/encrypt",
     "encryptEndpoint": "stream-encrypted",
-    "fronts": ["s25", "mapple", "s2", "s28", "s27", "s10", "s19", "s4", "s12", "s6", "s7", "s8", "s16"],
-    "frontTimeoutMs": { "mapple": 8000, "s10": 12000, "s2": 22000, "s25": 24000, "s28": 25000 },
+    "fronts": [
+      "s25",
+      "mapple",
+      "s2",
+      "s28",
+      "s27",
+      "s10",
+      "s19",
+      "s4",
+      "s12",
+      "s6",
+      "s7",
+      "s8",
+      "s16"
+    ],
+    "frontTimeoutMs": {
+      "mapple": 8000,
+      "s10": 12000,
+      "s2": 22000,
+      "s25": 24000,
+      "s28": 25000
+    },
     "defaultFrontTimeoutMs": 8000,
     "frontParallelism": 3,
     "frontCooldownMs": 60000,
@@ -24,7 +46,9 @@
   },
   "vaplayer": {
     "enabled": true,
-    "wrapperBases": ["https://vaplayer.ru"],
+    "wrapperBases": [
+      "https://vaplayer.ru"
+    ],
     "vaSrcPath": "/embed/va_src.php",
     "embedMoviePath": "/embed/movie/{imdb}",
     "embedTvPath": "/embed/tv/{imdb}/{season}/{episode}",
@@ -38,5 +62,42 @@
     "stepTimeoutMs": 8000,
     "budgetMs": 20000,
     "probeSegment": true
+  },
+  "netmirror": {
+    "enabled": true,
+    "domains": [
+      "https://mobiledetects.com",
+      "https://mobiledetect.app",
+      "https://mobidetect.art",
+      "https://mobidetect.cc",
+      "https://mobidetect.click",
+      "https://mobidetect.ink",
+      "https://mobidetect.live",
+      "https://mobidetect.pro",
+      "https://mobidetect.shop",
+      "https://mobidetect.site",
+      "https://mobidetect.space",
+      "https://mobidetect.store",
+      "https://mobidetect.vip",
+      "https://mobidetect.wiki",
+      "https://mobidetect.xyz",
+      "https://mobidetects.art",
+      "https://mobidetects.cc",
+      "https://mobidetects.info",
+      "https://mobidetects.ink",
+      "https://mobidetects.live",
+      "https://mobidetects.pro",
+      "https://mobidetects.store",
+      "https://mobidetects.top",
+      "https://mobidetects.xyz"
+    ],
+    "budgetMs": 50000,
+    "maxCalls": 24,
+    "budgetWindowMs": 300000,
+    "cooldownMs": 600000,
+    "apiTtlMs": 600000,
+    "sessionTtlMs": 1800000,
+    "metadataTtlMs": 604800000,
+    "playerTtlMs": 30000
   }
 }
