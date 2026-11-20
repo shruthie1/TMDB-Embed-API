@@ -368,10 +368,20 @@ export async function loadTrack(url, { signal, offsetMs = 0, runtimeMin = 0 } = 
    remembered rather than re-set every session. */
 const PREF_KEY = 'chitram:subs:v1';
 
-const DEFAULTS = { scale: 1, offsetMs: 0 };
+// Medium. Was 1 when the ladder was 0.62/1/1.3/1.6; after the ladder moved
+// (2026-11-20) a default of 1 matched no preset, so no size button showed as
+// chosen and the default sat between Medium and Large.
+const DEFAULTS = { scale: 0.82, offsetMs: 0 };
+
+// A choice saved on the old ladder keeps its NAME: Medium stays Medium.
+const LEGACY_SCALE = { 1: 0.82, 1.3: 1.05, 1.6: 1.3 };
 
 export function getSubPrefs() {
-  try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem(PREF_KEY) || '{}') }; }
+  try {
+    const p = { ...DEFAULTS, ...JSON.parse(localStorage.getItem(PREF_KEY) || '{}') };
+    if (LEGACY_SCALE[p.scale] != null) p.scale = LEGACY_SCALE[p.scale];
+    return p;
+  }
   catch { return { ...DEFAULTS }; }
 }
 
@@ -390,9 +400,9 @@ export function setSubPrefs(next) {
 // the top so each preset stays distinguishable from its neighbour.
 export const SIZES = [
   { key: 0.62, label: 'Small' },
-  { key: 1, label: 'Medium' },
-  { key: 1.3, label: 'Large' },
-  { key: 1.6, label: 'Extra large' },
+  { key: 0.82, label: 'Medium' },
+  { key: 1.05, label: 'Large' },
+  { key: 1.3, label: 'Extra large' },
 ];
 
 /**

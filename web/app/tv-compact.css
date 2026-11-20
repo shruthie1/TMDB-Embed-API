@@ -39,26 +39,42 @@ html[data-tv="true"] .chip{font-size:18px;display:inline-flex;align-items:center
 html[data-tv="true"] .lang-opt{font-size:20px}
 html[data-tv="true"] .icon-btn{min-width:56px;min-height:56px}
 
-/* Player bar. */
-html[data-tv="true"] .pctl .icon-btn{min-width:64px;min-height:64px;border-radius:var(--radius-md, 12px)}
-html[data-tv="true"] .pctl .icon-btn svg{width:30px;height:30px}
-html[data-tv="true"] .pctl-pick-btn{min-height:64px;font-size:18px;padding-inline:var(--space-4)}
-html[data-tv="true"] .pctl-pick-btn svg{width:26px;height:26px}
-html[data-tv="true"] .pctl-time{font-size:22px}
-html[data-tv="true"] .pctl-title b{font-size:30px}
+/* Player (2026-11-20 second pass, live TV test: "player fonts, seek bar and
+   options are all too small"). Sized against the viewport so a TV that
+   reports 1280x720 CSS pixels gets the same share of the screen as one that
+   reports 1920x1080. Values in comments are at 1920 wide. */
+html[data-tv="true"] .pctl .icon-btn{min-width:clamp(64px,4.4vw,96px);min-height:clamp(64px,4.4vw,96px);border-radius:14px}  /* 84px */
+html[data-tv="true"] .pctl .icon-btn svg{width:clamp(30px,2vw,44px);height:clamp(30px,2vw,44px)}                          /* 38px */
+html[data-tv="true"] .pctl-row{gap:clamp(6px,.5vw,12px)}
+html[data-tv="true"] .pctl-time{font-size:clamp(24px,1.6vw,34px);font-weight:500;margin-inline:clamp(8px,.8vw,20px)}  /* 31px */
+html[data-tv="true"] .pctl-title b{font-size:clamp(30px,2.1vw,44px)}                                                      /* 40px */
+html[data-tv="true"] .pctl-title span{font-size:clamp(20px,1.3vw,28px)}
 html[data-tv="true"] .pctl-bottom{padding:var(--space-4) var(--space-12) var(--space-8)}
 html[data-tv="true"] .pctl-top{padding-inline:var(--space-12)}
-html[data-tv="true"] .pctl-scrub{height:48px}
-html[data-tv="true"] .pctl-track{height:6px}
-html[data-tv="true"] .pctl-scrub:focus .pctl-track{height:10px;box-shadow:0 0 0 3px var(--color-accent)}
-html[data-tv="true"] .pctl-scrub:focus .pctl-knob{opacity:1;transform:translate(-50%,-50%) scale(1.6)}
+/* Seek bar: a thick line you can see from the sofa, thicker still with focus. */
+html[data-tv="true"] .pctl-scrub{height:clamp(44px,3vw,64px)}                                                             /* 58px */
+html[data-tv="true"] .pctl-track{height:clamp(8px,.55vw,12px)}                                                             /* 10.5px */
+html[data-tv="true"] .pctl-scrub:focus .pctl-track{height:clamp(14px,1vw,22px);box-shadow:0 0 0 3px rgb(var(--rgb-white)),var(--focus-glow)}
+html[data-tv="true"] .pctl-knob{width:clamp(20px,1.4vw,30px);height:clamp(20px,1.4vw,30px)}
+html[data-tv="true"] .pctl-scrub:focus .pctl-knob{opacity:1;transform:translate(-50%,-50%) scale(1.3)}
 html[data-tv="true"] .pctl-vol{display:none}
-html[data-tv="true"] .pmenu{min-width:340px}
-html[data-tv="true"] .pmenu-pick{max-height:min(60vh,560px)}
-html[data-tv="true"] .pmenu-item{font-size:20px;padding:var(--space-3) var(--space-5)}
-html[data-tv="true"] .pmenu-label,html[data-tv="true"] .sub-set-k{font-size:18px}
-html[data-tv="true"] .pmenu-sheet{min-width:460px;max-height:min(70vh,760px)}
-html[data-tv="true"] .sub-seg-btn,html[data-tv="true"] .sub-step,html[data-tv="true"] .sub-reset{font-size:18px;padding-inline:var(--space-4)}
+/* Server, quality, audio: the value is the point, so it is big. */
+html[data-tv="true"] .pctl-pick-btn{min-height:clamp(64px,4.4vw,96px);padding-inline:clamp(12px,.9vw,20px)}
+html[data-tv="true"] .pctl-row .pctl-pick-btn .pctl-pick-badge{font-size:clamp(20px,1.3vw,28px);max-width:12ch}            /* 25px */
+html[data-tv="true"] .pctl-row .pctl-pick-btn svg{width:clamp(26px,1.7vw,36px);height:clamp(26px,1.7vw,36px)}
+/* Menus and the settings sheet. */
+html[data-tv="true"] .pmenu{min-width:clamp(380px,26vw,560px)}                                                           /* 500px */
+html[data-tv="true"] .pmenu-pick{max-height:min(66vh,720px)}
+html[data-tv="true"] .pmenu-sheet{min-width:clamp(480px,32vw,700px);max-height:78vh}                                    /* 614px */
+html[data-tv="true"] .pmenu-item{font-size:clamp(22px,1.4vw,30px);min-height:clamp(60px,3.8vw,80px);padding:var(--space-3) var(--space-5)}  /* 27px / 73px */
+html[data-tv="true"] .pmenu-item svg{width:clamp(22px,1.4vw,30px);height:clamp(22px,1.4vw,30px)}
+html[data-tv="true"] .pmenu-label,html[data-tv="true"] .sub-set-k,html[data-tv="true"] .pmenu-sheet-head{font-size:clamp(18px,1.15vw,24px)}
+html[data-tv="true"] .sub-seg-btn,html[data-tv="true"] .sub-step,html[data-tv="true"] .sub-reset{font-size:clamp(20px,1.25vw,26px);min-height:clamp(56px,3.4vw,72px);padding-inline:var(--space-4)}
+html[data-tv="true"] .sub-sync-val{font-size:clamp(20px,1.25vw,26px)}
+/* Cards over the film: next episode, errors. */
+html[data-tv="true"] .player .overlay .btn{min-height:clamp(60px,3.8vw,80px);font-size:clamp(22px,1.4vw,30px);padding-inline:var(--space-8)}
+html[data-tv="true"] .player .ov-title{font-size:clamp(28px,1.9vw,40px)}
+html[data-tv="true"] .player .ov-eyebrow{font-size:clamp(16px,1vw,22px)}
 
 /* ── Scrollbars ──
    A TV has no pointer to drag a scrollbar with, and the default grey bar read
@@ -69,5 +85,49 @@ html[data-tv="true"] ::-webkit-scrollbar{display:none;width:0;height:0}
 /* A list row must not scale on focus: it grew past the list edge and the ring
    was cut at the sides. The fill and ring mark it. */
 html[data-tv="true"] .pmenu-item:focus,html[data-tv="true"] .sub-seg-btn:focus{transform:none}
-html[data-tv="true"] .pctl-row .pctl-pick-btn .pctl-pick-badge{font-size:18px;max-width:14ch}
-html[data-tv="true"] .pctl-row .pctl-pick-btn svg{width:26px;height:26px}
+html[data-tv="true"] .pctl-knob{opacity:1;transform:translate(-50%,-50%) scale(1)}
+
+/* ── Browse type at ten feet (2026-11-20, live TV feedback: still too small
+   from across the room). Text grows, posters do not: the rail keeps its
+   ~8-per-row card width from the 2026-11-15 compact pass. */
+html[data-tv="true"] .row-label{font-size:30px;margin-bottom:var(--space-4)}
+html[data-tv="true"] .see-all{font-size:20px;display:inline-flex;align-items:center;padding-inline:var(--space-3);border-radius:var(--radius-sm)}
+html[data-tv="true"] .card-title{font-size:23px;line-height:1.25}
+html[data-tv="true"] .card-meta{font-size:19px}
+html[data-tv="true"] .nav-link{font-size:24px;border-radius:var(--radius-pill)}
+html[data-tv="true"] .brand{font-size:36px}
+html[data-tv="true"] .btn{font-size:24px;min-height:64px}
+html[data-tv="true"] .chip{font-size:21px}
+html[data-tv="true"] .detail-back{font-size:21px;padding-inline:var(--space-3);border-radius:var(--radius-pill)}
+html[data-tv="true"] .home-hero-title{font-size:clamp(44px,3.6vw,68px)}
+html[data-tv="true"] .home-hero-overview{font-size:22px;line-height:1.45;max-width:52ch}
+html[data-tv="true"] .detail-overview{font-size:24px;line-height:1.5}
+html[data-tv="true"] .meta,html[data-tv="true"] .detail-meta,html[data-tv="true"] .home-hero-meta{font-size:20px}
+html[data-tv="true"] .search-input{font-size:36px}
+html[data-tv="true"] .page-title{font-size:44px}
+html[data-tv="true"] .empty{font-size:22px}
+html[data-tv="true"] .person b{font-size:19px}
+html[data-tv="true"] .person span{font-size:17px}
+html[data-tv="true"] .ep-body b{font-size:24px}
+html[data-tv="true"] .ep-meta,html[data-tv="true"] .ep-body p{font-size:19px}
+html[data-tv="true"] .lang-modal{width:min(760px,90vw);padding:var(--space-8)}
+html[data-tv="true"] .lang-modal-title{font-size:34px}
+html[data-tv="true"] .lang-modal-hint,html[data-tv="true"] .lang-modal-need,html[data-tv="true"] .lang-modal-count{font-size:20px}
+html[data-tv="true"] .lang-opt{font-size:24px;min-height:68px}
+html[data-tv="true"] .lang-modal-actions .btn{font-size:22px;min-height:60px;padding-inline:var(--space-7)}
+/* The accent underline under a focused card competed with the white frame. */
+html[data-tv="true"] .focusable .rule{background:rgb(var(--rgb-white) / .9)}
+html[data-tv="true"] .home-hero .actions .btn{padding-inline:var(--space-7)}
+html[data-tv="true"] .nav-link .ico{width:22px;height:22px}
+html[data-tv="true"] .badge{font-size:16px;padding:2px 8px}
+html[data-tv="true"] .pmenu-meta{font-size:19px}
+html[data-tv="true"] .pmenu-label{font-size:19px}
+html[data-tv="true"] .pmenu-check{width:26px;height:26px}
+/* The settings sheet rows had their own 13-16px size (globals.css). */
+html[data-tv="true"] .pmenu-sheet .pmenu-item{font-size:clamp(22px,1.4vw,30px);min-height:clamp(60px,3.8vw,80px);padding:0 var(--space-5)}
+html[data-tv="true"] .search-ico{width:32px;height:32px}
+html[data-tv="true"] .search-field .icon-btn svg{width:28px;height:28px}
+html[data-tv="true"] .search-summary,html[data-tv="true"] .result-count{font-size:20px}
+html[data-tv="true"] .sort-select{font-size:21px;min-height:56px;padding-inline:var(--space-4) var(--space-8)}
+html[data-tv="true"] .sort-caret{width:18px;height:18px}
+html[data-tv="true"] .clear-all{font-size:20px;min-height:56px}

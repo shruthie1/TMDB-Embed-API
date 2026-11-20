@@ -1526,7 +1526,9 @@ kbd{
 /* A TV is viewed from across the room: bigger floor, and further from the edge
    so the panel's own overscan does not clip it. */
 [data-tv="true"] .cue-text span{
-  font-size:calc(clamp(32px, 2.2vw + 1.2vh, 50px) * var(--cue-scale));
+  /* 2026-11-20: 32-50px base made Medium (x1) fill the frame on a 1080p TV.
+     Lowered so Medium lands ~36px; presets scale from here. */
+  font-size:calc(clamp(26px, 1.9vw + 1.0vh, 44px) * var(--cue-scale));
 }
 [data-tv="true"] .cue-layer{ padding:0 8% var(--space-10); }
 
@@ -2769,16 +2771,24 @@ html .person:focus-visible .person-ph,html[data-tv="true"] .person.focusable:foc
 html .tab:focus-visible .ico,
 html .search-field:has(.search-input:focus-visible){outline:var(--focus-ring);outline-offset:var(--focus-offset)}
 html .tab:focus-visible .ico{border-radius:var(--radius-sm)}
-/* TV: every D-pad stop shows the ring on plain :focus (a remote's focus is not
-   always "visible" to the UA), plus a glow so it reads at ten feet. Elements
-   that put the ring on a child (cards, cast, episodes) glow on that child. */
+/* ── TV focus ──────────────────────────────────────────────────────────────
+   One language, two forms, the way TV apps do it:
+   - Pictures (posters, stills, cast photos) get a 3px white frame, a soft
+     drop shadow and a small lift.
+   - Controls (buttons, links, chips, menu rows, player buttons) invert: white
+     fill, dark ink, the same shadow. No ring on top of the fill.
+   Plain :focus, because a remote's focus is not always "focus-visible". */
 html[data-tv="true"] [data-focus]:focus{outline:var(--focus-ring);outline-offset:var(--focus-offset);box-shadow:var(--focus-glow)}
 html[data-tv="true"] .card.focusable:focus,html[data-tv="true"] .ep.focusable:focus,
 html[data-tv="true"] .person.focusable:focus,html[data-tv="true"] .pctl-scrub:focus{outline:none;box-shadow:none}
 html[data-tv="true"] .card.focusable:focus .poster,html[data-tv="true"] .ep.focusable:focus .ep-still,
-html[data-tv="true"] .person.focusable:focus .person-ph{box-shadow:var(--focus-glow)}
-html[data-tv="true"] .icon-btn:focus,html[data-tv="true"] .pctl-pick-btn:focus{color:var(--paper);background:rgb(var(--rgb-white) / .14)}
-html[data-tv="true"] .pmenu-item:focus{background:rgb(var(--rgb-white) / .14);outline-offset:-4px;box-shadow:none}
+html[data-tv="true"] .person.focusable:focus .person-ph{box-shadow:var(--focus-glow);border-color:transparent}
+html[data-tv="true"] :is(.icon-btn,.pctl-pick-btn,.pmenu-item,.sub-seg-btn,.sub-step,.sub-reset,.chip,.nav-link,.btn:not(.primary),.lang-opt,.detail-back,.see-all,.tvbar-btn,.ov-back,.detail-overview-toggle,.clear-all,.tab):focus{
+  background:var(--color-white,#fff);color:var(--ink);border-color:transparent;outline:none;box-shadow:var(--focus-glow);text-shadow:none}
+html[data-tv="true"] :is(.icon-btn,.pctl-pick-btn,.pmenu-item,.btn,.lang-opt,.chip,.nav-link):focus :is(svg,.pctl-pick-badge,.lang-opt-mark,span,b,em){color:var(--ink)}
+html[data-tv="true"] .pmenu-item.on:focus>svg{color:var(--ink)}
+html[data-tv="true"] .btn.primary:focus{outline:var(--focus-ring);outline-offset:var(--focus-offset);box-shadow:var(--focus-glow)}
+html[data-tv="true"] .pmenu-item:focus{outline:none}
 /* Menu rows sit inside a scrolling list: the ring goes inside the row so the
    list edge cannot cut it. */
 html .pmenu-item:focus-visible,html[data-tv="true"] .pmenu-item:focus{outline-offset:calc(-1 * var(--focus-offset))}

@@ -149,8 +149,9 @@
   --shadow-lg:0 24px 64px rgb(var(--rgb-black) / .55);
   /* Focus: ONE ring for every interactive element, applied in globals.css
      ("Focus: one ring"). Shown on :focus-visible only, never on a click. */
-  --focus-ring:2px solid var(--color-accent);
+  --focus-ring:2px solid rgb(var(--rgb-white) / .92);
   --focus-offset:2px;
+  --focus-glow:none;
 
   /* ── Glass ── */
   --blur-sm:blur(8px);
@@ -234,17 +235,17 @@
 
 /* TV: tokens only. 10-foot viewing needs larger type and a heavier ring. */
 [data-tv="true"]{
-  /* The ring is read from across a room: 4px, further out, with a glow so it
-     still shows on a bright poster. */
-  --focus-ring:4px solid var(--color-accent);
-  --focus-offset:4px;
-  --focus-glow:0 0 0 2px rgb(var(--rgb-bg)), 0 0 24px 4px rgb(var(--rgb-accent-to) / .55);
-  --header-height:64px;
+  /* Focus from across a room: a clean 3px white frame and a soft drop
+     shadow. Controls invert to white instead (globals.css, "TV focus"). */
+  --focus-ring:3px solid rgb(var(--rgb-white));
+  --focus-offset:3px;
+  --focus-glow:0 12px 32px rgb(var(--rgb-black) / .55);
+  --header-height:80px;
   --header-pad-y:var(--space-2);
   --hero-height:70vh;
   --hero-title-size:clamp(36px,3vw,52px);
-  --btn-h:52px;
-  --btn-font:17px;
+  --btn-h:64px;
+  --btn-font:24px;
   --control-h:44px;
   --rail-focus-pad:var(--space-5);
   --glass-bg:rgb(var(--rgb-bg) / .85);

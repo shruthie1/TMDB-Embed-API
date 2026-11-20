@@ -62,7 +62,28 @@ export default function Dpad() {
       if (window.scrollY !== 0) top();
     }, 100);
 
+    /**
+     * On a TV, a page opens with focus on its main button.
+     *
+     * The viewer asked for this on the title page: the remote's first OK
+     * should play, not land on the logo. The button can render after the
+     * route (data loads first), so this waits up to ~3s for it, and gives up
+     * the moment the viewer presses a key or something else takes focus.
+     */
+    let tries = 0;
+    const auto = isTv() ? setInterval(() => {
+      const a = document.activeElement;
+      if (cancelled || ++tries > 30 || (a && a !== document.body)) { clearInterval(auto); return; }
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+      const btn = [...document.querySelectorAll('main .btn.primary[data-focus]')].find((el) => {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.top >= 0 && r.bottom <= window.innerHeight;
+      });
+      if (btn) { btn.focus({ preventScroll: true }); clearInterval(auto); }
+    }, 100) : null;
+
     return () => {
+      clearInterval(auto);
       clearInterval(id);
       ['wheel', 'touchstart', 'keydown'].forEach(n2 =>
         window.removeEventListener(n2, stop));

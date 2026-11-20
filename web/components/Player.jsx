@@ -817,8 +817,11 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
        */
       if (tvRemote && !useNative) {
         const onSlider = el?.getAttribute?.('role') === 'slider';
-        const inBar = Boolean((onControl || onSlider)
-          && playerRef.current?.querySelector('.pctl')?.contains(el));
+        const bar = playerRef.current?.querySelector('.pctl');
+        const inBar = Boolean((onControl || onSlider) && bar?.contains(el));
+        // A card over the film (Next episode, an error, the embed bar) owns
+        // its own buttons: OK on "Play next" must press it, not pause.
+        if (onControl && !inBar && playerRef.current?.contains(el)) return;
         const act = tvPlayerKey({ key: e.key, controlsVisible: controls.visible, focusInBar: inBar });
         if (act) {
           if (act === 'rewind') seekBy(v, -MEDIA_SEEK_SECS);

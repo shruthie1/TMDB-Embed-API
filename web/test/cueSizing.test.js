@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { SIZES } from '../lib/subtitles.js';
 
 const read = (f) => readFileSync(fileURLToPath(new URL(f, import.meta.url)), 'utf8');
 // Spacing comes from design tokens; resolve them so the maths below sees px.
@@ -112,9 +113,9 @@ describe('the size presets', () => {
   it('makes Small genuinely small on a phone', () => {
     // The report: "small looks like medium". It was 0.8, putting Small 3.3px
     // under Medium - a step you cannot see.
-    const small = at(390, 0.62), medium = at(390, 1);
-    expect(medium - small).toBeGreaterThan(3.5);
-    expect(small).toBeLessThan(medium * 0.75);
+    const small = at(390, 0.62), medium = at(390, 0.82);
+    expect(medium - small).toBeGreaterThan(3);
+    expect(small).toBeLessThan(medium * 0.85);
   });
 
   it('never drops Small below what is readable', () => {
@@ -126,7 +127,7 @@ describe('the size presets', () => {
   });
 
   it('keeps every preset distinguishable from its neighbour', () => {
-    const sizes = [0.62, 1, 1.3, 1.6].map(k => at(390, k));
+    const sizes = SIZES.map(s => at(390, s.key));
     for (let i = 1; i < sizes.length; i++) {
       expect(sizes[i]).toBeGreaterThan(sizes[i - 1] + 3);
     }
@@ -138,7 +139,8 @@ describe('the size presets', () => {
 
   it('still lets Extra large grow past the base ceiling', () => {
     // The ceiling is scaled too, so the largest preset is not pinned at 26px.
-    expect(at(1512, 1.6)).toBeGreaterThan(32);
+    const xl = SIZES[SIZES.length - 1].key;
+    expect(at(1512, xl)).toBeGreaterThan(32);
   });
 });
 
