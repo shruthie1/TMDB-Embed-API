@@ -30,7 +30,7 @@ object Tok {
     val textSecondary = Color(0xFFC9CCDB)
     val textMuted = Color(0xFF9497AA)
     val textDim = Color(0xFF6B6E80)
-    val accent = Color(0xFF22D3EE) // --color-accent: progress, active tab, focus
+    val accent = Color(0xFF22D3EE) // --color-accent: progress, active tab (not focus)
     val accentFrom = Color(0xFF7C5CFF)
     val danger = Color(0xFFE08B84)
     val radiusMd = RoundedCornerShape(10.dp)
@@ -39,6 +39,33 @@ object Tok {
     val scrimBottom = Brush.verticalGradient(listOf(Color.Transparent, bg.copy(alpha = 0.7f), bg))
     val scrimTop = Brush.verticalGradient(listOf(bg.copy(alpha = 0.85f), Color.Transparent))
     val scrimLeft = Brush.horizontalGradient(listOf(bg, bg.copy(alpha = 0.75f), Color.Transparent))
+}
+
+/**
+ * One focus language for every D-pad / keyboard target (web tokens.css
+ * --focus-ring and globals.css "TV focus"):
+ * - Pictures (posters, stills, cast photos): a 3dp white frame, a soft dark
+ *   drop shadow and a small lift.
+ * - Controls (buttons, chips, nav, menu rows, player buttons): invert to a
+ *   white fill with dark ink and the same shadow. Only focus is white: a
+ *   primary control is a brighter grey until focused, so two controls never
+ *   look focused at once.
+ * No accent colour and no glow colour: focus is white, calm and readable from
+ * the couch.
+ */
+object Focus {
+    val ring = Color.White
+    val fill = Color.White
+    val ink = Tok.bg
+    val ringWidth = 3.dp
+    val shadow = Color.Black.copy(alpha = 0.6f)
+    val shadowElevation = 14.dp
+    const val pictureScale = 1.07f
+    const val controlScale = 1.05f
+    /** A primary control (Play, Done) when not focused: brighter than the rest, never white. */
+    val primaryFill = Color.White.copy(alpha = 0.3f)
+    /** Selected but not focused (filter chip, season, rail item): quiet. */
+    val selectedFill = Color.White.copy(alpha = 0.18f)
 }
 
 /** Image with a solid placeholder; no crossfade (cheap on the Fire TV). */

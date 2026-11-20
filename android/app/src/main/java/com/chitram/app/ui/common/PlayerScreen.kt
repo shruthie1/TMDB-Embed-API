@@ -1,7 +1,19 @@
 package com.chitram.app.ui.common
 
 import android.app.Activity
+import android.os.Build
+import android.view.WindowManager
+import androidx.compose.foundation.layout.requiredSize
+import androidx.compose.material.icons.filled.AspectRatio
+import androidx.compose.material.icons.filled.Crop
+import androidx.compose.material.icons.filled.FitScreen
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Shape
+import com.chitram.app.App
+import com.chitram.app.data.VideoFit
 import android.content.pm.ActivityInfo
+import android.content.res.Configuration
 import android.view.SurfaceView
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
@@ -72,6 +84,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
@@ -113,10 +126,19 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
         ctl?.hide(WindowInsetsCompat.Type.systemBars())
         val oldOrientation = activity?.requestedOrientation
         if (!isTv) activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        // Draw into the notch / cutout too, so the picture can use the whole panel.
+        val oldCutout = window?.attributes?.let { if (Build.VERSION.SDK_INT >= 28) it.layoutInDisplayCutoutMode else null }
+        if (window != null && Build.VERSION.SDK_INT >= 28) {
+            window.attributes = window.attributes.apply {
+                layoutInDisplayCutoutMode = if (Build.VERSION.SDK_INT >= 30) WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                else WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
         onDispose {
             vm.leave()
             view.keepScreenOn = false
             ctl?.show(WindowInsetsCompat.Type.systemBars())
+            if (window != null && oldCutout != null && Build.VERSION.SDK_INT >= 28) window.attributes = window.attributes.apply { layoutInDisplayCutoutMode = oldCutout }
             if (!isTv && oldOrientation != null) activity.requestedOrientation = oldOrientation
         }
     }
@@ -127,6 +149,8 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
     var menu by remember { mutableStateOf<Menu?>(null) }
     var lastInput by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var seekHint by remember { mutableIntStateOf(0) } // -1 back, 1 forward, for the double-tap badge
+    val playerPrefs = App.instance.playerPrefs
+    var fit by remember { mutableStateOf(playerPrefs.fit) }
     val playFocus = remember { FocusRequester() }
     val rootFocus = remember { FocusRequester() }
     fun poke() { lastInput = System.currentTimeMillis() }
@@ -201,16 +225,24 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
                 },
             ),
     ) {
-        // Video surface, letterboxed to the stream's aspect ratio.
+        // Video surface. Fit: the whole picture, inside the screen both ways (a
+        // fixed width overflowed 16:9 video on a 20:9 phone). Fill: cover the
+        // screen and crop. Stretch: the full screen, distorted.
         val vs = vm.videoSize
         val ratio = if (vs.width > 0 && vs.height > 0) vs.width * vs.pixelWidthHeightRatio / vs.height else 16f / 9f
-        AndroidView(
-            factory = { ctx -> SurfaceView(ctx).also { vm.player.setVideoSurfaceView(it) } },
-            onRelease = { vm.player.clearVideoSurfaceView(it) },
-            // Fit inside the screen both ways: a fixed width overflowed 16:9 video
-            // on a 20:9 phone in landscape.
-            modifier = Modifier.align(Alignment.Center).aspectRatio(ratio),
-        )
+        BoxWithConstraints(Modifier.fillMaxSize().clipToBounds(), contentAlignment = Alignment.Center) {
+            val surface = when (fit) {
+                VideoFit.Fit -> Modifier.aspectRatio(ratio)
+                VideoFit.Stretch -> Modifier.fillMaxSize()
+                VideoFit.Fill -> if (maxWidth / maxHeight > ratio) Modifier.requiredSize(maxWidth, maxWidth / ratio)
+                    else Modifier.requiredSize(maxHeight * ratio, maxHeight)
+            }
+            AndroidView(
+                factory = { ctx -> SurfaceView(ctx).also { vm.player.setVideoSurfaceView(it) } },
+                onRelease = { vm.player.clearVideoSurfaceView(it) },
+                modifier = surface,
+            )
+        }
 
         if (vm.cues.isNotEmpty()) {
             BasicText(
@@ -241,8 +273,11 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
             }
         }
 
-        if (controls && vm.phase is PlayerVm.Phase.Playing && vm.nextUp == null) {
-            Controls(vm, now, isTv, playFocus, onMenu = { menu = it; poke() }, onBack = onBack, poke = ::poke)
+        // A phone can still be portrait for a few frames before the forced landscape lands.
+        // The control row cannot fit that width, so wait for landscape before drawing it.
+        val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+        if (controls && (isTv || landscape) && vm.phase is PlayerVm.Phase.Playing && vm.nextUp == null) {
+            Controls(vm, now, isTv, playFocus, fit, onFit = { fit = fit.next(); playerPrefs.fit = fit; poke() }, onMenu = { menu = it; poke() }, onBack = onBack, poke = ::poke)
         }
 
         vm.nextUp?.let { next -> NextUpCard(next, isTv, onPlay = { vm.start(next) }, onDismiss = { vm.dismissNext(); controls = true }) }
@@ -334,6 +369,7 @@ private fun FailedPanel(r: PlayRequest, message: String, isTv: Boolean, onRetry:
 @Composable
 private fun Controls(
     vm: PlayerVm, r: PlayRequest, isTv: Boolean, playFocus: FocusRequester,
+    fit: VideoFit, onFit: () -> Unit,
     onMenu: (Menu) -> Unit, onBack: () -> Unit, poke: () -> Unit,
 ) {
     val side = if (isTv) 48.dp else 20.dp
@@ -382,7 +418,10 @@ private fun Controls(
                 if (vm.durationMs > 0) BasicText("-" + fmtTime(vm.durationMs - vm.positionMs), style = TextStyle(color = Tok.textMuted, fontSize = 13.sp))
             }
             Spacer(Modifier.height(if (isTv) 14.dp else 6.dp))
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(if (isTv) 10.dp else 4.dp)) {
+            BoxWithConstraints(Modifier.fillMaxWidth()) {
+            // Narrow screens drop the menu labels so every control keeps its full size.
+            val labels = maxWidth >= if (isTv) 880.dp else 600.dp
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(if (isTv) 10.dp else 4.dp)) {
                 if (isTv) {
                     CtlButton(Icons.Filled.Replay10, "-10s", showLabel = false, isTv = true) { vm.seekBy(-10_000); poke() }
                     CtlButton(if (vm.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow, if (vm.isPlaying) "Pause" else "Play", showLabel = false, isTv = true, primary = true, modifier = Modifier.focusRequester(playFocus)) { vm.togglePlay(); poke() }
@@ -391,10 +430,16 @@ private fun Controls(
                 if (next != null) CtlButton(Icons.Filled.SkipNext, "Next episode", showLabel = true, isTv = isTv,
                     modifier = if (!isTv) Modifier.focusRequester(playFocus) else Modifier) { vm.start(next) }
                 Spacer(Modifier.weight(1f))
-                CtlButton(Icons.Filled.Dns, "Server", showLabel = true, isTv = isTv, modifier = if (!isTv && next == null) Modifier.focusRequester(playFocus) else Modifier) { onMenu(Menu.Server) }
-                CtlButton(Icons.Filled.GraphicEq, "Audio", showLabel = true, isTv = isTv) { onMenu(Menu.Audio) }
-                CtlButton(Icons.Filled.HighQuality, "Quality", showLabel = true, isTv = isTv) { onMenu(Menu.Quality) }
-                CtlButton(Icons.Filled.Subtitles, "Subtitles", showLabel = true, isTv = isTv) { onMenu(Menu.Subtitles) }
+                CtlButton(Icons.Filled.Dns, "Server", showLabel = labels, isTv = isTv, modifier = if (!isTv && next == null) Modifier.focusRequester(playFocus) else Modifier) { onMenu(Menu.Server) }
+                CtlButton(Icons.Filled.GraphicEq, "Audio", showLabel = labels, isTv = isTv) { onMenu(Menu.Audio) }
+                CtlButton(Icons.Filled.HighQuality, "Quality", showLabel = labels, isTv = isTv) { onMenu(Menu.Quality) }
+                CtlButton(Icons.Filled.Subtitles, "Subtitles", showLabel = labels, isTv = isTv) { onMenu(Menu.Subtitles) }
+                // Picture fit: one press cycles Fit, Fill, Stretch; the label names the current mode.
+                CtlButton(
+                    when (fit) { VideoFit.Fit -> Icons.Filled.FitScreen; VideoFit.Fill -> Icons.Filled.Crop; VideoFit.Stretch -> Icons.Filled.AspectRatio },
+                    fit.label, showLabel = true, isTv = isTv, onClick = onFit,
+                )
+            }
             }
         }
     }
@@ -458,17 +503,17 @@ private fun CtlButton(
     val src = remember { MutableInteractionSource() }
     val focused by src.collectIsFocusedAsState()
     val bg = when {
-        primary -> Color.White
-        focused -> Tok.fill3
+        focused -> Focus.fill
+        primary -> Focus.primaryFill
         isTv -> Tok.fill2
         else -> Color.Transparent
     }
-    val fg = if (primary) Tok.bg else Tok.text
+    val fg = if (focused) Focus.ink else Tok.text
     Row(
         modifier
+            .controlFocus(focused, Tok.pill)
             .clip(Tok.pill)
             .background(bg)
-            .border(2.dp, if (focused) Tok.accent else Color.Transparent, Tok.pill)
             .clickable(interactionSource = src, indication = null, onClick = onClick)
             .padding(horizontal = if (showLabel) 12.dp else 10.dp, vertical = if (isTv) 9.dp else 8.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -500,22 +545,18 @@ private fun NextUpCard(next: PlayRequest, isTv: Boolean, onPlay: () -> Unit, onD
     }
 }
 
-/** Focus-aware pill. Focus = accent ring; no scale animation in the player. */
+/** Focus-aware pill (see Focus): white fill, dark ink, shadow; no scale in the player. */
 @Composable
 fun PillButton(text: String, modifier: Modifier = Modifier, primary: Boolean = false, icon: ImageVector? = null, onClick: () -> Unit) {
     val src = remember { MutableInteractionSource() }
     val focused by src.collectIsFocusedAsState()
-    val bg = when {
-        primary -> Color.White
-        focused -> Tok.fill3
-        else -> Tok.fill2
-    }
-    val fg = if (primary) Tok.bg else Tok.text
+    val bg = if (focused) Focus.fill else if (primary) Focus.primaryFill else Tok.fill2
+    val fg = if (focused) Focus.ink else Tok.text
     Row(
         modifier
+            .controlFocus(focused, Tok.pill)
             .clip(Tok.pill)
             .background(bg)
-            .border(2.dp, if (focused) Tok.accent else Color.Transparent, Tok.pill)
             .clickable(interactionSource = src, indication = null, onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -550,21 +591,25 @@ private fun MenuPanel(title: String, items: List<MenuItem>, isTv: Boolean, onClo
                     Row(
                         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp)
                             .then(if (i == start) Modifier.focusRequester(first) else Modifier)
+                            .controlFocus(focused, Tok.radiusMd)
                             .clip(Tok.radiusMd)
-                            .background(if (focused) Tok.fill2 else Color.Transparent)
-                            .border(2.dp, if (focused) Tok.accent else Color.Transparent, Tok.radiusMd)
+                            .background(if (focused) Focus.fill else Color.Transparent)
                             .clickable(interactionSource = src, indication = null) { onPick(item.key) }
                             .padding(horizontal = 12.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Column(Modifier.weight(1f)) {
-                            BasicText(item.label, style = TextStyle(color = if (item.dim) Tok.textDim else Tok.text, fontSize = 16.sp))
-                            if (item.detail.isNotEmpty()) BasicText(item.detail, style = TextStyle(color = Tok.textMuted, fontSize = 12.sp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            BasicText(item.label, style = TextStyle(color = if (focused) Focus.ink else if (item.dim) Tok.textDim else Tok.text, fontSize = if (isTv) 18.sp else 16.sp))
+                            if (item.detail.isNotEmpty()) BasicText(item.detail, style = TextStyle(color = if (focused) Focus.ink.copy(alpha = 0.7f) else Tok.textMuted, fontSize = if (isTv) 14.sp else 12.sp), maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
-                        if (item.selected) Icon(Icons.Filled.Check, contentDescription = "Selected", tint = Tok.accent, modifier = Modifier.size(20.dp))
+                        if (item.selected) Icon(Icons.Filled.Check, contentDescription = "Selected", tint = if (focused) Focus.ink else Tok.accent, modifier = Modifier.size(20.dp))
                     }
                 }
             }
         }
     }
 }
+
+/** Player half of the one focus style (see Focus): the soft shadow under a focused control. */
+private fun Modifier.controlFocus(focused: Boolean, shape: Shape): Modifier =
+    if (focused) shadow(Focus.shadowElevation, shape, clip = false, ambientColor = Focus.shadow, spotColor = Focus.shadow) else this

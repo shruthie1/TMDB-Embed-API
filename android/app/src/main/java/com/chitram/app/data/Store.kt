@@ -210,3 +210,24 @@ class LastProviderStore(private val kv: KeyValue) {
     fun get(type: String, id: Long): String? = kv.get("lastProvider:$type:$id")
     fun put(type: String, id: Long, provider: String) = kv.put("lastProvider:$type:$id", provider)
 }
+
+/** How the picture fills the screen (web Player.jsx fit: contain / cover / fill). */
+enum class VideoFit(val label: String) {
+    Fit("Fit"),         // whole picture, bars where the shapes differ
+    Fill("Fill"),       // fill the screen, crop the overflow
+    Stretch("Stretch"); // fill the screen, distort
+
+    fun next(): VideoFit = entries[(ordinal + 1) % entries.size]
+
+    companion object {
+        fun parse(s: String?): VideoFit = entries.firstOrNull { it.name == s } ?: Fit
+    }
+}
+
+/** Player choices kept across sessions. */
+class PlayerPrefs(private val kv: KeyValue) {
+    companion object { const val FIT = "player:fit" }
+    var fit: VideoFit
+        get() = VideoFit.parse(kv.get(FIT))
+        set(v) = kv.put(FIT, v.name)
+}

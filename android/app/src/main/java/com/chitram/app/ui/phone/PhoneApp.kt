@@ -128,6 +128,7 @@ import com.chitram.app.ui.common.Row as HomeRow
 import com.chitram.app.ui.common.Screen
 import com.chitram.app.ui.common.SearchVm
 import com.chitram.app.ui.common.Tok
+import com.chitram.app.ui.common.Focus
 import com.chitram.app.ui.common.langName
 import com.chitram.app.ui.common.runtimeText
 import kotlinx.coroutines.delay
@@ -152,7 +153,7 @@ fun PhoneApp(nav: Nav) {
             return@MaterialTheme
         }
         val homeList = rememberLazyListState()
-        val showBar = top == Screen.Home || top == Screen.Search || top == Screen.MyList || top is Screen.Browse
+        val showBar = top == Screen.Home || top == Screen.Search || top == Screen.MyList || top is Screen.Browse || (top is Screen.Langs && !top.firstRun)
         // Edge to edge: each screen owns its top inset (the backdrop runs under
         // the status bar). Scaffold adds none, so nothing is padded twice.
         Scaffold(
@@ -165,8 +166,13 @@ fun PhoneApp(nav: Nav) {
                         Tab(Screen.Search, "Search", Icons.Filled.Search, Icons.Outlined.Search),
                         Tab(Screen.Browse(), "Browse", Icons.Filled.Tune, Icons.Filled.Tune),
                         Tab(Screen.MyList, "My list", Icons.Filled.Bookmark, Icons.Filled.BookmarkBorder),
+                        Tab(Screen.Langs(false), "Languages", Icons.Filled.Translate, Icons.Filled.Translate),
                     ).forEach { tab ->
-                        val on = if (tab.screen is Screen.Browse) top is Screen.Browse else top == tab.screen
+                        val on = when (tab.screen) {
+                            is Screen.Browse -> top is Screen.Browse
+                            is Screen.Langs -> top is Screen.Langs
+                            else -> top == tab.screen
+                        }
                         NavigationBarItem(
                             selected = on, onClick = { if (!on) nav.tab(tab.screen) },
                             icon = { Icon(if (on) tab.on else tab.off, contentDescription = tab.label) }, label = { Text(tab.label, fontSize = 12.sp) },
@@ -214,7 +220,7 @@ private fun PhoneHome(nav: Nav, listState: LazyListState) {
     }
 }
 
-/** App name and Languages over the hero, below the status bar (the only top inset here). */
+/** Only the app name, over the hero, below the status bar. It scrolls away with the hero; Languages is a bottom tab. */
 @Composable
 private fun HomeHeader(nav: Nav) {
     Row(
@@ -222,8 +228,7 @@ private fun HomeHeader(nav: Nav) {
             .statusBarsPadding().padding(start = GUTTER, end = 4.dp, top = 4.dp, bottom = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text("Chitram", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Tok.text, modifier = Modifier.weight(1f))
-        IconButton(onClick = { nav.push(Screen.Langs(false)) }) { Icon(Icons.Filled.Translate, contentDescription = "Languages", tint = Tok.text) }
+        Text("Chitram", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Tok.text, modifier = Modifier.weight(1f).padding(vertical = 12.dp))
     }
 }
 
@@ -758,7 +763,7 @@ private fun PhoneSearch(nav: Nav) {
                 shape = RoundedCornerShape(999.dp),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                 keyboardActions = KeyboardActions(onSearch = { kb?.hide(); vm.submit() }),
-                colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Tok.accent, unfocusedBorderColor = Tok.border, focusedContainerColor = Tok.surfaceSolid, unfocusedContainerColor = Tok.surfaceSolid),
+                colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Focus.ring, unfocusedBorderColor = Tok.border, focusedContainerColor = Tok.surfaceSolid, unfocusedContainerColor = Tok.surfaceSolid),
                 modifier = Modifier.fillMaxWidth().statusBarsPadding().padding(top = 12.dp, bottom = 8.dp),
             )
         }

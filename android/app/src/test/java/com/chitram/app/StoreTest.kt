@@ -3,6 +3,8 @@ package com.chitram.app
 import com.chitram.app.data.LanguagePrefs
 import com.chitram.app.data.MemoryKeyValue
 import com.chitram.app.data.MyListStore
+import com.chitram.app.data.PlayerPrefs
+import com.chitram.app.data.VideoFit
 import com.chitram.app.data.Progress
 import com.chitram.app.data.ProgressStore
 import com.chitram.app.data.SeasonInfo
@@ -15,6 +17,19 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class StoreTest {
+    @Test fun playerFitCyclesAndPersists() {
+        val kv = MemoryKeyValue()
+        val p = PlayerPrefs(kv)
+        assertEquals(VideoFit.Fit, p.fit) // default: whole picture
+        assertEquals(VideoFit.Fill, VideoFit.Fit.next())
+        assertEquals(VideoFit.Stretch, VideoFit.Fill.next())
+        assertEquals(VideoFit.Fit, VideoFit.Stretch.next())
+        p.fit = VideoFit.Fill
+        assertEquals(VideoFit.Fill, PlayerPrefs(kv).fit) // survives a new session
+        kv.put(PlayerPrefs.FIT, "bogus")
+        assertEquals(VideoFit.Fit, PlayerPrefs(kv).fit)
+    }
+
     @Test fun languagePrefs() {
         val p = LanguagePrefs(MemoryKeyValue())
         assertFalse(p.hasPrefs())

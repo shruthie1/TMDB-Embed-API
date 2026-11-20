@@ -5,6 +5,19 @@ import androidx.compose.foundation.gestures.BringIntoViewSpec
 import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.foundation.focusGroup
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.ui.graphics.Brush
+import androidx.tv.material3.Glow
+import androidx.tv.material3.LocalContentColor
+import com.chitram.app.ui.common.Focus
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -116,15 +129,25 @@ import com.chitram.app.ui.common.Tok
 import com.chitram.app.ui.common.metaLine
 import kotlinx.coroutines.delay
 
-private val focusBorder = Border(BorderStroke(2.dp, Tok.accent), shape = Tok.radiusMd)
-private const val FOCUS_SCALE = 1.04f // --focus-scale
+// Focus: see Focus in Common.kt. Pictures get a white frame, shadow and lift.
+private val focusBorder = Border(BorderStroke(Focus.ringWidth, Focus.ring), shape = Tok.radiusMd)
+private val focusGlow = Glow(elevationColor = Focus.shadow, elevation = Focus.shadowElevation)
+private const val FOCUS_SCALE = Focus.pictureScale
+private val POSTER_W = 124.dp
+private val POSTER_H = 186.dp
+/** Collapsed side rail; its width is reserved so it never covers a poster. */
+private val RAIL_W = 84.dp
+private val RAIL_OPEN_W = 248.dp
+/** Left gutter of a screen that sits next to the rail. */
+private val RAIL_GUTTER = 28.dp
 
 @Composable
+@OptIn(ExperimentalComposeUiApi::class)
 fun TvApp(nav: Nav) {
     MaterialTheme(
         colorScheme = darkColorScheme(
             primary = Color.White, onPrimary = Tok.bg, background = Tok.bg, onBackground = Tok.text,
-            surface = Tok.surface, onSurface = Tok.text, onSurfaceVariant = Tok.textMuted, border = Tok.accent,
+            surface = Tok.surface, onSurface = Tok.text, onSurfaceVariant = Tok.textMuted, border = Focus.ring,
         ),
     ) {
         // Where focus was on Home, so Back lands on the same card.
@@ -132,7 +155,11 @@ fun TvApp(nav: Nav) {
         val homeList = rememberLazyListState()
         BackHandler(enabled = nav.stack.size > 1) { nav.pop() }
         Box(Modifier.fillMaxSize().background(Tok.bg)) {
-            when (val s = nav.top) {
+            val s = nav.top
+            val rail = s == Screen.Home || s == Screen.Search || s == Screen.MyList || s is Screen.Browse || (s is Screen.Langs && !s.firstRun)
+            CompositionLocalProvider(LocalLastFocus provides remember { mutableStateOf<FocusRequester?>(null) }) {
+            Box(Modifier.fillMaxSize().padding(start = if (rail) RAIL_W else 0.dp)) {
+            when (s) {
                 Screen.Home -> TvHome(nav, restore, homeList)
                 Screen.Search -> TvSearch(nav)
                 Screen.MyList -> TvGrid(nav, "My list", App.instance.myList.all(), empty = "Titles you add show up here.")
@@ -142,11 +169,15 @@ fun TvApp(nav: Nav) {
                 is Screen.Browse -> TvBrowse(nav, s.initial)
                 is Screen.Player -> PlayerScreen(s.req, isTv = true, onBack = { nav.pop() })
             }
+            }
+            if (rail) TvRail(nav, s)
+            }
         }
     }
 }
 
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 private fun TvHome(nav: Nav, restore: androidx.compose.runtime.MutableState<String?>, listState: androidx.compose.foundation.lazy.LazyListState) {
     val vm: HomeVm = viewModel()
     LaunchedEffect(Unit) { vm.load() }
@@ -190,29 +221,34 @@ private fun TvHome(nav: Nav, restore: androidx.compose.runtime.MutableState<Stri
         }
         // One LazyColumn for header and rows, so D-pad Up/Down always walks
         // row by row (a fixed header above a list let Up jump to the nav chips).
+        // Vertical moves scroll explicitly (moveRow), so the column itself
+        // scrolls only as far as needed: the TV default pivot pushed the title
+        // and hero off the top when the first card took focus. Rows keep the
+        // default horizontal behaviour.
+        val rowScroll = LocalBringIntoViewSpec.current
+        CompositionLocalProvider(LocalBringIntoViewSpec provides MinimalScroll) {
         LazyColumn(state = listState, contentPadding = PaddingValues(bottom = 48.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
             item(key = "header") {
+                // Only the app name at the top. It is not sticky: it scrolls
+                // away with the rows. Navigation lives in the side rail.
                 Column {
-                    Row(Modifier.padding(start = 48.dp, top = 20.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text("Chitram", style = TextStyle(color = Tok.text, fontSize = 22.sp, fontWeight = FontWeight.Bold), modifier = Modifier.padding(end = 20.dp))
-                        TvChip("Search", icon = Icons.Filled.Search) { nav.push(Screen.Search) }
-                        TvChip("Browse", icon = Icons.Filled.Tune) { nav.push(Screen.Browse()) }
-                        TvChip("My list", icon = Icons.Filled.Bookmark) { nav.push(Screen.MyList) }
-                        TvChip("Languages", icon = Icons.Filled.Translate) { nav.push(Screen.Langs(false)) }
-                    }
-                    Column(Modifier.padding(start = 48.dp, top = 28.dp, end = 48.dp).fillMaxWidth(0.5f).height(150.dp)) {
+                    Text("Chitram", style = TextStyle(color = Tok.text, fontSize = 26.sp, fontWeight = FontWeight.Bold), modifier = Modifier.padding(start = RAIL_GUTTER, top = 18.dp))
+                    Column(Modifier.padding(start = RAIL_GUTTER, top = 14.dp, end = 48.dp).fillMaxWidth(0.55f).height(168.dp)) {
                         shown?.let { t ->
-                            Text(t.title, style = TextStyle(color = Tok.text, fontSize = 30.sp, fontWeight = FontWeight.Bold), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text(metaLine(t.year, t.rating, langName(t.originalLang)), style = TextStyle(color = Tok.textSecondary, fontSize = 14.sp), modifier = Modifier.padding(vertical = 6.dp))
-                            Text(t.overview.orEmpty(), style = TextStyle(color = Tok.textMuted, fontSize = 14.sp), maxLines = if (heroIsContinue) 2 else 3, overflow = TextOverflow.Ellipsis)
+                            Text(t.title, style = TextStyle(color = Tok.text, fontSize = 36.sp, fontWeight = FontWeight.Bold), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(metaLine(t.year, t.rating, langName(t.originalLang)), style = TextStyle(color = Tok.textSecondary, fontSize = 18.sp), modifier = Modifier.padding(vertical = 6.dp))
+                            Text(t.overview.orEmpty(), style = TextStyle(color = Tok.textMuted, fontSize = 17.sp, lineHeight = 23.sp), maxLines = if (heroIsContinue) 2 else 3, overflow = TextOverflow.Ellipsis)
                         }
                     }
                 }
             }
             itemsIndexed(visible, key = { _, r -> r.kind }) { i, row ->
                 val fr = rowFocus.getOrPut(row.kind) { FocusRequester() }
-                TvRow(row, nav, restore, fr, onFocus = { focused = row.kind to it.key }, onMove = { d -> moveRow(i + d) }, onRetry = { vm.retry(row.kind) })
+                CompositionLocalProvider(LocalBringIntoViewSpec provides rowScroll) {
+                    TvRow(row, nav, restore, fr, onFocus = { focused = row.kind to it.key }, onMove = { d -> moveRow(i + d) }, onRetry = { vm.retry(row.kind) })
+                }
             }
+        }
         }
     }
 }
@@ -224,7 +260,7 @@ private fun TvRow(
     onFocus: (Title) -> Unit, onMove: (Int) -> Boolean, onRetry: () -> Unit,
 ) {
     Column {
-        Text(row.label, style = TextStyle(color = Tok.text, fontSize = 18.sp, fontWeight = FontWeight.SemiBold), modifier = Modifier.padding(start = 48.dp, bottom = 10.dp))
+        Text(row.label, style = TextStyle(color = Tok.text, fontSize = 24.sp, fontWeight = FontWeight.SemiBold), modifier = Modifier.padding(start = RAIL_GUTTER, bottom = 6.dp))
         val wide = row.kind == "continue"
         LazyRow(
             modifier = Modifier
@@ -238,13 +274,14 @@ private fun TvRow(
                         else -> false
                     }
                 },
-            contentPadding = PaddingValues(horizontal = 48.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            // Room above and below for the focus lift and shadow.
+            contentPadding = PaddingValues(start = RAIL_GUTTER, end = 48.dp, top = 12.dp, bottom = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             if (row.error) {
                 item { TvChip("Couldn't load this section · Retry", onClick = onRetry) }
             } else if (row.loading) {
-                items(6) { Box(Modifier.size(if (wide) 240.dp else 130.dp, if (wide) 135.dp else 195.dp).background(Tok.surfaceSolid, Tok.radiusMd)) }
+                items(6) { Box(Modifier.size(if (wide) 240.dp else POSTER_W, if (wide) 135.dp else POSTER_H).background(Tok.surfaceSolid, Tok.radiusMd)) }
             } else {
                 items(row.titles, key = { it.key }) { t ->
                     val rk = "${row.kind}|${t.key}"
@@ -277,10 +314,11 @@ private fun TvRow(
 fun PosterCard(t: Title, modifier: Modifier = Modifier, rank: Int? = null, showType: Boolean = false, onClick: () -> Unit) {
     Card(
         onClick = onClick,
-        modifier = modifier.size(130.dp, 195.dp),
+        modifier = modifier.returnTarget().size(POSTER_W, POSTER_H),
         shape = CardDefaults.shape(Tok.radiusMd),
         scale = CardDefaults.scale(focusedScale = FOCUS_SCALE),
         border = CardDefaults.border(focusedBorder = focusBorder),
+        glow = CardDefaults.glow(focusedGlow = focusGlow),
         colors = CardDefaults.colors(containerColor = Tok.surfaceSolid),
     ) {
         Box(Modifier.fillMaxSize()) {
@@ -298,28 +336,30 @@ fun PosterCard(t: Title, modifier: Modifier = Modifier, rank: Int? = null, showT
 private fun SeeAllCard(modifier: Modifier = Modifier, onClick: () -> Unit) {
     Card(
         onClick = onClick,
-        modifier = modifier.size(130.dp, 195.dp),
+        modifier = modifier.returnTarget().size(POSTER_W, POSTER_H),
         shape = CardDefaults.shape(Tok.radiusMd),
         scale = CardDefaults.scale(focusedScale = FOCUS_SCALE),
         border = CardDefaults.border(focusedBorder = focusBorder),
-        colors = CardDefaults.colors(containerColor = Tok.fill1, focusedContainerColor = Tok.fill2),
+        glow = CardDefaults.glow(focusedGlow = focusGlow),
+        colors = CardDefaults.colors(containerColor = Tok.fill1, contentColor = Tok.text, focusedContainerColor = Focus.fill, focusedContentColor = Focus.ink),
     ) {
         Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-            Icon(Icons.Filled.ChevronRight, null, tint = Tok.text, modifier = Modifier.size(32.dp))
-            Text("See all", color = Tok.text, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+            Icon(Icons.Filled.ChevronRight, null, tint = LocalContentColor.current, modifier = Modifier.size(32.dp))
+            Text("See all", fontSize = 17.sp, fontWeight = FontWeight.Medium)
         }
     }
 }
 
 @Composable
 private fun WideCard(t: Title, p: Progress?, modifier: Modifier, onClick: () -> Unit) {
-    Column(modifier.width(240.dp)) {
+    Column(modifier.returnTarget().width(240.dp)) {
         Card(
             onClick = onClick,
             modifier = Modifier.size(240.dp, 135.dp),
             shape = CardDefaults.shape(Tok.radiusMd),
             scale = CardDefaults.scale(focusedScale = FOCUS_SCALE),
             border = CardDefaults.border(focusedBorder = focusBorder),
+        glow = CardDefaults.glow(focusedGlow = focusGlow),
             colors = CardDefaults.colors(containerColor = Tok.surfaceSolid),
         ) {
             Box(Modifier.fillMaxSize()) {
@@ -330,7 +370,7 @@ private fun WideCard(t: Title, p: Progress?, modifier: Modifier, onClick: () -> 
             }
         }
         val sub = if (p != null && p.mediaType == "tv") "${t.title} · S${p.season} E${p.episode}" else t.title
-        Text(sub, color = Tok.textSecondary, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 6.dp))
+        Text(sub, color = Tok.textSecondary, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 8.dp))
     }
 }
 
@@ -338,20 +378,26 @@ private fun WideCard(t: Title, p: Progress?, modifier: Modifier, onClick: () -> 
 private fun TvChip(text: String, selected: Boolean = false, modifier: Modifier = Modifier, icon: ImageVector? = null, onClick: () -> Unit) {
     Surface(
         onClick = onClick,
-        modifier = modifier,
+        modifier = modifier.returnTarget(),
         shape = ClickableSurfaceDefaults.shape(Tok.pill),
-        scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
+        // Focus inverts to white with dark ink; selected stays quiet so the
+        // two never look alike.
+        scale = ClickableSurfaceDefaults.scale(focusedScale = Focus.controlScale),
         colors = ClickableSurfaceDefaults.colors(
-            containerColor = if (selected) Color.White.copy(alpha = 0.9f) else Tok.fill2,
-            contentColor = if (selected) Tok.bg else Tok.text,
-            focusedContainerColor = if (selected) Color.White else Tok.fill3,
-            focusedContentColor = if (selected) Tok.bg else Tok.text,
+            containerColor = if (selected) Focus.selectedFill else Tok.fill2,
+            contentColor = Tok.text,
+            focusedContainerColor = Focus.fill,
+            focusedContentColor = Focus.ink,
         ),
-        border = ClickableSurfaceDefaults.border(focusedBorder = Border(BorderStroke(2.dp, Tok.accent), shape = Tok.pill)),
+        border = ClickableSurfaceDefaults.border(
+            border = if (selected) Border(BorderStroke(1.5.dp, Color.White.copy(alpha = 0.55f)), shape = Tok.pill) else Border.None,
+            focusedBorder = Border.None,
+        ),
+        glow = ClickableSurfaceDefaults.glow(focusedGlow = focusGlow),
     ) {
-        Row(Modifier.padding(horizontal = 18.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            if (icon != null) Icon(icon, null, Modifier.padding(end = 8.dp).size(18.dp), tint = if (selected) Tok.bg else Tok.text)
-            Text(text, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+        Row(Modifier.padding(horizontal = 20.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (icon != null) Icon(icon, null, Modifier.padding(end = 8.dp).size(20.dp), tint = LocalContentColor.current)
+            Text(text, fontSize = 18.sp, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium)
         }
     }
 }
@@ -360,18 +406,19 @@ private fun TvChip(text: String, selected: Boolean = false, modifier: Modifier =
 private fun TvButton(text: String, primary: Boolean, modifier: Modifier = Modifier, icon: ImageVector? = null, onClick: () -> Unit) {
     Button(
         onClick = onClick,
-        modifier = modifier,
-        scale = ButtonDefaults.scale(focusedScale = 1f),
+        modifier = modifier.returnTarget(),
+        // Focus: white fill, dark ink, lift and shadow. Only focus is white.
+        scale = ButtonDefaults.scale(focusedScale = Focus.controlScale),
         colors = ButtonDefaults.colors(
-            containerColor = if (primary) Color.White else Tok.fill2,
-            contentColor = if (primary) Tok.bg else Tok.text,
-            focusedContainerColor = if (primary) Color.White else Tok.fill3,
-            focusedContentColor = if (primary) Tok.bg else Tok.text,
+            containerColor = if (primary) Focus.primaryFill else Tok.fill2,
+            contentColor = Tok.text,
+            focusedContainerColor = Focus.fill,
+            focusedContentColor = Focus.ink,
         ),
-        border = ButtonDefaults.border(focusedBorder = Border(BorderStroke(2.dp, Tok.accent), shape = Tok.pill)),
+        glow = ButtonDefaults.glow(focusedGlow = focusGlow),
     ) {
-        if (icon != null) Icon(icon, null, Modifier.padding(end = 8.dp).size(20.dp), tint = if (primary) Tok.bg else Tok.text)
-        Text(text, fontWeight = FontWeight.SemiBold)
+        if (icon != null) Icon(icon, null, Modifier.padding(end = 8.dp).size(22.dp), tint = LocalContentColor.current)
+        Text(text, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
     }
 }
 
@@ -403,15 +450,15 @@ private fun TvDetail(nav: Nav, type: String, id: Long) {
                 item(key = "head") {
                     Column(Modifier.padding(start = 48.dp).fillMaxWidth(0.55f)) {
                         Text(t.title, style = TextStyle(color = Tok.text, fontSize = 34.sp, fontWeight = FontWeight.Bold), maxLines = 2)
-                        t.tagline?.takeIf { it.isNotBlank() }?.let { Text(it, color = Tok.textMuted, fontSize = 15.sp, modifier = Modifier.padding(top = 4.dp)) }
+                        t.tagline?.takeIf { it.isNotBlank() }?.let { Text(it, color = Tok.textMuted, fontSize = 18.sp, modifier = Modifier.padding(top = 4.dp)) }
                         val extra = listOfNotNull(
                             runtimeText(t.runtimeMin),
                             t.seasons?.takeIf { t.mediaType == "tv" && it > 0 }?.let { "$it season${if (it == 1) "" else "s"}" },
                             langName(t.originalLang),
                         ).joinToString("  ·  ")
-                        Text(metaLine(t.year, t.rating, extra.ifEmpty { null }), color = Tok.textSecondary, fontSize = 14.sp, modifier = Modifier.padding(vertical = 8.dp))
-                        if (t.genres.isNotEmpty()) Text(t.genres.joinToString(" · "), color = Tok.textMuted, fontSize = 13.sp)
-                        Text(t.overview.orEmpty(), color = Tok.textSecondary, fontSize = 15.sp, maxLines = 4, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 12.dp))
+                        Text(metaLine(t.year, t.rating, extra.ifEmpty { null }), color = Tok.textSecondary, fontSize = 18.sp, modifier = Modifier.padding(vertical = 8.dp))
+                        if (t.genres.isNotEmpty()) Text(t.genres.joinToString(" · "), color = Tok.textMuted, fontSize = 16.sp)
+                        Text(t.overview.orEmpty(), color = Tok.textSecondary, fontSize = 18.sp, lineHeight = 25.sp, maxLines = 4, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 12.dp))
                     }
                 }
                 item(key = "actions") {
@@ -451,6 +498,7 @@ private fun TvDetail(nav: Nav, type: String, id: Long) {
                                         shape = CardDefaults.shape(Tok.radiusMd),
                                         scale = CardDefaults.scale(focusedScale = FOCUS_SCALE),
                                         border = CardDefaults.border(focusedBorder = focusBorder),
+        glow = CardDefaults.glow(focusedGlow = focusGlow),
                                         colors = CardDefaults.colors(containerColor = Tok.surfaceSolid),
                                     ) {
                                         Box(Modifier.fillMaxSize()) {
@@ -462,10 +510,10 @@ private fun TvDetail(nav: Nav, type: String, id: Long) {
                                             }
                                         }
                                     }
-                                    Text(ep.title.ifEmpty { "Episode ${ep.episode}" }, color = Tok.text, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 8.dp))
+                                    Text(ep.title.ifEmpty { "Episode ${ep.episode}" }, color = Tok.text, fontSize = 17.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 8.dp))
                                     val meta = listOfNotNull(if (isNext) "Next up" else null, ep.runtimeMin?.let { "$it min" }, if (p?.finished == true) "Watched" else null).joinToString(" · ")
-                                    if (meta.isNotEmpty()) Text(meta, color = if (isNext) Tok.accent else Tok.textMuted, fontSize = 12.sp)
-                                    ep.overview?.let { Text(it, color = Tok.textMuted, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp)) }
+                                    if (meta.isNotEmpty()) Text(meta, color = if (isNext) Tok.accent else Tok.textMuted, fontSize = 15.sp)
+                                    ep.overview?.let { Text(it, color = Tok.textMuted, fontSize = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp)) }
                                 }
                             }
                         }
@@ -484,7 +532,7 @@ private fun TvDetail(nav: Nav, type: String, id: Long) {
                     Column {
                         TvSection("More like this")
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(16.dp), contentPadding = PaddingValues(horizontal = 48.dp, vertical = 6.dp)) {
-                            if (sim == null) items(6) { Box(Modifier.size(130.dp, 195.dp).background(Tok.surfaceSolid, Tok.radiusMd)) }
+                            if (sim == null) items(6) { Box(Modifier.size(POSTER_W, POSTER_H).background(Tok.surfaceSolid, Tok.radiusMd)) }
                             else items(sim, key = { it.key }) { s -> PosterCard(s) { nav.push(Screen.Detail(s.mediaType, s.tmdbId)) } }
                         }
                     }
@@ -493,7 +541,7 @@ private fun TvDetail(nav: Nav, type: String, id: Long) {
                     val facts = listOf("Director" to t.director, "Writers" to t.writers, "Country" to t.country).filter { it.second.isNotEmpty() }
                     if (facts.isNotEmpty()) Row(Modifier.padding(horizontal = 48.dp), horizontalArrangement = Arrangement.spacedBy(40.dp)) {
                         facts.forEach { (k, v) ->
-                            Column { Text(k, color = Tok.textMuted, fontSize = 13.sp); Text(v.joinToString(", "), color = Tok.textSecondary, fontSize = 14.sp) }
+                            Column { Text(k, color = Tok.textMuted, fontSize = 15.sp); Text(v.joinToString(", "), color = Tok.textSecondary, fontSize = 17.sp) }
                         }
                     }
                 }
@@ -504,18 +552,19 @@ private fun TvDetail(nav: Nav, type: String, id: Long) {
 
 @Composable
 private fun TvSection(label: String) {
-    Text(label, style = TextStyle(color = Tok.text, fontSize = 18.sp, fontWeight = FontWeight.SemiBold), modifier = Modifier.padding(start = 48.dp, bottom = 10.dp))
+    Text(label, style = TextStyle(color = Tok.text, fontSize = 22.sp, fontWeight = FontWeight.SemiBold), modifier = Modifier.padding(start = 48.dp, bottom = 10.dp))
 }
 
 @Composable
 private fun TvCastCard(c: Credit, onClick: () -> Unit) {
-    Column(Modifier.width(110.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+    Column(Modifier.width(124.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Surface(
             onClick = onClick,
             modifier = Modifier.size(96.dp),
             shape = ClickableSurfaceDefaults.shape(CircleShape),
             scale = ClickableSurfaceDefaults.scale(focusedScale = FOCUS_SCALE),
-            border = ClickableSurfaceDefaults.border(focusedBorder = Border(BorderStroke(3.dp, Tok.accent), shape = CircleShape)),
+            border = ClickableSurfaceDefaults.border(focusedBorder = Border(BorderStroke(Focus.ringWidth, Focus.ring), shape = CircleShape)),
+            glow = ClickableSurfaceDefaults.glow(focusedGlow = focusGlow),
             colors = ClickableSurfaceDefaults.colors(containerColor = Tok.surfaceSolid, focusedContainerColor = Tok.surfaceSolid),
         ) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -523,8 +572,8 @@ private fun TvCastCard(c: Credit, onClick: () -> Unit) {
                 else Text(c.name.take(1), color = Tok.textSecondary, fontSize = 30.sp)
             }
         }
-        Text(c.name, color = Tok.text, fontSize = 13.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 8.dp))
-        c.character?.let { Text(it, color = Tok.textMuted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+        Text(c.name, color = Tok.text, fontSize = 16.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 8.dp))
+        c.character?.let { Text(it, color = Tok.textMuted, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
     }
 }
 
@@ -539,7 +588,7 @@ private fun TvPerson(nav: Nav, id: Long, name: String) {
     val first = remember { FocusRequester() }
     LaunchedEffect(d) { if (d?.titles?.isNotEmpty() == true) { withFrameNanos { }; runCatching { first.requestFocus() } } }
     LazyVerticalGrid(
-        GridCells.Adaptive(130.dp), Modifier.fillMaxSize(),
+        GridCells.Adaptive(POSTER_W), Modifier.fillMaxSize(),
         contentPadding = PaddingValues(start = 48.dp, end = 48.dp, top = 32.dp, bottom = 32.dp),
         horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
@@ -552,7 +601,7 @@ private fun TvPerson(nav: Nav, id: Long, name: String) {
                 }
                 Column(Modifier.padding(start = 24.dp)) {
                     Text(p?.name ?: name, style = TextStyle(color = Tok.text, fontSize = 30.sp, fontWeight = FontWeight.Bold))
-                    p?.knownFor?.let { Text(it, color = Tok.textMuted, fontSize = 15.sp) }
+                    p?.knownFor?.let { Text(it, color = Tok.textMuted, fontSize = 18.sp) }
                     when {
                         d == null -> Text("Loading", color = Tok.textMuted)
                         d.person == null -> Text("That profile is not in the catalog.", color = Tok.textMuted)
@@ -575,15 +624,15 @@ private fun TvBrowse(nav: Nav, initial: BrowseFilters) {
     LaunchedEffect(initial) { vm.start(initial) }
     val f = vm.filters
     LazyVerticalGrid(
-        GridCells.Adaptive(130.dp), Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = 48.dp, end = 48.dp, top = 28.dp, bottom = 32.dp),
+        GridCells.Adaptive(POSTER_W), Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = RAIL_GUTTER, end = 48.dp, top = 28.dp, bottom = 32.dp),
         horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         full("head") {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Browse", style = TextStyle(color = Tok.text, fontSize = 28.sp, fontWeight = FontWeight.Bold), modifier = Modifier.padding(end = 20.dp))
-                    Text(listOfNotNull(vm.total?.let { "%,d titles".format(it) }).joinToString(), color = Tok.textMuted, fontSize = 14.sp)
+                    Text("Browse", style = TextStyle(color = Tok.text, fontSize = 32.sp, fontWeight = FontWeight.Bold), modifier = Modifier.padding(end = 20.dp))
+                    Text(listOfNotNull(vm.total?.let { "%,d titles".format(it) }).joinToString(), color = Tok.textMuted, fontSize = 17.sp)
                 }
                 TvFilterRow("Type", listOf("movie" to "Movies", "tv" to "Series"), { it == f.type }) { vm.set(f.copy(type = it)) }
                 TvFilterRow("Language", LanguagePrefs.LANGS.map { it.code to it.label }, { it in f.langs }) { c -> vm.set(f.copy(langs = if (c in f.langs) f.langs - c else f.langs + c)) }
@@ -600,15 +649,15 @@ private fun TvBrowse(nav: Nav, initial: BrowseFilters) {
             if (i >= vm.titles.size - 6) LaunchedEffect(vm.titles.size) { vm.loadMore() }
             PosterCard(t, showType = true) { nav.push(Screen.Detail(t.mediaType, t.tmdbId)) }
         }
-        if (vm.loading) items(if (vm.titles.isEmpty()) 12 else 6, key = { "sk$it" }) { Box(Modifier.size(130.dp, 195.dp).background(Tok.surfaceSolid, Tok.radiusMd)) }
+        if (vm.loading) items(if (vm.titles.isEmpty()) 12 else 6, key = { "sk$it" }) { Box(Modifier.size(POSTER_W, POSTER_H).background(Tok.surfaceSolid, Tok.radiusMd)) }
     }
 }
 
 @Composable
 private fun <T> TvFilterRow(label: String, opts: List<Pair<T, String>>, on: (T) -> Boolean, pick: (T) -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(label, color = Tok.textMuted, fontSize = 14.sp, modifier = Modifier.width(96.dp))
-        LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(vertical = 2.dp)) {
+        Text(label, color = Tok.textMuted, fontSize = 17.sp, modifier = Modifier.width(110.dp))
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(vertical = 6.dp, horizontal = 4.dp)) {
             items(opts, key = { it.first.toString() }) { (id, name) -> TvChip(name, selected = on(id)) { pick(id) } }
         }
     }
@@ -644,20 +693,21 @@ private fun TvSearch(nav: Nav) {
         vm.submit()
         toResults = true
     }
-    Column(Modifier.fillMaxSize().padding(start = 48.dp, end = 48.dp, top = 32.dp)) {
+    Column(Modifier.fillMaxSize().padding(start = RAIL_GUTTER, end = 48.dp, top = 32.dp)) {
         var fieldFocused by remember { mutableStateOf(false) }
         BasicTextField(
             value = vm.query,
             onValueChange = { vm.onQuery(it); toResults = false },
             singleLine = true,
-            textStyle = TextStyle(color = Tok.text, fontSize = 20.sp),
-            cursorBrush = SolidColor(Tok.accent),
+            textStyle = TextStyle(color = Tok.text, fontSize = 22.sp),
+            cursorBrush = SolidColor(Color.White),
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
             // The IME action closes the keyboard and moves to the first result.
             // While the keyboard is open it keeps D-pad Down for itself.
             keyboardActions = KeyboardActions(onSearch = { goToResults() }, onDone = { goToResults() }, onGo = { goToResults() }),
             modifier = Modifier
                 .fillMaxWidth(0.6f)
+                .returnTarget()
                 .focusRequester(field)
                 .onFocusChanged { fieldFocused = it.isFocused }
                 .onPreviewKeyEvent { e ->
@@ -675,10 +725,10 @@ private fun TvSearch(nav: Nav) {
             decorationBox = { inner ->
                 Box(
                     Modifier.background(Tok.surfaceSolid, Tok.pill)
-                        .border(2.dp, if (fieldFocused) Tok.accent else Color.Transparent, Tok.pill)
+                        .border(Focus.ringWidth, if (fieldFocused) Focus.ring else Tok.border, Tok.pill)
                         .padding(horizontal = 20.dp, vertical = 12.dp),
                 ) {
-                    if (vm.query.isEmpty()) Text("Search movies and shows", color = Tok.textDim, fontSize = 20.sp)
+                    if (vm.query.isEmpty()) Text("Search movies and shows", color = Tok.textDim, fontSize = 22.sp)
                     inner()
                 }
             },
@@ -688,22 +738,22 @@ private fun TvSearch(nav: Nav) {
             vm.error != null -> Text(vm.error!!, color = Tok.danger)
             vm.loading && vm.results.isEmpty() -> Text("Searching", color = Tok.textMuted)
             vm.query.length >= 2 && vm.results.isEmpty() && !vm.loading -> Text("No results for \"${vm.query}\"", color = Tok.textMuted)
-            vm.results.isNotEmpty() -> Text("${vm.results.size} results for “${vm.resultsFor}”", color = Tok.textMuted, fontSize = 14.sp)
+            vm.results.isNotEmpty() -> Text("${vm.results.size} results for “${vm.resultsFor}”", color = Tok.textMuted, fontSize = 17.sp)
             vm.query.isBlank() -> Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 if (vm.recent.isNotEmpty()) {
-                    Text("Recent", color = Tok.textSecondary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("Recent", color = Tok.textSecondary, fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(6.dp)) {
                         items(vm.recent, key = { it }) { q -> TvChip(q, icon = Icons.Filled.Search) { vm.onQuery(q); vm.submit(); toResults = true } }
                         item(key = "clear") { TvChip("Clear") { vm.clearRecent() } }
                     }
                 }
-                Text("Browse instead", color = Tok.textSecondary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Browse instead", color = Tok.textSecondary, fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(6.dp)) {
                     items(TV_SUGGEST, key = { it.first }) { (label, f) -> TvChip(label) { nav.push(Screen.Browse(f)) } }
                 }
             }
         }
-        LazyVerticalGrid(GridCells.Adaptive(130.dp), state = grid, horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp), contentPadding = PaddingValues(vertical = 8.dp)) {
+        LazyVerticalGrid(GridCells.Adaptive(POSTER_W), state = grid, horizontalArrangement = Arrangement.spacedBy(14.dp), verticalArrangement = Arrangement.spacedBy(18.dp), contentPadding = PaddingValues(vertical = 12.dp, horizontal = 6.dp)) {
             gridItemsIndexed(vm.results, key = { _, t -> t.key }) { i, t ->
                 PosterCard(t, if (i == 0) Modifier.focusRequester(firstCard) else Modifier, showType = true) { vm.remember(); nav.push(Screen.Detail(t.mediaType, t.tmdbId)) }
             }
@@ -713,10 +763,10 @@ private fun TvSearch(nav: Nav) {
 
 @Composable
 private fun TvGrid(nav: Nav, title: String, titles: List<Title>, empty: String) {
-    Column(Modifier.fillMaxSize().padding(start = 48.dp, end = 48.dp, top = 32.dp)) {
-        Text(title, style = TextStyle(color = Tok.text, fontSize = 26.sp, fontWeight = FontWeight.Bold), modifier = Modifier.padding(bottom = 20.dp))
+    Column(Modifier.fillMaxSize().padding(start = RAIL_GUTTER, end = 48.dp, top = 32.dp)) {
+        Text(title, style = TextStyle(color = Tok.text, fontSize = 32.sp, fontWeight = FontWeight.Bold), modifier = Modifier.padding(bottom = 20.dp))
         if (titles.isEmpty()) Text(empty, color = Tok.textMuted)
-        LazyVerticalGrid(GridCells.Adaptive(130.dp), horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp), contentPadding = PaddingValues(vertical = 8.dp)) {
+        LazyVerticalGrid(GridCells.Adaptive(POSTER_W), horizontalArrangement = Arrangement.spacedBy(14.dp), verticalArrangement = Arrangement.spacedBy(18.dp), contentPadding = PaddingValues(vertical = 12.dp, horizontal = 6.dp)) {
             items(titles, key = { it.key }) { t -> PosterCard(t) { nav.push(Screen.Detail(t.mediaType, t.tmdbId)) } }
         }
     }
@@ -730,7 +780,7 @@ private fun TvLangs(firstRun: Boolean, onDone: () -> Unit) {
     LaunchedEffect(Unit) { runCatching { first.requestFocus() } }
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Column(Modifier.background(Tok.surface, Tok.radiusLg).padding(40.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("Your languages", style = TextStyle(color = Tok.text, fontSize = 26.sp, fontWeight = FontWeight.Bold))
+            Text("Your languages", style = TextStyle(color = Tok.text, fontSize = 30.sp, fontWeight = FontWeight.Bold))
             Text("Pick the languages you watch.", color = Tok.textMuted, modifier = Modifier.padding(top = 6.dp, bottom = 24.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 LanguagePrefs.LANGS.forEachIndexed { i, l ->
@@ -763,4 +813,109 @@ private val MinimalScroll = object : BringIntoViewSpec {
             else -> trailing - containerSize
         }
     }
+}
+
+private data class RailDest(val screen: Screen, val label: String, val icon: ImageVector)
+
+private val RAIL = listOf(
+    RailDest(Screen.Search, "Search", Icons.Filled.Search),
+    RailDest(Screen.Home, "Home", Icons.Filled.Home),
+    RailDest(Screen.Browse(), "Browse", Icons.Filled.Tune),
+    RailDest(Screen.MyList, "My list", Icons.Filled.Bookmark),
+    RailDest(Screen.Langs(false), "Languages", Icons.Filled.Translate),
+)
+
+private fun RailDest.matches(s: Screen) = when (screen) {
+    is Screen.Browse -> s is Screen.Browse
+    is Screen.Langs -> s is Screen.Langs
+    else -> s == screen
+}
+
+/**
+ * Left side rail (Netflix / Hotstar style). Collapsed it shows icons only and
+ * its width is reserved, so it never covers a poster. When it takes D-pad
+ * focus it opens to icon + label over a scrim and enters on the current
+ * destination. Right, or picking a destination, hands focus back to content.
+ */
+@Composable
+@OptIn(ExperimentalComposeUiApi::class)
+private fun TvRail(nav: Nav, top: Screen) {
+    var open by remember { mutableStateOf(false) }
+    val width by animateDpAsState(if (open) RAIL_OPEN_W else RAIL_W, label = "rail")
+    val current = RAIL.indexOfFirst { it.matches(top) }.coerceAtLeast(0)
+    val reqs = remember { List(RAIL.size) { FocusRequester() } }
+    val scope = rememberCoroutineScope()
+    val last = LocalLastFocus.current
+    val focusManager = LocalFocusManager.current
+    // Back to the item that had focus before the rail; if it is gone (a new
+    // screen), the nearest item to the right.
+    fun toContent() {
+        last.value?.let { runCatching { it.requestFocus() } }
+        scope.launch { withFrameNanos { }; if (open) focusManager.moveFocus(FocusDirection.Right) }
+    }
+    if (open) Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(0f to Tok.bg.copy(alpha = 0.9f), 0.45f to Tok.bg.copy(alpha = 0.55f), 1f to Color.Transparent)))
+    Column(
+        Modifier.fillMaxHeight().width(width)
+            .background(if (open) Brush.horizontalGradient(listOf(Tok.surfaceSolid, Tok.bg)) else Brush.horizontalGradient(listOf(Tok.bg, Tok.bg)))
+            .onFocusChanged { open = it.hasFocus }
+            .focusProperties { enter = { reqs[current] } }
+            .focusGroup()
+            .onPreviewKeyEvent { e ->
+                if (e.type == KeyEventType.KeyDown && e.key == Key.DirectionRight) { toContent(); true } else false
+            }
+            .padding(horizontal = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterVertically),
+    ) {
+        RAIL.forEachIndexed { i, d ->
+            RailButton(d, selected = i == current, open = open, modifier = Modifier.focusRequester(reqs[i])) {
+                if (i != current) nav.tab(d.screen)
+                // Hand focus to the new screen once it has composed, unless
+                // the screen already took it (Home restores, Search focuses its field).
+                scope.launch {
+                    withFrameNanos { }; withFrameNanos { }
+                    if (open) { last.value = null; toContent() }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RailButton(d: RailDest, selected: Boolean, open: Boolean, modifier: Modifier, onClick: () -> Unit) {
+    val src = remember { MutableInteractionSource() }
+    val focused by src.collectIsFocusedAsState()
+    Surface(
+        onClick = onClick,
+        modifier = modifier.fillMaxWidth().height(54.dp),
+        shape = ClickableSurfaceDefaults.shape(Tok.radiusMd),
+        scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
+        colors = ClickableSurfaceDefaults.colors(
+            containerColor = Color.Transparent,
+            contentColor = if (selected) Tok.text else Tok.textMuted,
+            focusedContainerColor = Focus.fill,
+            focusedContentColor = Focus.ink,
+        ),
+        glow = ClickableSurfaceDefaults.glow(focusedGlow = focusGlow),
+        interactionSource = src,
+    ) {
+        Box(Modifier.fillMaxSize()) {
+            // Current destination: a short accent bar, like the web's active tab.
+            if (selected && !focused) Box(Modifier.align(Alignment.CenterStart).width(3.dp).height(22.dp).background(Tok.accent, Tok.pill))
+            Row(Modifier.fillMaxSize().padding(start = 15.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(d.icon, contentDescription = d.label, tint = LocalContentColor.current, modifier = Modifier.size(26.dp))
+                if (open) Text(d.label, fontSize = 20.sp, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium, maxLines = 1, modifier = Modifier.padding(start = 18.dp))
+            }
+        }
+    }
+}
+
+/** The content item that last had focus, so Right from the rail returns to it. */
+private val LocalLastFocus = staticCompositionLocalOf { mutableStateOf<FocusRequester?>(null) }
+
+/** Marks a focusable as a place the rail can hand focus back to. */
+@Composable
+private fun Modifier.returnTarget(): Modifier {
+    val me = remember { FocusRequester() }
+    val last = LocalLastFocus.current
+    return this.focusRequester(me).onFocusChanged { if (it.isFocused) last.value = me }
 }
