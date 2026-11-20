@@ -26,6 +26,15 @@
 // header. The scraper dropped such streams (players fail on them); this port
 // keeps that check on the first segment of the top variant. Krack's segments
 // are named .png but are real MPEG-TS (206 video/mp2t, measured 2026-11-20).
+// The check timed out at 5s on Krack and held every resolve for it, so it now
+// runs in the background, once per segment host, and its answer is cached:
+// the first resolve on an unknown host fails open (as a timeout already did),
+// later ones drop the row when the host is known to disguise.
+//
+// DEAD AUDIO RENDITIONS. Krack's kan/mal/tam playlists never answered (30s
+// timeouts, 2026-11-20; Telugu answered in 593ms), and picking one gave a
+// proxy 500 after 30.2s. Each rendition playlist gets one parallel GET while
+// listing; one with no 2xx answer inside AUDIO_TIMEOUT_MS leaves audio[].
 
 const hls = require('../lib/media/hlsManifest');
 
@@ -35,6 +44,9 @@ const UA = 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, 
 const API_TIMEOUT_MS = 10000;
 const MASTER_TIMEOUT_MS = 8000;
 const PROBE_TIMEOUT_MS = 5000;
+// Mutable for tests only.
+const _config = { audioTimeoutMs: 8000 };
+const DISGUISE_CACHE_MS = 6 * 60 * 60 * 1000;
 
 // Headers the stream host gets through /m3u8-proxy. The scraper sent VidBolt's
 // own Referer/Origin on every playlist and segment fetch.
@@ -62,8 +74,8 @@ function cleanName(name) {
 
 // One audio[] entry per AUDIO rendition the master declares. LANGUAGE wins;
 // an untagged or `und` rendition falls back to its NAME so no tag is lost.
-function audioFromMaster(text, baseUrl) {
-    return hls.parseMedia(text, baseUrl, 'AUDIO').map((m) => {
+function audioFromMaster(text, baseUrl, deadUrls = null) {
+    return hls.parseMedia(text, baseUrl, 'AUDIO').filter((m) => !(deadUrls && m.url && deadUrls.has(m.url))).map((m) => {
         const code = String(m.languageCode || '').trim();
         const language = code && !/^(und|unk|mul|zxx)$/i.test(code) ? code : cleanName(m.name) || null;
         return { language, name: cleanName(m.name) || null, channels: m.channels || null, codec: null };
@@ -91,10 +103,10 @@ function teluguFirst(langs) {
 }
 
 // Pure: the stream row for one fetched master. Exported for tests.
-function streamFromMaster(src, masterText, masterUrl) {
+function streamFromMaster(src, masterText, masterUrl, deadAudioUrls = null) {
     const levels = hls.parseLevels(masterText, masterUrl);
     if (!levels.length) return null;
-    const audio = audioFromMaster(masterText, masterUrl);
+    const audio = audioFromMaster(masterText, masterUrl, deadAudioUrls);
     const languages = teluguFirst([...new Set(audio.map((a) => a.language).filter(Boolean))]);
     const quality = tierOf(levels[0]) || (/\b(2160|1440|1080|720|480|360)p\b/i.exec(src.quality || '') || [])[0] || 'Auto';
     const subtitles = hls.parseMedia(masterText, masterUrl, 'SUBTITLES')
@@ -127,15 +139,15 @@ function looksLikeImage(bytes) {
     return png || jpg || gif;
 }
 
-// The scraper's mmDisguised: first segment of the top variant. Fails open, as
-// in the scraper: a probe that cannot run does not drop the row.
+// The scraper's mmDisguised: first segment of the top variant. true / false,
+// or null when the probe could not run (fails open: the row is kept).
 async function segmentsDisguised(levelUrl) {
     try {
         const res = await fetch(levelUrl, { headers: STREAM_HEADERS, signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
-        if (!res.ok) return false;
+        if (!res.ok) return null;
         const text = await res.text();
         const seg = text.split(/\r?\n/).map((l) => l.trim()).find((l) => l && !l.startsWith('#'));
-        if (!seg) return false;
+        if (!seg) return null;
         const r = await fetch(hls.resolveUri(seg, levelUrl), {
             headers: { ...STREAM_HEADERS, Range: 'bytes=0-15' },
             signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
@@ -144,8 +156,56 @@ async function segmentsDisguised(levelUrl) {
         return looksLikeImage(head);
     } catch (e) {
         console.log(`[multimovies] segment probe failed open: ${e.message}`);
-        return false;
+        return null;
     }
+}
+
+// Per segment host: { disguised, at } once a check finished, and the in-flight
+// check so concurrent resolves share it. A check that could not run is not
+// cached, so the next resolve tries again.
+const disguiseCache = new Map();
+const disguiseInflight = new Map();
+
+function hostOf(url) {
+    try { return new URL(url).host; } catch { return null; }
+}
+
+// true / false from a finished check on this host, null when unknown. Starts
+// a background check when unknown; never waits for it.
+function disguisedHost(levelUrl) {
+    const host = hostOf(levelUrl);
+    if (!host) return null;
+    const hit = disguiseCache.get(host);
+    if (hit && Date.now() - hit.at < DISGUISE_CACHE_MS) return hit.disguised;
+    if (!disguiseInflight.has(host)) {
+        const p = segmentsDisguised(levelUrl)
+            .then((d) => {
+                if (d !== null) disguiseCache.set(host, { disguised: d, at: Date.now() });
+                console.log(`[multimovies] segment check host=${host} disguised=${d === null ? 'unknown' : d}`);
+            })
+            .finally(() => disguiseInflight.delete(host));
+        disguiseInflight.set(host, p);
+    }
+    return null;
+}
+
+// Set of AUDIO rendition URLs whose playlist gave no 2xx within the timeout.
+async function deadAudioUrls(masterText, masterUrl, tmdbId) {
+    const media = hls.parseMedia(masterText, masterUrl, 'AUDIO').filter((m) => m.url);
+    const dead = new Set();
+    await Promise.all(media.map(async (m) => {
+        const t0 = Date.now();
+        try {
+            const r = await fetch(m.url, { headers: STREAM_HEADERS, signal: AbortSignal.timeout(_config.audioTimeoutMs) });
+            if (r.body && r.body.cancel) r.body.cancel().catch(() => {});
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        } catch (e) {
+            dead.add(m.url);
+            console.log(`[multimovies] audio rendition ${m.languageCode || m.name || '?'} dropped for ${tmdbId}: `
+                + `${e.name === 'TimeoutError' ? `no answer in ${_config.audioTimeoutMs}ms` : e.message} (${Date.now() - t0}ms)`);
+        }
+    }));
+    return dead;
 }
 
 async function getMultimoviesStreams(tmdbId, mediaType = 'movie', seasonNum = null, episodeNum = null) {
@@ -176,13 +236,13 @@ async function getMultimoviesStreams(tmdbId, mediaType = 'movie', seasonNum = nu
             console.log(`[multimovies] master unreadable for ${tmdbId}, dropped: ${e.message}`);
             return null;
         }
-        const row = streamFromMaster(src, text, src.url);
-        if (!row) {
+        if (!hls.parseLevels(text, src.url).length) {
             console.log(`[multimovies] master has no variants for ${tmdbId}, dropped`);
             return null;
         }
+        const row = streamFromMaster(src, text, src.url, await deadAudioUrls(text, src.url, tmdbId));
         const top = hls.parseLevels(text, src.url)[0];
-        if (top && top.url && await segmentsDisguised(top.url)) {
+        if (top && top.url && disguisedHost(top.url) === true) {
             console.log(`[multimovies] segments disguised as images for ${tmdbId}, dropped`);
             return null;
         }
@@ -208,4 +268,7 @@ module.exports = {
     audioFromMaster,
     looksLikeImage,
     tierOf,
+    _config,
+    _clearDisguiseCache: () => { disguiseCache.clear(); disguiseInflight.clear(); },
+    _disguiseSettled: () => Promise.all([...disguiseInflight.values()]),
 };

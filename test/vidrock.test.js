@@ -27,11 +27,11 @@ test('too-short ciphertext throws', () => {
     assert.throws(() => decryptStreamUrl('AAAA'), /too short/);
 });
 
-test('Nova row: 1080p, English as stated, no switchable audio, vidrock headers', () => {
+test('Nova row: 1080p, unconfirmed English not claimed, no switchable audio, vidrock headers', () => {
     const row = streamFromMaster('Nova', NOVA, NOVA_URL, NOVA_MASTER);
     const n = normaliseStream(row);
     assert.equal(n.quality, '1080p');
-    assert.deepEqual(n.languages, ['English']);
+    assert.deepEqual(n.languages, []);
     assert.equal(n.selectableAudio, false);
     assert.equal(n.container, 'hls');
     assert.equal(row.headers.Referer, 'https://vidrock.net/');
@@ -57,4 +57,53 @@ test('quality tiers follow the scraper (width or height)', () => {
     assert.equal(tierOf(1280, 720), '720p');
     assert.equal(tierOf(640, 360), '360p');
     assert.equal(tierOf(0, 0), null);
+});
+
+// L1 (2026-11-20). The server's `language` is a hint, not a fact: Radhe Shyam
+// 673392's Nova row said English over a Hindi track. It labels the row only
+// when the master's own AUDIO renditions confirm it; otherwise the row stays
+// unlabelled and the hint is kept on `statedLanguage`.
+test('L1: stated language with no EXT-X-MEDIA leaves the row unlabelled, hint kept', () => {
+    const row = streamFromMaster('Nova', NOVA, NOVA_URL, NOVA_MASTER);
+    assert.deepEqual(row.languages, []);
+    assert.equal(row.statedLanguage, 'English');
+    const n = normaliseStream(row);
+    assert.deepEqual(n.languages, []);
+    assert.equal(n.language, undefined);
+});
+
+test('L1: stated language confirmed by a master AUDIO rendition labels the row', () => {
+    const text = '#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",LANGUAGE="eng",NAME="English",URI="e.m3u8"\n'
+        + '#EXT-X-STREAM-INF:BANDWIDTH=1,AUDIO="a",RESOLUTION=1920x1080\nv.m3u8\n';
+    const n = normaliseStream(streamFromMaster('Nova', NOVA, 'https://x/m.m3u8', text));
+    assert.deepEqual(n.languages, ['English']);
+});
+
+test('L1: stated language contradicted by the master is dropped, renditions kept', () => {
+    const text = '#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",LANGUAGE="hin",NAME="Hindi",URI="h.m3u8"\n'
+        + '#EXT-X-STREAM-INF:BANDWIDTH=1,AUDIO="a",RESOLUTION=1920x1080\nv.m3u8\n';
+    const row = streamFromMaster('Nova', NOVA, 'https://x/m.m3u8', text);
+    assert.deepEqual(normaliseStream(row).languages, ['Hindi']);
+    assert.equal(row.statedLanguage, 'English');
+});
+
+// P7a (2026-11-20). vercetti.org answers a sporadic 403 on the SAME master URL
+// regardless of age (laptop: 1 of 10 fetches at 3s spacing; 403 at t=20s then
+// 200 at 40/60/80s). On VM1 that dropped the only row twice in 20 minutes.
+test('P7a: one master 403 is retried once and the row survives', async (t) => {
+    const { getVidrockStreams } = require('../providers/vidrock');
+    const realFetch = global.fetch;
+    let masterCalls = 0;
+    global.fetch = async (url) => {
+        if (String(url).startsWith('https://vidrock.net/api/')) {
+            return new Response(JSON.stringify({ Nova: NOVA }), { status: 200 });
+        }
+        masterCalls += 1;
+        return masterCalls === 1 ? new Response('', { status: 403 }) : new Response(NOVA_MASTER, { status: 200 });
+    };
+    t.after(() => { global.fetch = realFetch; });
+    const rows = await getVidrockStreams('27205', 'movie');
+    assert.equal(masterCalls, 2);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].url, NOVA_URL);
 });

@@ -83,3 +83,76 @@ test('image-header segments are detected; MPEG-TS is not', () => {
     // Krack's ".png" segments are real TS: sync byte 0x47 then PID bytes.
     assert.equal(looksLikeImage([0x47, 0x40, 0x11, 0x10]), false);
 });
+
+// Network fixtures for getMultimoviesStreams. `hang` URLs never answer until
+// their AbortSignal fires, like Krack's kan/mal/tam playlists (2026-11-20:
+// three of four timed out at 30s, Telugu answered in 593ms).
+function stubFetch(t, routes) {
+    const realFetch = global.fetch;
+    const calls = [];
+    global.fetch = (url, opts = {}) => {
+        const u = String(url);
+        calls.push(u);
+        const route = routes.find(([re]) => re.test(u));
+        if (!route) return Promise.resolve(new Response('', { status: 404 }));
+        const body = route[1];
+        if (body === 'hang') {
+            return new Promise((_, reject) => {
+                const s = opts.signal;
+                if (s) s.addEventListener('abort', () => reject(s.reason || new Error('aborted')));
+            });
+        }
+        return Promise.resolve(typeof body === 'function' ? body(u) : new Response(body, { status: 200 }));
+    };
+    t.after(() => { global.fetch = realFetch; });
+    return calls;
+}
+
+const KRACK_API = JSON.stringify({ stream: { server: 'vidbolt', sources: [{ url: KRACK_URL, kind: 'hls', quality: '1080p' }] } });
+
+test('P6a: audio renditions whose playlist does not answer are dropped; Telugu kept', async (t) => {
+    const mm = require('../providers/multimovies');
+    mm._config.audioTimeoutMs = 100;
+    mm._clearDisguiseCache();
+    t.after(() => { mm._config.audioTimeoutMs = 8000; });
+    stubFetch(t, [
+        [/\/api\/resolve/, KRACK_API],
+        [/index\.m3u8/, KRACK],
+        [/track_telugu/, '#EXTM3U\n#EXTINF:4,\na.aac\n'],
+        [/track_(kannada|malayalam|tamil)/, 'hang'],
+        [/tiles\.m3u8/, '#EXTM3U\n#EXTINF:4,\ns0.png\n'],
+        [/s0\.png/, () => new Response(Buffer.from([0x47, 0x40, 0x11, 0x10]), { status: 206 })],
+    ]);
+    const rows = await mm.getMultimoviesStreams('784572', 'movie');
+    assert.equal(rows.length, 1);
+    assert.deepEqual(rows[0].audio.map((a) => a.language), ['tel']);
+    assert.deepEqual(rows[0].languages, ['tel']);
+    assert.equal(rows[0].selectableAudio, true);
+    await mm._disguiseSettled();
+});
+
+test('P6b: the disguised-segment check does not hold up the resolve, and is cached per host', async (t) => {
+    const mm = require('../providers/multimovies');
+    mm._clearDisguiseCache();
+    let segHits = 0;
+    stubFetch(t, [
+        [/\/api\/resolve/, KRACK_API],
+        [/index\.m3u8/, KRACK],
+        [/track_/, '#EXTM3U\n#EXTINF:4,\na.aac\n'],
+        [/tiles\.m3u8/, '#EXTM3U\n#EXTINF:4,\ns0.png\n'],
+        [/s0\.png/, () => {
+            segHits += 1;
+            // A slow host: answers an image header after 300ms.
+            return new Promise((res) => setTimeout(() => res(new Response(Buffer.from([0x89, 0x50, 0x4e, 0x47]), { status: 206 })), 300));
+        }],
+    ]);
+    const t0 = Date.now();
+    const first = await mm.getMultimoviesStreams('784572', 'movie');
+    assert.ok(Date.now() - t0 < 250, `resolve waited for the check: ${Date.now() - t0}ms`);
+    assert.equal(first.length, 1, 'unknown host fails open');
+    await mm._disguiseSettled();
+    const second = await mm.getMultimoviesStreams('784572', 'movie');
+    assert.equal(second.length, 0, 'cached disguised host drops the row');
+    await mm._disguiseSettled();
+    assert.equal(segHits, 1, 'one check per host');
+});

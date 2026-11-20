@@ -20,11 +20,21 @@
 //   - two api.themoviedb.org calls that only fed the card text (title, year,
 //     runtime). No stream data came from them.
 //
-// LANGUAGE. Each server entry states `language` (e.g. "English"); that is what
-// the row claims. Audio renditions are read from the master, never guessed.
+// LANGUAGE. Each server entry states `language` (e.g. "English"), but that is
+// a hint, not a fact: Radhe Shyam 673392's Nova said English over a Hindi
+// track (2026-11-20). The row claims the stated language only when one of the
+// master's AUDIO renditions confirms it. Otherwise it claims only what the
+// renditions say (often nothing = unlabelled), and keeps the hint on
+// `statedLanguage`. A first-segment probe cannot confirm it either: Nova's TS
+// segments carry no language tag (ffprobe on 27205, 2026-11-20).
+//
+// MASTER 403. vercetti.org answers a sporadic 403 on the same master URL
+// regardless of its age (1 of 10 fetches at 3s spacing; the URL is identical
+// across resolves minutes apart), so a 403 at resolve gets one retry.
 
 const { createDecipheriv } = require('crypto');
 const hls = require('../lib/media/hlsManifest');
+const { canonicalLanguage } = require('../utils/streamSchema');
 
 const API_BASE = 'https://vidrock.net';
 const STREAM_KEY = Buffer.from('7f3e9c2a8b5d1f4e6a9c3b7d2e5f8a1c4b6d9e2f5a8c1b4d7e9f2a5c8b1d4e7f', 'hex');
@@ -38,6 +48,7 @@ const HEADERS = {
 };
 const API_TIMEOUT_MS = 10000;
 const MASTER_TIMEOUT_MS = 8000;
+const MASTER_RETRY_DELAY_MS = 500;
 
 // base64url ciphertext -> plaintext URL. Throws on input too short to hold
 // IV + tag, as the scraper did.
@@ -74,15 +85,21 @@ function streamFromMaster(server, entry, url, masterText) {
         name: m.name || null, channels: m.channels || null, codec: null,
     }));
     const stated = String((entry && entry.language) || '').trim();
-    const languages = [...new Set([stated, ...audio.map((a) => a.language)].filter(Boolean))];
+    const rendition = audio.map((a) => a.language).filter(Boolean);
+    const confirmed = Boolean(stated) && audio.some((a) => [a.language, a.name]
+        .some((v) => v && canonicalLanguage(v) === canonicalLanguage(stated)));
+    const languages = [...new Set([...(confirmed ? [stated] : []), ...rendition])];
     return {
         name: `VidRock | ${quality} | ${server}`,
-        title: `VidRock · ${server}${stated ? ` · ${stated}` : ' · Original audio'}`,
+        // No language word here: normaliseStream reads one from the title
+        // when `languages` is empty, which would restore the unconfirmed hint.
+        title: `VidRock · ${server}${confirmed ? ` · ${stated}` : ''}`,
         url,
         provider: 'vidrock',
         quality,
         container: 'hls',
         languages,
+        statedLanguage: stated || null,
         audio,
         selectableAudio: audio.length > 0,
         levels: levels.map((l) => ({ height: l.height, quality: tierOf(l.width, l.height), bandwidth: l.bandwidth, codecs: l.codecs })),
@@ -131,11 +148,17 @@ async function getVidrockStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
             return null;
         }
         try {
-            const r = await fetch(url, { headers: HEADERS, signal: AbortSignal.timeout(MASTER_TIMEOUT_MS) });
+            const get = () => fetch(url, { headers: HEADERS, signal: AbortSignal.timeout(MASTER_TIMEOUT_MS) });
+            let r = await get();
+            if (r.status === 403) {
+                console.log(`[vidrock] ${name}: master 403, retry once`);
+                await new Promise((res) => setTimeout(res, MASTER_RETRY_DELAY_MS));
+                r = await get();
+            }
             if (!r.ok) throw new Error(`HTTP ${r.status}`);
             const row = streamFromMaster(name, entry, url, await r.text());
             if (!row) console.log(`[vidrock] ${name}: master has no variants, dropped`);
-            else console.log(`[vidrock] ${name}: ${row.quality} lang=${row.languages.join('/') || 'unstated'} audio=${row.audio.length}`);
+            else console.log(`[vidrock] ${name}: ${row.quality} lang=${row.languages.join('/') || 'und'} stated=${row.statedLanguage || '-'} audio=${row.audio.length}`);
             return row;
         } catch (e) {
             console.log(`[vidrock] ${name}: master unreadable, dropped: ${e.message}`);
