@@ -20,17 +20,25 @@ function PersonCard({ person }) {
   );
 }
 
-export function CastRowSkeleton({ count = 6 }) {
+export function CastRowSkeleton({ count = 10 }) {
+  // Same section and label as CastRow, so the rows below do not move when the
+  // cast lands. Enough people to fill a TV-wide rail; the rail clips the rest.
   return (
-    <div className="cast-rail" data-rail="" aria-hidden="true">
-      {Array.from({ length: count }, (_, i) => (
-        <div className="person" key={i}>
-          <Skeleton className="person-ph" />
-          <Skeleton variant="text" width="80%" style={{ margin: '8px auto 0' }} />
-          <Skeleton variant="text" width="56%" style={{ margin: '5px auto 0', height: '.62em' }} />
-        </div>
-      ))}
-    </div>
+    <section className="row-sec" aria-hidden="true">
+      <div className="row-head"><h2 className="row-label">Cast</h2></div>
+      <div className="cast-rail" data-rail="">
+        {Array.from({ length: count }, (_, i) => (
+          <div className="person" key={i}>
+            <Skeleton className="person-ph" />
+            {/* Bars inside the real <b>/<span>, so they take the name and
+                character line boxes. Two lines each: most names and roles
+                wrap once on a TV-width person. */}
+            <b><i className="skel skel-line" style={{ width: '86%' }} /><i className="skel skel-line" style={{ width: '60%' }} /></b>
+            <span><i className="skel skel-line" style={{ width: '70%' }} /><i className="skel skel-line" style={{ width: '44%' }} /></span>
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
 

@@ -24,6 +24,8 @@ html[data-tv="true"] .topbar::before,html[data-tv="true"] .topbar::after{display
 /* The rail has Home; the wordmark is not a D-pad stop (dpad.js skips
    pointer-events:none). */
 html[data-tv="true"] .topbar .brand{pointer-events:none}
+/* Detail page: Back sits top-left, so the wordmark moves top-right. */
+html[data-tv="true"] body:has(.detail) .topbar{justify-content:flex-end}
 html[data-tv="true"] body:not(:has(.page-backdrop)) main{padding-top:var(--header-h)}
 /* Browsers without :has() put every page below the wordmark. */
 @supports not selector(:has(a)){

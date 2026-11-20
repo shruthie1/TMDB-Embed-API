@@ -123,7 +123,7 @@ export function detectBakedBars(video) {
   return bar;
 }
 
-export function useCueOverlay({ videoRef, subUrl, fit = 'contain', enabled = true }) {
+export function useCueOverlay({ videoRef, subUrl, fit = 'cover', enabled = true }) {
   const [text, setText] = useState('');
   // The picture's box inside the element, so the overlay can match it.
   const [box, setBox] = useState(null);

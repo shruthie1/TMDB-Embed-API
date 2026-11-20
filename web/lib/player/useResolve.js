@@ -151,6 +151,8 @@ export function useResolve({ mediaType, tmdbId, season = 0, episode = 0 }) {
   // the id identifies the exact row that is playing. The name stays because
   // recovery and the dead-source set are keyed by provider.
   const [currentSourceId, setCurrentSourceId] = useState(null);
+  // True while a forced re-resolve runs, so the loading screen can say so.
+  const [refreshing, setRefreshing] = useState(false);
   const [sourcesPending, setSourcesPending] = useState(true);
   const [log, setLog] = useState([]);
   const [providers, setProviders] = useState([]);
@@ -186,6 +188,7 @@ export function useResolve({ mediaType, tmdbId, season = 0, episode = 0 }) {
     // blocked by scheme mismatch and a misconfigured resolver surfaces as the
     // relay's 502 through onFail instead. See the note in lib/api.js.
     setError(null); setStage(0); setLog([]); setProviders([]);
+    setRefreshing(Boolean(refresh));
     setSourcesPending(true);
     cancelRef.current?.();
 
@@ -347,7 +350,7 @@ export function useResolve({ mediaType, tmdbId, season = 0, episode = 0 }) {
     setSources(prev => prev.map(s => (s.id === id ? { ...s, ...fresh, id: s.id } : s)));
   }, []);
 
-  return { stream, sources, currentSource, currentSourceId, sourcesPending, log, stage, error, providers,
+  return { stream, sources, currentSource, currentSourceId, sourcesPending, log, stage, error, providers, refreshing,
            mergeSources, replaceSource, requestedAt,
            load, switchSource, setError };
 }

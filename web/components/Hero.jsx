@@ -5,6 +5,7 @@ import { poster } from '../lib/api';
 import { Badge, Skeleton } from './ui';
 import { inList, toggleList } from '../lib/list';
 import { languageName } from '../lib/subtitles';
+import { isTv } from '../lib/dpad';
 
 /** Auto-advance interval. Must match --hero-rotate in app/tokens.css. */
 const ROTATE_MS = 8000;
@@ -51,13 +52,23 @@ export default function Hero({ titles = [], loading }) {
   if (loading) {
     return (
       <div className="home-hero" aria-hidden="true">
-        <Skeleton className="home-hero-art" />
+        {/* .page-backdrop, as on the real hero: without it main gains the
+            header's top padding and the whole page dropped when data landed. */}
+        <Skeleton className="home-hero-art page-backdrop" />
+        {/* The real hero's own classes, so each bar takes the line box of the
+            text it stands in for (see CardSkeleton). */}
         <div className="home-hero-in home-hero-skel-in">
-          <Skeleton variant="text" width="62%" height="3.8em" />
-          <div className="detail-meta"><Skeleton variant="text" width={180} /></div>
-          <Skeleton variant="text" width="92%" style={{ marginTop: 18 }} />
-          <Skeleton variant="text" width="78%" style={{ marginTop: 8 }} />
-          <Skeleton width={150} height={46} style={{ marginTop: 26 }} />
+          <h1 className="home-hero-title"><span className="skel skel-line" style={{ width: '62%' }} /></h1>
+          <div className="detail-meta"><span><span className="skel skel-line" style={{ width: '5em' }} /></span>
+            <span><span className="badge skel skel-ghost">Telugu</span></span></div>
+          <p className="home-hero-overview">
+            <span className="skel skel-line" style={{ width: '92%' }} />
+            <span className="skel skel-line" style={{ width: '78%' }} />
+          </p>
+          <div className="actions">
+            <span className="btn primary skel skel-btn" style={{ width: '9.5em' }} />
+            <span className="btn skel skel-btn" style={{ width: '8em' }} />
+          </div>
         </div>
       </div>
     );
@@ -87,6 +98,15 @@ export default function Hero({ titles = [], loading }) {
       }}
       onPointerCancel={() => { swipeStart.current = null; setPaused(false); }}
       onKeyDown={e => {
+        // TV: the remote must walk Watch now -> My List and leave the hero for
+        // the side rail. Taking every Left/Right trapped focus here, because
+        // dpad.js skips keys that are already defaultPrevented. So Left always
+        // goes to dpad, and Right cycles only from the last button.
+        if (isTv() && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+          const btns = [...e.currentTarget.querySelectorAll('.actions [data-focus]')];
+          const at = btns.indexOf(document.activeElement);
+          if (e.key === 'ArrowLeft' || (at >= 0 && at < btns.length - 1)) return;
+        }
         if (e.key === 'ArrowRight') { e.preventDefault(); move(1); }
         if (e.key === 'ArrowLeft') { e.preventDefault(); move(-1); }
       }}

@@ -173,7 +173,7 @@ export default function PlayerControls({
   sources = [], currentSource, currentSourceId = null, onPickSource, sourcesPending = false,
   audioSync = null,
   subs = [], currentSub = null, onPickSub, subLoading = false,
-  fit = 'contain', onCycleFit, onSetFit,
+  fit = 'cover', onCycleFit, onSetFit,
   subPrefs = { scale: 1, offsetMs: 0 }, onSubPrefs,
   levels = [], currentLevel = -1, autoLevel, onPickLevel,
   audioTracks = [], currentAudio, onPickAudio, onPickPair,

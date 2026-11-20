@@ -511,9 +511,9 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
    * TV player offers this because the right answer depends on the film and on
    * how much the viewer minds either bars or a crop.
    */
-  const [fit, setFit] = useState('contain');
-  // 'Fit whole' (contain) is the default on EVERY device and every film starts
-  // there. A crop is a per-film judgement - choosing Fill for one wide film
+  const [fit, setFit] = useState('cover');
+  // 'Fill screen' (cover) is the default on EVERY device and every film starts
+  // there (owner call, 2026-11-20: no bars by default). A crop is a per-film judgement - choosing Fill for one wide film
   // should not silently crop the next - so the previous choice is deliberately
   // not restored. The picker is one press away when a particular film wants it.
   //
@@ -1724,9 +1724,14 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       )}
 
       {busy && stream && !error && (
-        <div className="pbuffering" role="status" aria-live="polite">
+        <div className={`pbuffering${statusMessage ? ' has-msg' : ''}`} role="status" aria-live="polite">
           <div className="pspinner" />
-          {statusMessage && <span>{statusMessage}</span>}
+          {statusMessage && <span className="pbuffer-text">{statusMessage}</span>}
+          {statusMessage && sources.length > 1 && sources.findIndex(s => s.id === currentSourceId) >= 0 && (
+            <span className="pbuffer-count">
+              Source {sources.findIndex(s => s.id === currentSourceId) + 1} of {sources.length}
+            </span>
+          )}
           {/* Screen readers get the state even when it is visually SILENT.
               When there IS a visible message the aria-live region already
               announces it, so a second copy read the label twice - and made
@@ -1772,8 +1777,9 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       )}
 
       {!stream && !error && !embedOn && (
-        <Resolving stage={stage} title={title.title} meta={epTag || title.year} elapsed={elapsed} log={log}
-          providers={providers} onArt={Boolean(title.backdrop)}
+        <Resolving stage={stage} title={title.title}
+          meta={isTv ? `S${season} E${episode}${epTitle ? ` · ${epTitle}` : ''}` : null} elapsed={elapsed} log={log}
+          providers={providers} onArt={Boolean(title.backdrop)} refreshing={resolve.refreshing}
           onClose={onClose} onRetry={() => resolve.load(true)} />
       )}
       {notice && !error && (

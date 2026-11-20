@@ -13,7 +13,7 @@ import Icon from './Icon';
  * available. Scrolling stays native: touch, trackpad, mouse wheel and TV
  * D-pad focus all use the same rail.
  */
-export function Row({ label, titles, loading, skeletonCount = 6, href, emptyHint,
+export function Row({ label, titles, loading, skeletonCount = 10, href, emptyHint,
   error, onRetry, homeSection = false, ranked = false }) {
   const railRef = useRef(null);
   const [edges, setEdges] = useState({ left: false, right: false });

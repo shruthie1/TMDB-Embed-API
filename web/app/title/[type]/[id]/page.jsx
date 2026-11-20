@@ -110,7 +110,7 @@ export default function TitlePage() {
     setTimeout(() => setToast(null), 2200);
   }, [t]);
 
-  if (!t) return <TitleSkeleton />;
+  if (!t) return <TitleSkeleton onBack={() => router.back()} />;
 
   // What the Play button does, and what it should say. For a series this is
   // an episode; for a film, a position. Falls back to S1E1 for a new show.
@@ -264,27 +264,52 @@ export default function TitlePage() {
   );
 }
 
-function TitleSkeleton() {
+/**
+ * Stands in for the title page until its data lands. Same markup and classes
+ * as the loaded page (Back, the backdrop, poster, title, meta, synopsis,
+ * actions, Cast, More like this), each text bar inside the real element, so
+ * every block sits where the loaded one will and nothing moves on arrival.
+ */
+function TitleSkeleton({ onBack }) {
   return (
     <div className="detail title-skeleton" aria-busy="true" aria-label="Loading title">
+      {/* The real Back: it works before the data arrives, and the page below
+          it starts at the same offset as the loaded one. */}
+      <button type="button" className="detail-back focusable" data-focus="" onClick={onBack} aria-label="Go back">
+        <Icon name="back" size={16} />
+        <span>Back</span>
+      </button>
       <div className="hero">
+        {/* .page-backdrop, as on the loaded hero: without it main gains the
+            header's top padding and the page dropped when data landed. */}
+        <Skeleton className="hero-art page-backdrop" />
         <div className="hero-inner">
           <Skeleton className="hero-poster" />
           <div className="hero-text">
-            <Skeleton variant="text" width="56%" height="2.4em" />
-            <Skeleton variant="text" width="30%" style={{ marginTop: 16 }} />
-            <div className="detail-meta"><Skeleton variant="text" width={210} /></div>
-            <div style={{ marginTop: 22, maxWidth: 560 }}>
-              <Skeleton variant="text" width="100%" />
-              <Skeleton variant="text" width="94%" style={{ marginTop: 9 }} />
-              <Skeleton variant="text" width="62%" style={{ marginTop: 9 }} />
+            <h1 className="detail-title"><span className="skel skel-line" style={{ width: '56%' }} /></h1>
+            <div className="detail-meta">
+              <span><span className="skel skel-line" style={{ width: '12em' }} /></span>
+              <span><span className="badge skel skel-ghost">English</span></span>
+            </div>
+            <p className="detail-overview">
+              <span className="skel skel-line" style={{ width: '100%' }} />
+              <span className="skel skel-line" style={{ width: '94%' }} />
+              <span className="skel skel-line" style={{ width: '62%' }} />
+            </p>
+            {/* Same class as the real "Read more", so it shows exactly where
+                that one does (phones) and nowhere else. */}
+            <span className="detail-overview-toggle"><span className="skel skel-line" style={{ width: '5em' }} /></span>
+          </div>
+          <div className="hero-actions">
+            <div className="actions">
+              <span className="btn primary skel skel-btn" style={{ width: '8em' }} />
+              <span className="btn skel skel-btn" style={{ width: '8em' }} />
             </div>
           </div>
-          <div className="hero-actions"><div className="actions"><Skeleton width={150} height={46} /><Skeleton width={110} height={46} /></div></div>
         </div>
       </div>
       <CastRowSkeleton />
-      <Row label="More like this" titles={[]} loading skeletonCount={6} />
+      <Row label="More like this" titles={[]} loading />
     </div>
   );
 }

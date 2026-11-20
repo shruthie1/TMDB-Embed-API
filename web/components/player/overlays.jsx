@@ -43,27 +43,26 @@ function ProviderTrack({ providers }) {
   );
 }
 
-/** One short, friendly status line. Internal words stay in Details. */
-function statusLine(stage, providers) {
-  if (stage === 1) return 'Checking playback…';
-  if (stage === 2) return 'Starting…';
-  return providers.some(p => p.state === 'failed') ? 'Trying another source…' : 'Getting your stream ready';
+/** One short status line, the same copy as the Android app. Internal words
+ *  (stage, failed providers) stay in Details. */
+function statusLine(refreshing) {
+  return refreshing ? 'Refreshing links…' : 'Getting your stream ready';
 }
 
 /**
- * Loading screen while a stream is resolved: blurred backdrop (Player.jsx),
- * one ring spinner, the title, one status line, and a source counter when the
- * provider count is known. Back is always there; Try again appears after 8s.
- * The provider track and log stay available under Details for debugging.
+ * Loading screen while a stream is resolved, matching the Android app: the
+ * backdrop at 35% under a dark gradient (Player.jsx, globals.css), a cyan ring
+ * spinner, the title, the episode line, one status line. Try again appears
+ * after 8s; on TV a Back pill sits beside it (the top-left Back is desktop and
+ * phone). The provider track and log stay available under Details.
  */
 export function Resolving({ stage, title, meta, elapsed = 0, log = [], providers = [], onArt = false,
-                            onClose, onRetry }) {
+                            refreshing = false, onClose, onRetry }) {
   const secs = Math.floor(elapsed / 1000);
   const total = providers.length;
-  const started = providers.filter(p => p.state !== 'queued').length;
-  const status = statusLine(stage, providers);
+  const status = statusLine(refreshing);
   return (
-    <div className={`overlay ov-screen${onArt ? ' on-art' : ''}`}>
+    <div className={`overlay ov-screen ov-resolving${onArt ? ' on-art' : ''}`} data-stage={stage}>
       {onClose && (
         <button type="button" className="ov-back focusable" data-focus="" onClick={onClose} aria-label="Back">
           <Icon name="back" size={18} /><span>Back</span>
@@ -74,12 +73,18 @@ export function Resolving({ stage, title, meta, elapsed = 0, log = [], providers
         <p className="ov-name">{title}</p>
         {meta && <p className="ov-meta">{meta}</p>}
         <p className="ov-status">{status}</p>
-        {total > 1 && stage === 0 && (
-          <p className="ov-count">Source {Math.max(1, started)} of {total}</p>
-        )}
-        {secs >= 8 && onRetry && (
+        {secs >= 8 && (onRetry || onClose) && (
           <div className="ov-actions" data-focus-group="">
-            <button type="button" className="btn focusable" data-focus="" onClick={onRetry}>Try again</button>
+            {onRetry && (
+              <button type="button" className="ov-pill focusable" data-focus="" onClick={onRetry}>
+                <Icon name="restart" size={18} /><span>Try again</span>
+              </button>
+            )}
+            {onClose && (
+              <button type="button" className="ov-pill ov-pill-tv focusable" data-focus="" onClick={onClose}>
+                <Icon name="back" size={18} /><span>Back</span>
+              </button>
+            )}
           </div>
         )}
         {(total > 0 || log.length > 0) && (

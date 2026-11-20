@@ -158,8 +158,14 @@ export function initDpad() {
     // search box a trap on a remote: no key could leave it for the results.
     const lineField = active?.tagName === 'INPUT'
       && /^(text|search|email|url|tel|)$/.test(active.getAttribute('type') || '');
+    // On a TV a CLOSED select must not own the arrows: it held all four, so
+    // the Browse sort box was a trap (no way to the grid or the side rail).
+    // OK opens the native list, which takes the keys itself while open, and
+    // the Filters panel has Sort chips too. Desktop/phone keep the exemption.
+    const tvSelect = active?.tagName === 'SELECT' && isTv();
     const fieldOwnsKey = lineField ? (dir === 'left' || dir === 'right')
-      : (active && (/^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName) || active.isContentEditable));
+      : (active && !tvSelect
+        && (/^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName) || active.isContentEditable));
     if (fieldOwnsKey) return;
 
     /**
@@ -277,7 +283,15 @@ export function initDpad() {
       // Remember where we were BEFORE moving, so coming back restores it.
       if (group) memory.set(group, active);
       next.focus();
-      next.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'smooth' });
+      // TV title page: the hero (Back, title, Play, My List) is the top of the
+      // page. 'nearest' only scrolled Play to the viewport's top edge, so
+      // coming back up from Cast left the backdrop and title cut off. Show the
+      // whole page top instead.
+      if (isTv() && next.closest('.detail .hero, .detail-back')) {
+        window.scrollTo({ top: 0, left: 0, behavior: 'smooth' });
+      } else {
+        next.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'smooth' });
+      }
       e.preventDefault();
     }
   };

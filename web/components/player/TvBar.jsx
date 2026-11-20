@@ -53,7 +53,7 @@ export default function TvBar({
   levels = [], currentLevel, autoLevel, onPickLevel,
   audioTracks = [], currentAudio, onPickAudio,
   sourcesPending = false, onClose,
-  fit = 'contain', onSetFit,
+  fit = 'cover', onSetFit,
   subs = [], currentSub, onPickSub, subLoading = false,
 }) {
   /**

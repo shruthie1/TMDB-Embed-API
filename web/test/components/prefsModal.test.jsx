@@ -13,15 +13,21 @@ beforeEach(() => { localStorage.clear(); vi.useFakeTimers(); });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 describe('PrefsModal', () => {
-  it('opens after load on a first visit, with nothing selected, and is sticky', () => {
+  it('opens after load on a first visit, with Telugu preselected, and is sticky', () => {
     render(<PrefsButton />);
     expect(dialog()).toBeNull();           // not before the page has painted
     firstVisit();
     const d = dialog();
     expect(d.getAttribute('aria-modal')).toBe('true');
-    for (const l of ['Telugu', 'Tamil', 'Hindi', 'Malayalam', 'Kannada']) {
+    expect(chip('Telugu').getAttribute('aria-pressed')).toBe('true');
+    for (const l of ['Tamil', 'Hindi', 'Malayalam', 'Kannada']) {
       expect(chip(l).getAttribute('aria-pressed')).toBe('false');
     }
+    expect(screen.getByText('1 selected')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Save' }).disabled).toBe(false);
+    expect(screen.queryByText('Pick at least one language')).toBeNull();
+    // Clearing the default still needs a pick before Save.
+    fireEvent.click(chip('Telugu'));
     expect(screen.getByRole('button', { name: 'Save' }).disabled).toBe(true);
     expect(screen.getByText('Pick at least one language')).toBeTruthy();
     fireEvent.click(document.body.querySelector('.lang-modal-backdrop'));
@@ -36,6 +42,7 @@ describe('PrefsModal', () => {
     window.addEventListener(PREFS_EVENT, onSave);
     const first = render(<PrefsButton />);
     firstVisit();
+    fireEvent.click(chip('Telugu'));       // clear the preselected default
     fireEvent.click(chip('Hindi'));
     fireEvent.click(chip('Telugu'));
     expect(chip('Hindi').getAttribute('aria-pressed')).toBe('true');
@@ -77,8 +84,12 @@ describe('PrefsModal', () => {
     firstVisit();
     const tiles = [...document.querySelectorAll('.lang-opt')];
     expect(tiles).toHaveLength(5);
-    expect(new Set(tiles.map(t => t.className)).size).toBe(1);
-    expect(tiles.every(t => t.getAttribute('aria-pressed') === 'false')).toBe(true);
+    const [te, ...rest] = tiles;
+    expect(te.textContent).toMatch(/^Telugu/);
+    expect(te.getAttribute('aria-pressed')).toBe('true');
+    expect(te.className).toMatch(/\bon\b/);
+    expect(new Set(rest.map(t => t.className)).size).toBe(1);
+    expect(rest.every(t => t.getAttribute('aria-pressed') === 'false')).toBe(true);
     expect(document.activeElement).toBe(dialog());
   });
 
@@ -86,18 +97,20 @@ describe('PrefsModal', () => {
     render(<PrefsButton />);
     firstVisit();
     const te = chip('Telugu');
+    const hi = chip('Hindi');
+    act(() => { hi.focus(); });
+    expect(hi.className).not.toMatch(/\bon\b/);
+    expect(hi.getAttribute('aria-pressed')).toBe('false');
+    fireEvent.click(hi);
+    expect(hi.className).toMatch(/\bon\b/);
+    expect(hi.getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByText('2 selected')).toBeTruthy();
     act(() => { te.focus(); });
+    expect(te.className).toMatch(/\bon\b/);
+    expect(chip('Tamil').className).not.toMatch(/\bon\b/);
+    fireEvent.click(te);
     expect(te.className).not.toMatch(/\bon\b/);
     expect(te.getAttribute('aria-pressed')).toBe('false');
-    fireEvent.click(te);
-    expect(te.className).toMatch(/\bon\b/);
-    expect(te.getAttribute('aria-pressed')).toBe('true');
     expect(screen.getByText('1 selected')).toBeTruthy();
-    act(() => { chip('Hindi').focus(); });
-    expect(te.className).toMatch(/\bon\b/);
-    expect(chip('Hindi').className).not.toMatch(/\bon\b/);
-    fireEvent.click(te);
-    expect(te.className).not.toMatch(/\bon\b/);
-    expect(te.getAttribute('aria-pressed')).toBe('false');
   });
 });

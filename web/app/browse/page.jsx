@@ -4,6 +4,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { Card, CardSkeleton } from '../../components/Card';
 import { FilterBar, FilterPanel } from '../../components/Filters';
 import { Button, EmptyState, ErrorState, Skeleton } from '../../components/ui';
+import { isTv } from '../../lib/dpad';
 
 const nums = (v) => (v || '').split(',').filter(Boolean).map(Number);
 const strs = (v) => (v || '').split(',').filter(Boolean);
@@ -108,6 +109,18 @@ function Browse() {
       .catch(() => alive && setState(s => ({ ...s, loading: false, error: 'Could not load titles.' })));
     return () => { alive = false; };
   }, [key, page]);
+
+  // TV: opening Browse focused nothing, so the first key press landed on the
+  // Filters button. Start on the first result card instead, once, when the
+  // first results arrive. Skip it if the viewer already moved into the page.
+  const tvFocusDone = useRef(false);
+  useEffect(() => {
+    if (tvFocusDone.current || state.loading || !state.titles.length || !isTv()) return;
+    tvFocusDone.current = true;
+    const a = document.activeElement;
+    if (a && a !== document.body && a.closest('.browse')) return;
+    document.querySelector('.browse .grid-titles [data-focus]')?.focus();
+  }, [state.loading, state.titles.length]);
 
   const hasMore = page < state.totalPages;
 
