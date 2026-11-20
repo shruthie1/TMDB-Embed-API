@@ -45,9 +45,29 @@ data class TitleFull(
     val tagline: String? = null,
     val seasons: Int? = null,
     val seasonList: List<SeasonInfo> = emptyList(),
+    /** Cast with photos, in billing order (web CastRow). */
+    val credits: List<Credit> = emptyList(),
+    val director: List<String> = emptyList(),
+    val writers: List<String> = emptyList(),
+    val country: List<String> = emptyList(),
 ) {
     fun asTitle() = Title(tmdbId, mediaType, title, poster, backdrop, year, rating, originalLang, overview)
 }
+
+/** One cast member in /api/title/:type/:id/full `credits`. */
+@Serializable
+data class Credit(val id: Long, val name: String = "", val character: String? = null, val profile: String? = null)
+
+/** /api/person/:id */
+@Serializable
+data class Person(val id: Long, val name: String = "", val profile: String? = null, val knownFor: String? = null, val bio: String? = null)
+
+@Serializable
+data class PersonResponse(val person: Person? = null, val titles: List<Title> = emptyList())
+
+/** /api/discover (Browse). */
+@Serializable
+data class DiscoverResponse(val page: Int = 1, val totalPages: Int = 1, val totalResults: Int = 0, val titles: List<Title> = emptyList())
 
 @Serializable
 data class Episode(
@@ -58,6 +78,7 @@ data class Episode(
     val still: String? = null,
     val runtimeMin: Int? = null,
     val airDate: String? = null,
+    val rating: Double? = null,
 )
 
 @Serializable

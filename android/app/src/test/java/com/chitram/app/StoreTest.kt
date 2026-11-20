@@ -32,9 +32,16 @@ class StoreTest {
     }
 
     @Test fun homeRowOrder() {
-        assertEquals(listOf("continue", "te", "trending", "top10", "hi", "series-te", "list"), HomeRows.plan(emptyList()).map { it.kind })
-        assertEquals(listOf("continue", "te", "trending", "top10", "ta", "series-te", "list"), HomeRows.plan(listOf("ta", "te")).map { it.kind })
-        assertEquals(listOf("continue", "hi", "trending", "top10", "series-hi", "list"), HomeRows.plan(listOf("hi")).map { it.kind })
+        // Same order as web/lib/homeRows.js: no choice means all five languages.
+        val all = HomeRows.plan(emptyList()).map { it.kind }
+        assertEquals(listOf("continue", "top10", "recent", "trending", "te", "series-te", "ta", "series-ta"), all.take(8))
+        assertEquals(listOf("genre-28", "genre-53", "genre-35", "genre-10749", "genre-10751", "list", "upcoming"), all.takeLast(7))
+        assertEquals(21, all.size) // 4 fixed + 5 languages x 2 + 5 genres + 2
+        assertEquals(listOf("continue", "top10", "recent", "trending", "hi", "series-hi", "genre-28", "genre-53", "genre-35", "genre-10749", "genre-10751", "list", "upcoming"),
+            HomeRows.plan(listOf("hi")).map { it.kind })
+        val rows = HomeRows.plan(listOf("ta", "te"))
+        assertEquals("Latest Tamil movies", rows.first { it.kind == "ta" }.label)
+        assertEquals(listOf("ta", "te"), rows.first { it.kind == "recent" }.seeAll!!.langs)
     }
 
     @Test fun resumeAndFinished() {

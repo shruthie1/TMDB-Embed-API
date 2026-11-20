@@ -6,19 +6,23 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.chitram.app.App
+import com.chitram.app.data.BrowseFilters
 import com.chitram.app.data.Episode
 import com.chitram.app.data.LanguagePrefs
+import com.chitram.app.data.PersonResponse
 import com.chitram.app.data.Progress
 import com.chitram.app.data.Title
 import com.chitram.app.data.TitleFull
 import com.chitram.app.player.PlayRequest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-/** One home row. `progress` is set only on the Continue watching row. */
+/**
+ * One home row. `progress` is set only on Continue watching. `thin` hides a
+ * row that has fewer titles than that after cross-row dedupe (web homeRows).
+ */
 data class Row(
     val kind: String,
     val label: String,
@@ -26,31 +30,81 @@ data class Row(
     val progress: Map<String, Progress> = emptyMap(),
     val loading: Boolean = true,
     val ranked: Boolean = false,
-)
+    val thin: Int = 1,
+    val error: Boolean = false,
+    val rec: Boolean = false,
+    /** "See all" target; null for rows without one. */
+    val seeAll: BrowseFilters? = null,
+) {
+    val personal: Boolean get() = kind == "continue" || kind == "list"
+
+    /** Web Home: hide an empty personal row, a thin row, and an empty row. */
+    val shown: Boolean get() = when {
+        error -> !rec
+        loading -> !personal
+        else -> titles.size >= maxOf(thin, 1)
+    }
+}
 
 object HomeRows {
+    /** Genre rows on Home (web GENRE_ROWS). */
+    val GENRES = listOf(28 to "Action", 53 to "Thrillers", 35 to "Comedy", 10749 to "Romance", 10751 to "Family")
+
     /**
-     * Order: Continue watching, <primary> new, Trending, Top 10, <secondary>,
-     * <primary> series, My List. Primary is Telugu unless the viewer's chosen
-     * languages exclude it; secondary is Hindi by default.
+     * Port of web/lib/homeRows.js: Continue watching, Top 10, New on OTT,
+     * Trending, then per language "Latest X movies" and "Popular X shows",
+     * genre rows, My list, Coming soon. `chosen` empty means every language.
      */
     fun plan(chosen: List<String>): List<Row> {
-        val primary = if (chosen.isEmpty() || "te" in chosen) "te" else chosen.first()
-        val secondary = when {
-            chosen.isEmpty() -> "hi"
-            else -> chosen.firstOrNull { it != primary }
-        }
-        val p = LanguagePrefs.label(primary)
+        val langs = chosen.ifEmpty { LanguagePrefs.LANGS.map { it.code } }
         return buildList {
             add(Row("continue", "Continue watching", loading = false))
-            add(Row(primary, "New in $p"))
-            add(Row("trending", "Trending now"))
-            add(Row("top10", "Top 10 in India today", ranked = true))
-            if (secondary != null) add(Row(secondary, "Latest ${LanguagePrefs.label(secondary)} movies"))
-            add(Row("series-$primary", "Popular $p shows"))
+            add(Row("top10", "Top 10 in India today", ranked = true, thin = 5))
+            add(Row("recent", "New on OTT", thin = 4, seeAll = BrowseFilters(langs = langs, sort = "primary_release_date.desc")))
+            add(Row("trending", "Trending now", thin = 4, seeAll = BrowseFilters()))
+            for (c in langs) {
+                val l = LanguagePrefs.label(c)
+                add(Row(c, "Latest $l movies", thin = 4, seeAll = BrowseFilters(langs = listOf(c))))
+                add(Row("series-$c", "Popular $l shows", thin = 6, seeAll = BrowseFilters(type = "tv", langs = listOf(c))))
+            }
+            for ((id, l) in GENRES) add(Row("genre-$id", l, thin = 6, seeAll = BrowseFilters(langs = langs, genres = listOf(id))))
             add(Row("list", "My list", loading = false))
+            add(Row("upcoming", "Coming soon", thin = 4))
         }
     }
+
+    /**
+     * "Because you watched" rows: the first after Trending now, the next ones
+     * after the first and second "Popular X shows" rows (web Home `display`).
+     */
+    fun withRecs(base: List<Row>, recs: List<Row>): List<Row> {
+        val anchors = listOf("trending") + base.filter { it.kind.startsWith("series-") }.map { it.kind }
+        val out = ArrayList<Row>()
+        for (r in base) {
+            out += r
+            val at = anchors.indexOf(r.kind)
+            if (at >= 0 && at < recs.size) out += recs[at]
+        }
+        return out
+    }
+
+    /**
+     * Each title shows once, in the first row that has it (web dedupeRows).
+     * Personal rows and the ranked Top 10 keep every title but still claim them.
+     */
+    fun dedupe(rows: List<Row>, raw: Map<String, List<Title>>): List<Row> {
+        val seen = HashSet<String>()
+        return rows.map { r ->
+            val src = if (r.personal) r.titles else raw[r.kind] ?: return@map r
+            val out = if (r.personal || r.ranked) src else src.filter { it.key !in seen }
+            out.forEach { seen += it.key }
+            r.copy(titles = out)
+        }
+    }
+
+    /** Hero pool (web Home): Continue watching, Top 10, Trending; with a backdrop; 6. */
+    fun heroPool(cont: List<Title>, top10: List<Title>, trending: List<Title>): List<Title> =
+        (cont + top10 + trending).filter { !it.backdrop.isNullOrEmpty() }.distinctBy { it.key }.take(6)
 
     /**
      * Continue watching cards. The overview comes from the saved progress, else
@@ -65,49 +119,76 @@ object HomeRows {
 
 class HomeVm : ViewModel() {
     private val g = App.instance
+    /** Every planned row, deduplicated; render `rows.filter { it.shown }`. */
     var rows by mutableStateOf<List<Row>>(emptyList()); private set
-    var error by mutableStateOf<String?>(null); private set
+    /** null until Continue watching and Top 10 are in (web shows a skeleton). */
+    var heroTitles by mutableStateOf<List<Title>?>(null); private set
     private var loadedFor: List<String>? = null
+    private var base: List<Row> = emptyList()
+    private var recs: List<Row> = emptyList()
+
+    /** Raw catalogue rows as fetched; `rows` shows them deduplicated in order. */
+    private val raw = HashMap<String, List<Title>>()
+    private val failed = HashSet<String>()
+    private val overviews = HashMap<String, String>()
+    private val overviewAsked = HashSet<String>()
 
     fun load(force: Boolean = false) {
         val chosen = g.prefs.langs()
         if (!force && loadedFor == chosen) { refreshLocal(); return }
         loadedFor = chosen
-        raw.clear()
-        rows = HomeRows.plan(chosen)
+        raw.clear(); failed.clear(); recs = emptyList()
+        base = HomeRows.plan(chosen)
+        heroTitles = null
+        rebuild()
         refreshLocal()
-        val q = g.prefs.query()
-        error = null
-        for (r in rows) {
-            if (r.kind == "continue" || r.kind == "list") continue
-            viewModelScope.launch {
-                val titles = runCatching { g.api.row(r.kind, if (r.kind in setOf("trending", "top10", "recent")) q else "") }
-                    .onFailure { error = "Could not load rows. Check the connection." }
-                    .getOrDefault(emptyList())
-                raw[r.kind] = titles
-                update(r.kind) { it.copy(loading = false) }
-            }
+        for (r in base) if (!r.personal) fetch(r.kind)
+        loadRecs()
+    }
+
+    fun retry(kind: String) {
+        failed.remove(kind)
+        raw.remove(kind)
+        rebuild()
+        fetch(kind)
+    }
+
+    private fun fetch(kind: String) {
+        viewModelScope.launch {
+            val res = runCatching { g.api.row(kind, g.prefs.query()) }
+            res.onSuccess { raw[kind] = it }.onFailure { if (it is CancellationException) throw it; failed += kind }
+            rebuild()
         }
     }
 
-    /** Raw catalogue rows as fetched; `rows` shows them deduplicated in order. */
-    private val raw = HashMap<String, List<Title>>()
-    private val overviews = HashMap<String, String>()
-    private val overviewAsked = HashSet<String>()
+    private fun loadRecs() {
+        val seeds = g.progress.seeds(3)
+        if (seeds.isEmpty()) return
+        viewModelScope.launch {
+            val out = ArrayList<Row>()
+            for (s in seeds) {
+                val t = runCatching { g.api.similar(s.mediaType, s.tmdbId) }.getOrNull().orEmpty()
+                if (t.isEmpty()) continue
+                val kind = "rec-${s.mediaType}-${s.tmdbId}"
+                raw[kind] = t
+                out += Row(kind, "Because you watched ${s.title}", thin = 4, rec = true)
+            }
+            recs = out
+            rebuild()
+        }
+    }
 
-    /**
-     * Drop titles already shown in an earlier catalogue row (web dedupeRows).
-     * Recomputed in row order on every update, so the order rows arrive in
-     * does not decide which row keeps a title.
-     */
-    private fun dedupeAll(list: List<Row>): List<Row> {
-        val seen = HashSet<String>()
-        return list.map { r ->
-            if (r.kind == "continue" || r.kind == "list") return@map r
-            val src = raw[r.kind] ?: return@map r
-            val out = if (r.ranked) src else src.filter { it.key !in seen }
-            out.forEach { seen += it.key }
-            r.copy(titles = out)
+    private var local = HashMap<String, Row>()
+
+    private fun rebuild() {
+        val planned = HomeRows.withRecs(base, recs).map { r ->
+            local[r.kind] ?: r.copy(loading = r.kind !in raw && r.kind !in failed, error = r.kind in failed)
+        }
+        rows = HomeRows.dedupe(planned, raw)
+        // Web waits for Continue watching and Top 10, then fills from Trending.
+        if ("top10" in raw || "top10" in failed) {
+            val pool = HomeRows.heroPool(local["continue"]?.titles.orEmpty(), raw["top10"].orEmpty(), raw["trending"].orEmpty())
+            if (pool != heroTitles) heroTitles = pool
         }
     }
 
@@ -127,23 +208,14 @@ class HomeVm : ViewModel() {
                 }
             }
         }
-        update("continue") { r ->
-            r.copy(
-                titles = titles,
-                progress = cw.associateBy { "${it.mediaType}:${it.tmdbId}" },
-                loading = false,
-            )
-        }
-        update("list") { it.copy(titles = listed, loading = false) }
+        local["continue"] = Row("continue", "Continue watching", titles, cw.associateBy { "${it.mediaType}:${it.tmdbId}" }, loading = false)
+        local["list"] = Row("list", "My list", listed, loading = false)
+        rebuild()
     }
 
-    private fun update(kind: String, f: (Row) -> Row) {
-        rows = dedupeAll(rows.map { if (it.kind == kind) f(it) else it })
-    }
-
-    /** Hero: the first title in the first loaded catalogue row. */
+    /** First catalogue title: the TV hero before anything is focused. */
     val hero: Title?
-        get() = rows.firstOrNull { it.kind != "continue" && it.kind != "list" && it.titles.isNotEmpty() }?.titles?.firstOrNull()
+        get() = heroTitles?.firstOrNull() ?: rows.firstOrNull { !it.personal && it.titles.isNotEmpty() }?.titles?.firstOrNull()
 }
 
 class DetailVm : ViewModel() {
@@ -155,6 +227,8 @@ class DetailVm : ViewModel() {
     var episodesLoading by mutableStateOf(false); private set
     var inList by mutableStateOf(false); private set
     var resume by mutableStateOf<Progress?>(null); private set
+    /** "More like this"; null while loading. */
+    var similar by mutableStateOf<List<Title>?>(null); private set
     private var key: String? = null
     private var epJob: Job? = null
 
@@ -163,7 +237,10 @@ class DetailVm : ViewModel() {
         if (key == k) { refreshLocal(); return }
         key = k
         viewModelScope.launch {
-            val t = runCatching { g.api.titleFull(type, id) }.onFailure { error = "Could not load this title." }.getOrNull() ?: return@launch
+            similar = runCatching { g.api.similar(type, id) }.getOrDefault(emptyList())
+        }
+        viewModelScope.launch {
+            val t = runCatching { g.api.titleFull(type, id) }.onFailure { android.util.Log.w("Chitram", "title $type/$id failed", it); error = "Could not load this title." }.getOrNull() ?: return@launch
             full = t
             refreshLocal()
             if (t.mediaType == "tv") {
@@ -171,6 +248,14 @@ class DetailVm : ViewModel() {
                 selectSeason(next?.season?.takeIf { s -> t.seasonList.any { it.number == s } } ?: t.seasonList.firstOrNull { it.number > 0 }?.number ?: 1)
             }
         }
+    }
+
+    fun retry() {
+        val k = key ?: return
+        key = null
+        error = null
+        val (type, id) = k.split(":")
+        load(type, id.toLong())
     }
 
     fun refreshLocal() {
@@ -186,22 +271,107 @@ class DetailVm : ViewModel() {
         epJob?.cancel()
         episodesLoading = true
         epJob = viewModelScope.launch {
-            val deferred = async { runCatching { g.api.season(t.tmdbId, n) }.getOrDefault(emptyList()) }
-            episodes = deferred.await()
+            episodes = runCatching { g.api.season(t.tmdbId, n) }.getOrDefault(emptyList())
             episodesLoading = false
         }
     }
 
-    fun toggleList() { full?.let { inList = g.myList.toggle(it.asTitle()) } }
+    fun toggleList(): Boolean { full?.let { inList = g.myList.toggle(it.asTitle()) }; return inList }
 
     fun episodeProgress(ep: Episode): Progress? = full?.let { g.progress.get("tv", it.tmdbId, ep.season, ep.episode) }
 
-    fun playRequest(ep: Episode? = null): PlayRequest? {
-        val t = full ?: return null
-        if (t.mediaType != "tv") return PlayRequest("movie", t.tmdbId, t.title, poster = t.poster, backdrop = t.backdrop, overview = t.overview)
-        val e = ep ?: resume?.let { r -> Episode(r.episode, r.season, r.epTitle ?: "") } ?: episodes.firstOrNull() ?: Episode(1, season)
-        return PlayRequest("tv", t.tmdbId, t.title, e.season, e.episode, t.poster, t.backdrop, e.title.ifEmpty { null }, t.seasonList, t.overview)
+    /** Play label, as on the web title page. */
+    fun playLabel(): String {
+        val t = full ?: return "Play"
+        val r = resume
+        return when {
+            t.mediaType != "tv" -> if (r != null) "Resume" else "Play"
+            r == null -> "Play S1 E1"
+            r.positionMs > 0 -> "Resume S${r.season} E${r.episode}"
+            else -> "Play S${r.season} E${r.episode}"
+        }
     }
+
+    /** True when Start over makes sense: a saved position mid-way. */
+    val canStartOver: Boolean get() = (resume?.positionMs ?: 0) > 0
+
+    fun playRequest(ep: Episode? = null, fromStart: Boolean = false): PlayRequest? {
+        val t = full ?: return null
+        if (t.mediaType != "tv") return PlayRequest("movie", t.tmdbId, t.title, poster = t.poster, backdrop = t.backdrop, overview = t.overview, fromStart = fromStart)
+        val e = ep ?: resume?.let { r -> Episode(r.episode, r.season, r.epTitle ?: episodes.firstOrNull { it.season == r.season && it.episode == r.episode }?.title ?: "") }
+            ?: episodes.firstOrNull() ?: Episode(1, season)
+        return PlayRequest("tv", t.tmdbId, t.title, e.season, e.episode, t.poster, t.backdrop, e.title.ifEmpty { null }, t.seasonList, t.overview, fromStart = fromStart)
+    }
+}
+
+class PersonVm : ViewModel() {
+    private val g = App.instance
+    /** null while loading; `person == null` inside means not found or failed. */
+    var data by mutableStateOf<PersonResponse?>(null); private set
+    private var id = 0L
+
+    fun load(personId: Long) {
+        if (id == personId) return
+        id = personId
+        viewModelScope.launch {
+            data = runCatching { g.api.person(personId) }.getOrDefault(PersonResponse())
+        }
+    }
+}
+
+class BrowseVm : ViewModel() {
+    private val g = App.instance
+    var filters by mutableStateOf(BrowseFilters()); private set
+    var titles by mutableStateOf<List<Title>>(emptyList()); private set
+    var total by mutableStateOf<Int?>(null); private set
+    var loading by mutableStateOf(false); private set
+    var error by mutableStateOf<String?>(null); private set
+    private var page = 0
+    private var totalPages = 1
+    private var job: Job? = null
+    private var started = false
+
+    val hasMore: Boolean get() = page < totalPages
+
+    /** First open: filters from a row's "See all", else the defaults. */
+    fun start(initial: BrowseFilters) {
+        if (started) return
+        started = true
+        set(initial)
+    }
+
+    fun set(f: BrowseFilters) {
+        filters = f
+        page = 0
+        totalPages = 1
+        titles = emptyList()
+        total = null
+        loadMore(reset = true)
+    }
+
+    fun loadMore(reset: Boolean = false) {
+        if (!reset && (loading || !hasMore)) return
+        job?.cancel()
+        val f = filters
+        val next = page + 1
+        loading = true
+        error = null
+        job = viewModelScope.launch {
+            try {
+                val r = g.api.discover(f, next)
+                // Pages can repeat a title; keep the first.
+                titles = (titles + r.titles).distinctBy { it.key }
+                page = next
+                totalPages = r.totalPages
+                total = r.totalResults
+            } catch (e: CancellationException) { throw e } catch (e: Exception) {
+                error = "Could not load titles."
+            }
+            loading = false
+        }
+    }
+
+    fun retry() = if (titles.isEmpty()) set(filters) else loadMore()
 }
 
 class SearchVm : ViewModel() {
@@ -212,25 +382,32 @@ class SearchVm : ViewModel() {
     var resultsFor by mutableStateOf(""); private set
     var loading by mutableStateOf(false); private set
     var error by mutableStateOf<String?>(null); private set
+    var recent by mutableStateOf(g.recent.all()); private set
     private var job: Job? = null
 
     fun onQuery(q: String) {
         query = q
-        search(debounceMs = 350) // debounce typing on the on-screen keyboard
+        search(debounceMs = 300) // debounce typing on the on-screen keyboard
     }
 
     /** IME Search: run now, skipping the debounce, unless done or in flight. */
     fun submit() {
         val q = query.trim()
+        remember(q)
         if ((resultsFor == q && !loading) || inFlight == q) return
         search(debounceMs = 0)
     }
     private var inFlight: String? = null
 
+    /** Saved when the viewer submits or opens a result, not on every keystroke. */
+    fun remember(q: String = query) { g.recent.add(q); recent = g.recent.all() }
+    fun forget(q: String) { g.recent.remove(q); recent = g.recent.all() }
+    fun clearRecent() { g.recent.clear(); recent = emptyList() }
+
     private fun search(debounceMs: Long) {
         val q = query.trim()
         job?.cancel()
-        if (q.length < 2) { results = emptyList(); resultsFor = q; loading = false; return }
+        if (q.length < 2) { results = emptyList(); resultsFor = q; loading = false; error = null; return }
         job = viewModelScope.launch {
             delay(debounceMs)
             loading = true

@@ -22,8 +22,8 @@ android {
         applicationId = "com.chitram.app"
         minSdk = 25
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.0.1"
+        versionCode = 3
+        versionName = "1.1.0"
         // Only ship the locales and densities we use.
         resourceConfigurations += listOf("en")
     }
@@ -76,6 +76,8 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
+    // R8 keeps only the icons the app uses.
+    implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.tv:tv-material:1.0.0")
 
     implementation("androidx.media3:media3-exoplayer:1.5.1")

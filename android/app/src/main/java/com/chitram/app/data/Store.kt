@@ -164,6 +164,17 @@ class ProgressStore(private val kv: KeyValue, private val now: () -> Long = Syst
         return (movies + shows).sortedByDescending { it.updatedAt }.take(limit)
     }
 
+    /**
+     * "Because you watched" seeds (web getSeeds): titles watched 25% or more,
+     * or finished, newest first, one entry per title.
+     */
+    fun seeds(limit: Int = 3): List<Progress> = read().values
+        .filter { it.finished || it.pct >= 0.25f }
+        .groupBy { "${it.mediaType}:${it.tmdbId}" }
+        .map { (_, l) -> l.maxBy { it.updatedAt } }
+        .sortedByDescending { it.updatedAt }
+        .take(limit)
+
     fun remove(mediaType: String, tmdbId: Long) {
         val all = read()
         all.entries.removeAll { it.value.mediaType == mediaType && it.value.tmdbId == tmdbId }

@@ -50,6 +50,8 @@ data class PlayRequest(
     val epTitle: String? = null,
     val seasons: List<SeasonInfo> = emptyList(),
     val overview: String? = null,
+    /** Start over: ignore the saved position. */
+    val fromStart: Boolean = false,
 )
 
 data class MenuItem(val key: String, val label: String, val detail: String = "", val selected: Boolean = false, val dim: Boolean = false)
@@ -75,6 +77,11 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     var tracks by mutableStateOf(Tracks.EMPTY); private set
     var positionMs by mutableStateOf(0L); private set
     var durationMs by mutableStateOf(0L); private set
+    var bufferedMs by mutableStateOf(0L); private set
+    /** Mid-play message while a source changes ("Trying another source…"); "" otherwise. */
+    var notice by mutableStateOf(""); private set
+    /** Set when an episode ends and another follows: the Next episode card. */
+    var nextUp by mutableStateOf<PlayRequest?>(null); private set
 
     val player: ExoPlayer = ExoPlayer.Builder(
         app,
@@ -108,6 +115,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                 buffering = state == Player.STATE_BUFFERING
                 if (state == Player.STATE_READY) {
                     durationMs = player.duration.coerceAtLeast(0)
+                    notice = ""
                     current?.let { request?.let { r -> g.lastProvider.put(r.type, r.id, it.provider) } }
                 }
                 if (state == Player.STATE_ENDED) onEnded()
@@ -122,9 +130,29 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             while (isActive) {
                 delay(500)
                 positionMs = player.currentPosition
+                bufferedMs = player.bufferedPosition
                 if (player.duration > 0) durationMs = player.duration
                 if (++n % 20 == 0 && player.isPlaying) saveProgress()
+                checkStall()
             }
+        }
+    }
+
+    // Stall ladder (web useRecovery "switching" stage): a buffering stream whose
+    // buffer has not grown for 25s is dead, so move to the next source. ExoPlayer
+    // retries a refused connection on its own and never raises an error for it.
+    private var stallBuffered = -1L
+    private var stallSince = 0L
+
+    private fun checkStall() {
+        val stalled = phase == Phase.Playing && player.playWhenReady && player.playbackState == Player.STATE_BUFFERING
+        if (!stalled) { stallSince = 0; return }
+        val now = System.currentTimeMillis()
+        val b = player.bufferedPosition
+        if (stallSince == 0L || b > stallBuffered) { stallSince = now; stallBuffered = b; return }
+        if (now - stallSince >= STALL_SWITCH_MS) {
+            stallSince = 0
+            failover("${current?.provider ?: "Source"}: stalled", player.currentPosition.coerceAtLeast(0))
         }
     }
 
@@ -134,7 +162,9 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         request = r
         tried.clear()
         refreshedOnce = false
-        resolve(refresh = false, keepProvider = null, startMs = g.progress.resumeMs(r.type, r.id, r.season, r.episode))
+        nextUp = null
+        notice = ""
+        resolve(refresh = false, keepProvider = null, startMs = if (r.fromStart) 0 else g.progress.resumeMs(r.type, r.id, r.season, r.episode))
     }
 
     private fun resolve(refresh: Boolean, keepProvider: String?, startMs: Long) {
@@ -142,7 +172,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         resolveJob?.cancel()
         player.stop()
         phase = Phase.Resolving
-        status = if (refresh) "Refreshing links" else "Finding the best source"
+        status = if (refresh) "Refreshing links…" else "Getting your stream ready"
         resolveJob = viewModelScope.launch {
             val list = try {
                 val resp = g.api.streams(r.type, r.id, r.season, r.episode, refresh)
@@ -208,8 +238,9 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             player.stop()
             return
         }
-        status = "Switching server ($reason)"
+        android.util.Log.i("Chitram", "failover: $reason -> ${next.provider}")
         play(next, pos)
+        notice = "Trying another source…"
     }
 
     /**
@@ -241,18 +272,26 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** The following episode, crossing into the next season; null for a film or the last one. */
+    val nextEpisode: PlayRequest?
+        get() {
+            val r = request ?: return null
+            if (r.type != "tv" || r.season == 0) return null
+            val count = r.seasons.firstOrNull { it.number == r.season }?.episodes ?: 0
+            return when {
+                count == 0 || r.episode < count -> r.copy(episode = r.episode + 1, epTitle = null, fromStart = false)
+                r.seasons.any { it.number == r.season + 1 } -> r.copy(season = r.season + 1, episode = 1, epTitle = null, fromStart = false)
+                else -> null
+            }
+        }
+
+    /** End of an episode: offer the next one with a countdown (web NextUp). */
     private fun onEnded() {
         saveProgress()
-        val r = request ?: return
-        if (r.type != "tv" || r.season == 0) return
-        val count = r.seasons.firstOrNull { it.number == r.season }?.episodes ?: 0
-        val next = when {
-            count == 0 || r.episode < count -> r.copy(episode = r.episode + 1, epTitle = null)
-            r.seasons.any { it.number == r.season + 1 } -> r.copy(season = r.season + 1, episode = 1, epTitle = null)
-            else -> return
-        }
-        start(next)
+        nextUp = nextEpisode
     }
+
+    fun dismissNext() { nextUp = null }
 
     fun saveProgress() {
         val r = request ?: return
@@ -271,6 +310,8 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         request = null
         current = null
         sources = emptyList()
+        nextUp = null
+        notice = ""
         phase = Phase.Resolving
     }
 
@@ -282,6 +323,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     }
 
     fun togglePlay() { if (player.isPlaying) player.pause() else { if (player.playbackState == Player.STATE_ENDED) player.seekTo(0); player.play() } }
+    fun seekTo(ms: Long) { player.seekTo(ms.coerceIn(0, if (player.duration > 0) player.duration else Long.MAX_VALUE)); positionMs = player.currentPosition }
     fun seekBy(ms: Long) { player.seekTo((player.currentPosition + ms).coerceIn(0, if (player.duration > 0) player.duration else Long.MAX_VALUE)); positionMs = player.currentPosition }
 
     // ---- Menus ---------------------------------------------------------------
@@ -348,7 +390,10 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     fun choose(key: String) {
         val p = key.split(":")
         when (p[0]) {
-            "src" -> sources.firstOrNull { it.id == key.removePrefix("src:") }?.let { tried.clear(); play(it) }
+            "src" -> sources.firstOrNull { it.id == key.removePrefix("src:") }?.let {
+                if (it.id == current?.id) return
+                tried.clear(); play(it); notice = "Switching to ${it.provider}…"
+            }
             "trk" -> override(C.TRACK_TYPE_AUDIO, p[1].toInt(), p[2].toInt())
             "q" -> if (p[1] == "auto") player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().clearOverridesOfType(C.TRACK_TYPE_VIDEO).build()
                    else override(C.TRACK_TYPE_VIDEO, p[1].toInt(), p[2].toInt())
@@ -375,6 +420,9 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     }
 
     companion object {
+        /** Web useRecovery STAGES.switching. */
+        const val STALL_SWITCH_MS = 25_000L
+
         /** Now-playing info: show or film title, episode line, backdrop art. */
         fun metadata(r: PlayRequest?): MediaMetadata {
             if (r == null) return MediaMetadata.EMPTY

@@ -43,7 +43,7 @@ object Tok {
 
 /** Image with a solid placeholder; no crossfade (cheap on the Fire TV). */
 @Composable
-fun Art(path: String?, size: String, modifier: Modifier = Modifier, contentDescription: String? = null) {
+fun Art(path: String?, size: String, modifier: Modifier = Modifier, contentDescription: String? = null, alignment: androidx.compose.ui.Alignment = androidx.compose.ui.Alignment.Center) {
     val url = Api.image(path, size)
     Box(modifier.background(Tok.surfaceSolid)) {
         if (url != null) {
@@ -51,6 +51,7 @@ fun Art(path: String?, size: String, modifier: Modifier = Modifier, contentDescr
                 model = ImageRequest.Builder(LocalContext.current).data(url).build(),
                 contentDescription = contentDescription,
                 contentScale = ContentScale.Crop,
+                alignment = alignment,
                 modifier = Modifier.fillMaxSize(),
             )
         }
@@ -63,6 +64,9 @@ sealed interface Screen {
     data object MyList : Screen
     data class Langs(val firstRun: Boolean) : Screen
     data class Detail(val type: String, val id: Long) : Screen
+    data class Person(val id: Long, val name: String = "") : Screen
+    /** Browse with filters; `initial` comes from a row's "See all". */
+    data class Browse(val initial: com.chitram.app.data.BrowseFilters = com.chitram.app.data.BrowseFilters()) : Screen
     data class Player(val req: PlayRequest) : Screen
 }
 
@@ -80,6 +84,19 @@ fun fmtTime(ms: Long): String {
     val s = (ms / 1000).coerceAtLeast(0)
     val h = s / 3600; val m = (s % 3600) / 60; val sec = s % 60
     return if (h > 0) "%d:%02d:%02d".format(h, m, sec) else "%d:%02d".format(m, sec)
+}
+
+fun runtimeText(min: Int?): String? = when {
+    min == null || min <= 0 -> null
+    min >= 60 -> "${min / 60}h ${min % 60}m"
+    else -> "${min}m"
+}
+
+/** Language name for a code, e.g. "te" -> "Telugu", "en" -> "English". */
+fun langName(code: String?): String? = when {
+    code.isNullOrEmpty() -> null
+    else -> com.chitram.app.data.LanguagePrefs.LANGS.firstOrNull { it.code == code }?.label
+        ?: java.util.Locale(code).getDisplayLanguage(java.util.Locale.ENGLISH).ifEmpty { code }
 }
 
 fun metaLine(year: Int?, rating: Double?, extra: String? = null): String =

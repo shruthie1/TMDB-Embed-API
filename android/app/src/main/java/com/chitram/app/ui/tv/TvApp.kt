@@ -1,5 +1,9 @@
 package com.chitram.app.ui.tv
 
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.gestures.BringIntoViewSpec
+import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -58,6 +62,29 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyGridScope
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Replay
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Translate
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material3.Icon
+import androidx.compose.ui.graphics.vector.ImageVector
+import com.chitram.app.data.BrowseFilters
+import com.chitram.app.data.BrowseOptions
+import com.chitram.app.data.Credit
+import com.chitram.app.ui.common.BrowseVm
+import com.chitram.app.ui.common.PersonVm
+import com.chitram.app.ui.common.langName
+import com.chitram.app.ui.common.runtimeText
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -111,6 +138,8 @@ fun TvApp(nav: Nav) {
                 Screen.MyList -> TvGrid(nav, "My list", App.instance.myList.all(), empty = "Titles you add show up here.")
                 is Screen.Langs -> TvLangs(s.firstRun) { if (s.firstRun) nav.replaceAll(Screen.Home) else nav.pop() }
                 is Screen.Detail -> TvDetail(nav, s.type, s.id)
+                is Screen.Person -> TvPerson(nav, s.id, s.name)
+                is Screen.Browse -> TvBrowse(nav, s.initial)
                 is Screen.Player -> PlayerScreen(s.req, isTv = true, onBack = { nav.pop() })
             }
         }
@@ -146,7 +175,7 @@ private fun TvHome(nav: Nav, restore: androidx.compose.runtime.MutableState<Stri
         // D-pad Up/Down moves exactly one row: scroll the target row to the top,
         // then hand focus to the card it last had. Default 2D focus search
         // skipped a half-visible row.
-        val visible = vm.rows.filter { it.loading || it.titles.isNotEmpty() }
+        val visible = vm.rows.filter { it.shown }
         val rowFocus = remember { HashMap<String, FocusRequester>() }
         val scope = rememberCoroutineScope()
         fun moveRow(j: Int): Boolean {
@@ -166,23 +195,23 @@ private fun TvHome(nav: Nav, restore: androidx.compose.runtime.MutableState<Stri
                 Column {
                     Row(Modifier.padding(start = 48.dp, top = 20.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text("Chitram", style = TextStyle(color = Tok.text, fontSize = 22.sp, fontWeight = FontWeight.Bold), modifier = Modifier.padding(end = 20.dp))
-                        TvChip("Search") { nav.push(Screen.Search) }
-                        TvChip("My list") { nav.push(Screen.MyList) }
-                        TvChip("Languages") { nav.push(Screen.Langs(false)) }
+                        TvChip("Search", icon = Icons.Filled.Search) { nav.push(Screen.Search) }
+                        TvChip("Browse", icon = Icons.Filled.Tune) { nav.push(Screen.Browse()) }
+                        TvChip("My list", icon = Icons.Filled.Bookmark) { nav.push(Screen.MyList) }
+                        TvChip("Languages", icon = Icons.Filled.Translate) { nav.push(Screen.Langs(false)) }
                     }
                     Column(Modifier.padding(start = 48.dp, top = 28.dp, end = 48.dp).fillMaxWidth(0.5f).height(150.dp)) {
                         shown?.let { t ->
                             Text(t.title, style = TextStyle(color = Tok.text, fontSize = 30.sp, fontWeight = FontWeight.Bold), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text(metaLine(t.year, t.rating, t.originalLang?.let { LanguagePrefs.label(it) }), style = TextStyle(color = Tok.textSecondary, fontSize = 14.sp), modifier = Modifier.padding(vertical = 6.dp))
+                            Text(metaLine(t.year, t.rating, langName(t.originalLang)), style = TextStyle(color = Tok.textSecondary, fontSize = 14.sp), modifier = Modifier.padding(vertical = 6.dp))
                             Text(t.overview.orEmpty(), style = TextStyle(color = Tok.textMuted, fontSize = 14.sp), maxLines = if (heroIsContinue) 2 else 3, overflow = TextOverflow.Ellipsis)
                         }
                     }
-                    if (vm.error != null) Text(vm.error!!, color = Tok.danger, modifier = Modifier.padding(start = 48.dp))
                 }
             }
             itemsIndexed(visible, key = { _, r -> r.kind }) { i, row ->
                 val fr = rowFocus.getOrPut(row.kind) { FocusRequester() }
-                TvRow(row, nav, restore, fr, onFocus = { focused = row.kind to it.key }, onMove = { d -> moveRow(i + d) })
+                TvRow(row, nav, restore, fr, onFocus = { focused = row.kind to it.key }, onMove = { d -> moveRow(i + d) }, onRetry = { vm.retry(row.kind) })
             }
         }
     }
@@ -192,7 +221,7 @@ private fun TvHome(nav: Nav, restore: androidx.compose.runtime.MutableState<Stri
 @OptIn(ExperimentalComposeUiApi::class)
 private fun TvRow(
     row: HomeRow, nav: Nav, restore: androidx.compose.runtime.MutableState<String?>, rowFocus: FocusRequester,
-    onFocus: (Title) -> Unit, onMove: (Int) -> Boolean,
+    onFocus: (Title) -> Unit, onMove: (Int) -> Boolean, onRetry: () -> Unit,
 ) {
     Column {
         Text(row.label, style = TextStyle(color = Tok.text, fontSize = 18.sp, fontWeight = FontWeight.SemiBold), modifier = Modifier.padding(start = 48.dp, bottom = 10.dp))
@@ -212,7 +241,9 @@ private fun TvRow(
             contentPadding = PaddingValues(horizontal = 48.dp, vertical = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            if (row.loading) {
+            if (row.error) {
+                item { TvChip("Couldn't load this section · Retry", onClick = onRetry) }
+            } else if (row.loading) {
                 items(6) { Box(Modifier.size(if (wide) 240.dp else 130.dp, if (wide) 135.dp else 195.dp).background(Tok.surfaceSolid, Tok.radiusMd)) }
             } else {
                 items(row.titles, key = { it.key }) { t ->
@@ -224,7 +255,18 @@ private fun TvRow(
                         nav.push(Screen.Detail(t.mediaType, t.tmdbId))
                     }
                     val mod = Modifier.focusRequester(fr).onFocusChanged { if (it.isFocused) onFocus(t) }
-                    if (wide) WideCard(t, row.progress[t.key], mod, open) else PosterCard(t, mod, open)
+                    if (wide) WideCard(t, row.progress[t.key], mod, open)
+                    else PosterCard(t, mod, rank = if (row.ranked) row.titles.indexOf(t) + 1 else null, onClick = open)
+                }
+                // "See all" as the last card, like the web rows' link.
+                val all = row.seeAll
+                if (all != null || row.kind == "list") item(key = "see-all") {
+                    val fr = remember { FocusRequester() }
+                    if (restore.value == "${row.kind}|see-all") LaunchedEffect(Unit) { runCatching { fr.requestFocus() } }
+                    SeeAllCard(Modifier.focusRequester(fr)) {
+                        restore.value = "${row.kind}|see-all"
+                        nav.push(if (all != null) Screen.Browse(all) else Screen.MyList)
+                    }
                 }
             }
         }
@@ -232,7 +274,7 @@ private fun TvRow(
 }
 
 @Composable
-fun PosterCard(t: Title, modifier: Modifier = Modifier, onClick: () -> Unit) {
+fun PosterCard(t: Title, modifier: Modifier = Modifier, rank: Int? = null, showType: Boolean = false, onClick: () -> Unit) {
     Card(
         onClick = onClick,
         modifier = modifier.size(130.dp, 195.dp),
@@ -244,6 +286,27 @@ fun PosterCard(t: Title, modifier: Modifier = Modifier, onClick: () -> Unit) {
         Box(Modifier.fillMaxSize()) {
             Art(t.poster, "w342", Modifier.fillMaxSize(), t.title)
             if (t.poster == null) Text(t.title, color = Tok.textSecondary, fontSize = 13.sp, modifier = Modifier.padding(8.dp))
+            if (showType && t.mediaType == "tv") Text("Series", color = Tok.text, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.align(Alignment.TopStart).padding(6.dp).background(Tok.bg.copy(alpha = 0.75f), Tok.radiusMd).padding(horizontal = 6.dp, vertical = 1.dp))
+            if (rank != null) Text("$rank", style = TextStyle(color = Color.White, fontSize = 44.sp, fontWeight = FontWeight.Black),
+                modifier = Modifier.align(Alignment.BottomStart).padding(start = 8.dp))
+        }
+    }
+}
+
+@Composable
+private fun SeeAllCard(modifier: Modifier = Modifier, onClick: () -> Unit) {
+    Card(
+        onClick = onClick,
+        modifier = modifier.size(130.dp, 195.dp),
+        shape = CardDefaults.shape(Tok.radiusMd),
+        scale = CardDefaults.scale(focusedScale = FOCUS_SCALE),
+        border = CardDefaults.border(focusedBorder = focusBorder),
+        colors = CardDefaults.colors(containerColor = Tok.fill1, focusedContainerColor = Tok.fill2),
+    ) {
+        Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+            Icon(Icons.Filled.ChevronRight, null, tint = Tok.text, modifier = Modifier.size(32.dp))
+            Text("See all", color = Tok.text, fontSize = 15.sp, fontWeight = FontWeight.Medium)
         }
     }
 }
@@ -272,7 +335,7 @@ private fun WideCard(t: Title, p: Progress?, modifier: Modifier, onClick: () -> 
 }
 
 @Composable
-private fun TvChip(text: String, selected: Boolean = false, modifier: Modifier = Modifier, onClick: () -> Unit) {
+private fun TvChip(text: String, selected: Boolean = false, modifier: Modifier = Modifier, icon: ImageVector? = null, onClick: () -> Unit) {
     Surface(
         onClick = onClick,
         modifier = modifier,
@@ -286,12 +349,15 @@ private fun TvChip(text: String, selected: Boolean = false, modifier: Modifier =
         ),
         border = ClickableSurfaceDefaults.border(focusedBorder = Border(BorderStroke(2.dp, Tok.accent), shape = Tok.pill)),
     ) {
-        Text(text, fontSize = 15.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(horizontal = 18.dp, vertical = 8.dp))
+        Row(Modifier.padding(horizontal = 18.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (icon != null) Icon(icon, null, Modifier.padding(end = 8.dp).size(18.dp), tint = if (selected) Tok.bg else Tok.text)
+            Text(text, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+        }
     }
 }
 
 @Composable
-private fun TvButton(text: String, primary: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+private fun TvButton(text: String, primary: Boolean, modifier: Modifier = Modifier, icon: ImageVector? = null, onClick: () -> Unit) {
     Button(
         onClick = onClick,
         modifier = modifier,
@@ -303,10 +369,14 @@ private fun TvButton(text: String, primary: Boolean, modifier: Modifier = Modifi
             focusedContentColor = if (primary) Tok.bg else Tok.text,
         ),
         border = ButtonDefaults.border(focusedBorder = Border(BorderStroke(2.dp, Tok.accent), shape = Tok.pill)),
-    ) { Text(text, fontWeight = FontWeight.SemiBold) }
+    ) {
+        if (icon != null) Icon(icon, null, Modifier.padding(end = 8.dp).size(20.dp), tint = if (primary) Tok.bg else Tok.text)
+        Text(text, fontWeight = FontWeight.SemiBold)
+    }
 }
 
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 private fun TvDetail(nav: Nav, type: String, id: Long) {
     val vm: DetailVm = viewModel(key = "detail-$type-$id")
     LaunchedEffect(type, id) { vm.load(type, id) }
@@ -315,72 +385,115 @@ private fun TvDetail(nav: Nav, type: String, id: Long) {
     Box(Modifier.fillMaxSize()) {
         Art(t?.backdrop, "w1280", Modifier.align(Alignment.TopEnd).fillMaxWidth(0.72f).fillMaxHeight(0.8f))
         Box(Modifier.fillMaxSize().background(Tok.scrimLeft))
+        Box(Modifier.fillMaxSize().background(Tok.scrimBottom))
         if (t == null) {
             Text(vm.error ?: "Loading", color = Tok.textMuted, modifier = Modifier.padding(48.dp))
             return@Box
         }
-        LaunchedEffect(t.tmdbId) { runCatching { playFocus.requestFocus() } }
-        LazyColumn(contentPadding = PaddingValues(start = 48.dp, top = 48.dp, bottom = 48.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            item(key = "head") {
-                Column(Modifier.fillMaxWidth(0.55f)) {
-                    Text(t.title, style = TextStyle(color = Tok.text, fontSize = 34.sp, fontWeight = FontWeight.Bold), maxLines = 2)
-                    val extra = listOfNotNull(
-                        t.runtimeMin?.let { "${it / 60}h ${it % 60}m" },
-                        t.seasons?.takeIf { t.mediaType == "tv" }?.let { "$it seasons" },
-                        t.originalLang?.let { LanguagePrefs.label(it) },
-                    ).joinToString("  ·  ")
-                    Text(metaLine(t.year, t.rating, extra.ifEmpty { null }), color = Tok.textSecondary, fontSize = 14.sp, modifier = Modifier.padding(vertical = 8.dp))
-                    if (t.genres.isNotEmpty()) Text(t.genres.joinToString(" · "), color = Tok.textMuted, fontSize = 13.sp)
-                    Text(t.overview.orEmpty(), color = Tok.textSecondary, fontSize = 15.sp, maxLines = 4, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 12.dp))
-                    if (t.cast.isNotEmpty()) Text("Cast: " + t.cast.take(5).joinToString(", "), color = Tok.textMuted, fontSize = 13.sp, maxLines = 1, modifier = Modifier.padding(top = 8.dp))
-                }
-            }
-            item(key = "actions") {
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    val r = vm.resume
-                    val label = when {
-                        r == null -> "Play"
-                        t.mediaType == "tv" && r.positionMs > 0 -> "Resume S${r.season} E${r.episode}"
-                        t.mediaType == "tv" -> "Play S${r.season} E${r.episode}"
-                        else -> "Resume"
+        val detailList = rememberLazyListState()
+        val scope = rememberCoroutineScope()
+        // Focus Play, then pin the list to the top: focusing scrolls Play into
+        // view and would otherwise clip the title.
+        LaunchedEffect(t.tmdbId) { runCatching { playFocus.requestFocus() }; detailList.scrollToItem(0) }
+        // Compose's TV default pivots the focused item to 30% of the height,
+        // which pushed the title off the top. Scroll only as far as needed and
+        // return to the very top when Play takes focus.
+        CompositionLocalProvider(LocalBringIntoViewSpec provides MinimalScroll) {
+            LazyColumn(state = detailList, contentPadding = PaddingValues(top = 40.dp, bottom = 48.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
+                item(key = "head") {
+                    Column(Modifier.padding(start = 48.dp).fillMaxWidth(0.55f)) {
+                        Text(t.title, style = TextStyle(color = Tok.text, fontSize = 34.sp, fontWeight = FontWeight.Bold), maxLines = 2)
+                        t.tagline?.takeIf { it.isNotBlank() }?.let { Text(it, color = Tok.textMuted, fontSize = 15.sp, modifier = Modifier.padding(top = 4.dp)) }
+                        val extra = listOfNotNull(
+                            runtimeText(t.runtimeMin),
+                            t.seasons?.takeIf { t.mediaType == "tv" && it > 0 }?.let { "$it season${if (it == 1) "" else "s"}" },
+                            langName(t.originalLang),
+                        ).joinToString("  ·  ")
+                        Text(metaLine(t.year, t.rating, extra.ifEmpty { null }), color = Tok.textSecondary, fontSize = 14.sp, modifier = Modifier.padding(vertical = 8.dp))
+                        if (t.genres.isNotEmpty()) Text(t.genres.joinToString(" · "), color = Tok.textMuted, fontSize = 13.sp)
+                        Text(t.overview.orEmpty(), color = Tok.textSecondary, fontSize = 15.sp, maxLines = 4, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 12.dp))
                     }
-                    TvButton(label, primary = true, modifier = Modifier.focusRequester(playFocus)) {
-                        vm.playRequest()?.let { nav.push(Screen.Player(it)) }
-                    }
-                    TvButton(if (vm.inList) "✓ In my list" else "+ My list", primary = false) { vm.toggleList() }
                 }
-            }
-            if (t.mediaType == "tv" && t.seasonList.isNotEmpty()) {
-                item(key = "seasons") {
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(end = 48.dp)) {
-                        items(t.seasonList.filter { it.number > 0 }, key = { it.number }) { s ->
-                            TvChip(s.name.ifEmpty { "Season ${s.number}" }, selected = s.number == vm.season) { vm.selectSeason(s.number) }
+                item(key = "actions") {
+                    Row(Modifier.padding(start = 48.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        TvButton(vm.playLabel(), primary = true, modifier = Modifier.focusRequester(playFocus).onFocusChanged { if (it.isFocused) scope.launch { detailList.animateScrollToItem(0) } }, icon = Icons.Filled.PlayArrow) {
+                            vm.playRequest()?.let { nav.push(Screen.Player(it)) }
+                        }
+                        if (vm.canStartOver) TvButton("Start over", primary = false, icon = Icons.Filled.Replay) {
+                            vm.playRequest(fromStart = true)?.let { nav.push(Screen.Player(it)) }
+                        }
+                        TvButton(if (vm.inList) "In My List" else "My List", primary = false, icon = if (vm.inList) Icons.Filled.Check else Icons.Filled.Add) { vm.toggleList() }
+                    }
+                }
+                if (t.mediaType == "tv" && t.seasonList.isNotEmpty()) {
+                    item(key = "seasons") {
+                        Column {
+                            TvSection("Episodes")
+                            val seasons = t.seasonList.filter { it.number > 0 }
+                            if (seasons.size > 1) LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(horizontal = 48.dp)) {
+                                items(seasons, key = { it.number }) { s ->
+                                    TvChip(s.name.ifEmpty { "Season ${s.number}" }, selected = s.number == vm.season) { vm.selectSeason(s.number) }
+                                }
+                            }
+                        }
+                    }
+                    item(key = "episodes") {
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(16.dp), contentPadding = PaddingValues(horizontal = 48.dp, vertical = 6.dp)) {
+                            if (vm.episodesLoading) items(5) { Box(Modifier.size(240.dp, 135.dp).background(Tok.surfaceSolid, Tok.radiusMd)) }
+                            else items(vm.episodes, key = { "${it.season}-${it.episode}" }) { ep ->
+                                val p = vm.episodeProgress(ep)
+                                val r = vm.resume
+                                val isNext = r != null && r.season == ep.season && r.episode == ep.episode
+                                Column(Modifier.width(240.dp)) {
+                                    Card(
+                                        onClick = { vm.playRequest(ep)?.let { nav.push(Screen.Player(it)) } },
+                                        modifier = Modifier.size(240.dp, 135.dp),
+                                        shape = CardDefaults.shape(Tok.radiusMd),
+                                        scale = CardDefaults.scale(focusedScale = FOCUS_SCALE),
+                                        border = CardDefaults.border(focusedBorder = focusBorder),
+                                        colors = CardDefaults.colors(containerColor = Tok.surfaceSolid),
+                                    ) {
+                                        Box(Modifier.fillMaxSize()) {
+                                            Art(ep.still, "w300", Modifier.fillMaxSize())
+                                            Text("E${ep.episode}", color = Tok.text, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                                                modifier = Modifier.padding(6.dp).background(Tok.bg.copy(alpha = 0.7f), Tok.radiusMd).padding(horizontal = 6.dp, vertical = 1.dp))
+                                            if (p != null) Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(4.dp).background(Tok.fill3)) {
+                                                Box(Modifier.fillMaxHeight().fillMaxWidth(if (p.finished) 1f else p.pct).background(Tok.accent))
+                                            }
+                                        }
+                                    }
+                                    Text(ep.title.ifEmpty { "Episode ${ep.episode}" }, color = Tok.text, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 8.dp))
+                                    val meta = listOfNotNull(if (isNext) "Next up" else null, ep.runtimeMin?.let { "$it min" }, if (p?.finished == true) "Watched" else null).joinToString(" · ")
+                                    if (meta.isNotEmpty()) Text(meta, color = if (isNext) Tok.accent else Tok.textMuted, fontSize = 12.sp)
+                                    ep.overview?.let { Text(it, color = Tok.textMuted, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp)) }
+                                }
+                            }
                         }
                     }
                 }
-                item(key = "episodes") {
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(16.dp), contentPadding = PaddingValues(end = 48.dp, top = 6.dp, bottom = 6.dp)) {
-                        if (vm.episodesLoading) items(5) { Box(Modifier.size(240.dp, 135.dp).background(Tok.surfaceSolid, Tok.radiusMd)) }
-                        else items(vm.episodes, key = { "${it.season}-${it.episode}" }) { ep ->
-                            val p = vm.episodeProgress(ep)
-                            Column(Modifier.width(240.dp)) {
-                                Card(
-                                    onClick = { vm.playRequest(ep)?.let { nav.push(Screen.Player(it)) } },
-                                    modifier = Modifier.size(240.dp, 135.dp),
-                                    shape = CardDefaults.shape(Tok.radiusMd),
-                                    scale = CardDefaults.scale(focusedScale = FOCUS_SCALE),
-                                    border = CardDefaults.border(focusedBorder = focusBorder),
-                                    colors = CardDefaults.colors(containerColor = Tok.surfaceSolid),
-                                ) {
-                                    Box(Modifier.fillMaxSize()) {
-                                        Art(ep.still, "w300", Modifier.fillMaxSize())
-                                        if (p != null) Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(4.dp).background(Tok.fill3)) {
-                                            Box(Modifier.fillMaxHeight().fillMaxWidth(if (p.finished) 1f else p.pct).background(Tok.accent))
-                                        }
-                                    }
-                                }
-                                Text("E${ep.episode} · ${ep.title}", color = Tok.textSecondary, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 6.dp))
-                            }
+                if (t.credits.isNotEmpty()) item(key = "cast") {
+                    Column {
+                        TvSection("Cast")
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(18.dp), contentPadding = PaddingValues(horizontal = 48.dp, vertical = 6.dp)) {
+                            items(t.credits, key = { it.id }) { c -> TvCastCard(c) { nav.push(Screen.Person(c.id, c.name)) } }
+                        }
+                    }
+                }
+                val sim = vm.similar
+                if (sim == null || sim.isNotEmpty()) item(key = "similar") {
+                    Column {
+                        TvSection("More like this")
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(16.dp), contentPadding = PaddingValues(horizontal = 48.dp, vertical = 6.dp)) {
+                            if (sim == null) items(6) { Box(Modifier.size(130.dp, 195.dp).background(Tok.surfaceSolid, Tok.radiusMd)) }
+                            else items(sim, key = { it.key }) { s -> PosterCard(s) { nav.push(Screen.Detail(s.mediaType, s.tmdbId)) } }
+                        }
+                    }
+                }
+                item(key = "facts") {
+                    val facts = listOf("Director" to t.director, "Writers" to t.writers, "Country" to t.country).filter { it.second.isNotEmpty() }
+                    if (facts.isNotEmpty()) Row(Modifier.padding(horizontal = 48.dp), horizontalArrangement = Arrangement.spacedBy(40.dp)) {
+                        facts.forEach { (k, v) ->
+                            Column { Text(k, color = Tok.textMuted, fontSize = 13.sp); Text(v.joinToString(", "), color = Tok.textSecondary, fontSize = 14.sp) }
                         }
                     }
                 }
@@ -388,6 +501,124 @@ private fun TvDetail(nav: Nav, type: String, id: Long) {
         }
     }
 }
+
+@Composable
+private fun TvSection(label: String) {
+    Text(label, style = TextStyle(color = Tok.text, fontSize = 18.sp, fontWeight = FontWeight.SemiBold), modifier = Modifier.padding(start = 48.dp, bottom = 10.dp))
+}
+
+@Composable
+private fun TvCastCard(c: Credit, onClick: () -> Unit) {
+    Column(Modifier.width(110.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        Surface(
+            onClick = onClick,
+            modifier = Modifier.size(96.dp),
+            shape = ClickableSurfaceDefaults.shape(CircleShape),
+            scale = ClickableSurfaceDefaults.scale(focusedScale = FOCUS_SCALE),
+            border = ClickableSurfaceDefaults.border(focusedBorder = Border(BorderStroke(3.dp, Tok.accent), shape = CircleShape)),
+            colors = ClickableSurfaceDefaults.colors(containerColor = Tok.surfaceSolid, focusedContainerColor = Tok.surfaceSolid),
+        ) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                if (c.profile != null) Art(c.profile, "w185", Modifier.fillMaxSize().clip(CircleShape), c.name)
+                else Text(c.name.take(1), color = Tok.textSecondary, fontSize = 30.sp)
+            }
+        }
+        Text(c.name, color = Tok.text, fontSize = 13.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 8.dp))
+        c.character?.let { Text(it, color = Tok.textMuted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+    }
+}
+
+private fun LazyGridScope.full(key: String, content: @Composable () -> Unit) =
+    item(key = key, span = { GridItemSpan(maxLineSpan) }) { content() }
+
+@Composable
+private fun TvPerson(nav: Nav, id: Long, name: String) {
+    val vm: PersonVm = viewModel(key = "person-$id")
+    LaunchedEffect(id) { vm.load(id) }
+    val d = vm.data
+    val first = remember { FocusRequester() }
+    LaunchedEffect(d) { if (d?.titles?.isNotEmpty() == true) { withFrameNanos { }; runCatching { first.requestFocus() } } }
+    LazyVerticalGrid(
+        GridCells.Adaptive(130.dp), Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = 48.dp, end = 48.dp, top = 32.dp, bottom = 32.dp),
+        horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        full("head") {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 12.dp)) {
+                val p = d?.person
+                Box(Modifier.size(110.dp).clip(CircleShape).background(Tok.surfaceSolid), contentAlignment = Alignment.Center) {
+                    if (p?.profile != null) Art(p.profile, "w185", Modifier.fillMaxSize(), p.name)
+                    else Text((p?.name ?: name).take(1), color = Tok.textSecondary, fontSize = 36.sp)
+                }
+                Column(Modifier.padding(start = 24.dp)) {
+                    Text(p?.name ?: name, style = TextStyle(color = Tok.text, fontSize = 30.sp, fontWeight = FontWeight.Bold))
+                    p?.knownFor?.let { Text(it, color = Tok.textMuted, fontSize = 15.sp) }
+                    when {
+                        d == null -> Text("Loading", color = Tok.textMuted)
+                        d.person == null -> Text("That profile is not in the catalog.", color = Tok.textMuted)
+                        d.titles.isEmpty() -> Text("No titles to show.", color = Tok.textMuted)
+                        else -> Text("Known for", color = Tok.textSecondary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 12.dp))
+                    }
+                }
+            }
+        }
+        val titles = d?.titles.orEmpty()
+        gridItemsIndexed(titles, key = { _, t -> t.key }) { i, t ->
+            PosterCard(t, if (i == 0) Modifier.focusRequester(first) else Modifier, showType = true) { nav.push(Screen.Detail(t.mediaType, t.tmdbId)) }
+        }
+    }
+}
+
+@Composable
+private fun TvBrowse(nav: Nav, initial: BrowseFilters) {
+    val vm: BrowseVm = viewModel(key = "browse-$initial")
+    LaunchedEffect(initial) { vm.start(initial) }
+    val f = vm.filters
+    LazyVerticalGrid(
+        GridCells.Adaptive(130.dp), Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = 48.dp, end = 48.dp, top = 28.dp, bottom = 32.dp),
+        horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        full("head") {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Browse", style = TextStyle(color = Tok.text, fontSize = 28.sp, fontWeight = FontWeight.Bold), modifier = Modifier.padding(end = 20.dp))
+                    Text(listOfNotNull(vm.total?.let { "%,d titles".format(it) }).joinToString(), color = Tok.textMuted, fontSize = 14.sp)
+                }
+                TvFilterRow("Type", listOf("movie" to "Movies", "tv" to "Series"), { it == f.type }) { vm.set(f.copy(type = it)) }
+                TvFilterRow("Language", LanguagePrefs.LANGS.map { it.code to it.label }, { it in f.langs }) { c -> vm.set(f.copy(langs = if (c in f.langs) f.langs - c else f.langs + c)) }
+                TvFilterRow("Genre", BrowseOptions.GENRES.map { it.id to it.name }, { it in f.genres }) { g -> vm.set(f.copy(genres = if (g in f.genres) f.genres - g else f.genres + g)) }
+                TvFilterRow("Decade", BrowseOptions.DECADES.map { it.id to it.name }, { it == f.decade }) { d -> vm.set(f.copy(decade = if (f.decade == d) null else d)) }
+                TvFilterRow("Rating", BrowseOptions.RATINGS.map { it to "★ $it+" }, { it == f.minRating }) { r -> vm.set(f.copy(minRating = if (f.minRating == r) null else r)) }
+                TvFilterRow("Sort", BrowseOptions.SORTS.map { it.id to it.name }, { it == f.sort }) { vm.set(f.copy(sort = it)) }
+                vm.error?.let { Text(it, color = Tok.danger) }
+                if (!vm.loading && vm.titles.isEmpty() && vm.total != null) Text("No titles match those filters. Try removing a filter.", color = Tok.textMuted)
+            }
+        }
+        gridItemsIndexed(vm.titles, key = { _, t -> t.key }) { i, t ->
+            // Nearing the end loads the next page.
+            if (i >= vm.titles.size - 6) LaunchedEffect(vm.titles.size) { vm.loadMore() }
+            PosterCard(t, showType = true) { nav.push(Screen.Detail(t.mediaType, t.tmdbId)) }
+        }
+        if (vm.loading) items(if (vm.titles.isEmpty()) 12 else 6, key = { "sk$it" }) { Box(Modifier.size(130.dp, 195.dp).background(Tok.surfaceSolid, Tok.radiusMd)) }
+    }
+}
+
+@Composable
+private fun <T> TvFilterRow(label: String, opts: List<Pair<T, String>>, on: (T) -> Boolean, pick: (T) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(label, color = Tok.textMuted, fontSize = 14.sp, modifier = Modifier.width(96.dp))
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(vertical = 2.dp)) {
+            items(opts, key = { it.first.toString() }) { (id, name) -> TvChip(name, selected = on(id)) { pick(id) } }
+        }
+    }
+}
+
+private val TV_SUGGEST = listOf(
+    "Telugu" to BrowseFilters(langs = listOf("te")), "Tamil" to BrowseFilters(langs = listOf("ta")),
+    "Kannada" to BrowseFilters(langs = listOf("kn")), "Action" to BrowseFilters(genres = listOf(28)),
+    "Top rated" to BrowseFilters(sort = "vote_average.desc"),
+)
 
 @Composable
 private fun TvSearch(nav: Nav) {
@@ -457,10 +688,24 @@ private fun TvSearch(nav: Nav) {
             vm.error != null -> Text(vm.error!!, color = Tok.danger)
             vm.loading && vm.results.isEmpty() -> Text("Searching", color = Tok.textMuted)
             vm.query.length >= 2 && vm.results.isEmpty() && !vm.loading -> Text("No results for \"${vm.query}\"", color = Tok.textMuted)
+            vm.results.isNotEmpty() -> Text("${vm.results.size} results for “${vm.resultsFor}”", color = Tok.textMuted, fontSize = 14.sp)
+            vm.query.isBlank() -> Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (vm.recent.isNotEmpty()) {
+                    Text("Recent", color = Tok.textSecondary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        items(vm.recent, key = { it }) { q -> TvChip(q, icon = Icons.Filled.Search) { vm.onQuery(q); vm.submit(); toResults = true } }
+                        item(key = "clear") { TvChip("Clear") { vm.clearRecent() } }
+                    }
+                }
+                Text("Browse instead", color = Tok.textSecondary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    items(TV_SUGGEST, key = { it.first }) { (label, f) -> TvChip(label) { nav.push(Screen.Browse(f)) } }
+                }
+            }
         }
         LazyVerticalGrid(GridCells.Adaptive(130.dp), state = grid, horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp), contentPadding = PaddingValues(vertical = 8.dp)) {
             gridItemsIndexed(vm.results, key = { _, t -> t.key }) { i, t ->
-                PosterCard(t, if (i == 0) Modifier.focusRequester(firstCard) else Modifier) { nav.push(Screen.Detail(t.mediaType, t.tmdbId)) }
+                PosterCard(t, if (i == 0) Modifier.focusRequester(firstCard) else Modifier, showType = true) { vm.remember(); nav.push(Screen.Detail(t.mediaType, t.tmdbId)) }
             }
         }
     }
@@ -502,6 +747,20 @@ private fun TvLangs(firstRun: Boolean, onDone: () -> Unit) {
                 }
                 if (firstRun) TvButton("Skip", primary = false) { prefs.save(emptyList()); onDone() }
             }
+        }
+    }
+}
+
+/** Scroll only as far as needed to show the focused item (the phone default). */
+@OptIn(ExperimentalFoundationApi::class)
+private val MinimalScroll = object : BringIntoViewSpec {
+    override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float {
+        val trailing = offset + size
+        return when {
+            offset >= 0 && trailing <= containerSize -> 0f
+            offset < 0 && trailing > containerSize -> 0f
+            kotlin.math.abs(offset) < kotlin.math.abs(trailing - containerSize) -> offset
+            else -> trailing - containerSize
         }
     }
 }

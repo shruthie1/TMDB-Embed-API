@@ -80,6 +80,15 @@ class Api(val client: OkHttpClient, private val base: String = BASE) {
 
     suspend fun titleFull(type: String, id: Long): TitleFull = getJson("/api/title/$type/$id/full", TitleFull.serializer())
 
+    /** "More like this" and "Because you watched": /api/similar/:type/:id. */
+    suspend fun similar(type: String, id: Long): List<Title> =
+        getJson("/api/similar/$type/$id", RowResponse.serializer()).titles
+
+    suspend fun person(id: Long): PersonResponse = getJson("/api/person/$id", PersonResponse.serializer())
+
+    suspend fun discover(f: BrowseFilters, page: Int): DiscoverResponse =
+        getJson("/api/discover?${f.apiQuery(page)}", DiscoverResponse.serializer())
+
     suspend fun season(id: Long, season: Int): List<Episode> =
         getJson("/api/season/$id/$season", SeasonResponse.serializer()).episodes
 

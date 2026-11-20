@@ -11,6 +11,7 @@ import com.chitram.app.data.LastProviderStore
 import com.chitram.app.data.MyListStore
 import com.chitram.app.data.PrefsKeyValue
 import com.chitram.app.data.ProgressStore
+import com.chitram.app.data.RecentSearchStore
 import com.chitram.app.player.Device
 import com.chitram.app.player.MediaCodecSupport
 
@@ -21,6 +22,7 @@ class App : Application(), ImageLoaderFactory {
     lateinit var progress: ProgressStore
     lateinit var myList: MyListStore
     lateinit var lastProvider: LastProviderStore
+    lateinit var recent: RecentSearchStore
     val codecs = MediaCodecSupport()
     var isTv = false
         private set
@@ -34,6 +36,7 @@ class App : Application(), ImageLoaderFactory {
         progress = ProgressStore(kv)
         myList = MyListStore(kv)
         lastProvider = LastProviderStore(kv)
+        recent = RecentSearchStore(kv)
         isTv = Device.isTv(this)
     }
 
