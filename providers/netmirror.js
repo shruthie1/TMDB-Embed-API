@@ -1,5 +1,6 @@
 const { getDetails } = require('../utils/tmdb');
 const { getStore, mediaIdentityOf } = require('../utils/store');
+const { canonicalLanguage } = require('../utils/streamSchema');
 const {
     normalizeTitle: normaliseTitle,
     looseTitle: loosenTitle,
@@ -500,7 +501,10 @@ function pickSearchMatch(results, wantedTitle) {
 // serves its video from a different file id is the placeholder described above.
 // Network failure returns true: this is a guard against a known decoy, not a
 // general validator, and a flaky fetch must not drop a working stream.
-async function masterMatchesTitle(masterUrl, wantedId, referer) {
+//
+// `seen`, when given, receives the fetched master text as `seen.body`, so the
+// caller can read the audio renditions without a second request.
+async function masterMatchesTitle(masterUrl, wantedId, referer, seen) {
     try {
         const resp = await nmFetch(masterUrl, {
             headers: { Referer: referer || '', 'User-Agent': nextUA() },
@@ -508,6 +512,7 @@ async function masterMatchesTitle(masterUrl, wantedId, referer) {
         });
         if (!resp.ok) return true;
         const body = await resp.text();
+        if (seen) seen.body = body;
         if (!/#EXT-X-STREAM-INF/i.test(body)) return true;
 
         // Only the lines that are URIs (a variant) rather than tags (audio and
@@ -528,6 +533,34 @@ async function masterMatchesTitle(masterUrl, wantedId, referer) {
     } catch {
         return true;
     }
+}
+
+// The audio renditions a NetMirror master really lists (#EXT-X-MEDIA
+// TYPE=AUDIO with a URI), one {language} each, in master order.
+//
+// These are what make the row an audio DONOR for /hybrid/pair: without
+// audio[] and selectableAudio the web called the row a "substitute" and never
+// offered its Telugu over another provider's picture (docs/PENDING-WORK.md H5).
+// The language comes from LANGUAGE, else from NAME ("[4] Telugu"), else - for
+// a lone rendition - from post.php's single language. A track nothing names
+// keeps a null language rather than a guessed one.
+function audioFromMaster(body, postLangs = []) {
+    const out = [];
+    for (const raw of String(body || '').split(/\r?\n/)) {
+        const line = raw.trim();
+        if (!line.startsWith('#EXT-X-MEDIA:') || !/TYPE=AUDIO/i.test(line)) continue;
+        if (!/URI="[^"]+"/.test(line)) continue;
+        const code = (line.match(/LANGUAGE="([^"]*)"/) || [])[1] || '';
+        const name = ((line.match(/NAME="([^"]*)"/) || [])[1] || '').replace(/^\[\d+\]\s*/, '').trim();
+        const fromCode = canonicalLanguage(code);
+        const fromName = canonicalLanguage(name);
+        out.push({ language: (fromCode && fromCode !== 'Unknown' ? fromCode : null)
+            || (fromName && fromName !== 'Unknown' ? fromName : null) });
+    }
+    if (out.length === 1 && !out[0].language && postLangs.length === 1) {
+        out[0].language = canonicalLanguage(postLangs[0]) || postLangs[0];
+    }
+    return out;
 }
 
 // newtv answers a lookup the catalogue does not have with an HTML "Page Not
@@ -672,11 +705,22 @@ async function resolveMatch(api, config, platform, match, title, type, season, e
         // downstream can tell it is the wrong film; the picture simply is not
         // the title, and the player's startup fallback bounces straight back to
         // another provider. Catch it here, where the id is known.
-        if (!(await masterMatchesTitle(player.video_link, targetId, player.referer || api))) {
+        const master = {};
+        if (!(await masterMatchesTitle(player.video_link, targetId, player.referer || api, master))) {
             // Still rejected (CLAUDE.md rule 4), but reported as a throttle:
             // the title IS there, so this must not be cached as "no streams".
             console.log(`[NetMirror] ${platform} returned a placeholder master for "${title}" — rejecting`);
             return failure(`${platform}: throttled (placeholder master)`);
+        }
+
+        // Declare audio only when the master was read and really lists
+        // renditions. An unread master (fetch failed open) claims nothing.
+        const audio = audioFromMaster(master.body, postLangs);
+        if (audio.length) {
+            console.log(`[NetMirror] ${platform} master lists ${audio.length} audio rendition(s):`
+                + ` ${audio.map((a) => a.language || '?').join('/')} - selectable`);
+        } else if (master.body !== undefined) {
+            console.log(`[NetMirror] ${platform} master lists no audio renditions - not selectable`);
         }
 
         return [{
@@ -686,6 +730,7 @@ async function resolveMatch(api, config, platform, match, title, type, season, e
             quality: 'Auto',
             provider: 'NetMirror',
             ...(languages.length ? { language: languages.join('/') } : {}),
+            ...(audio.length ? { audio, selectableAudio: true } : {}),
             headers: {
                 Referer: player.referer || api,
                 'User-Agent': nextUA()

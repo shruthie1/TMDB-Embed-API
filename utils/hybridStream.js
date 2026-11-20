@@ -286,6 +286,16 @@ async function describeStream(stream) {
     const cached = fromCache(key);
     if (cached !== null) return cached;
 
+    // A proxied url is described from its upstream, so rendition and variant
+    // urls come back as upstream urls and every later decision (rebase, header
+    // refill, re-proxying) sees the real target. See unwrapProxied.
+    const unwrapped = unwrapProxied(stream.url);
+    if (unwrapped.url !== stream.url) {
+        const own = stream.headers && Object.keys(stream.headers).length;
+        console.log(`[hybrid] describe ${stream.provider}: unwrapped proxied url to upstream`
+            + ` (headers from ${own ? 'caller' : (Object.keys(unwrapped.headers).length ? 'wrapper' : 'none')})`);
+        stream = { ...stream, url: unwrapped.url, headers: own ? stream.headers : unwrapped.headers };
+    }
     const headers = stream.headers || {};
     const masterText = await getText(stream.url, headers);
     if (!masterText) { describeCache.set(key, { at: Date.now(), value: null }); return null; }
@@ -455,6 +465,35 @@ function tierFor(height) {
     return 'Auto';
 }
 
+// The browser plays (and posts back) PROXIED urls:
+// <base>/m3u8-proxy?url=<encoded upstream>&headers=<json>. Everything that
+// decides how to treat a url - local or remote, which headers it needs - must
+// look at the upstream inside, not at the wrapper. Judged by its prefix, a
+// proxied NetMirror rendition read as LOCAL and lost rebase=1, so its measured
+// PTS offset was silently ignored by the proxy (docs/PENDING-WORK.md H1).
+// Matches the path on any host: the public base the browser saw need not equal
+// the one this request arrived on. Returns {url, headers}; headers are the
+// wrapper's own, {} when it carried none or the url was not a wrapper.
+function unwrapProxied(url, depth = 0) {
+    const plain = { url, headers: {} };
+    if (!url || depth > 2) return plain;
+    let u;
+    try { u = new URL(String(url)); } catch { return plain; }
+    if (!u.pathname.endsWith('/m3u8-proxy')) return plain;
+    const inner = u.searchParams.get('url');
+    if (!inner || !/^https?:\/\//i.test(inner)) return plain;
+    let headers = {};
+    try {
+        const parsed = JSON.parse(u.searchParams.get('headers') || '{}');
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) headers = parsed;
+    } catch { /* unsigned wrapper: no headers */ }
+    const deeper = unwrapProxied(inner, depth + 1);
+    return {
+        url: deeper.url,
+        headers: Object.keys(deeper.headers).length ? deeper.headers : headers,
+    };
+}
+
 function proxied(serverUrl, url, headers) {
     // A URL that already points at this server needs no proxy: castle-demux
     // playlists and their segments are served locally and carry no upstream
@@ -512,6 +551,16 @@ function buildMaster(plan, serverUrl, videoCodec, ptsOffset = 0) {
 
     const lines = ['#EXTM3U', '#EXT-X-VERSION:3'];
     renditions.forEach((r, i) => {
+        // Decide local vs remote from the upstream, not the wrapper. A
+        // rendition that arrived already proxied is re-wrapped once, carrying
+        // the wrapper's headers when the description has none.
+        const inner = unwrapProxied(r.url);
+        const wrapped = inner.url !== r.url;
+        const remote = !String(inner.url).startsWith(serverUrl);
+        const hdrs = Object.keys(audio.desc.headers || {}).length ? audio.desc.headers : inner.headers;
+        if (wrapped && remote && ptsOffset) {
+            console.log(`[hybrid] audio rendition ${i} was proxied; unwrapped to upstream so rebase=1 carries pts=${ptsOffset}`);
+        }
         const attrs = [
             'TYPE=AUDIO',
             'GROUP-ID="hybrid-audio"',
@@ -520,8 +569,7 @@ function buildMaster(plan, serverUrl, videoCodec, ptsOffset = 0) {
             `CODECS="${DEFAULT_AUDIO_CODEC}"`,
             `DEFAULT=${i === defaultIndex ? 'YES' : 'NO'}`,
             'AUTOSELECT=YES',
-            `URI="${withPts(proxied(serverUrl, r.url, audio.desc.headers), ptsOffset,
-                { remote: !String(r.url).startsWith(serverUrl) })}"`,
+            `URI="${withPts(proxied(serverUrl, inner.url, hdrs), ptsOffset, { remote })}"`,
         ].filter(Boolean);
         lines.push(`#EXT-X-MEDIA:${attrs.join(',')}`);
     });
@@ -678,3 +726,4 @@ module.exports.describePlansAsStreams = describePlansAsStreams;
 module.exports.proxied = proxied;
 module.exports.tierFor = tierFor;
 module.exports.withPts = withPts;
+module.exports.unwrapProxied = unwrapProxied;
