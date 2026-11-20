@@ -1,0 +1,2 @@
+# setup.sh clones the community tool and writes the run config here.
+.work/

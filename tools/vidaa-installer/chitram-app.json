@@ -1,0 +1,8 @@
+{
+  "appid": "vidaa_chitram",
+  "name": "Chitram",
+  "url": "https://chtrm2.vercel.app/?tv=1",
+  "text": "Chitram: a private cinema",
+  "category": "my",
+  "icon": "https://raw.githubusercontent.com/shruthie1/TMDB-Embed-API/main/tools/vidaa-installer/chitram-400.png"
+}

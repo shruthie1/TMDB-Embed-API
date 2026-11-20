@@ -27,6 +27,15 @@ describe('isTvDevice', () => {
     ]) { setUA(ua); expect(isTvDevice(), ua).toBe(true); }
   });
 
+  it('recognises Hisense VIDAA (Odin browser), with or without SmartTV', () => {
+    for (const ua of [
+      'Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/111.0.5563.146 Odin/111.5563.5.1 Safari/537.36 Hbbtv/1.6.1 (+DRM; Hisense; 65A60LXVT; V0000.09.40A.N1024; ; ; ) VIDAA/9.0(Hisense;SmartTV;65A60LXVT;V0000.09.40A.N1024;;)',
+      'Mozilla/5.0 (X11; Linux armv7l) AppleWebKit/537.36 Chrome/88.0.4324.150 Odin/88.4324.3.0 Safari/537.36',
+      'Mozilla/5.0 (Linux) AppleWebKit/537.36 Chrome/74.0.3729.157 Safari/537.36 VIDAA/6.0',
+      'Mozilla/5.0 (Linux) AppleWebKit/537.36 Chrome/79.0 Safari/537.36 (HISENSE 55U7)',
+    ]) { setUA(ua); expect(isTvDevice(), ua).toBe(true); }
+  });
+
   it('does not mistake a phone or laptop for a TV', () => {
     for (const ua of [
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15',

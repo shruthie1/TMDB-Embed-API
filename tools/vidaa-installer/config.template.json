@@ -1,0 +1,16 @@
+{
+    "enable_dns_server": true,
+    "enable_https_server": true,
+    "enable_http_server": false,
+    "server_address": "__MAC_IP__",
+    "http_port": 80,
+    "https_port": 443,
+    "ssl_keyfile": "ssl/local.key",
+    "ssl_certfile": "ssl/local.crt",
+    "html_file": "index-chitram.html",
+    "dns_records": [
+        { "hostname": "vidaahub.com", "type": "A", "address": "__MAC_IP__" },
+        { "hostname": "ajax.googleapis.com", "type": "A", "address": "__AJAX_IP__" },
+        { "hostname": "raw.githubusercontent.com", "type": "A", "address": "__RAW_IP__" }
+    ]
+}

@@ -1,5 +1,6 @@
 'use client';
 import { isTvDevice } from './player/hlsConfig';
+import { backAction, exitApp, isTyping, isVidaa } from './tvKeys';
 
 // TV remote navigation.
 //
@@ -162,8 +163,50 @@ export function initDpad() {
     }
   };
 
+  /**
+   * TV Back (Backspace) outside the player.
+   *
+   * Remotes send Back as Backspace, and nothing outside the player listened
+   * for it: overlays only close on Escape, and pages had no Back at all. So
+   * on a TV, Backspace closes an open overlay by sending it an Escape, and
+   * otherwise goes back one page. On the VIDAA home page it closes the app.
+   */
+  const onBack = (e) => {
+    if (e.defaultPrevented) return;
+    const dialogs = [...document.querySelectorAll('[role="dialog"][aria-modal="true"]')]
+      .filter(reachable);
+    const action = backAction({
+      key: e.key, keyCode: e.keyCode, tv: isTv(),
+      typing: isTyping(document.activeElement),
+      playerOpen: !!document.querySelector('.player'),
+      dialogOpen: dialogs.length > 0,
+      pathname: window.location.pathname,
+      vidaa: isVidaa(navigator.userAgent),
+    });
+    if (!action) return;
+    e.preventDefault();
+    if (action === 'escape') {
+      // Sent from the topmost dialog so it bubbles to the window listeners
+      // that Filters, Shortcuts and PrefsPicker already have for Escape.
+      dialogs[dialogs.length - 1].dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    } else if (action === 'exit') {
+      exitApp();
+    } else if (window.history.length > 1) {
+      window.history.back();
+    } else {
+      // Opened straight onto a deep link: there is no page to go back to.
+      window.location.assign('/');
+    }
+  };
+
   window.addEventListener('keydown', onKey);
-  return () => { window.removeEventListener('keydown', onKey); window.__chitramDpad = false; };
+  window.addEventListener('keydown', onBack);
+  return () => {
+    window.removeEventListener('keydown', onKey);
+    window.removeEventListener('keydown', onBack);
+    window.__chitramDpad = false;
+  };
 }
 
 /**

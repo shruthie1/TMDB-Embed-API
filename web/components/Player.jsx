@@ -6,6 +6,7 @@ import TvBar from './player/TvBar';
 import Icon from './Icon';
 import { listSources, poster, reportPlayback } from '../lib/api';
 import { readOverride } from '../lib/dpad';
+import { mediaKeyAction, MEDIA_SEEK_SECS } from '../lib/tvKeys';
 import { forgetProvider, rememberProvider } from '../lib/lastProvider';
 import { abortReason } from '../lib/abortReason';
 import useAudioSync from '../lib/player/useAudioSync';
@@ -743,9 +744,13 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       if (el && (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.isContentEditable)) return;
       const v = videoRef.current;
 
+      // Remote media keys (VIDAA sends bare keyCodes 415/19/413/417/412).
+      // Stop leaves the film, the same as Back.
+      const media = mediaKeyAction(e);
       const isBack = e.key === 'Escape' || e.key === 'Backspace'
         || e.key === 'BrowserBack' || e.key === 'GoBack'
-        || e.keyCode === 461 || e.keyCode === 10009;
+        || e.keyCode === 461 || e.keyCode === 10009 || e.keyCode === 8
+        || media === 'stop';
       // Inside the embed their player owns the keys; only Back is ours.
       if (embedOnRef.current && !isBack) return;
       if (isBack) {
@@ -778,6 +783,19 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
        * `onControl` guard above already returns for Enter and Space; this is
        * the same idea for the arrows.
        */
+      // FastForward/Rewind are dedicated keys, so unlike the arrows they seek
+      // even with focus on a control, and on the native path too.
+      if (media === 'forward' || media === 'rewind') {
+        seekBy(v, media === 'forward' ? MEDIA_SEEK_SECS : -MEDIA_SEEK_SECS);
+        e.preventDefault();
+        return;
+      }
+      // Explicit Play and Pause are idempotent, so they are safe on the native
+      // path too, where a TV defaults (VIDAA included) and where the native
+      // bar may or may not handle the remote's vendor keyCodes.
+      if (media === 'play') { v.play().catch(() => {}); e.preventDefault(); return; }
+      if (media === 'pause') { v.pause(); e.preventDefault(); return; }
+
       if (useNative) {
         if (onControl) return;               // let the D-pad navigate
         const step = e.shiftKey ? 60 : 10;
@@ -815,11 +833,17 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       // page or re-firing the button focus was left on.
       if (onControl && (e.key === ' ' || e.key === 'Spacebar')) e.preventDefault();
 
+      // Toggle only off the native path: there the UA's own bar may toggle
+      // too, and two toggles cancel out.
+      if (media === 'toggle') {
+        v.paused ? v.play().catch(() => {}) : v.pause();
+        e.preventDefault();
+        return;
+      }
+
       switch (e.key) {
-        case ' ': case 'Spacebar': case 'k': case 'MediaPlayPause':
+        case ' ': case 'Spacebar': case 'k':
           v.paused ? v.play().catch(() => {}) : v.pause(); break;
-        case 'MediaPlay': v.play().catch(() => {}); break;
-        case 'MediaPause': v.pause(); break;
         case 'l': seek(10); break;
         case 'j': seek(-10); break;
         case 'ArrowRight': if (navigating) return; seek(10); break;

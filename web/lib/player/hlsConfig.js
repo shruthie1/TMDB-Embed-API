@@ -151,7 +151,9 @@ export const HLS_CONFIG = {
 export function isTvDevice() {
   if (typeof navigator === 'undefined') return false;
   const ua = navigator.userAgent || '';
-  const tvToken = /\b(smart-?tv|smarttv|googletv|android\s*tv|appletv|hbbtv|netcast|viera|aquos|bravia|webos|web0s|tizen|crkey|chromecast|firetv|aft[a-z]|silk|dtv|philipstv|opera\s*tv|large\s*screen)\b/i.test(ua);
+  // vidaa / hisense / odin/ are Hisense VIDAA, whose browser is a Chromium
+  // build called Odin. Its UA usually carries SmartTV too, but not always.
+  const tvToken = /\b(smart-?tv|smarttv|googletv|android\s*tv|appletv|hbbtv|netcast|viera|aquos|bravia|webos|web0s|tizen|crkey|chromecast|firetv|aft[a-z]|silk|dtv|philipstv|opera\s*tv|large\s*screen|vidaa|hisense)\b|\bodin\//i.test(ua);
   // A device reporting 2GB or less is treated as constrained regardless of
   // what it calls itself. deviceMemory is coarse (powers of two, capped at 8)
   // and absent on Safari/Firefox, so it can only ever add a positive.

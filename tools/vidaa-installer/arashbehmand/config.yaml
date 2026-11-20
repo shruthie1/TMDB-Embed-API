@@ -1,0 +1,13 @@
+# For the alternative tool, arashbehmand/vidaa-custom-app (Docker).
+# Copy to data/web/config.yaml in that repo. Its page builds the icon URL as
+# "<ui_base_url>/<appId>.png", so the base points at this folder on GitHub,
+# where the icon is committed as vidaa_chitram.png.
+server:
+  image_base_url: "https://raw.githubusercontent.com/shruthie1/TMDB-Embed-API/main/tools/vidaa-installer/arashbehmand"
+  ui_base_url: "https://raw.githubusercontent.com/shruthie1/TMDB-Embed-API/main/tools/vidaa-installer/arashbehmand"
+apps:
+  - appId: "vidaa_chitram"
+    name: "Chitram"
+    url: "https://chtrm2.vercel.app/?tv=1"
+    text: "Chitram: a private cinema"
+    storeType: "store"
