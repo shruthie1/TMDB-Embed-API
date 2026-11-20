@@ -1,0 +1,76 @@
+/* ── Card lift (2026-11-20) ────────────────────────────────────────────────
+   One motion for posters and cast photos on every surface: home rows,
+   search results, the browse grid, the cast row. Hover (mouse) and focus
+   (keyboard, D-pad) lift the same way: a gentle scale from the centre, a
+   deeper soft shadow, a slight brightening, and on focus the white frame.
+   200ms ease-out, transform and shadow only, so no layout work.
+   Loaded last; `html` raises specificity over the older layered rules. */
+
+:root{
+  --lift-scale:1.06;
+  --lift-ms:200ms;
+  --lift-ease:cubic-bezier(.2,.8,.2,1);
+  --lift-shadow:0 18px 36px -10px rgb(var(--rgb-black) / .75),0 6px 14px -6px rgb(var(--rgb-black) / .5);
+}
+/* Scale 1.07 at 1080p grows a poster ~8px a side; with the 6px frame that
+   fits the 16px the TV rail keeps inside its scroll box (nav.css). */
+html[data-tv="true"]{--lift-scale:1.07}
+@media (prefers-reduced-motion:reduce){
+  :root,html[data-tv="true"]{--lift-scale:1;--lift-ms:0ms}
+}
+
+/* The entrance fade kept `transform:none` after it ended (fill-mode both),
+   and an animation's value beats any hover or focus transform, so cards in
+   a row never actually scaled. Backwards fill only covers the delay. */
+html .card.enter{animation-fill-mode:backwards}
+
+html .card,html .person{
+  transition:transform var(--lift-ms) var(--lift-ease);
+  transform-origin:50% 50%;backface-visibility:hidden;
+}
+html .card .poster,html .person .person-ph{
+  transition:box-shadow var(--lift-ms) var(--lift-ease),filter var(--lift-ms) var(--lift-ease),
+    border-color var(--lift-ms) var(--lift-ease),opacity var(--lift-ms) var(--lift-ease);
+}
+
+/* Lifted: focus everywhere. No translateY: a pure scale stays inside the
+   row's padded scroll box at both edges. */
+html .card.focusable:is(:focus,:focus-visible),
+html .person.focusable:is(:focus,:focus-visible){
+  transform:scale(var(--lift-scale));position:relative;z-index:var(--z-focus);
+}
+html .card.focusable:is(:focus,:focus-visible) .poster,
+html .person.focusable:is(:focus,:focus-visible) .person-ph{
+  box-shadow:var(--lift-shadow);filter:brightness(1.06);border-color:transparent;
+}
+
+/* Mouse hover: the same lift without the focus frame. Neighbours in the row
+   dim a little; layers are promoted only while the pointer is in a row. */
+@media (hover:hover) and (pointer:fine){
+  html:not([data-tv="true"]) .card:hover,html:not([data-tv="true"]) .person:hover{
+    transform:scale(var(--lift-scale));position:relative;z-index:var(--z-focus);
+  }
+  html:not([data-tv="true"]) .card:hover .poster,html:not([data-tv="true"]) .person:hover .person-ph{
+    box-shadow:var(--lift-shadow);filter:brightness(1.06);border-color:var(--color-border-hover);
+  }
+  html:not([data-tv="true"]) :is(.rail,.grid-titles,.cast-rail):hover .card,
+  html:not([data-tv="true"]) :is(.rail,.cast-rail):hover .person{will-change:transform}
+  html:not([data-tv="true"]) .rail:has(.card:hover) .card:not(:hover) .poster{opacity:.78}
+}
+
+/* Room for the lift inside a row's scroll box (it clips both axes) on
+   phone and desktop. TV has its own, in nav.css. */
+html:not([data-tv="true"]){--rail-focus-pad:var(--space-4)}
+html:not([data-tv="true"]) .rail{
+  padding-inline:var(--space-3);margin-inline:calc(-1 * var(--space-3));
+  scroll-padding-inline:var(--space-3);
+}
+@media (min-width:560px){
+  html .cast-rail{padding-inline:var(--space-4);margin-inline:calc(-1 * var(--space-4))}
+}
+/* TV: the older TV frame rule (globals.css) is more specific; restate the
+   lift shadow at its weight. Rows get 24px above and below for the lift and
+   the 6px frame (20px left the frame's top edge under the row's clip). */
+html[data-tv="true"]{--rail-focus-pad:var(--space-6)}
+html[data-tv="true"] .card.focusable:focus .poster,
+html[data-tv="true"] .person.focusable:focus .person-ph{box-shadow:var(--lift-shadow)}

@@ -4,6 +4,7 @@ import './globals.css';
 import './tv-compact.css';
 import './prefs-modal.css';
 import './nav.css';
+import './cards.css';
 import Dpad from '../components/Dpad';
 import HeaderScroll from '../components/HeaderScroll';
 import Diagnostics from '../components/Diagnostics';
