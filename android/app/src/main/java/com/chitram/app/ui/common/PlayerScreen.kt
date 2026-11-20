@@ -73,6 +73,8 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import android.widget.Toast
+import com.chitram.app.player.WvcCast
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -427,6 +429,19 @@ private fun Controls(
                 val lang = vm.audioItems().firstOrNull { it.selected }?.label?.takeUnless { it == "Default" } ?: s.languages.firstOrNull()
                 BasicText(listOfNotNull(s.provider, lang).joinToString(" · "), style = TextStyle(color = Tok.textSecondary, fontSize = m.small),
                     maxLines = 1, modifier = Modifier.background(Color.Black.copy(alpha = 0.45f), Tok.pill).border(1.dp, Tok.border, Tok.pill).padding(horizontal = 12.dp, vertical = 5.dp))
+            }
+            // Cast to TV through Web Video Caster. Phone only: the TV layout has no use for it.
+            if (!isTv && vm.current != null) {
+                val ctx = LocalContext.current
+                Spacer(Modifier.width(8.dp))
+                CtlButton(Glyphs.cast, "Cast to TV", m) {
+                    val spec = vm.castSpec() ?: return@CtlButton
+                    when (WvcCast.open(ctx, spec)) {
+                        is WvcCast.Launch.Wvc -> spec.hint?.let { Toast.makeText(ctx, it, Toast.LENGTH_LONG).show() }
+                        is WvcCast.Launch.Store -> Toast.makeText(ctx, "Install Web Video Caster to cast to your TV", Toast.LENGTH_LONG).show()
+                        null -> Toast.makeText(ctx, "Could not open Web Video Caster", Toast.LENGTH_LONG).show()
+                    }
+                }
             }
         }
 

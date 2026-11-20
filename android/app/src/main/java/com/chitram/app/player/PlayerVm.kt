@@ -430,6 +430,18 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         resolve(refresh = true, keepProvider = null, startMs = g.progress.resumeMs(r.type, r.id, r.season, r.episode))
     }
 
+    /**
+     * Cast to TV: pauses here and returns what to hand Web Video Caster, or null
+     * when nothing is playing. WVC takes no start position, so the TV starts at 0.
+     */
+    fun castSpec(): WvcCast.Spec? {
+        val s = current ?: return null
+        val r = request ?: return null
+        player.pause()
+        saveProgress()
+        return WvcCast.spec(s, r)
+    }
+
     fun togglePlay() { if (player.isPlaying) player.pause() else { if (player.playbackState == Player.STATE_ENDED) player.seekTo(0); player.play() } }
     fun seekTo(ms: Long) { player.seekTo(ms.coerceIn(0, if (player.duration > 0) player.duration else Long.MAX_VALUE)); positionMs = player.currentPosition }
     fun seekBy(ms: Long) { player.seekTo((player.currentPosition + ms).coerceIn(0, if (player.duration > 0) player.duration else Long.MAX_VALUE)); positionMs = player.currentPosition }

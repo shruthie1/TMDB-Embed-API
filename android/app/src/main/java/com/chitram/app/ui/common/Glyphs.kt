@@ -37,6 +37,7 @@ object Glyphs {
     val subtitles = line(rect(3f, 6f, 18f, 12f, 1.5f) + "M7 14h4M14 14h3")
     val fitContain = line(rect(3f, 8f, 18f, 8f, 1f) + "M3 8h18M3 16h18")
     val fitCover = line(rect(3f, 6f, 18f, 12f, 1f) + "M7 3v18M17 3v18")
+    val cast = line("M3 7V6a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-6M3 11a9 9 0 0 1 9 9M3 15a5 5 0 0 1 5 5M3 19.5h.01")
     val fitFill = line(rect(3f, 6f, 18f, 12f, 1f) + "M3 12h18M6 9l-3 3 3 3M18 9l3 3-3 3")
     val seekBack = line("M3.6 10.5A9 9 0 1 1 3 15M3 5.5V11h5.5")
     val seekFwd = line("M20.4 10.5A9 9 0 1 0 21 15M21 5.5V11h-5.5")

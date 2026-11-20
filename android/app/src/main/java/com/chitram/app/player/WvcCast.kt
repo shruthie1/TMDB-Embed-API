@@ -1,0 +1,91 @@
+package com.chitram.app.player
+
+import android.content.ActivityNotFoundException
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.Bundle
+import com.chitram.app.data.Api
+import com.chitram.app.data.Source
+
+/**
+ * Cast to TV through Web Video Caster (WVC). The owner's Hisense VIDAA TV runs
+ * the WVC receiver, so the phone hands WVC the stream that is playing now.
+ *
+ * Intent contract from https://www.webvideocaster.com/integrations (Android
+ * Intents): ACTION_VIEW with data + type, package com.instantbits.cast.webvideo,
+ * String extras "title" and "poster", headers as a Bundle under
+ * "android.media.intent.extra.HTTP_HEADERS". WVC documents no start-position
+ * extra, so none is sent.
+ *
+ * Backend rows are already proxied by the VM and need no headers. On-device rows
+ * (mapple, vaplayer) need Referer/Origin/User-Agent; a TV browser cannot send
+ * Referer, so they work only when WVC routes the video through the phone.
+ */
+object WvcCast {
+    const val PACKAGE = "com.instantbits.cast.webvideo"
+    const val EXTRA_HEADERS = "android.media.intent.extra.HTTP_HEADERS"
+    const val ROUTE_HINT = "Turn on 'Route through phone' in Web Video Caster if it fails"
+    private const val STORE_MARKET = "market://details?id=$PACKAGE"
+    private const val STORE_WEB = "https://play.google.com/store/apps/details?id=$PACKAGE"
+    private val NEEDED = listOf("Referer", "Origin", "User-Agent")
+
+    data class Spec(
+        val url: String,
+        val mime: String,
+        val title: String,
+        val poster: String?,
+        val headers: Map<String, String>,
+        /** One line to show on the phone, or null. */
+        val hint: String?,
+    )
+
+    sealed interface Launch {
+        data class Wvc(val spec: Spec) : Launch
+        data class Store(val uri: String) : Launch
+    }
+
+    fun spec(s: Source, r: PlayRequest): Spec {
+        val title = if (r.type == "tv" && r.season > 0) "${r.title} S${r.season} E${r.episode}" else r.title
+        val headers = if (s.onDevice == null) emptyMap()
+        else NEEDED.mapNotNull { k -> s.headers.entries.firstOrNull { it.key.equals(k, ignoreCase = true) }?.let { k to it.value } }.toMap()
+        return Spec(
+            url = s.url,
+            mime = if (s.progressive) "video/mp4" else "application/x-mpegURL",
+            title = title,
+            poster = Api.image(r.poster, "w500"),
+            headers = headers,
+            hint = if (s.onDevice != null) ROUTE_HINT else null,
+        )
+    }
+
+    /**
+     * Tries WVC, then the Play Store app, then the Play Store website. `start`
+     * throws ActivityNotFoundException when nothing handles a target.
+     * Returns the target that opened.
+     */
+    fun launch(spec: Spec, start: (Launch) -> Unit): Launch? {
+        for (t in listOf(Launch.Wvc(spec), Launch.Store(STORE_MARKET), Launch.Store(STORE_WEB))) {
+            try {
+                start(t); return t
+            } catch (_: ActivityNotFoundException) {
+            }
+        }
+        return null
+    }
+
+    fun intent(t: Launch): Intent = when (t) {
+        is Launch.Wvc -> Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(Uri.parse(t.spec.url), t.spec.mime)
+            setPackage(PACKAGE)
+            putExtra("title", t.spec.title)
+            t.spec.poster?.let { putExtra("poster", it) }
+            if (t.spec.headers.isNotEmpty()) {
+                putExtra(EXTRA_HEADERS, Bundle().apply { t.spec.headers.forEach { (k, v) -> putString(k, v) } })
+            }
+        }
+        is Launch.Store -> Intent(Intent.ACTION_VIEW, Uri.parse(t.uri))
+    }.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+    fun open(ctx: Context, spec: Spec): Launch? = launch(spec) { ctx.startActivity(intent(it)) }
+}
