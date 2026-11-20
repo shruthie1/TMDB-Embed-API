@@ -18,6 +18,10 @@ import { VA_EMBED_ID, vaEmbedChoice, shouldAutoEmbed } from '../lib/player/vaEmb
 import { markDead, nextAlive, qualityHeight } from '../lib/player/deadSources';
 import { fatalAction } from '../lib/player/fatalPolicy';
 import { runtimeVerdict } from '../lib/player/runtimeCheck';
+import {
+  SWITCH_TICK_MS, advanceNotice, advanceTarget, beginSourceSwitch, hasLife, tickSourceSwitch,
+} from '../lib/player/switchFlow';
+import { createWarmScheduler } from '../lib/player/warmSources';
 import useNoPictureGuard from '../lib/player/useNoPictureGuard';
 import { pairSources, listSources as listBackendSources } from '../lib/backend';
 import {
@@ -104,6 +108,9 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   // Position to restore across a source switch, so swapping provider never
   // costs your place in the film.
   const resumeAt = useRef(0);
+  // The stream that fired `playing`, so a frame from the OLD stream can never
+  // count as a server switch landing (see startSourceSwitch).
+  const playedStreamRef = useRef(null);
 
   const resolve = useResolve({
     mediaType: title.mediaType, tmdbId: title.tmdbId, season, episode,
@@ -137,6 +144,8 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   // position, with a one-line notice. See lib/player/useSwitchGuard.js.
   // `stopSwitchRef` clears the switch overlay; beginSwitch is declared below.
   const stopSwitchRef = useRef(null);
+  // Declared with switchSource below; onFatal reaches it through this ref.
+  const failSwitchRef = useRef(null);
   const switchGuard = useSwitchGuard({
     revert: (prev) => {
       stopSwitchRef.current?.();
@@ -156,16 +165,25 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       resolve.replaceSource(target.id, fresh);
       resolve.switchSource({ ...target, ...fresh, id: target.id });
     },
-    giveUp: () => { switchGuard.fail(); },
+    giveUp: () => { if (!failSwitchRef.current?.('stale url')) switchGuard.fail(); },
     currentId: () => currentSourceIdRef.current,
   });
+  // Rows that failed a server switch. Taken out of the menus (owner: a failed
+  // server is not kept selectable). Keyed by url, so a re-resolve that mints
+  // a fresh url for the same row brings it back.
+  const [failedUrls, setFailedUrls] = useState(() => new Set());
+  // What the menus offer: every row except the ones that failed a switch.
+  const menuSources = useMemo(
+    () => (failedUrls.size ? sources.filter((s) => !failedUrls.has(s.masterUrl)) : sources),
+    [sources, failedUrls]);
   // The label a viewer sees for a row: the same "CastleTV 2" the Servers menu
-  // shows, so the notice names the row they picked.
-  const rowLabel = useCallback((id, fallback) => {
-    const list = videoChoices(sources);
-    const at = list.findIndex((c) => c.id === videoIdOf(id, sources));
+  // shows, so the notice names the row they picked. Numbered over the list
+  // the menus show, so a toast and the menu agree.
+  const rowLabel = useCallback((id, fallback, rows = menuSources) => {
+    const list = videoChoices(rows);
+    const at = list.findIndex((c) => c.id === videoIdOf(id, rows));
     return at >= 0 ? videoLabels(list)[at] : (fallback || 'That server');
-  }, [sources]);
+  }, [menuSources]);
 
   /**
    * Recover from a dead stream without going back to the network.
@@ -315,6 +333,10 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     if (switchGuard.isPending() && fatalAction(data).kind === 'stale'
         && staleRefresh.tryRefresh(
           sourceListRef.current.find((s) => s.id === currentSourceIdRef.current))) return;
+    // A server switch in flight that failed outright: drop that server and
+    // move on to the next alive one (same language first), as the timeout does.
+    const fa = fatalAction(data);
+    if (fa.failover && failSwitchRef.current?.(fa.reason || fa.kind)) return;
     if (switchGuard.fail()) return;
     // A 403/410 means the signed url went stale. Another provider's url is
     // almost certainly still good, so try that FIRST - it resumes at the same
@@ -1085,6 +1107,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       }
       setStarted(true);
       startedRef.current = true;
+      playedStreamRef.current = stream;
       setPlaying(true);
       confirmPlayback();
     };
@@ -1239,9 +1262,23 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   // clear AFTER switchSource had already fallen through and armed the VaPlayer
   // backstop, so the "not responding" callback was silently cancelled and no
   // message could ever appear.
-  const beginSwitch = useCallback((label, onTimeout = null) => {
+  // A SERVER switch in flight (lib/player/switchFlow.js): it owns the overlay,
+  // the source lock and its own bounded timeout, so beginSwitch stands aside
+  // while one runs. `streamRef` is the stream on screen, read by the checker.
+  const srcSwitch = useRef(null);
+  const srcTick = useRef(null);
+  const [sourceLocked, setSourceLocked] = useState(false);
+  const streamRef = useRef(stream);
+  streamRef.current = stream;
+  // A switch that replaces the stream (a pairing, an audio re-timing) is not
+  // landed by the OLD picture moving on while the backend works.
+  const switchFromStream = useRef(null);
+
+  const beginSwitch = useCallback((label, onTimeout = null, { replacesStream = false } = {}) => {
+    if (srcSwitch.current) return null;
     setSwitching(label);
     clearTimeout(switchTimer.current);
+    switchFromStream.current = replacesStream ? streamRef.current : null;
     const id = setTimeout(() => {
       setSwitching(null);
       onTimeout?.();
@@ -1252,7 +1289,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
 
   // Cancel a switch this caller started, and only if it is still the live one.
   const endSwitch = useCallback((id) => {
-    if (switchTimer.current !== id) return;
+    if (id == null || switchTimer.current !== id) return;
     clearTimeout(id);
     switchTimer.current = null;
     setSwitching(null);
@@ -1265,8 +1302,11 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
 
   useEffect(() => {
     const v = videoRef.current;
-    if (!v || !switching) return;
+    // A server switch is judged by its own checker (startSourceSwitch).
+    if (!v || !switching || srcSwitch.current) return;
     const done = () => {
+      // Still the old picture: the new stream has not been attached yet.
+      if (switchFromStream.current && streamRef.current === switchFromStream.current) return;
       clearTimeout(switchTimer.current);
       setSwitching(null);
     };
@@ -1306,14 +1346,129 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     };
   }, [switching, videoRef]);
 
+  // Background warming of the next 2-3 servers (lib/player/warmSources.js).
+  // Reads the player through refs when its timer fires, never a stale render.
+  const stallStageRef = useRef(null);
+  stallStageRef.current = recovery.stallStage;
+  const warmStateRef = useRef(null);
+  warmStateRef.current = () => {
+    const v = videoRef.current;
+    const list = sourceListRef.current;
+    return {
+      sources: list,
+      // During a pairing the id is `pair-<video>-<audio>`; the video row is
+      // the one playing and must not be warmed.
+      currentId: videoIdOf(currentSourceIdRef.current, list),
+      dead: deadSources.current,
+      lang: failoverCtxRef.current.lang,
+      height: failoverCtxRef.current.height,
+      at: v?.currentTime || 0,
+      stable: Boolean(v && !v.paused && !v.ended && v.readyState >= 3
+        && !srcSwitch.current && !stallStageRef.current && !embedOnRef.current),
+    };
+  };
+  const warm = useMemo(() => createWarmScheduler({ getState: () => warmStateRef.current() }), []);
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v || !stream || !started || embedOn) { warm.stop(); return undefined; }
+    // Every `playing` re-arms the full 10s delay, so a stall or a seek
+    // restarts the clock; any stop of playback cancels the round in flight.
+    const on = () => warm.start();
+    const off = () => warm.stop();
+    const stops = ['pause', 'ended', 'waiting', 'emptied'];
+    warm.start();
+    v.addEventListener('playing', on);
+    stops.forEach((e) => v.addEventListener(e, off));
+    return () => {
+      warm.stop();
+      v.removeEventListener('playing', on);
+      stops.forEach((e) => v.removeEventListener(e, off));
+    };
+  }, [stream, started, embedOn, warm, videoRef]);
+
+  const endSourceSwitch = useCallback(() => {
+    clearInterval(srcTick.current);
+    srcTick.current = null;
+    srcSwitch.current = null;
+    setSourceLocked(false);
+    setSwitching(null);
+  }, []);
+
+  /**
+   * Show "Switching to X…" at once, lock the server list, and judge the new
+   * stream on its own frames: landed, or dead after SWITCH_NO_LIFE_MS (nothing
+   * at all) / SWITCH_HARD_MS (something, but no frame). Dead advances.
+   */
+  const startSourceSwitch = useCallback((src, label, at, ctx) => {
+    clearTimeout(switchTimer.current);
+    switchTimer.current = null;
+    clearInterval(srcTick.current);
+    warm.stop();
+    srcSwitch.current = beginSourceSwitch({ target: src, label, at, ctx, streamKey: streamRef.current });
+    setSourceLocked(true);
+    setSwitching(`Switching to ${label}…`);
+    srcTick.current = setInterval(() => {
+      const r = tickSourceSwitch(srcSwitch.current, {
+        streamKey: streamRef.current,
+        frames: playedStreamRef.current != null && playedStreamRef.current === streamRef.current,
+        alive: hasLife(videoRef.current),
+      });
+      if (r.verdict === 'wait') { srcSwitch.current = r.state; return; }
+      if (r.verdict === 'landed') { endSourceSwitch(); switchGuard.landed(); return; }
+      failSwitchRef.current?.('switch timeout');
+    }, SWITCH_TICK_MS);
+  }, [warm, endSourceSwitch, switchGuard, videoRef]);
+  useEffect(() => () => clearInterval(srcTick.current), []);
+
+  // The server being switched to failed (timeout or a fatal error). Mark it
+  // dead, take it out of the menus, and play the next alive row in the
+  // language that was playing at the click. Returns true when it handled it.
+  failSwitchRef.current = (reason) => {
+    const m = srcSwitch.current;
+    if (!m) return false;
+    endSourceSwitch();
+    // Advancing replaces the old "go back" revert for a server pick.
+    switchGuard.landed();
+    const failed = m.target;
+    forgetProvider(title.mediaType, title.tmdbId, failed.provider, season, episode);
+    reportPlayback({ ...reportCtx.current, ...reportMetrics(), provider: failed.provider,
+      ok: false, reason: `switch: ${reason}` });
+    if (failed.masterUrl) setFailedUrls((prev) => new Set(prev).add(failed.masterUrl));
+    const alt = advanceTarget(sourceListRef.current, deadSources.current, failed, m.ctx);
+    if (!alt) {
+      resolve.setError({ message: `${m.label} didn't respond, and no other server is left. Try again in a moment.` });
+      return true;
+    }
+    setNotice(advanceNotice(m.label, rowLabel(alt.id, alt.provider,
+      menuSources.filter((s) => s.masterUrl !== failed.masterUrl))));
+    switchSourceRef.current?.(alt, null, { at: m.at, ctx: m.ctx });
+    return true;
+  };
+
   // `lang` is supplied only when the switch EXISTS to change the language (a
   // per-language sibling source). The Servers menu passes nothing, so picking a
   // different server keeps whatever language is already standing.
-  const switchSource = useCallback(async (src, lang = null) => {
+  // `opts.at` / `opts.ctx` carry the click-time position and language through
+  // an auto-advance: by then the failed attach has reset both.
+  const switchSource = useCallback(async (src, lang = null, opts = {}) => {
     // Leaving a pairing behind clears its padding hint; a single-source
     // reel is aligned with its own audio by construction.
     setPairPadding(null);
     if (lang) setWantLang(lang);
+    // Comparing the provider NAME blocked a switch between two streams from
+    // the SAME provider - and that is a real case here: NetMirror returns
+    // three variants on movie/1440735, only one of which carries the Kannada
+    // and Telugu audio renditions. Compare identity when we have it.
+    if (!src?.masterUrl) return;
+    const sameRow = src.id != null && currentSourceId != null
+      ? src.id === currentSourceId
+      : src.provider === currentSource;
+    if (sameRow) return;
+    // Feedback first, before any network: the click must change the screen
+    // NOW, even when a language pairing has to run before the new stream.
+    const at = opts.at ?? (videoRef.current?.currentTime || 0);
+    startSourceSwitch(src, rowLabel(src.id, src.provider), at,
+      opts.ctx || { ...failoverCtxRef.current });
     // Keeping the language across a SERVER change.
     //
     // A server row carries only the picture. When the viewer has a standing
@@ -1360,83 +1515,30 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
           // to the plain switch when pairing does not work out.
           const ok = await pickPairRef.current?.({
             mode: 'pair',
+            // Superseded while pairing (timed out and advanced): do nothing.
+            stale: () => srcSwitch.current?.target !== src,
             video: { id: src.id, source: src },
             audio: { id: `src:${donor.id}:${want}`, language: want, source: donor,
                      kind: donor.selectableAudio ? 'pairable' : 'whole-source' },
           });
           if (ok) return;
+          if (srcSwitch.current?.target !== src) return;
         }
       }
     }
-    // Comparing the provider NAME blocked a switch between two streams from
-    // the SAME provider - and that is a real case here: NetMirror returns
-    // three variants on movie/1440735, only one of which carries the Kannada
-    // and Telugu audio renditions. Compare identity when we have it.
-    if (!src?.masterUrl) return;
-    const sameRow = src.id != null && currentSourceId != null
-      ? src.id === currentSourceId
-      : src.provider === currentSource;
-    if (sameRow) return;
     // Manual and recovery switches also count as the startup escape. Do not
     // immediately replace the chosen source again after another 8 seconds.
     startupFallbackUsedRef.current = true;
     // A source switch tears down hls.js and re-attaches, then restores
-    // position - several seconds with nothing on screen otherwise.
-    // If 12s after the switch the clock is still frozen, the new provider never
-    // produced a frame.
-    //
-    // NOT `!videoWidth`: the element can keep the PREVIOUS source's dimensions
-    // after a failed attach, so that test never fires. Measured on 1408162 with
-    // VaPlayer down - t stayed put while videoWidth read 1722.
-    //
-    // NOT a position snapshot taken HERE either: the old source keeps playing
-    // while the new master is fetched. Measured the same run - t moved 2879.2
-    // -> 2891.8, a 12.6s advance on the OLD stream, so comparing against the
-    // click-time position said "it is fine" about a dead provider. Sample at
-    // the moment the backstop fires and again a beat later: only a stream that
-    // is actually decoding moves in that window.
-    beginSwitch(`Switching to ${src.provider}…`, () => {
-      const v = videoRef.current;
-      if (!v) return;
-      // `paused` is NOT evidence of a dead provider. A source switch detaches
-      // hls.js and re-attaches, so the element is legitimately paused for as
-      // long as the new manifest and first segments take to arrive - and a
-      // slow-but-alive server was being condemned for it. Measured 2026-09-22
-      // on showsst: the error rendered with the transport bar reading
-      // "1:06:55 / 0:00", i.e. duration was still 0 because the manifest had
-      // not finished loading. That is a switch in flight, not a failure.
-      //
-      // Ask instead whether ANY sign of life exists. A provider that is
-      // genuinely down produces none of these: no manifest, no buffer, no
-      // decoded frame, no clock movement.
-      const alive = (w) => Boolean(
-        w && (
-          w.videoWidth > 0                              // a frame was decoded
-          || w.buffered?.length > 0                     // segments landed
-          || (Number.isFinite(w.duration) && w.duration > 0) // manifest parsed
-          || w.readyState >= 2                          // metadata present
-        ),
-      );
-      if (alive(v)) return;
-      const at = v.currentTime;
-      // Sample over a window long enough for a first segment on a slow link.
-      // 1200ms was inside the normal attach time for a healthy provider, which
-      // is what made the message fire on servers that then played fine.
-      setTimeout(() => {
-        const w = videoRef.current;
-        if (!w) return;
-        if (alive(w)) return;
-        if (Math.abs(w.currentTime - at) >= 0.25) return; // clock is moving
-        if (switchGuard.fail()) return;
-        resolve.setError({ message: `${src.provider} is not responding. Try another server.` });
-      }, 6000);
-    });
-    resumeAt.current = videoRef.current?.currentTime || 0;
+    // position. The overlay and the bounded verdict (landed / dead and
+    // advance) are startSourceSwitch's, armed above. The old 12s + 6s
+    // backstop only ever ended in an error; a slow-but-alive server that
+    // answered a manifest was never judged again.
+    resumeAt.current = at;
     recovery.clearStall();
     resolve.switchSource(src);
-    // beginSwitch is a useCallback with no deps, so naming it adds no re-runs.
-  }, [currentSource, currentSourceId, recovery, resolve, beginSwitch, wantLang, sources,
-      hls.audioTracks, hls.currentAudio, switchGuard]);
+  }, [currentSource, currentSourceId, recovery, resolve, wantLang, sources,
+      hls.audioTracks, hls.currentAudio, startSourceSwitch, rowLabel, videoRef]);
 
   // Let the recovery path above reach switchSource without reordering hooks.
   switchSourceRef.current = switchSource;
@@ -1474,9 +1576,11 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     // The fused master carries this language; remember it so a later server
     // change keeps it rather than reverting to that provider's default.
     if (plan.audio?.language) setWantLang(plan.audio.language);
-    const pairTimer = beginSwitch(`Pairing ${audio.provider} audio…`);
+    const pairTimer = beginSwitch(`Pairing ${audio.provider} audio…`, null, { replacesStream: true });
     const paired = await pairSources(video, audio,
       { tmdbId: title.tmdbId, mediaType: title.mediaType });
+    // The server switch that asked for this pairing already gave up on it.
+    if (plan.stale?.()) return false;
     if (!paired?.url) {
       // Nothing changed, so clear the overlay rather than leaving it hanging
       // for its full 12s timeout on a combination we already know is refused.
@@ -1510,15 +1614,25 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     at: videoRef.current?.currentTime || 0,
   } : null), [stream, currentSourceId, currentSource, rowLabel]);
   const pickSource = useCallback((src, lang = null) => {
+    // The list is locked while a server switch runs: it ends in a frame, or
+    // in a bounded timeout that moves on by itself.
+    if (srcSwitch.current) {
+      setNotice(`Still switching to ${srcSwitch.current.label}…`);
+      return undefined;
+    }
     if (src?.id == null || src.id !== currentSourceId) {
       switchGuard.begin(snapshot(), rowLabel(src?.id, src?.provider));
     }
     return switchSource(src, lang);
-  }, [switchSource, switchGuard, snapshot, rowLabel, currentSourceId]);
+  }, [switchSource, switchGuard, snapshot, rowLabel, currentSourceId, setNotice]);
   const pickPairGuarded = useCallback((plan) => {
+    if (srcSwitch.current) {
+      setNotice(`Still switching to ${srcSwitch.current.label}…`);
+      return false;
+    }
     switchGuard.begin(snapshot(), plan?.audio?.language || 'That language');
     return pickPair(plan);
-  }, [pickPair, switchGuard, snapshot]);
+  }, [pickPair, switchGuard, snapshot, setNotice]);
 
   // VaPlayer's own page in an iframe, the last Servers row. See
   // lib/player/vaEmbed.js. `embedOn` is the one switch: while it is set the
@@ -1560,8 +1674,8 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   }, [embedOn, vaEmbed, error, sources]);
   // The TV bar lists sources itself; the embed rides along as one more entry.
   const tvSources = useMemo(
-    () => (vaEmbed ? [...sources, { ...vaEmbed, provider: vaEmbed.label }] : sources),
-    [sources, vaEmbed]);
+    () => (vaEmbed ? [...menuSources, { ...vaEmbed, provider: vaEmbed.label }] : menuSources),
+    [menuSources, vaEmbed]);
   const pickTvSource = useCallback((s) => {
     if (s?.id === VA_EMBED_ID) pickEmbed();
     else pickSource(s);
@@ -1587,7 +1701,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     // Nothing fused means there is nothing to restamp: a single provider's own
     // muxed audio is already aligned with its own video by construction.
     if (!pair?.video || !pair?.audio) return;
-    const syncTimer = beginSwitch('Adjusting audio timing…');
+    const syncTimer = beginSwitch('Adjusting audio timing…', null, { replacesStream: true });
     const paired = await pairSources(pair.video, pair.audio,
       { nudge: want, tmdbId: title.tmdbId, mediaType: title.mediaType });
     if (!paired?.url) {
@@ -1644,7 +1758,8 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
 
   return (
     <div className="player" ref={playerRef} role="dialog" aria-modal="true"
-         aria-label={`Playing ${title.title}`}>
+         aria-label={`Playing ${title.title}`}
+         data-switching={sourceLocked ? 'true' : undefined}>
       {!stream && !error && title.backdrop && (
         <div className="player-art"
              style={{ backgroundImage: `url(${poster(title.backdrop, 'w1280')})` }}
@@ -1730,7 +1845,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
           onMenuChange={setMenuOpen}
           menuOpen={menuOpen}
           tv={tvRemote}
-          sources={sources}
+          sources={menuSources}
           currentSource={currentSource}
           currentSourceId={currentSourceId}
           sourcesPending={sourcesPending}

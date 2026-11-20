@@ -391,7 +391,11 @@ export function resolveLive(type, id, {
       // (backend PRIMARY_PROVIDERS). Ask once more for the complete list; the
       // backend joins those running calls rather than starting them again.
       // The picture never waits for this: rows are merged as they land.
-      if (d?.partial && onMore) {
+      // A provider that THREW (providerErrors) is asked again the same way:
+      // the backend never memoizes such an answer, so ?full=1 re-runs it and
+      // a wanted server gets its url instead of staying missing.
+      const errored = Array.isArray(d?.providerErrors) && d.providerErrors.length > 0;
+      if ((d?.partial || errored) && onMore) {
         getJson(endpoint(type, id, { season, episode, full: true }), { timeoutMs: 60000, signal: ac.signal })
           .then((full) => {
             if (ac.signal.aborted) return;

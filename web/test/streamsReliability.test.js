@@ -129,3 +129,44 @@ describe('fatal hls.js errors fail over to the next source', () => {
     expect(fatalAction({})).toEqual({ kind: 'nudge', failover: false });
   });
 });
+
+// Owner 2026-11-20: a wanted source must always get a url. A provider that
+// THREW on the first answer is retried by ?full=1 too (the backend does not
+// memoize an answer with providerErrors, so the follow-up re-runs it), not
+// only a provider that was still running (`partial`).
+describe('?full=1 follow-up', () => {
+  function runMore(id, first, full) {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(res(200, first))
+      .mockResolvedValueOnce(res(200, full));
+    vi.stubGlobal('fetch', fetchMock);
+    const more = [];
+    return new Promise((resolve) => {
+      resolveLive('movie', id, {
+        onDone: () => {},
+        onMore: (rows) => more.push(rows),
+        onFail: (e) => resolve({ err: e }),
+      });
+      setTimeout(() => resolve({ fetchMock, more }), 20);
+    });
+  }
+  const LATE = { url: 'https://cdn/late.m3u8', provider: 'OneTouchTV', quality: '720p', container: 'hls', languages: ['Telugu'] };
+
+  it('fires on providerErrors and merges the late rows', async () => {
+    const { fetchMock, more } = await runMore(31,
+      body([STREAM], { providerErrors: ['onetouchtv'] }), body([STREAM, LATE]));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[1][0])).toMatch(/full=1/);
+    expect(more[0].map((s) => s.provider)).toContain('OneTouchTV');
+  });
+
+  it('still fires on a partial answer', async () => {
+    const { fetchMock } = await runMore(32, body([STREAM], { partial: true }), body([STREAM, LATE]));
+    expect(String(fetchMock.mock.calls[1]?.[0])).toMatch(/full=1/);
+  });
+
+  it('does not fire on a complete, error-free answer', async () => {
+    const { fetchMock } = await runMore(33, body([STREAM], { providerErrors: [] }), body([STREAM, LATE]));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});

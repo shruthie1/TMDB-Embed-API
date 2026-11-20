@@ -1252,6 +1252,11 @@ kbd{
   pointer-events:auto;
 }
 .pbuffer-btn:hover,.pbuffer-btn:focus-visible{border-color:var(--color-border-hover);color:var(--paper)}
+/* A server switch is running: the server list is locked until it lands or
+   times out (Player.jsx startSourceSwitch). Dimmed so the lock is visible;
+   a press that gets through anyway is ignored with a "Still switching" toast. */
+.player[data-switching="true"] [aria-label^="Server:"]{opacity:.45;pointer-events:none}
+.player[data-switching="true"] .tvbar > .tvbar-row:first-child .tvbar-btn:not(.on){opacity:.45}
 
 /* ── Rails: edge fade, see-all, empty hint ──────────────────────────────────
    TV uses the D-pad and touch uses native scroll; no rail arrow controls are
