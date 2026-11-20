@@ -10,6 +10,7 @@ import { isVidaa, mediaKeyAction, MEDIA_SEEK_SECS, tvPlayerKey } from '../lib/tv
 import { forgetProvider, rememberProvider } from '../lib/lastProvider';
 import { abortReason } from '../lib/abortReason';
 import useAudioSync from '../lib/player/useAudioSync';
+import useNetmirrorSources from '../lib/player/useNetmirrorSources';
 import useSwitchGuard from '../lib/player/useSwitchGuard';
 import useStaleRefresh from '../lib/player/staleRefresh';
 import { videoChoices, videoIdOf } from '../lib/player/trackChoices';
@@ -742,16 +743,10 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
    * Keyed on whether a stream EXISTS, not on the stream object: a source
    * switch replaces the object, and must not re-ask or cancel this.
    */
-  const hasStream = Boolean(stream);
-  useEffect(() => {
-    if (!hasStream) return;
-    const ac = new AbortController();
-    listBackendSources(title.mediaType, title.tmdbId,
-      { season, episode, provider: 'netmirror', signal: ac.signal })
-      .then((found) => { if (found?.length) mergeSources(found); })
-      .catch(() => { /* NetMirror is extra; the list we have stands */ });
-    return () => ac.abort(abortReason('netmirror lookup superseded or unmounted'));
-  }, [hasStream, title.mediaType, title.tmdbId, season, episode, mergeSources]);
+  const netmirrorSources = useNetmirrorSources({
+    hasStream: Boolean(stream), mediaType: title.mediaType, tmdbId: title.tmdbId,
+    season, episode, mergeSources,
+  });
   // Buffering keeps the bar up, so a stall shows where playback is instead
   // of a frozen picture with nothing on it.
   const [stalled, setStalled] = useState(false);
@@ -1958,6 +1953,8 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
           currentSourceId={currentSourceId}
           onPickSource={pickTvSource}
           sourcesPending={sourcesPending}
+          onCheckSources={netmirrorSources.check}
+          checkingSources={netmirrorSources.loading}
           audioTracks={hls.audioTracks}
           currentAudio={hls.currentAudio}
           onPickAudio={hls.pickAudio}
@@ -2002,6 +1999,8 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
           currentSource={currentSource}
           currentSourceId={currentSourceId}
           sourcesPending={sourcesPending}
+          onCheckSources={netmirrorSources.check}
+          checkingSources={netmirrorSources.loading}
           onPickSource={pickSource}
           levels={hls.levels}
           currentLevel={hls.currentLevel}

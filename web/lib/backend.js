@@ -192,10 +192,12 @@ export function toSource(s, i = 0) {
     // fix in providers/vaplayer.js). [] means unknown, never "one level".
     levels: Array.isArray(s.levels) ? s.levels : [],
     languages,
+    catalogLanguages: Array.isArray(s.catalogLanguages) ? s.catalogLanguages : [],
     audio: Array.isArray(s.audio) ? s.audio : [],
     // True only when the manifest really carries selectable renditions, so the
     // Audio menu is not offered on a stream that cannot switch.
     selectableAudio: Boolean(s.selectableAudio),
+    incomplete: Boolean(s.incomplete),
     // A synthetic master binding one provider's video to another's audio
     // (utils/hybridStream.js). It is the only way to get the best video AND
     // the preferred language on titles where no single provider has both, so
@@ -292,12 +294,21 @@ function endpoint(type, id, { season, episode, provider, refresh, capabilities, 
   return `${path}${q ? `?${q}` : ''}`;
 }
 
+/** Keep partial catalog coverage visible instead of turning it into a complete source list. */
+export function sourcesFromResponse(d) {
+  const pending = Boolean(d?.partial || d?.providerError)
+    || (Array.isArray(d?.providerErrors) && d.providerErrors.some((p) => String(p).toLowerCase() === 'netmirror'));
+  return rankSources((Array.isArray(d?.streams) ? d.streams : []).map((raw, i) => {
+    const s = toSource(raw, i);
+    return s && pending && String(s.provider).toLowerCase() === 'netmirror' ? { ...s, incomplete: true } : s;
+  }).filter(Boolean));
+}
+
 /** Fetch and adapt every playable source for a title. */
 export async function listSources(type, id, opts = {}) {
   try {
     const d = await getJson(endpoint(type, id, opts), opts);
-    const raw = Array.isArray(d?.streams) ? d.streams : [];
-    return rankSources(raw.map(toSource).filter(Boolean));
+    return sourcesFromResponse(d);
   } catch {
     return null; // null = "could not ask", [] = "asked, none exist"
   }
@@ -348,8 +359,7 @@ export function resolveLive(type, id, {
       : fetchStreamsShared(key, endpoint(type, id, { season, episode })))
     .then((d) => {
       if (settled) return;
-      const raw = Array.isArray(d?.streams) ? d.streams : [];
-      let sources = rankSources(raw.map(toSource).filter(Boolean));
+      let sources = sourcesFromResponse(d);
       // Honour the remembered provider by ORDER, now that it no longer
       // restricts the fan-out. Everything else keeps rankSources' ranking.
       // The remembered provider is a NAME, and a name no longer identifies a
@@ -404,7 +414,7 @@ export function resolveLive(type, id, {
           .then((full) => {
             if (ac.signal.aborted) return;
             cachePut(key, full);
-            const more = rankSources((Array.isArray(full?.streams) ? full.streams : []).map(toSource).filter(Boolean));
+            const more = sourcesFromResponse(full);
             if (more.length) onMore(more);
           })
           .catch(() => { /* the first list stands */ });

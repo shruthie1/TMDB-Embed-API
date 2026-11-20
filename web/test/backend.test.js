@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { toSource, rankSources, sourceHeight, playableUrl, proxiedSegment } from '../lib/backend';
+import { toSource, rankSources, sourceHeight, playableUrl, proxiedSegment, sourcesFromResponse } from '../lib/backend';
 
 // Real shapes from GET /api/streams/movie/1441228 (Irumudi), captured
 // 2026-09-21 against the Express API in this repo.
@@ -146,5 +146,25 @@ describe('url helpers', () => {
     // Wrapping again would produce a relay pointed at a relay.
     expect(playableUrl(u)).toBe(u);
     expect(proxiedSegment(u)).toBe(u);
+  });
+});
+
+
+describe('NetMirror catalog metadata and partial coverage', () => {
+  const row = { provider: 'NetMirror', url: 'https://x/nf.m3u8', container: 'hls', languages: ['Hindi'], audio: [{ language: 'Hindi' }], catalogLanguages: ['Hindi', 'Telugu', 'Tamil'], selectableAudio: true };
+  it('keeps catalog display languages separate from actual playable tracks', () => {
+    const [source] = sourcesFromResponse({ streams: [row] });
+    expect(source.catalogLanguages).toEqual(['Hindi', 'Telugu', 'Tamil']);
+    expect(source.languages).toEqual(['Hindi']);
+    expect(source.audio).toEqual([{ language: 'Hindi' }]);
+  });
+  it('retains playable partial rows and clears the pending flag when coverage completes', () => {
+    const [partial] = sourcesFromResponse({ streams: [row], providerError: 'netmirror-budget' });
+    const [complete] = sourcesFromResponse({ streams: [row] });
+    expect(partial.incomplete).toBe(true);
+    expect(complete.incomplete).toBe(false);
+    expect(partial.id).toBe(complete.id);
+    const [aggregate] = sourcesFromResponse({ streams: [row], providerErrors: ['netmirror'] });
+    expect(aggregate.incomplete).toBe(true);
   });
 });

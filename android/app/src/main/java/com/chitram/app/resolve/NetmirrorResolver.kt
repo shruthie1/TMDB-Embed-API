@@ -64,7 +64,18 @@ class NetmirrorResolver(
         val base = discover(cfg)
         val out = mutableListOf<Resolved>()
         var failed = false
-        for (ott in listOf("nf", "pv", "hs")) {
+        val catalogs = try {
+            val list = objects(json(cfg, base, "nf", "/newtv/ott.php", cache = true), "ott")
+                .mapNotNull { str(it, "value")?.takeIf { v -> Regex("[A-Za-z0-9_-]{1,24}").matches(v) } }.distinct()
+            if (list.isEmpty()) throw StepException("netmirror catalogs", 0, "no catalogs returned")
+            list
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            if (blockedUntil > now() || calls >= cfg.maxCalls) throw e
+            failed = true
+            listOf("nf", "pv", "hs")
+        }
+        for (ott in catalogs) {
             try {
                 val matches = search(cfg, base, ott, title)
                 for (match in matches) {
@@ -79,7 +90,7 @@ class NetmirrorResolver(
                     val player = json(cfg, base, ott, "/newtv/player.php?id=${enc(target)}")
                     val link = str(player, "video_link") ?: continue
                     val referer = str(player, "referer") ?: "$base/"
-                    val headers = mapOf("Referer" to referer, "User-Agent" to UA)
+                    val headers = mapOf("Referer" to referer, "User-Agent" to UA, "X-Requested-With" to "NetmirrorNewTV v1.0")
                     val reply = mediaHttp.fetch(Request.Builder().url(link).apply { headers.forEach { (k, v) -> header(k, v) } }.build())
                     if (!reply.ok || !reply.body.trimStart().startsWith("#EXTM3U")) throw StepException("netmirror master", reply.code, "unavailable playlist")
                     if (!masterMatchesTitle(reply.body, target)) {
@@ -92,7 +103,7 @@ class NetmirrorResolver(
                     // Only actual renditions are selectable; post.lang never invents tracks.
                     val audio = master.audio.map { a -> a.copy(name = a.name?.replace(Regex("^\\[\\d+]\\s*"), "")) }
                         .let { a -> if (a.size == 1 && a[0].label == null && langs.size == 1) listOf(a[0].copy(language = langs[0])) else a }
-                    val label = when (ott) { "nf" -> "Netflix"; "pv" -> "Prime Video"; else -> "Hotstar" }
+                    val label = when (ott) { "nf" -> "Netflix"; "pv" -> "Prime Video"; "hs" -> "Hotstar"; else -> ott.uppercase() }
                     val subtitles = reply.body.lines().filter { it.startsWith("#EXT-X-MEDIA:") }.mapNotNull { line ->
                         val a = Hls.attrs(line)
                         if (a["TYPE"] != "SUBTITLES") null else a["URI"]?.takeUnless { it.substringBefore('?').endsWith(".m3u8", true) }?.let { uri ->
@@ -101,7 +112,7 @@ class NetmirrorResolver(
                     }
                     out += Resolved("netmirror", "NetMirror | $label", link, headers, null, audio, master.levels, master.codecs,
                         key = "netmirror-$ott-$target", subtitles = subtitles,
-                        languages = if (audio.isEmpty() && langs.size == 1) langs else Hls.languages(audio)).also(onRow)
+                        languages = if (audio.isEmpty() && langs.size == 1) langs else Hls.languages(audio), catalogLanguages = langs).also(onRow)
                     } catch (e: Exception) {
                         if (e is CancellationException) throw e
                         failed = true
@@ -128,7 +139,7 @@ class NetmirrorResolver(
             players[cacheKey] = out.toList() to until
         }
         if (out.isEmpty() && failed) throw StepException("netmirror", 0, "upstream resolution failed")
-        out
+        if (failed) out.map { it.copy(incomplete = true) } else out
     }
 
     private suspend fun discover(cfg: NetmirrorConfig): String {
@@ -181,7 +192,7 @@ class NetmirrorResolver(
                 if (str(data, "status") == "error") throw StepException("netmirror API", r.code, "upstream error")
                 if (cache) {
                     if (metadata.size >= 128) metadata.remove(metadata.keys.first())
-                    metadata[key] = Cached(data, now() + cfg.metadataTtlMs)
+                    metadata[key] = Cached(data, now() + if (path == "/newtv/ott.php") cfg.apiTtlMs else cfg.metadataTtlMs)
                 }
                 return data
             }
@@ -200,20 +211,35 @@ class NetmirrorResolver(
     }
 
     private suspend fun episodeId(cfg: NetmirrorConfig, base: String, ott: String, post: JsonObject, season: Int, episode: Int): String? {
-        fun find(rows: List<JsonObject>, s: Int?) = rows.firstOrNull { ep ->
-            (number(str(ep, "sNum")) ?: s) == season && (number(str(ep, "ep")) ?: number(str(ep, "epNum"))) == episode
-        }?.let { str(it, "id") }
+        fun seasonNumber(row: JsonObject, index: Int): Int? =
+            str(row, "s")?.let(::number) ?: if (str(row, "s").isNullOrBlank()) index + 1 else null
         val seasons = objects(post, "season")
-        val selected = seasons.indexOfFirst { str(it, "selected") == "true" || str(it, "selected") == "1" }
-        find(objects(post, "episodes"), if (selected >= 0) selected + 1 else null)?.let { return it }
-        val wanted = seasons.getOrNull(season - 1)?.let { str(it, "id") } ?: str(post, "nextPageSeason") ?: return null
-        // Each season/page is fetched once, with the same authenticated session.
-        for (page in 1..20) {
-            val data = json(cfg, base, ott, "/newtv/episodes.php?id=${enc(wanted)}&page=$page", cache = true)
-            find(objects(data, "episodes"), season)?.let { return it }
-            if (str(data, "nextPageShow") != "1") break
+        val selectedIndex = seasons.indexOfFirst { str(it, "selected") in listOf("true", "1") }
+        val selected = seasons.getOrNull(selectedIndex)?.let { seasonNumber(it, selectedIndex) }
+        fun find(data: JsonObject, fallback: Int?) = objects(data, "episodes").firstOrNull { ep ->
+            (number(str(ep, "sNum")) ?: fallback) == season &&
+                (number(str(ep, "ep")) ?: number(str(ep, "epNum"))) == episode
+        }?.let { str(it, "id") }
+        find(post, selected)?.let { return it }
+        val wanted = seasons.withIndex().firstOrNull { seasonNumber(it.value, it.index) == season }?.value
+            ?.let { str(it, "id") } ?: return null
+        var data = post
+        // The first selected-season page is already in post.php. Other seasons load by their explicit ID.
+        if (selected != season) {
+            data = json(cfg, base, ott, "/newtv/episodes.php?id=${enc(wanted)}", cache = true)
+            find(data, season)?.let { return it }
         }
-        return null
+        val visited = mutableSetOf<String>()
+        repeat(20) {
+            if (str(data, "nextPageShow") !in listOf("1", "true")) return null
+            val cursorSeason = str(data, "nextPageSeason")?.takeIf { it.isNotBlank() } ?: throw StepException("netmirror episodes", 0, "missing season cursor")
+            val cursor = str(data, "nextPage")?.takeIf { it.isNotBlank() } ?: throw StepException("netmirror episodes", 0, "missing page cursor")
+            val key = "$cursorSeason|$cursor"
+            if (!visited.add(key)) throw StepException("netmirror episodes", 0, "repeated page cursor")
+            data = json(cfg, base, ott, "/newtv/episodes.php?id=${enc(cursorSeason)}&page=${enc(cursor)}", cache = true)
+            find(data, season)?.let { return it }
+        }
+        throw StepException("netmirror episodes", 0, "page budget spent")
     }
 
     private suspend fun request(cfg: NetmirrorConfig, url: String, headers: Map<String, String>): Reply {
@@ -238,7 +264,7 @@ class NetmirrorResolver(
         }
         private fun str(o: JsonObject, key: String) = (o[key] as? JsonPrimitive)?.contentOrNull
         private fun objects(o: JsonObject, key: String) = (o[key] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
-        private fun number(s: String?) = s?.filter(Char::isDigit)?.toIntOrNull()
+        private fun number(s: String?) = s?.let { Regex("\\d+").find(it)?.value?.toIntOrNull() }
         private fun enc(s: String): String = java.net.URLEncoder.encode(s, "UTF-8")
     }
 }

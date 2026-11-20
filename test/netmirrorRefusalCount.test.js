@@ -39,6 +39,7 @@ test('a memoised refusal is not counted a second time', async () => {
             calls.checknewtv++;
             return resp(200, JSON.stringify({ token_hash: Buffer.from('https://newtv.example').toString('base64') }));
         }
+        if (u.includes('/newtv/ott.php')) return resp(200, JSON.stringify({ ott: ['nf', 'pv', 'hs'].map(value => ({ value })) }));
         if (u.includes('/newtv/search.php')) { calls.search++; return resp(403, '<html>Page Not Found</html>'); }
         if (u.startsWith('https://cdn.example/')) return resp(206, '');
         throw new Error(`unexpected fetch ${u}`);

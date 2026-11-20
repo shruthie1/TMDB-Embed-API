@@ -26,6 +26,8 @@ data class Resolved(
     val key: String? = null,
     val subtitles: List<com.chitram.app.data.SubtitleRef> = emptyList(),
     val languages: List<String> = emptyList(),
+    val catalogLanguages: List<String> = emptyList(),
+    val incomplete: Boolean = false,
 )
 
 /**

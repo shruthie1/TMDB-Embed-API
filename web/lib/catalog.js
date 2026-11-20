@@ -612,18 +612,19 @@ export async function getTitleFull(type, id) {
     ]),
     j(tmdbUrl(`/${type}/${id}`, { append_to_response: 'credits' })),
   ]);
-  if (!fast) return rich ? fromTmdb(rich, type) : null;
   if (!rich) return fast;
+  // The rich producer owns seasons/credits even when the optional fast path loses its race.
+  const seed = fast || fromTmdb(rich, type);
   const cast = (rich.credits?.cast || []).slice(0, 8).map(c => c.name);
   return {
-    ...fast,
-    overview: rich.overview || fast.overview,
-    backdrop: rich.backdrop_path || fast.backdrop,
+    ...seed,
+    overview: rich.overview || seed.overview,
+    backdrop: rich.backdrop_path || seed.backdrop,
     genres: (rich.genres || []).map(g => g.name).length
-      ? (rich.genres || []).map(g => g.name) : fast.genres,
-    runtimeMin: rich.runtime ?? rich.episode_run_time?.[0] ?? fast.runtimeMin,
+      ? (rich.genres || []).map(g => g.name) : seed.genres,
+    runtimeMin: rich.runtime ?? rich.episode_run_time?.[0] ?? seed.runtimeMin,
     originalLang: rich.original_language ?? null,
-    cast: cast.length ? cast : fast.cast,
+    cast: cast.length ? cast : seed.cast,
     // Structured credits for the cast row — names alone cannot render photos.
     credits: (rich.credits?.cast || []).slice(0, 12).map(c => ({
       id: c.id, name: c.name, character: c.character || null, profile: c.profile_path || null,
@@ -637,7 +638,7 @@ export async function getTitleFull(type, id) {
     seasonList: (rich.seasons || [])
       .filter(s => s.season_number > 0)
       .map(s => ({ number: s.season_number, name: s.name, episodes: s.episode_count })),
-    source: `${fast.source}+tmdb`,
+    source: fast ? `${fast.source}+tmdb` : 'tmdb',
     enriched: true,
   };
 }

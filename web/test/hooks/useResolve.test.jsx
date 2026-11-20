@@ -278,3 +278,13 @@ describe('useResolve — row ids stay put while the list grows', () => {
     expect(api.currentSourceId).toBe('CastleTV-0');
   });
 });
+
+it('NetMirror continuation appends rows, clears pending coverage, and preserves the playing file', () => {
+  const api=harness({mediaType:'tv',tmdbId:80,season:2,episode:1});
+  const mp4={id:'nm-mp4',provider:'NetMirror',masterUrl:'https://cdn/english.mp4',quality:'1080p',variants:[],incomplete:true};
+  const hls={id:'nm-hls',provider:'NetMirror',masterUrl:'https://cdn/multi.m3u8',quality:'Auto',variants:[],languages:['Telugu']};
+  act(()=>emit.fn.onDone({...mp4,sources:[mp4]}));const playing=api.stream;
+  act(()=>api.mergeSources([{...mp4,incomplete:false},hls]));
+  expect(api.sources.map(s=>s.masterUrl)).toEqual([mp4.masterUrl,hls.masterUrl]);expect(api.sources[0].incomplete).toBe(false);
+  expect(api.stream).toBe(playing);expect(api.currentSourceId).toBe('nm-mp4');
+});

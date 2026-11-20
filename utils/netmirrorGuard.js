@@ -4,13 +4,13 @@
 // be asked at all, and remembers every good answer while it stays valid.
 //
 // Why: newtv throttles per IP. Measured 2026-11-20 on the Mac (residential):
-// after about 7 newtv calls player.php answered "status":"otp" and the master
+// after about 7 anonymous newtv calls player.php answered "status":"otp" and the master
 // served the shared throttle clip (files/220884). On the VM newtv refuses the
 // datacenter IP outright (403 "Page Not Found"), and every lookup still sent
 // three refused searches. Each NetMirror call we skip is one the limiter never
 // counts.
 //
-// Four pieces, all persisted to one JSON file under data/ (git-ignored, kept
+// Guard state, all persisted to one JSON file under data/ (git-ignored, kept
 // by deploy-vm.sh), so a pm2 restart or a deploy does not re-hammer NetMirror:
 //
 //   cool-down   a throttle clip, "otp" or HTTP 429 stops ALL NetMirror calls
@@ -21,7 +21,9 @@
 //   bucket      6 newtv calls per 5 min (one token back every 50s). The
 //               throttle showed after ~7 calls, so 6 stays under it with one
 //               call of margin. The embed-tmdb path is exempt: it has never
-//               shown the clip and has its own 429 signal.
+//               shown the clip and has its own 429 signal. Authenticated
+//               requests have a separate configurable local allowance (24/5min),
+//               not a claim about the upstream service limit.
 //   cache       keyed answers with their own TTL (search/post 7d, player
 //               until the link expires, rows until their urls expire).
 
@@ -33,6 +35,7 @@ const COOL_BASE_MS = 10 * MIN;
 const COOL_MAX_MS = 120 * MIN;
 const NEWTV_BLOCK_MS = Number(process.env.NETMIRROR_NEWTV_BLOCK_MS) || 6 * 60 * MIN;
 const BUCKET_CAP = Number(process.env.NETMIRROR_BUDGET_CALLS) || 6;
+const AUTH_BUCKET_CAP = Number(process.env.NETMIRROR_AUTH_BUDGET_CALLS) || 24;
 const BUCKET_WINDOW_MS = Number(process.env.NETMIRROR_BUDGET_WINDOW_MS) || 5 * MIN;
 const CACHE_MAX = 1500;
 const WRITE_DELAY_MS = 500;
@@ -45,6 +48,7 @@ function freshState(now) {
         throttle: { until: 0, nextMs: COOL_BASE_MS, reason: null },
         newtv: { blockedUntil: 0, reason: null },
         bucket: { tokens: BUCKET_CAP, at: now },
+        authBucket: { tokens: AUTH_BUCKET_CAP, at: now },
         cache: {},
     };
 }
@@ -146,21 +150,26 @@ function createGuard({ file = DEFAULT_FILE, now = () => Date.now(), log = (...a)
 
     // ---- bucket ---------------------------------------------------------
 
-    function refill() {
+    // Independent local allowances; neither bucket stores credentials. Shared
+    // IP-refusal and throttle state still gates both modes before a token.
+    function refill(authenticated = false) {
         const s = load();
+        const b = authenticated ? s.authBucket : s.bucket;
+        const cap = authenticated ? AUTH_BUCKET_CAP : BUCKET_CAP;
+        b.tokens = Math.min(cap, b.tokens);
         const t = clock();
-        const gained = ((t - s.bucket.at) * BUCKET_CAP) / BUCKET_WINDOW_MS;
+        const gained = ((t - b.at) * cap) / BUCKET_WINDOW_MS;
         if (gained > 0) {
-            s.bucket.tokens = Math.min(BUCKET_CAP, s.bucket.tokens + gained);
-            s.bucket.at = t;
+            b.tokens = Math.min(cap, b.tokens + gained);
+            b.at = t;
         }
-        return s.bucket;
+        return b;
     }
 
-    function tokens() { return Math.floor(refill().tokens + 1e-9); }
+    function tokens(authenticated = false) { return Math.floor(refill(authenticated).tokens + 1e-9); }
 
-    function take() {
-        const b = refill();
+    function take(authenticated = false) {
+        const b = refill(authenticated);
         if (b.tokens + 1e-9 < 1) return false;
         b.tokens -= 1;
         save();

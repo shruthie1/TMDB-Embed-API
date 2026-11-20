@@ -35,7 +35,7 @@ const sourceMeta = (source) => {
   // showed five identical "CastleTV" buttons with nothing to choose between
   // them. These are what actually distinguish one row entry from the next.
   const langs = (source.languages || []).join('/');
-  const bits = [langs, source.quality, source.best, source.codecs?.video];
+  const bits = [langs, source.quality, source.best, source.codecs?.video, source.incomplete && 'More sources pending'];
   if ((source.audioTracks?.length || 0) > 1) bits.push(`${source.audioTracks.length} audio`);
   return bits.filter(Boolean).join(' · ');
 };
@@ -52,7 +52,7 @@ export default function TvBar({
   sources = [], currentSource, currentSourceId, onPickSource,
   levels = [], currentLevel, autoLevel, onPickLevel,
   audioTracks = [], currentAudio, onPickAudio,
-  sourcesPending = false, onClose,
+  sourcesPending = false, onClose, onCheckSources, checkingSources = false,
   fit = 'cover', onSetFit,
   subs = [], currentSub, onPickSub, subLoading = false,
 }) {
@@ -237,6 +237,13 @@ export default function TvBar({
               {s.provider}{sourceMeta(s) ? ` · ${sourceMeta(s)}` : ''}
             </button>
           ))}
+          {sources.some(s => s.incomplete) && onCheckSources && (
+            <button type="button" className="tvbar-btn focusable" data-focus=""
+                    disabled={checkingSources} aria-busy={checkingSources || undefined}
+                    onClick={() => { onCheckSources(); rearm.current(); }}>
+              {checkingSources ? 'Checking sources…' : 'Check for more sources'}
+            </button>
+          )}
           {sourcesPending && <span className="tvbar-note">finding more…</span>}
         </div>
       </div>

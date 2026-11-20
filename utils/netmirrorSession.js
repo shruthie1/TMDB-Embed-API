@@ -71,14 +71,23 @@ function createNewTvSession({ exchange, credential = () => process.env.NETMIRROR
         }
     }
 
-    async function request(api, send) {
+    async function request(api, send, { ensureToken = false } = {}) {
         const otp = String(credential() || '').trim();
         // Backend exchange is opt-in; the device maintains its own session.
         if (!otp) return send('');
         const state = stateFor(api, otp);
         let token = tokenOf(state);
+        const preauthenticated = ensureToken && !token;
+        if (preauthenticated) token = await renew(api, otp, state, '');
         const data = await send(token);
         if (data?.status !== 'otp') return data;
+        // A freshly issued token gets one send, never a second exchange in
+        // the same operation. Existing tokens may renew once on rejection.
+        if (preauthenticated) {
+            invalidate(state, token);
+            state.failedUntil = now() + failureMs;
+            throw authError();
+        }
         token = await renew(api, otp, state, token);
         const retried = await send(token);
         if (retried?.status === 'otp') {
@@ -89,7 +98,11 @@ function createNewTvSession({ exchange, credential = () => process.env.NETMIRROR
         return retried;
     }
 
-    return { request };
+    function hasToken(api) {
+        const otp = String(credential() || '').trim();
+        return Boolean(api && otp && tokenOf(stateFor(api, otp)));
+    }
+    return { request, hasToken };
 }
 
 module.exports = { createNewTvSession };

@@ -3203,3 +3203,43 @@ html .pctl-scrub:focus-visible,html .sync-bar:focus-visible{outline:none}
 }
 [data-tv="true"] .ov-load-row{font-size:16px;padding:var(--space-2-5) var(--space-1)}
 [data-tv="true"] .ov-load-panel{width:min(560px,60vw)}
+
+/* Shared player menu surfaces. These rules never size the player or controls. */
+.pmenu-unified{width:296px;max-width:calc(100vw - 24px);padding:0;display:flex;flex-direction:column;overflow:hidden}
+.pmenu-picker-head{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3);min-height:52px}
+.pmenu-heading{display:flex;align-items:center;gap:var(--space-2);font-size:var(--text-sm);font-weight:var(--weight-medium)}
+.pmenu-picker-head .icon-btn,.pmenu-sheet-head .icon-btn{min-width:44px;min-height:44px}
+.pmenu-picker-body{min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:var(--space-1-5)}
+.pmenu .pmenu-item{min-height:48px;padding:var(--space-2) var(--space-3);gap:var(--space-3)}
+.pmenu-marker{width:18px;flex:0 0 18px;display:flex;align-items:center;justify-content:center;color:var(--color-text-primary)}
+.pmenu-copy{display:flex;flex:1;min-width:0;flex-direction:column;gap:var(--space-1);align-items:stretch}
+.pmenu-copy .pmenu-text{flex:none;display:block;font-size:var(--text-sm);line-height:1.4}
+.pmenu-copy .pmenu-meta{margin:0;white-space:normal;overflow-wrap:anywhere;font-size:var(--text-xs);line-height:1.4}
+.pmenu-item.on{background:var(--color-fill-1)}
+.pmenu-item:focus-visible{outline:var(--focus-ring);outline-offset:calc(-1 * var(--focus-offset))}
+.sheet-picks .pmenu-unified{width:auto;max-width:none;overflow:visible}
+.sheet-picks .pmenu-picker-head{display:none}
+.sheet-picks .pmenu-picker-body{overflow:visible;padding:0}
+@media (max-width:639px){
+  .pctl .pmenu-unified,.embed-stage .pmenu-unified{
+    position:fixed;left:0;right:0;bottom:0;top:auto;width:auto;max-width:none;max-height:70svh;
+    border-radius:var(--radius-lg) var(--radius-lg) 0 0;border-bottom:0;
+  }
+  .pctl .sheet-picks .pmenu-unified{position:static;max-height:none;border:0;border-radius:0}
+  .pmenu-unified .pmenu-picker-body{padding-bottom:calc(var(--space-3) + var(--safe-b))}
+}
+@media (pointer:coarse) and (max-height:500px) and (min-width:640px){
+  .pctl .pmenu-unified,.pctl .pmenu-sheet,.embed-stage .pmenu-unified{
+    position:fixed;left:auto;right:var(--safe-r,0px);top:var(--safe-t,0px);bottom:0;
+    width:min(360px,50vw);max-height:none;border-radius:var(--radius-lg) 0 0 var(--radius-lg);
+  }
+  .pctl .sheet-picks .pmenu-unified{position:static;width:auto;max-height:none;border-radius:0}
+}
+html[data-tv="true"] .pctl .pmenu-unified,html[data-tv="true"] .pctl .pmenu-sheet,
+html[data-tv="true"] .embed-stage .pmenu-unified{
+  position:fixed;left:auto;right:0;top:0;bottom:0;width:min(400px,50vw);max-height:none;
+  border-radius:var(--radius-lg) 0 0 var(--radius-lg);
+}
+html[data-tv="true"] .pmenu .pmenu-item{min-height:56px}
+html[data-tv="true"] .pmenu-copy .pmenu-text{font-size:var(--text-md)}
+html[data-tv="true"] .pmenu-item:focus .pmenu-marker{color:var(--ink)}

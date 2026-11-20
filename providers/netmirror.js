@@ -1,6 +1,7 @@
 const { getDetails } = require('../utils/tmdb');
 const { getStore, mediaIdentityOf } = require('../utils/store');
 const { canonicalLanguage } = require('../utils/streamSchema');
+const hlsManifest = require('../lib/media/hlsManifest');
 const {
     normalizeTitle: normaliseTitle,
     looseTitle: loosenTitle,
@@ -8,6 +9,10 @@ const {
     isPrefixWithSuffixNoise,
 } = require('../utils/titleMatch');
 
+// V3 also invalidates false-complete results from decorated season labels.
+// Metadata retains pagination cursors and separates catalog labels from audio.
+// Old persisted answers must not hide pages/languages until their week-long TTL.
+const CACHE_VERSION = '3';
 const STREAM_CACHE_TTL = 25 * 60 * 1000;
 // Short cooldown for empty/failed lookups so a transient throttle does not
 // masquerade as a lasting "no streams" answer, and so repeated page loads
@@ -113,10 +118,10 @@ function gateError(code) {
 
 // Why the next newtv call would not be sent, or null. Order matters: a block
 // or a cool-down must not spend a budget token.
-function newtvSkipCode() {
+function newtvSkipCode(authenticated = false) {
     if (guard.newtvBlockedMs()) return 'NEWTV_BLOCKED';
     if (guard.coolingMs()) return 'NM_THROTTLED';
-    if (guard.tokens() < 1) return 'NM_BUDGET';
+    if (guard.tokens(authenticated) < 1) return 'NM_BUDGET';
     return null;
 }
 
@@ -124,12 +129,13 @@ function newtvSkipCode() {
 // through here. Never waits for a token: an empty bucket skips at once so the
 // /api/streams answer is never held up by the budget.
 async function newtvFetch(url, options) {
-    const skip = newtvSkipCode();
+    const authenticated = Boolean(new Headers(options?.headers).get('usertoken'));
+    const skip = newtvSkipCode(authenticated);
     if (skip) throw gateError(skip);
-    if (!guard.take()) throw gateError('NM_BUDGET');
+    if (!guard.take(authenticated)) throw gateError('NM_BUDGET');
     let kind = 'newtv';
     try { kind = new URL(url).pathname.split('/').pop() || kind; } catch { /* keep */ }
-    console.log(`[netmirror] call newtv ${kind} tokens-left=${guard.tokens()}`);
+    console.log(`[netmirror] call newtv ${kind} mode=${authenticated ? 'authenticated' : 'anonymous'} tokens-left=${guard.tokens(authenticated)}`);
     const response = await nmFetch(url, options);
     if (response.status === 429) {
         guard.throttleOpen('http-429');
@@ -438,41 +444,70 @@ async function fetchNetflix(tmdbId, type, title, season, episode) {
 
 function parseNumber(value) {
     if (!value) return null;
-    const parsed = parseInt(String(value).replace(/[^\d]/g, ''), 10);
+    const parsed = parseInt(String(value).match(/\d+/)?.[0] || '', 10);
     return Number.isFinite(parsed) ? parsed : null;
 }
 
-async function getEpisodes(api, showId, postData, config) {
+// The APK selects seasons by item.s and requests item.id. Pages can change
+// BOTH nextPageSeason and nextPage; neither season positions nor page+1 are
+// stable identifiers. Stop on the requested episode instead of enumerating a
+// whole show and spending the remaining request budget unnecessarily.
+async function getEpisodes(api, showId, postData, config, memo, wantedSeason, wantedEpisode) {
     const result = [];
-    const selectedSeason = Array.isArray(postData.season) ? postData.season.findIndex((item) => item.selected) : -1;
-    const selectedSeasonId = selectedSeason >= 0 ? postData.season[selectedSeason].id : postData.nextPageSeason;
-    const add = (episode, seasonNumber) => {
-        result.push({
-            id: episode.id,
-            s: seasonNumber || parseNumber(episode.sNum),
-            ep: parseNumber(episode.ep) || parseNumber(episode.epNum)
-        });
-    };
-
-    for (const episode of postData.episodes || []) {
-        if (episode) add(episode, selectedSeason >= 0 ? selectedSeason + 1 : null);
-    }
-
-    if (postData.nextPageShow === 1 && selectedSeasonId) {
-        try {
-            const data = await authenticatedNewTvJson(api, config.ott,
-                `/newtv/episodes.php?id=${encodeURIComponent(selectedSeasonId)}&page=2`);
-            requireMetadata(data);
-            for (const episode of data.episodes || []) {
-                if (episode) add(episode, selectedSeason >= 0 ? selectedSeason + 1 : null);
-            }
-        } catch (error) {
-            // Auth and budget failures are unknown, not a missing episode.
-            if (error.gate || error.code === 'NETMIRROR_AUTH_REQUIRED') throw error;
-            // The first page is still useful when pagination is unavailable.
+    const seasons = Array.isArray(postData.season) ? postData.season.filter(Boolean) : [];
+    const seasonNumber = (item, index) => parseNumber(item.s) ?? parseNumber(item.sNum) ?? index + 1;
+    const selectedIndex = seasons.findIndex((item) => item.selected === true || item.selected === 1 || item.selected === '1');
+    const selected = selectedIndex >= 0 ? seasons[selectedIndex] : null;
+    const selectedNumber = selected ? seasonNumber(selected, selectedIndex) : null;
+    const wantedIndex = seasons.findIndex((item, index) => seasonNumber(item, index) === wantedSeason);
+    const wanted = wantedIndex >= 0 ? seasons[wantedIndex] : null;
+    const add = (data, fallbackSeason) => {
+        for (const episode of Array.isArray(data?.episodes) ? data.episodes : []) {
+            if (!episode) continue;
+            result.push({ id: episode.id, s: parseNumber(episode.sNum) ?? fallbackSeason,
+                ep: parseNumber(episode.ep) ?? parseNumber(episode.epNum) });
         }
+    };
+    const found = () => result.some((ep) => ep.s === wantedSeason && ep.ep === wantedEpisode);
+    add(postData, selectedNumber);
+    if (found()) return result;
+
+    let data = postData;
+    let currentSeasonId = selected?.id || postData.nextPageSeason;
+    let currentSeasonNumber = selectedNumber;
+    if (wanted && selectedNumber !== wantedSeason) {
+        currentSeasonId = wanted.id;
+        currentSeasonNumber = wantedSeason;
+        data = await newTvJson(memo, config.ott,
+            `/newtv/episodes.php?id=${encodeURIComponent(currentSeasonId)}`);
+        if (data === null) return result;
+        add(data, currentSeasonNumber);
+        if (found()) return result;
+    } else if (selectedNumber !== null && selectedNumber !== wantedSeason) {
+        // No matching season in the supplied list: do not play the selected
+        // season's episode as if it belonged to the requested one.
+        return result;
     }
 
+    const cursors = new Set();
+    while (data && (data.nextPageShow === true || Number(data.nextPageShow) === 1)) {
+        const nextId = data.nextPageSeason || currentSeasonId;
+        // Older responses omit nextPage on the post's first page; its one
+        // supported continuation is page2. Later pages must supply a cursor.
+        const nextPage = data.nextPage ?? (data === postData ? 2 : null);
+        if (!nextId || nextPage === null || nextPage === undefined || nextPage === '') {
+            throw new Error('NetMirror episode pagination cursor missing');
+        }
+        const cursor = `${nextId}|${nextPage}`;
+        if (cursors.has(cursor)) throw new Error('NetMirror episode pagination cursor repeated');
+        cursors.add(cursor);
+        data = await newTvJson(memo, config.ott,
+            `/newtv/episodes.php?id=${encodeURIComponent(nextId)}&page=${encodeURIComponent(nextPage)}`);
+        if (data === null) return result;
+        currentSeasonId = nextId;
+        add(data, currentSeasonNumber);
+        if (found()) return result;
+    }
     return result;
 }
 
@@ -576,7 +611,8 @@ function pickSearchMatch(results, wantedTitle) {
 async function masterMatchesTitle(masterUrl, wantedId, referer, seen) {
     try {
         const resp = await nmFetch(masterUrl, {
-            headers: { Referer: referer || '', 'User-Agent': nextUA() },
+            headers: { Referer: referer || '', 'User-Agent': newTvHeaders('nf')['User-Agent'],
+                'X-Requested-With': 'NetmirrorNewTV v1.0' },
             signal: AbortSignal.timeout(12000),
         });
         if (!resp.ok) return true;
@@ -671,7 +707,9 @@ async function readNewTvJson(response) {
 
 // Search, post, episodes and player all use the same credential path. A
 // status:otp is an auth challenge, not metadata and not proof of throttling.
-// Every exchange and replay still spends the existing newtv call budget.
+// Configured OTP is verified before metadata. Discovery/exchange use the
+// anonymous budget; token-bearing API calls use their separate local allowance.
+// Shared throttle, IP refusal and decoy protections still apply to both.
 const newTvSession = createNewTvSession({
     exchange: async (api, otp) => readNewTvJson(await newtvFetch(`${api}/newtv/otp.php`, {
         redirect: 'error', // Custom OTP headers must never follow a redirect to another origin.
@@ -681,13 +719,13 @@ const newTvSession = createNewTvSession({
     })),
 });
 
-async function authenticatedNewTvJson(api, ott, pathQuery, extra = {}) {
+async function authenticatedNewTvJson(api, ott, pathQuery, extra = {}, options = { ensureToken: true }) {
     return newTvSession.request(api, async (token) => readNewTvJson(await newtvFetch(`${api}${pathQuery}`, {
         redirect: 'error', // fetch does not strip custom Usertoken headers across redirects.
         // Token is last: legacy call sites cannot accidentally override it.
         headers: newTvHeaders(ott, { ...extra, Usertoken: token }),
         signal: AbortSignal.timeout(15000),
-    })));
+    })), options);
 }
 
 function requireMetadata(data) {
@@ -713,7 +751,7 @@ function requireMetadata(data) {
 const NEWTV_LONG_TTL_MS = Number(process.env.NETMIRROR_META_TTL_MS) || 7 * 24 * 60 * 60 * 1000;
 const NEWTV_EMPTY_TTL_MS = 30 * 60 * 1000;
 const POST_FIELDS = ['type', 'year', 'main_id', 'runtime', 'lang', 'episodes', 'season',
-    'nextPageShow', 'nextPageSeason'];
+    'nextPageShow', 'nextPageSeason', 'nextPage'];
 
 function trimNewTv(pathQuery, data) {
     if (!data || typeof data !== 'object') return data;
@@ -729,6 +767,7 @@ function trimNewTv(pathQuery, data) {
 }
 
 function newTvTtl(pathQuery, data) {
+    if (pathQuery === '/newtv/ott.php') return 10 * 60 * 1000;
     if (data === null) return NEWTV_EMPTY_TTL_MS;
     if (pathQuery.startsWith('/newtv/search.php')) {
         return (data.searchResult || []).length ? NEWTV_LONG_TTL_MS : NEWTV_EMPTY_TTL_MS;
@@ -737,7 +776,7 @@ function newTvTtl(pathQuery, data) {
 }
 
 async function newTvJson(memo, ott, pathQuery, extra) {
-    const key = `nt|${ott}|${pathQuery}`;
+    const key = `nt${CACHE_VERSION}|${ott}|${pathQuery}`;
     if (memo && memo.has(key)) {
         const hit = memo.get(key);
         if (hit.error) { hit.error.memoReplay = true; throw hit.error; }
@@ -762,6 +801,30 @@ async function newTvJson(memo, ott, pathQuery, extra) {
     }
 }
 
+// The APK obtains catalog codes from ott.php; retain bounded known catalogs
+// only when that registry is unavailable, and expose the incomplete result.
+async function resolveCatalogs(memo) {
+    try {
+        const data = await newTvJson(memo, 'nf', '/newtv/ott.php');
+        const catalogs = [];
+        const seen = new Set();
+        for (const row of Array.isArray(data?.ott) ? data.ott : []) {
+            const code = String(row?.value || '');
+            if (!/^[a-zA-Z0-9_-]{1,24}$/.test(code) || seen.has(code)) continue;
+            seen.add(code);
+            const known = PLATFORM_ORDER.find((name) => PLATFORM_MAP[name].ott === code);
+            const label = String(row.name || row.title || code.toUpperCase()).replace(/[\x00-\x1f\x7f]/g, '').slice(0, 80);
+            catalogs.push({ platform: known || code, config: { ott: code, ...(known ? {} : { label }) } });
+        }
+        if (catalogs.length) return { catalogs };
+        throw new Error('empty catalog registry');
+    } catch (error) {
+        if (error.gate) return { catalogs: [], error: error.message, blocked: error.code === 'NEWTV_BLOCKED' };
+        return { catalogs: PLATFORM_ORDER.map((platform) => ({ platform, config: PLATFORM_MAP[platform] })),
+            error: 'netmirror-catalogs-incomplete' };
+    }
+}
+
 // What a gate stop means for one catalogue: a newtv block is a lasting known
 // state (no error, the reachable answer is complete); a cool-down or an empty
 // budget is "unknown right now".
@@ -770,9 +833,9 @@ function gateOutcome(error) {
     return failure(error.message);
 }
 
-async function fetchPlatform(platform, title, type, season, episode, memo) {
+async function fetchPlatform(platform, title, type, season, episode, memo, year, catalogConfig) {
     try {
-        const config = PLATFORM_MAP[platform];
+        const config = catalogConfig || PLATFORM_MAP[platform];
         let matches = [];
         let lastSeen = [];
         // NetMirror's search matches on punctuation too, while TMDB titles carry
@@ -798,13 +861,12 @@ async function fetchPlatform(platform, title, type, season, episode, memo) {
             console.log(`[NetMirror] ${platform} no title match for "${title}"${seen.length ? ` (saw: ${seen.join(', ')})` : ''}`);
             return [];
         }
-        // Resolve each language row, not just the first. NetMirror only ever
-        // exposes one audio track per file, so a second language is a second
-        // catalogue entry - dropping the rest is dropping the language choice.
+        // Resolve every matching row: separate dubbed files and multi-audio
+        // masters can coexist, and each may expose a different set of tracks.
         const out = [];
         let err = null;
-        for (const match of matches.slice(0, MAX_LANGUAGE_ROWS)) {
-            const rows = await resolveMatch(config, platform, match, title, type, season, episode, memo);
+        for (const match of matches) {
+            const rows = await resolveMatch(config, platform, match, title, type, season, episode, memo, year);
             if (rows.upstreamError) err = rows.upstreamError;
             if (rows.newtvBlocked) return Object.assign(out, { newtvBlocked: true });
             out.push(...rows);
@@ -820,10 +882,9 @@ async function fetchPlatform(platform, title, type, season, episode, memo) {
     }
 }
 
-// How many catalogue rows of one title we will resolve. Each row costs a
-// post.php + player.php pair against a provider that rate limits per IP, so
-// this is capped rather than unbounded.
-const MAX_LANGUAGE_ROWS = Number(process.env.NETMIRROR_MAX_LANG_ROWS) || 4;
+// The shared newtv token bucket bounds upstream calls. There is no separate
+// four-dub truncation: cached earlier dubs cost no calls, so later lookups can
+// continue to the remaining languages when budget becomes available.
 
 // player.php + the master check for one catalogue id. Returns
 // { video_link, referer, audio, real } or a failure()/[] array.
@@ -836,7 +897,7 @@ const MAX_LANGUAGE_ROWS = Number(process.env.NETMIRROR_MAX_LANG_ROWS) || 4;
 async function resolvePlayer(config, platform, targetId, title, postLangs) {
     const api = await resolveNewTvApi();
     const player = await authenticatedNewTvJson(api, config.ott,
-        `/newtv/player.php?id=${encodeURIComponent(targetId)}`);
+        `/newtv/player.php?id=${encodeURIComponent(targetId)}`, {}, { ensureToken: true });
     if (player === null) {
         console.log(`[NetMirror] ${platform} player: page not found for id ${targetId} - no rows`);
         return [];
@@ -887,10 +948,12 @@ async function resolvePlayer(config, platform, targetId, title, postLangs) {
     } else if (master.body !== undefined) {
         console.log(`[NetMirror] ${platform} master lists no audio renditions - not selectable`);
     }
-    return { video_link: player.video_link, referer, audio, real: Boolean(master.real) };
+    return { video_link: player.video_link, referer, audio, real: Boolean(master.real),
+        levels: hlsManifest.parseLevels(master.body, player.video_link),
+        codecs: hlsManifest.masterCodecs(master.body) };
 }
 
-async function resolveMatch(config, platform, match, title, type, season, episode, memo) {
+async function resolveMatch(config, platform, match, title, type, season, episode, memo, year) {
     const first = match.item;
     try {
 
@@ -901,9 +964,14 @@ async function resolveMatch(config, platform, match, title, type, season, episod
             return [];
         }
 
+        const postYear = Number(String(postData.year || '').slice(0, 4));
+        if (type === 'movie' && year && postYear > 1900 && Math.abs(postYear - year) > 1) {
+            console.log(`[NetMirror] ${platform} year mismatch for "${title}" - skipped`);
+            return [];
+        }
         let targetId = first.id;
         if (type === 'series') {
-            const episodes = await getEpisodes(await resolveNewTvApi(), first.id, postData, config);
+            const episodes = await getEpisodes(await resolveNewTvApi(), first.id, postData, config, memo, season, episode);
             const target = episodes.find((item) => item.s === season && item.ep === episode);
             if (!target) return [];
             targetId = target.id;
@@ -913,27 +981,21 @@ async function resolveMatch(config, platform, match, title, type, season, episod
             targetId = postData.main_id || first.id;
         }
 
-        const label = platform === 'primevideo'
+        const label = config.label || (platform === 'primevideo'
             ? 'Prime Video'
-            : platform.charAt(0).toUpperCase() + platform.slice(1);
-        // post.php carries the authoritative language list for the title:
-        //   lang: [{"l":"Hindi","s":"hin"}, ... {"l":"Telugu","s":"tel"}]
-        // and those are exactly the EXT-X-MEDIA audio renditions the master
-        // playlist ends up exposing. Prefer it over the language parsed out of
-        // the catalogue title, which only ever describes a single dub row.
+            : platform.charAt(0).toUpperCase() + platform.slice(1));
+        // The APK displays post.lang as catalog metadata; it switches actual
+        // native player audio tracks. Keep the catalog strip separately so a
+        // language named here cannot invent a rendition in this stream.
         const postLangs = Array.isArray(postData.lang)
             ? postData.lang.map((entry) => entry && entry.l).filter(Boolean)
             : [];
-        const languages = postLangs.length ? postLangs : (match.language ? [match.language] : []);
-        // The watch UI reads the language out of a [...] tag in `name` (see
-        // languageFromLabel in public/watch.js), the same shape CastleTV emits.
-        // Carry `language` as a field too so callers do not have to parse it.
-        const langTag = languages.length ? ` [${languages.join('/')}]` : '';
+        const catalogLanguages = [...new Set(postLangs.map(canonicalLanguage).filter(Boolean))];
 
         // N7: a player link whose master was already proven real is reused
         // until the link expires (its stated expiry, else 25 min): no
         // player.php and no master fetch.
-        const playerKey = `nt|${config.ott}|player|${targetId}`;
+        const playerKey = `nt${CACHE_VERSION}|${config.ott}|player|${targetId}`;
         let resolved = guard.cacheGet(playerKey);
         if (resolved) {
             console.log(`[netmirror] cache-hit player ${platform} ${targetId}`);
@@ -944,22 +1006,32 @@ async function resolveMatch(config, platform, match, title, type, season, episod
                 const exp = urlExpiresAt(resolved.video_link, guard.now());
                 const ttl = exp ? exp - guard.now() - 60 * 1000 : STREAM_CACHE_TTL;
                 guard.cacheSet(playerKey, { video_link: resolved.video_link, referer: resolved.referer,
-                    audio: resolved.audio }, ttl);
+                    audio: resolved.audio, levels: resolved.levels, codecs: resolved.codecs }, ttl);
             }
         }
         const audio = resolved.audio || [];
+        const actualLanguages = [...new Set(audio.map((entry) => entry.language).filter(Boolean))];
+        const languages = actualLanguages.length ? actualLanguages
+            : catalogLanguages.length === 1 ? catalogLanguages
+                : match.language ? [match.language] : [];
+        const langTag = languages.length ? ` [${languages.join('/')}]` : '';
 
         return [{
             name: `NetMirror${langTag} | ${label}`,
             title: `${title}\nAuto`,
             url: resolved.video_link,
             quality: 'Auto',
+            levels: resolved.levels || [],
+            codecs: resolved.codecs || null,
+            container: 'hls',
             provider: 'NetMirror',
+            catalogLanguages,
             ...(languages.length ? { language: languages.join('/') } : {}),
             ...(audio.length ? { audio, selectableAudio: true } : {}),
             headers: {
                 Referer: resolved.referer,
-                'User-Agent': nextUA()
+                'User-Agent': newTvHeaders(config.ott)['User-Agent'],
+                'X-Requested-With': 'NetmirrorNewTV v1.0'
             }
         }];
     } catch (error) {
@@ -1135,15 +1207,6 @@ async function dropThrottled(streams) {
     return { streams: keep, throttled };
 }
 
-function hdOnly(streams, forceHd) {
-    if (!forceHd) return streams;
-    const hd = streams.filter((stream) => {
-        const match = (stream.quality || '').match(/(\d+)p/i);
-        return !match || Number(match[1]) >= 720;
-    });
-    return hd.length ? hd : streams;
-}
-
 // How long a set of rows stays good: 25 min, or less when a url states an
 // earlier expiry (a minute of margin).
 function rowsTtl(streams) {
@@ -1168,8 +1231,8 @@ async function getNetmirrorStreams(tmdbId, mediaType = 'movie', seasonNum = null
         }
 
         const key = `${tmdbId}:${type}:${season || 0}:${episode || 0}`;
-        const rowsKey = `rows|${key}`;
-        const goodKey = `good|${key}`;
+        const rowsKey = `rows${CACHE_VERSION}|${key}`;
+        const goodKey = `good${CACHE_VERSION}|${key}`;
         const cached = guard.cacheGet(rowsKey);
         if (cached) {
             if (cached.error && !cached.streams.length) {
@@ -1177,7 +1240,7 @@ async function getNetmirrorStreams(tmdbId, mediaType = 'movie', seasonNum = null
                 // every request and never let NetMirror be asked again.
                 return Promise.reject(new Error(`backing off: ${cached.error}`));
             }
-            const out = hdOnly(cached.streams, true);
+            const out = cached.streams;
             return cached.error ? failure(cached.error, [...out]) : out;
         }
         const running = inflight.get(key);
@@ -1190,7 +1253,7 @@ async function getNetmirrorStreams(tmdbId, mediaType = 'movie', seasonNum = null
             const good = guard.cacheGet(goodKey);
             console.log(`[netmirror] throttle-skip tmdbId=${tmdbId} left=${Math.round(cooling / 1000)}s`
                 + ` cached-rows=${good ? good.length : 0}`);
-            if (good && good.length) return failure(GATE_REASON.NM_THROTTLED, hdOnly(good, true));
+            if (good && good.length) return failure(GATE_REASON.NM_THROTTLED, good);
             return Promise.reject(new Error(GATE_REASON.NM_THROTTLED));
         }
 
@@ -1271,9 +1334,11 @@ async function getNetmirrorStreams(tmdbId, mediaType = 'movie', seasonNum = null
             // N7: a newtv block, a cool-down or an empty budget stops the loop
             // before the next catalogue, with no gap sleep and no request.
             let asked = askedNetflix ? 1 : 0;
-            let newtvBlocked = false;
-            for (const platform of PLATFORM_ORDER) {
-                const skip = newtvSkipCode();
+            const registry = await resolveCatalogs(memo);
+            if (registry.error && !registry.blocked) upstreamError = registry.error;
+            let newtvBlocked = Boolean(registry.blocked);
+            for (const { platform, config } of registry.catalogs) {
+                const skip = newtvSkipCode(newTvSession.hasToken(resolvedApiUrl));
                 if (skip) {
                     console.log(`[netmirror] skip-catalogues from=${platform} reason=${GATE_REASON[skip]}`);
                     if (skip === 'NEWTV_BLOCKED') newtvBlocked = true;
@@ -1281,7 +1346,8 @@ async function getNetmirrorStreams(tmdbId, mediaType = 'movie', seasonNum = null
                     break;
                 }
                 if (asked++) await sleep(PLATFORM_GAP_MS);
-                const found = await fetchPlatform(platform, title, type, season, episode, memo);
+                const year = Number(String(details?.release_date || details?.first_air_date || '').slice(0, 4)) || null;
+                const found = await fetchPlatform(platform, title, type, season, episode, memo, year, config);
                 if (found.newtvBlocked) newtvBlocked = true;
                 if (found.upstreamError) upstreamError = found.upstreamError;
                 if (found.length) collected.push(...found);
@@ -1289,10 +1355,19 @@ async function getNetmirrorStreams(tmdbId, mediaType = 'movie', seasonNum = null
             // A block is known and lasting: with rows, what the VM can reach is
             // the answer. With none, it is unknown, not "no streams".
             if (newtvBlocked && !collected.length && !upstreamError) upstreamError = GATE_REASON.NEWTV_BLOCKED;
+            // A partial lookup may find a new catalog while another is still
+            // waiting on budget. Keep the union with valid last-good rows;
+            // choosing whichever list is longer silently loses distinct dubs.
+            const previousGood = guard.cacheGet(goodKey);
+            if (upstreamError && previousGood?.length) {
+                const merged = new Map(previousGood.map((row) => [`${row.url}|${row.quality || ''}`, row]));
+                for (const row of collected) merged.set(`${row.url}|${row.quality || ''}`, row);
+                collected = [...merged.values()];
+            }
             // Check the CDN BEFORE caching. The 429 comes from the file host,
             // not the API, so without this a throttled url is stored as a good
             // stream for 25 minutes and fails later in the player instead.
-            const { streams: live, throttled } = await dropThrottled(hdOnly(collected, true));
+            const { streams: live, throttled } = await dropThrottled(collected);
             const streams = live;
             if (throttled && !upstreamError) upstreamError = 'CDN throttled';
 
@@ -1326,11 +1401,6 @@ async function getNetmirrorStreams(tmdbId, mediaType = 'movie', seasonNum = null
                 guard.cacheSet(goodKey, streams, rowsTtl(streams));
             }
             console.log(`[NetMirror] ${tmdbId} streams ready: ${streams.length}${why || ''}`);
-            const gated = upstreamError === GATE_REASON.NM_BUDGET || upstreamError === GATE_REASON.NM_THROTTLED;
-            if (gated && good && good.length > streams.length) {
-                console.log(`[netmirror] serve-cached tmdbId=${tmdbId} rows=${good.length} reason=${upstreamError}`);
-                return failure(upstreamError, hdOnly(good, true));
-            }
             if (upstreamError && !streams.length) throw new Error(upstreamError);
             return upstreamError ? failure(upstreamError, [...streams]) : streams;
         })().finally(() => inflight.delete(key));
@@ -1344,7 +1414,7 @@ async function getNetmirrorStreams(tmdbId, mediaType = 'movie', seasonNum = null
         console.error(`[NetMirror] Error: ${err.message} - backing off ${Math.round(EMPTY_CACHE_TTL / 1000)}s`);
         try {
             const k = `${tmdbId}:${type}:${seasonNum || 0}:${episodeNum || 0}`;
-            guard.cacheSet(`rows|${k}`, { streams: [], error: err.message }, EMPTY_CACHE_TTL);
+            guard.cacheSet(`rows${CACHE_VERSION}|${k}`, { streams: [], error: err.message }, EMPTY_CACHE_TTL);
         } catch (_) { /* key build is best effort */ }
         throw err; // unknown, not "no streams"
     }

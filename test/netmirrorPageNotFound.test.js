@@ -41,6 +41,7 @@ function route(newtvSearch) {
             calls.checknewtv++;
             return json({ token_hash: Buffer.from('https://newtv.example').toString('base64') });
         }
+        if (u.includes('/newtv/ott.php')) return json({ ott: ['nf', 'pv', 'hs'].map(value => ({ value })) });
         if (u.includes('/newtv/search.php')) { calls.search++; return newtvSearch(); }
         if (u.startsWith('https://cdn.example/')) { calls.cdn++; return html(206, ''); }
         throw new Error(`unexpected fetch ${u}`);

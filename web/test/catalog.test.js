@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { trendingIndia, trendingGlobal, trendingSeriesGlobal, similarTitles,
-         LANGS } from '../lib/catalog';
+         LANGS, getTitleFull } from '../lib/catalog';
 
 /**
  * `catalog.js` talks to TMDB over plain `fetch`, so stubbing it lets us assert
@@ -134,5 +134,37 @@ describe('global rows', () => {
     // mediaType drives the detail-page route, so a tv row emitting 'movie'
     // sends every card to the wrong URL.
     expect(out[0].mediaType).toBe('tv');
+  });
+});
+
+
+describe('full title enrichment when the fast record is absent', () => {
+  const rich = { id: 66732, name: 'Stranger Things', first_air_date: '2016-07-15',
+    number_of_seasons: 5, seasons: [{ season_number: 1, name: 'Season 1', episode_count: 8 },
+      { season_number: 2, name: 'Stranger Things 2', episode_count: 9 }],
+    credits: { cast: [{ id: 1, name: 'Actor', character: 'Character', profile_path: '/actor.jpg' }], crew: [] },
+    genres: [{ name: 'Drama' }], episode_run_time: [48], original_language: 'en' };
+  it('keeps the season selector and credits when only the rich request succeeds', async () => {
+    globalThis.fetch = vi.fn(async url => ({ ok: String(url).includes('append_to_response'), json: async () => rich }));
+    const title = await getTitleFull('tv', 66732);
+    expect(title.seasonList).toEqual([{ number: 1, name: 'Season 1', episodes: 8 }, { number: 2, name: 'Stranger Things 2', episodes: 9 }]);
+    expect(title.seasons).toBe(5);
+    expect(title.credits[0].name).toBe('Actor');
+    expect(title.runtimeMin).toBe(48);
+    expect(title.enriched).toBe(true);
+  });
+  it('keeps movie enrichment when only the rich request succeeds', async () => {
+    globalThis.fetch = vi.fn(async url => ({ ok: String(url).includes('append_to_response'), json: async () => ({ ...rich, title: 'Movie', runtime: 95 }) }));
+    const title = await getTitleFull('movie', 1);
+    expect(title.runtimeMin).toBe(95);
+    expect(title.cast).toEqual(['Actor']);
+  });
+  it('keeps a usable fast record when rich metadata fails', async () => {
+    globalThis.fetch = vi.fn(async url => ({ ok: !String(url).includes('append_to_response'), json: async () => String(url).includes('external_ids') ? { imdb_id: 'tt1' } : { meta: { name: 'Fast title', year: '2016' } } }));
+    expect((await getTitleFull('tv', 1)).title).toBe('Fast title');
+  });
+  it('returns no record when both producers fail', async () => {
+    globalThis.fetch = vi.fn(async () => ({ ok: false }));
+    expect(await getTitleFull('tv', 1)).toBeNull();
   });
 });

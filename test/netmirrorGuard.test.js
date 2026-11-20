@@ -107,3 +107,24 @@ test('cache entries expire at their own TTL', () => {
     assert.equal(g.cacheGet('search|nf|x'), undefined);
     assert.deepEqual(g.cacheGet('post|nf|1'), { lang: ['Hindi'] });
 });
+
+
+test('authenticated allowance is independent, bounded at 24, refills, and persists without credentials', () => {
+    const dir=fs.mkdtempSync(path.join(os.tmpdir(),'nm-auth-'));const file=path.join(dir,'state.json');const c=clock();
+    const a=createGuard({file,now:c.now,log:quiet});
+    for(let i=0;i<6;i++)assert.equal(a.take(),true);
+    assert.equal(a.take(),false);assert.equal(a.tokens(true),24);
+    for(let i=0;i<24;i++)assert.equal(a.take(true),true);
+    assert.equal(a.take(true),false);a.flush();
+    const b=createGuard({file,now:c.now,log:quiet});assert.equal(b.tokens(),0);assert.equal(b.tokens(true),0);
+    c.add(12500);assert.equal(b.take(true),true);assert.equal(b.take(true),false);assert.equal(b.take(),false);
+    assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(file,'utf8')).authBucket).sort(),['at','tokens']);
+});
+
+test('loading an older state initializes auth allowance without resetting anonymous, refusal, cooldown or cache', () => {
+    const dir=fs.mkdtempSync(path.join(os.tmpdir(),'nm-old-'));const file=path.join(dir,'state.json');const c=clock();
+    const a=createGuard({file,now:c.now,log:quiet});a.take();a.throttleOpen('clip');a.newtvBlock('refused');a.cacheSet('keep',1,100000);a.flush();
+    const old=JSON.parse(fs.readFileSync(file,'utf8'));delete old.authBucket;fs.writeFileSync(file,JSON.stringify(old));
+    const b=createGuard({file,now:c.now,log:quiet});assert.equal(b.tokens(),5);assert.equal(b.tokens(true),24);
+    assert.ok(b.coolingMs()>0);assert.ok(b.newtvBlockedMs()>0);assert.equal(b.cacheGet('keep'),1);
+});

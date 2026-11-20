@@ -74,7 +74,7 @@ class OnDeviceResolver(
                 result
             }
             if (timedOut && completed.isEmpty()) throw StepException(name, 0, "budget ${cfg.budgetMs}ms spent")
-            (rows ?: completed).map { toSource(it, codecs) }
+            (rows ?: completed.map { it.copy(incomplete = true) }).map { toSource(it, codecs) }
         }.orEmpty()
     }
 
@@ -197,8 +197,11 @@ class OnDeviceResolver(
                 levels = r.levels,
                 // From the master's EXT-X-MEDIA renditions, in master order: the
                 // language ranking needs them (never drop a language tag).
-                languages = (Hls.languages(r.audio) + r.languages).distinctBy { it.lowercase() },
+                languages = (Hls.languages(r.audio) + r.languages).mapNotNull(com.chitram.app.data.Ranking::languageLabel).distinctBy { it.lowercase() },
                 selectableAudio = r.audio.size > 1 && !r.muxed,
+                audioLanguages = if (r.provider == NETMIRROR || r.audio.isNotEmpty()) Hls.languages(r.audio).mapNotNull(com.chitram.app.data.Ranking::languageLabel).distinctBy { it.lowercase() } else null,
+                catalogLanguages = r.catalogLanguages.mapNotNull(com.chitram.app.data.Ranking::languageLabel).distinctBy { it.lowercase() },
+                incomplete = r.incomplete,
                 hybrid = false,
                 subtitles = r.subtitles,
                 videoCodec = null,

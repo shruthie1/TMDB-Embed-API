@@ -261,3 +261,21 @@ describe('picture fit in the settings sheet', () => {
     unmount();
   });
 });
+
+
+describe('partial NetMirror source coverage', () => {
+  it('lets even one partial source open its menu and states that more sources are pending', () => {
+    const { container } = openServers({ sources: [{ id: 'nm-1', provider: 'NetMirror', masterUrl: 'https://x/nm.m3u8', quality: '720p', languages: ['Telugu'], incomplete: true }], currentSourceId: 'nm-1' });
+    expect(container.textContent).toContain('More sources pending');
+    expect(container.querySelector('[aria-label^="Server:"]').getAttribute('aria-disabled')).not.toBe('true');
+    expect(container.querySelectorAll('.pmenu-pick [aria-checked="true"]')).toHaveLength(1);
+  });
+});
+
+it('offers explicit continuation without picking a source and disables it while checking', () => {
+  const onCheckSources=vi.fn(),onPickSource=vi.fn();
+  const props={sources:[{id:'nm-1',provider:'NetMirror',masterUrl:'https://x/nm.mp4',quality:'720p',incomplete:true}],currentSourceId:'nm-1',onCheckSources,onPickSource};
+  let view=openServers(props);fireEvent.click(view.getByRole('menuitem',{name:'Check for more sources'}));
+  expect(onCheckSources).toHaveBeenCalledTimes(1);expect(onPickSource).not.toHaveBeenCalled();
+  view.unmount();view=openServers({...props,checkingSources:true});expect(view.getByRole('menuitem',{name:'Checking sources…'}).disabled).toBe(true);
+});

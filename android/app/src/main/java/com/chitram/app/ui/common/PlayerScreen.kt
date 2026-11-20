@@ -42,6 +42,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -737,23 +740,39 @@ fun PillButton(text: String, modifier: Modifier = Modifier, primary: Boolean = f
 
 @Composable
 private fun MenuPanel(title: String, items: List<MenuItem>, isTv: Boolean, onClose: () -> Unit, onPick: (String) -> Unit) {
-    val first = remember { FocusRequester() }
+    val first = remember(title) { FocusRequester() }
+    val start = items.indexOfFirst { it.selected }.coerceAtLeast(0)
+    val listState = rememberLazyListState(initialFirstVisibleItemIndex = start)
     LaunchedEffect(title) { runCatching { first.requestFocus() } }
-    Box(
+    BoxWithConstraints(
         Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.4f))
             .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClose),
         contentAlignment = Alignment.CenterEnd,
     ) {
+        val bottomSheet = !isTv && maxHeight > maxWidth
+        val panelWidth = minOf(maxWidth, if (isTv) 420.dp else 360.dp)
         Column(
-            Modifier.fillMaxHeight().width(360.dp).background(Tok.surface)
+            Modifier.align(if (bottomSheet) Alignment.BottomCenter else Alignment.CenterEnd)
+                .then(if (bottomSheet) Modifier.fillMaxWidth().heightIn(max = maxHeight * 0.7f) else Modifier.fillMaxHeight().width(panelWidth))
+                .clip(if (bottomSheet) RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp) else RoundedCornerShape(0.dp))
+                .background(Tok.surfaceSolid)
                 .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { }
                 .windowInsetsPadding(WindowInsets.displayCutout)
                 .padding(vertical = if (isTv) 24.dp else 12.dp),
         ) {
-            BasicText(title, style = TextStyle(color = Tok.text, fontSize = 20.sp, fontWeight = FontWeight.SemiBold), modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp))
+            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                val closeSource = remember { MutableInteractionSource() }
+                val closeFocused by closeSource.collectIsFocusedAsState()
+                Box(Modifier.size(48.dp).controlFocus(closeFocused, Tok.radiusMd)
+                    .clickable(interactionSource = closeSource, indication = null, onClick = onClose)
+                    .semantics { contentDescription = "Close $title" }, contentAlignment = Alignment.Center) {
+                    Icon(Glyphs.back, contentDescription = null, tint = if (closeFocused) Focus.ink else Tok.text, modifier = Modifier.size(20.dp))
+                }
+                BasicText(title, style = TextStyle(color = Tok.text, fontSize = 20.sp, fontWeight = FontWeight.SemiBold), modifier = Modifier.padding(horizontal = 8.dp))
+            }
+            Box(Modifier.fillMaxWidth().height(1.dp).background(Tok.fill2))
             if (items.isEmpty()) BasicText("Nothing to choose here.", style = TextStyle(color = Tok.textMuted, fontSize = 14.sp), modifier = Modifier.padding(24.dp))
-            val start = items.indexOfFirst { it.selected }.coerceAtLeast(0)
-            LazyColumn(Modifier.fillMaxWidth()) {
+            LazyColumn(Modifier.fillMaxWidth().weight(1f, fill = false), state = listState) {
                 itemsIndexed(items, key = { _, it -> it.key }) { i, item ->
                     val src = remember { MutableInteractionSource() }
                     val focused by src.collectIsFocusedAsState()
@@ -764,14 +783,19 @@ private fun MenuPanel(title: String, items: List<MenuItem>, isTv: Boolean, onClo
                             .clip(Tok.radiusMd)
                             .background(if (focused) Focus.fill else Color.Transparent)
                             .clickable(interactionSource = src, indication = null) { onPick(item.key) }
+                            .heightIn(min = 48.dp)
                             .padding(horizontal = 12.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
+                        Box(Modifier.size(20.dp), contentAlignment = Alignment.Center) {
+                            if (item.selected) Icon(Glyphs.check, contentDescription = "Selected", tint = if (focused) Focus.ink else Tok.text, modifier = Modifier.size(18.dp))
+                        }
+                        Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
                             BasicText(item.label, style = TextStyle(color = if (focused) Focus.ink else if (item.dim) Tok.textDim else Tok.text, fontSize = if (isTv) 18.sp else 16.sp))
                             if (item.detail.isNotEmpty()) BasicText(item.detail, style = TextStyle(color = if (focused) Focus.ink.copy(alpha = 0.7f) else Tok.textMuted, fontSize = if (isTv) 14.sp else 12.sp), maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
-                        if (item.selected) Icon(Glyphs.check, contentDescription = "Selected", tint = if (focused) Focus.ink else Color.White, modifier = Modifier.size(20.dp))
+
                     }
                 }
             }

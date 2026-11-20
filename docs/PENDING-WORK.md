@@ -135,6 +135,7 @@ Start APK items after C4 (1.2.0) lands; web player items after C3 lands.
 - [ ] **A6. mapple front s25 playlist has no audio list**, so its Telugu track has no language and ranks low. Probe audio on device (or read track NAMEs from the media playlist) so the label is not lost.
 - [ ] **A7. mapple front skip is 10 min after one failure;** a slow s12 answer can hide mapple for a whole session. Retry once before skipping.
 - Phone result: mapple (s25) and vaplayer both played on home Wi-Fi; vaplayer token OK, no 403. Mobile data untested.
+- [x] **A11. mapple Telugu-first front choice (Kubera 1171101)** DONE 1.2.7 (bb25440, 2026-11-21): a language-less front hit no longer wins at betterWaitMs 2500; it waits while fronts run, up to max(betterWaitMs, betterWaitMaxMs=12000, config-overridable, clamp 0..30000), or until all fronts settle. Hindi-only "mapple" front (TS, no SPS/PPS, media3 crash) won before s12 (Telugu, 9th of 13) started. KEY_FRONT now stores only a preferred-language front. V127Test reproduces the race (fails on the old policy). APK ~/Documents/Projects/local/chitram-android/Chitram-1.2.7.apk built from c6f9f7f + fix (no NetMirror), installed 00:45 IST. Kubera on the phone unverified. SPS/PPS injection not done (not needed if s12 wins).
 
 ## NetMirror authenticated device path (2026-11-21)
 - [x] Implement TV OTP session lifecycle in backend (opt-in `NETMIRROR_OTP`) and Android (owner-supplied `111111`, local override), all catalog/episode/player paths.
@@ -145,3 +146,13 @@ Start APK items after C4 (1.2.0) lands; web player items after C3 lands.
 
 - [x] Website NetMirror locally enabled and browser playback verified (2026-11-21): live Telugu HLS rendered; MP4+HLS rows retained with stable source IDs. Web893/backend416tests passed.
 - [ ] Deploy website/backend NetMirror changes to the live environment and configure server OTP; live VM IP-refusal and multi-language playback remain unverified.
+
+## NetMirror playback parity (2026-11-21)
+- [x] Dynamic catalog discovery, all matching dubs/qualities, actual audio vs catalog labels, proper season labels/IDs and episode cursors, partial-source continuation across website/API and Android. See `docs/netmirror/PARITY.md`.
+- [x] Fix rich-only website title enrichment retaining season selector; live five-season selector and S2E1 request exercised.
+- [x] Hardware APK1.2.8: NetMirror S2E1 playback, Telugu selected and in-stream Tamil selection; Auto/1080p/720p menu observed.
+- [ ] Finish live browser multi-audio/quality/caption checks and hardware caption rendering; keep service budgets and pending metadata explicit.
+
+## Player modal consistency — 2026-11-21
+
+Shared website picker headers, close/Escape handling, selected rows and responsive phone/landscape/TV surfaces. Existing settings sheet retains picture and subtitle controls. Android uses consistent rows, viewport-capped side panels, selected-row scrolling and a portrait bottom sheet. Player transport, seek bar and below-player layout are preserved. APK 1.2.9 (22) built and installed on OnePlus CPH2447. Device playback and visual TV verification remain separate from build/unit verification.

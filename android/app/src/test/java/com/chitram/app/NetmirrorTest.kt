@@ -37,6 +37,10 @@ class NetmirrorTest {
     private var failFirstDub = false
     private var series = false
     private var expiring = false
+    private var nonSequential = false
+    private var paged = false
+    private var repeatCursor = false
+    private var extraCatalog = false
     private var held = false
     private var slowHotstar = false
     private var apiPrefix = ""
@@ -62,6 +66,7 @@ class NetmirrorTest {
                 }
                 val ott = r.getHeader("Ott").orEmpty()
                 val id = when (ott) { "pv" -> "222"; "hs" -> "333"; else -> "111" }
+                if (p.endsWith("/ott.php")) return json(if (extraCatalog) """{"ott":[{"value":"nf"},{"value":"pv"},{"value":"hs"},{"value":"extra"}]}""" else """{"ott":[{"value":"nf"},{"value":"pv"},{"value":"hs"}]}""")
                 if (p.endsWith("/search.php")) {
                     val out = json("""{"searchResult":[{"id":"$id","t":"Test Movie"}${if (failFirstDub && ott == "nf") ",{\"id\":\"112\",\"t\":\"Test Movie (Telugu)\"}" else ""}]}""")
                     return if (held || (slowHotstar && ott == "hs")) out.setBodyDelay(5, TimeUnit.SECONDS) else out
@@ -69,9 +74,15 @@ class NetmirrorTest {
                 if (p.endsWith("/post.php")) {
                     val target = r.requestUrl!!.queryParameter("id")!!
                     if (failFirstDub && target == "111") return MockResponse().setResponseCode(500)
-                    return json("""{"type":"${if (series) "t" else "m"}","year":"2024","main_id":"$target","lang":[{"l":"Telugu"}],"season":[{"id":"s1","selected":true},{"id":"s2"}],"episodes":[]}""")
+                    val seasonRows = if (nonSequential) """[{"id":"s3","s":"Season 3 (8 EP)"},{"id":"s1","s":"Season 1 (8 EP)","selected":true},{"id":"s2","s":"Season 2 (9 EP)"}]""" else """[{"id":"s1","s":"Season 1 (8 EP)","selected":true},{"id":"s2","s":"Season 2 (9 EP)"}]"""
+                    return json("""{"type":"${if (series) "t" else "m"}","year":"2024","main_id":"$target","lang":[{"l":"Telugu"}],"season":$seasonRows,"episodes":[]}""")
                 }
-                if (p.endsWith("/episodes.php")) return json("""{"episodes":[{"id":"444","ep":"E2","sNum":"S2"}],"nextPageShow":0}""")
+                if (p.endsWith("/episodes.php")) {
+                    val page = r.requestUrl!!.queryParameter("page")
+                    if (paged && page == null) return json("""{"episodes":[],"nextPageShow":1,"nextPageSeason":"cursor-s2","nextPage":"3"}""")
+                    if (repeatCursor || (paged && page != "3")) return json("""{"episodes":[],"nextPageShow":1,"nextPageSeason":"cursor-s2","nextPage":"3"}""")
+                    return json("""{"episodes":[{"id":"444","ep":"E2","sNum":"S2"}],"nextPageShow":0}""")
+                }
                 if (p.endsWith("/player.php")) {
                     val target = r.requestUrl!!.queryParameter("id")!!
                     return json("""{"status":"ok","video_link":"$base/media/$target.m3u8${if (expiring) "?e=${clock / 1000 + 5}" else ""}","referer":"$base/"}""")
@@ -109,11 +120,12 @@ class NetmirrorTest {
         assertEquals(3, seen.count { it.requestUrl!!.encodedPath.endsWith("search.php") })
         assertEquals(6, seen.count { it.requestUrl!!.encodedPath.endsWith("player.php") })
     }
-    @Test fun otpRenewsOnceThenContinuesWithPostAndPlayer() = runBlocking {
+    @Test fun otpRenewsOnCatalogDiscoveryThenContinuesWithPostAndPlayer() = runBlocking {
         reject = 1
         assertEquals(3, resolve(resolver()).size)
         assertEquals(2, logins)
-        assertEquals(4, seen.count { it.requestUrl!!.encodedPath.endsWith("search.php") })
+        assertEquals(2, seen.count { it.requestUrl!!.encodedPath.endsWith("ott.php") })
+        assertEquals(3, seen.count { it.requestUrl!!.encodedPath.endsWith("search.php") })
         assertTrue(seen.any { it.requestUrl!!.encodedPath.endsWith("player.php") && it.getHeader("Usertoken") == "SECRET-2" })
     }
     @Test fun repeatedOtpStopsWithoutServingItsBogusLink() = runBlocking {
@@ -166,7 +178,26 @@ class NetmirrorTest {
         assertTrue(rows.any { it.key == "netmirror-nf-112" })
         assertEquals(3, rows.size)
     }
-    @Test fun authoritativeSingleLanguageDoesNotInventSelectableTracks() = runBlocking {
+    @Test fun partialRowsRemainRetryableAndExplicitRetryCompletesThem() = runBlocking {
+ failFirstDub = true
+ val r = resolver()
+ val partial = resolve(r)
+ assertEquals(3, partial.size)
+ assertTrue(partial.all { it.incomplete })
+ val before = seen.size
+ val retried = resolve(r)
+ assertEquals(partial, retried)
+ assertTrue("Partial results must remain retryable instead of becoming complete cache hits", seen.size > before)
+ failFirstDub = false
+ val complete = resolve(r, fresh = true)
+ assertEquals(4, complete.size)
+ assertTrue(complete.none { it.incomplete })
+ assertTrue(seen.size > before)
+ val completedRequests = seen.size
+ assertEquals(complete, resolve(r))
+ assertEquals("Complete result should reuse player cache", completedRequests, seen.size)
+ }
+ @Test fun authoritativeSingleLanguageDoesNotInventSelectableTracks() = runBlocking {
         bare = true
         val sources = resolve(resolver()).map { OnDeviceResolver.toSource(it, codecs) }
         assertTrue(sources.all { it.languages == listOf("Telugu") && !it.selectableAudio })
@@ -176,7 +207,7 @@ class NetmirrorTest {
         val rows = resolve(resolver())
         assertEquals(3, rows.size)
         assertTrue(rows.all { it.key!!.endsWith("444") })
-        assertTrue(seen.any { it.path == "/newtv/episodes.php?id=s2&page=1" })
+        assertTrue(seen.any { it.path == "/newtv/episodes.php?id=s2" })
     }
     @Test fun concurrentLookupsShareLoginAndCancellationReleasesLock() = runBlocking {
         val r = resolver()
@@ -241,6 +272,44 @@ class NetmirrorTest {
         resolve(r)
         assertEquals(6, seen.count { it.requestUrl!!.encodedPath.endsWith("player.php") })
         assertEquals(3, seen.count { it.requestUrl!!.encodedPath.endsWith("search.php") })
+    }
+
+    @Test fun shuffledSeasonsAndOpaquePaginationFollowTheRequestedEpisode() = runBlocking {
+        series = true; nonSequential = true; paged = true
+        val rows = resolve(resolver())
+        assertEquals(3, rows.size)
+        val episodes = seen.filter { it.requestUrl!!.encodedPath.endsWith("episodes.php") }
+        assertTrue(episodes.any { it.path == "/newtv/episodes.php?id=s2" })
+        assertTrue(episodes.any { it.path == "/newtv/episodes.php?id=cursor-s2&page=3" })
+        assertFalse(episodes.any { it.path!!.contains("id=s1") || it.path!!.contains("id=s3") || it.path!!.contains("page=2") })
+    }
+    @Test fun repeatedPaginationCursorIsFailureAndNeverAnEmptyCachedCatalog() = runBlocking {
+        series = true; paged = true; repeatCursor = true
+        val r = resolver()
+        assertTrue(runCatching { resolve(r) }.isFailure)
+        assertEquals(0, seen.count { it.requestUrl!!.encodedPath.endsWith("player.php") })
+        // Metadata already fetched is reusable, but no falsely complete empty row cache is installed.
+        repeatCursor = false; clock += cfg.metadataTtlMs + 1
+        assertEquals(3, resolve(r).size)
+    }
+    @Test fun audioMenuParserKeepsTheRequestedLanguageRatherThanGlobalDefault() = runBlocking {
+        val rows = resolve(resolver()).map { OnDeviceResolver.toSource(it, codecs) }
+        val s = rows[0]
+        val picked = com.chitram.app.player.AudioChoice.source("src:${s.id}:Hindi", rows)!!
+        assertEquals(s.id, picked.first.id)
+        assertEquals("Hindi", picked.second)
+        assertNull(com.chitram.app.player.AudioChoice.source("src:${s.id}:French", rows))
+        assertNull(com.chitram.app.player.AudioChoice.source("src:missing:Hindi", rows))
+        assertNull(com.chitram.app.player.AudioChoice.source("src:${s.id}", rows)!!.second)
+    }
+
+    @Test fun newlyAdvertisedCatalogIsResolvedAndPreservedWithoutAnAppUpdate() = runBlocking {
+        extraCatalog = true
+        val rows = resolve(resolver())
+        assertEquals(4, rows.size)
+        assertTrue(rows.any { it.key == "netmirror-extra-111" && it.label.endsWith("EXTRA") })
+        assertEquals(1, seen.count { it.requestUrl!!.encodedPath.endsWith("ott.php") })
+        assertFalse(rows.any { it.incomplete })
     }
 
     @Test fun publicConfigRejectsBadHostsAndContainsNoToken() {

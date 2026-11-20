@@ -83,9 +83,9 @@ function SettingsSheet({ subs, currentSub, onPickSub, subLoading, subPrefs, onSu
   return (
     <>
       <div className="pmenu-sheet-head">
-        <span>Settings</span>
+        <span className="pmenu-heading"><Icon name="settings" size={18} />Settings</span>
         <button className="icon-btn focusable" data-focus="" aria-label="Close settings" onClick={onClose}>
-          <Icon name="close" size={15} />
+          <Icon name="close" size={18} />
         </button>
       </div>
 
@@ -212,7 +212,7 @@ export default function PlayerControls({
   videoRef, hls, title, subtitle, onClose, busy = false,
   visible = true, onReveal, onHide, onMenuChange, menuOpen = null, tv = false,
   sources = [], currentSource, currentSourceId = null, onPickSource, sourcesPending = false,
-  labels = null,
+  labels = null, onCheckSources, checkingSources = false,
   audioSync = null,
   subs = [], currentSub = null, onPickSub, subLoading = false,
   fit = 'cover', onCycleFit, onSetFit,
@@ -570,6 +570,7 @@ export default function PlayerControls({
               fused combinations - see web/lib/player/trackChoices.js. */}
           <VideoMenu choices={serverList} currentId={currentSourceId}
                      currentSource={currentSource}
+                     onCheckSources={onCheckSources} checkingSources={checkingSources}
                      onPick={(c) => {
                        openMenu(null);
                        if (c?.embed) onPickEmbed?.(c);

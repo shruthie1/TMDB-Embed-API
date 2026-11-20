@@ -94,6 +94,10 @@ data class Level(val height: Int = 0, val quality: String? = null, val bandwidth
 @Serializable
 data class SubtitleRef(val url: String = "", val lang: String? = null, val id: String? = null)
 
+/** One measured audio track/rendition; other provider-specific fields stay optional. */
+@Serializable
+data class RawAudio(val language: String? = null)
+
 /** One stream in /api/streams. Canonical shape from utils/streamSchema.js. */
 @Serializable
 data class RawStream(
@@ -110,6 +114,10 @@ data class RawStream(
     val hybrid: Boolean = false,
     val codecs: String? = null,
     val videoCodec: String? = null,
+    /** null: legacy/unknown metadata; []: provider explicitly found no renditions. */
+    val audio: List<RawAudio>? = null,
+    /** Availability labels from a catalog, never proof of selectable audio. */
+    val catalogLanguages: List<String> = emptyList(),
 )
 
 @Serializable
@@ -121,10 +129,12 @@ data class StreamsResponse(
     val streams: List<RawStream> = emptyList(),
     /** Providers that threw (strings today; any shape is kept so a change never breaks the parse). */
     val providerErrors: List<kotlinx.serialization.json.JsonElement> = emptyList(),
+    /** Provider-specific responses may include usable rows plus an incomplete/error reason. */
+    val providerError: String? = null,
 ) {
     /**
      * A9: the VM sent only the ready rows (`partial`, PRIMARY_PROVIDERS) or a
      * provider threw. Ask once more with ?full=1, as web/lib/backend.js does.
      */
-    val wantsFull: Boolean get() = partial || providerErrors.isNotEmpty()
+    val wantsFull: Boolean get() = partial || providerErrors.isNotEmpty() || !providerError.isNullOrEmpty()
 }

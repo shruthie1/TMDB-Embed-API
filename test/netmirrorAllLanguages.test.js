@@ -57,6 +57,7 @@ function route(opts = {}) {
             calls.checknewtv++;
             return json({ token_hash: Buffer.from('https://newtv.example').toString('base64') });
         }
+        if (u.includes('/newtv/ott.php')) return json({ ott: ['nf', 'pv', 'hs'].map(value => ({ value })) });
         if (u.includes('/newtv/search.php')) {
             calls.search.push(ott);
             if (opts.blocked && opts.blocked.includes(ott)) return resp(403, BLOCKED);

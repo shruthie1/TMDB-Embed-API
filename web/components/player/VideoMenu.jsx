@@ -1,6 +1,7 @@
 'use client';
 import Icon from '../Icon';
 import MenuRow from './MenuRow';
+import PlayerMenu from './PlayerMenu';
 import { videoIdOf, videoLabels } from '../../lib/player/trackChoices';
 
 /**
@@ -24,7 +25,7 @@ import { videoIdOf, videoLabels } from '../../lib/player/trackChoices';
  */
 export default function VideoMenu({
   choices = [], currentId, currentSource = null, onPick,
-  open, onToggle, onTouch,
+  open, onToggle, onTouch, onCheckSources, checkingSources = false,
 }) {
   if (!choices.length) return null;
 
@@ -36,7 +37,8 @@ export default function VideoMenu({
   const maxOf = (c) => {
     if (c.embed) return 'Their player';
     if (c.unsupported) return 'Not supported on this device';
-    return c.quality && c.quality !== 'Auto' ? `up to ${c.quality}` : 'Auto quality';
+    const quality = c.quality && c.quality !== 'Auto' ? `up to ${c.quality}` : 'Auto quality';
+    return c.source?.incomplete ? `${quality} · More sources pending` : quality;
   };
   const labels = videoLabels(choices);
 
@@ -56,7 +58,8 @@ export default function VideoMenu({
   const badge = selectedIndex >= 0
     ? labels[selectedIndex]
     : (currentSource || labels[0]);
-  const only = choices.length === 1;
+  const incomplete = choices.some(c => c.source?.incomplete);
+  const only = choices.length === 1 && !incomplete;
 
   return (
     <div className="pmenu-wrap">
@@ -74,18 +77,21 @@ export default function VideoMenu({
       </button>
 
       {open && !only && (
-        <div className="pmenu pmenu-pick" role="menu" data-focus-group=""
-             onClick={(e) => { e.stopPropagation(); onTouch?.(); }}
-             onPointerDown={onTouch} onKeyDown={onTouch}
-             onScroll={onTouch} onWheel={onTouch}>
-          <p className="pmenu-label">Server</p>
+        <PlayerMenu title="Server" icon="server" onClose={onToggle} onTouch={onTouch}>
           {choices.map((c, i) => (
             <MenuRow key={c.id ?? i} label={labels[i]} meta={maxOf(c)}
                      selected={i === selectedIndex}
                      dim={c.unsupported}
                      onClick={() => onPick?.(c)} />
           ))}
-        </div>
+          {incomplete && onCheckSources && (
+            <button role="menuitem" className="pmenu-item focusable" data-focus=""
+                    disabled={checkingSources} aria-busy={checkingSources || undefined}
+                    onClick={onCheckSources}>
+              <span className="pmenu-text">{checkingSources ? 'Checking sources…' : 'Check for more sources'}</span>
+            </button>
+          )}
+        </PlayerMenu>
       )}
     </div>
   );

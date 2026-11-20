@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { render } from '@testing-library/react';
+import { describe, it, expect, vi } from 'vitest';
+import { render, fireEvent } from '@testing-library/react';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -150,4 +150,16 @@ describe('TvBar CSS contract', () => {
       }
     }
   });
+});
+
+
+it('offers the same bounded source continuation on the TV browser without switching playback', () => {
+  const onCheckSources=vi.fn(),onPickSource=vi.fn();
+  const props={sources:[{id:'nm',provider:'NetMirror',incomplete:true}],onCheckSources,onPickSource};
+  let view=render(<TvBar {...props}/>);
+  expect(view.container.textContent).toContain('More sources pending');
+  fireEvent.click(view.getByRole('button',{name:'Check for more sources'}));
+  expect(onCheckSources).toHaveBeenCalledTimes(1);expect(onPickSource).not.toHaveBeenCalled();
+  view.rerender(<TvBar {...props} checkingSources/>);
+  expect(view.getByRole('button',{name:'Checking sources…'}).disabled).toBe(true);
 });

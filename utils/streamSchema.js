@@ -216,6 +216,7 @@ function normaliseStream(raw) {
         quality,
         levels,
         languages,
+        ...(Array.isArray(raw.catalogLanguages) ? { catalogLanguages: [...new Set(raw.catalogLanguages.map(canonicalLanguage).filter(Boolean))] } : {}),
         audio,
         subtitles,
         size: raw.size || null,

@@ -58,7 +58,7 @@ describe('player control row', () => {
     fireEvent.click(container.querySelector('.pctl-row > .pmenu-wrap > [aria-label^="Audio"]'));
     const list = container.querySelector('.pmenu-pick');
     expect(list).not.toBeNull();
-    expect(list.querySelector('.pmenu-label').textContent).toBe('Audio');
+    expect(list.getAttribute('aria-label')).toBe('Audio');
     expect(list.textContent).toMatch('Telugu');
     expect(container.querySelector('.pmenu-sheet')).toBeNull();
   });
@@ -67,7 +67,7 @@ describe('player control row', () => {
     isCompact = true;
     const { container } = mount();
     fireEvent.click(container.querySelector('.pctl-row > .pmenu-wrap > [aria-label^="Server"]'));
-    expect(container.querySelector('.pmenu-pick .pmenu-label').textContent).toBe('Server');
+    expect(container.querySelector('.pmenu-pick').getAttribute('aria-label')).toBe('Server');
   });
 
   it('phone: opening Quality keeps the sheet open, and closing it returns to the sheet', () => {

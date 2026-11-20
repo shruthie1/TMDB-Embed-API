@@ -29,6 +29,12 @@ data class Source(
     val headers: Map<String, String> = emptyMap(),
     /** vaplayer host token: appended as ?token= to every request that lacks one. */
     val segmentToken: String? = null,
+    /** Actual known rendition languages; null keeps legacy metadata fallback. */
+    val audioLanguages: List<String>? = null,
+    /** Read-only catalog availability, separate from playable language choices. */
+    val catalogLanguages: List<String> = emptyList(),
+    /** The provider returned usable rows while more catalogs/dubs remain unresolved. */
+    val incomplete: Boolean = false,
 )
 
 /** Answers "can this device decode this video codec family?" null = unknown. */
@@ -40,6 +46,28 @@ object Ranking {
     private val HLS_URL = Regex("""\.m3u8(\?|$)""", RegexOption.IGNORE_CASE)
     private val HLS_PROXY = Regex("""m3u8-proxy|[?&]url=[^&]*m3u8""", RegexOption.IGNORE_CASE)
     private val HEIGHT = Regex("""(\d{3,4})p""")
+
+    // Locale understands bibliographic "cze" but not terminologic "ces" on
+    // every Android/JVM version. Map the ISO3 code through the ISO2 locale first.
+    private val iso3ToIso2: Map<String, String> = java.util.Locale.getISOLanguages().mapNotNull { code ->
+        runCatching { java.util.Locale(code).isO3Language to code }.getOrNull()
+    }.toMap()
+    private val LANGUAGE_CODE = Regex("^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$")
+
+    /** Provider codes and display labels share one language identity in menus. */
+    fun languageLabel(value: String?): String? {
+        val raw = value?.trim()?.takeIf(String::isNotEmpty) ?: return null
+        val code = raw.lowercase(java.util.Locale.ROOT).replace('_', '-')
+        val language = code.substringBefore('-')
+        if (language in setOf("und", "mul", "zxx", "unknown")) return null
+        if (!LANGUAGE_CODE.matches(code)) return raw
+        val iso2 = iso3ToIso2[language] ?: language
+        val display = java.util.Locale(iso2).getDisplayLanguage(java.util.Locale.ENGLISH)
+        return display.takeUnless { it.isBlank() || it.equals(iso2, true) || it.equals(language, true) } ?: raw
+    }
+
+    private fun languageLabels(values: List<String>): List<String> =
+        values.mapNotNull(::languageLabel).distinctBy { it.lowercase() }
 
     /** Decided by `container`, not the url: every url is proxy-wrapped. */
     fun isHls(s: RawStream): Boolean {
@@ -53,21 +81,35 @@ object Ranking {
         val url = s.url
         if (url.isNullOrEmpty()) return null
         val provider = s.provider ?: s.name ?: "Unknown"
+        val audioLanguages = s.audio?.mapNotNull { languageLabel(it.language) }
+            ?.distinctBy { it.lowercase() }
+        val languages = when {
+            !audioLanguages.isNullOrEmpty() -> audioLanguages
+            s.selectableAudio && audioLanguages != null -> emptyList()
+            else -> languageLabels(s.languages)
+        }
         return Source(
-            id = "${s.provider ?: "src"}-$i",
+            // Supplemental replies have different indexes than aggregate replies.
+            // URL+quality identity keeps catalogs distinct and contains no ':' menu delimiter.
+            id = if (provider.equals("netmirror", true)) "netmirror-" + java.net.URLEncoder.encode(
+                kotlinx.serialization.json.JsonArray(listOf(kotlinx.serialization.json.JsonPrimitive(url),
+                    kotlinx.serialization.json.JsonPrimitive(s.quality ?: "Auto"))).toString(), "UTF-8")
+                else "${s.provider ?: "src"}-$i",
             provider = provider,
             label = s.title ?: s.provider ?: "Stream",
             url = url,
             progressive = !isHls(s),
             quality = s.quality ?: "Auto",
             levels = s.levels,
-            languages = s.languages,
-            selectableAudio = s.selectableAudio,
+            languages = languages,
+            selectableAudio = s.selectableAudio && s.audio?.isNotEmpty() != false,
             hybrid = s.hybrid,
             subtitles = s.subtitles.filter { it.url.isNotEmpty() },
             videoCodec = s.videoCodec,
             codecString = s.codecs,
             unsupported = codecs.supports(s.videoCodec, s.codecs) == false,
+            audioLanguages = audioLanguages,
+            catalogLanguages = languageLabels(s.catalogLanguages),
         )
     }
 
@@ -79,7 +121,9 @@ object Ranking {
     }
 
     fun tier(s: Source, preferred: String): Int {
-        val pref = s.languages.any { it.equals(preferred, ignoreCase = true) }
+        val playable = if (s.selectableAudio) s.audioLanguages ?: s.languages else s.languages
+        val want = languageLabel(preferred)
+        val pref = want != null && playable.any { languageLabel(it)?.equals(want, ignoreCase = true) == true }
         return when {
             s.hybrid -> 0
             pref && s.selectableAudio -> 1
@@ -181,13 +225,14 @@ object Ranking {
      * In-file tracks are added by the player, ahead of these.
      */
     fun otherSourceLanguages(sources: List<Source>, currentId: String?, exclude: Set<String>): List<Pair<String, Source>> {
-        val seen = exclude.map { it.lowercase() }.toMutableSet()
+        val seen = exclude.mapNotNull(::languageLabel).map { it.lowercase() }.toMutableSet()
         val out = ArrayList<Pair<String, Source>>()
         for (s in sources) {
             if (s.id == currentId || s.unsupported) continue
-            val offered = if (s.selectableAudio) s.languages else s.languages.take(1)
-            for (lang in offered) {
-                if (lang.isBlank() || !seen.add(lang.lowercase())) continue
+            val offered = if (s.selectableAudio) s.audioLanguages ?: s.languages else s.languages.take(1)
+            for (raw in offered) {
+                val lang = languageLabel(raw) ?: continue
+                if (!seen.add(lang.lowercase())) continue
                 out += lang to s
             }
         }

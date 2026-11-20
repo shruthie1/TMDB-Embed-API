@@ -266,8 +266,10 @@ function nmFetch(master) {
     const u = String(url);
     if (u.startsWith('https://nm.test/api/embed-tmdb/')) return json({ ok: true, streams: [] });
     if (u.startsWith('https://disc.test/checknewtv.php')) return json({ token_hash: Buffer.from('https://newtv.test').toString('base64') });
+    if (u.includes('/newtv/ott.php')) return json({ ott: ['nf', 'pv', 'hs'].map(value => ({ value })) });
     if (u.includes('/newtv/search.php')) return json({ searchResult: [{ id: 'REAL1', t: u.match(/s=([^&]+)/) ? decodeURIComponent(u.match(/s=([^&]+)/)[1]) : '' }] });
     if (u.includes('/newtv/post.php')) return json({ lang: [{ l: 'Hindi', s: 'hin' }, { l: 'Telugu', s: 'tel' }], main_id: 'REAL1' });
+    if (u.includes('/newtv/otp.php')) return json({ status: 'ok', usertoken: 'fixture-token' });
     if (u.includes('/newtv/player.php')) return json({ status: 'ok', video_link: 'https://cdn.test/hls/REAL1.m3u8' });
     if (u.startsWith('https://cdn.test/hls/')) return new Response(master);
     return new Response('', { status: 404 });

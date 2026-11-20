@@ -36,6 +36,7 @@ function route(postLang) {
             return json({ ok: true, streams: [{ url: `https://cdn.example/nf/${postLang.length}/1080.mp4`, resolution: 1080, size: 100 }] });
         }
         if (u.includes('/checknewtv.php')) return json({ token_hash: Buffer.from('https://newtv.example').toString('base64') });
+        if (u.includes('/newtv/ott.php')) return json({ ott: ['nf', 'pv', 'hs'].map(value => ({ value })) });
         if (u.includes('/newtv/search.php')) {
             const ott = init && init.headers && init.headers.Ott;
             calls.search.push(ott);

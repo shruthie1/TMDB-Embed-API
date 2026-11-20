@@ -23,18 +23,20 @@ import Icon from '../Icon';
  * activate it - there is no dead zone by construction.
  */
 const MenuRow = ({ label, meta, selected, loading, dim, onClick }) => (
-  <button role="menuitemradio" aria-checked={Boolean(selected)}
+  <button type="button" role="menuitemradio" aria-checked={Boolean(selected)}
           aria-current={selected ? 'true' : undefined}
           aria-busy={loading || undefined}
           className={`pmenu-item focusable ${selected ? 'on' : ''}${dim ? ' dim' : ''}`} data-focus=""
           onClick={onClick}>
-    <span className="pmenu-text">{label}</span>
-    {loading
-      ? <span className="pmenu-meta">Loading…</span>
-      : meta && <span className="pmenu-meta">{meta}</span>}
-    {loading
-      ? <span className="pmenu-spin" aria-hidden="true" />
-      : selected && <Icon name="check" size={13} className="pmenu-check" />}
+    <span className="pmenu-marker" aria-hidden="true">
+      {loading ? <span className="pmenu-spin" />
+        : selected && <Icon name="check" size={16} className="pmenu-check" />}
+    </span>
+    <span className="pmenu-copy">
+      <span className="pmenu-text">{label}</span>
+      {loading ? <span className="pmenu-meta">Loading…</span>
+        : meta && <span className="pmenu-meta">{meta}</span>}
+    </span>
   </button>
 );
 

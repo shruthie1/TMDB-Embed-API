@@ -127,3 +127,67 @@ test('credentials are never sent to an insecure or credential-bearing API URL', 
     assert.equal(f.exchanges(), 0);
     assert.equal(await f.client.request('https://api.example', f.send), ok, 'valid next request still succeeds');
 });
+
+
+test('player opt-in authenticates before sending and reuses the token on the next operation', async () => {
+    const f = fixture();
+    assert.equal(await f.client.request('https://api.example', f.send, {ensureToken:true}), ok);
+    assert.deepEqual(f.tokens,['secret-1']);
+    assert.equal(await f.client.request('https://api.example', f.send, {ensureToken:true}),ok);
+    assert.deepEqual(f.tokens,['secret-1','secret-1']);
+    assert.equal(f.exchanges(),1);
+});
+
+test('a freshly issued player token rejection is bounded and pauses the next exchange', async () => {
+    let now=1;
+    const f=fixture({now:()=>now,failureMs:100});
+    let sends=0;
+    const reject=async()=>{sends++;return challenge;};
+    await assert.rejects(f.client.request('https://api.example',reject,{ensureToken:true}),{code:'NETMIRROR_AUTH_REQUIRED'});
+    await assert.rejects(f.client.request('https://api.example',reject,{ensureToken:true}),{code:'NETMIRROR_AUTH_REQUIRED'});
+    assert.equal(sends,1);
+    assert.equal(f.exchanges(),1);
+    now+=101;
+    assert.equal(await f.client.request('https://api.example',f.send,{ensureToken:true}),ok);
+    assert.deepEqual(f.tokens,['secret-2']);
+});
+
+test('an existing player token can renew once after rejection and replay immediately', async () => {
+    const f=fixture();
+    await f.client.request('https://api.example',f.send,{ensureToken:true});
+    assert.equal(await f.client.request('https://api.example',async token=>token==='secret-1'?challenge:f.send(token),{ensureToken:true}),ok);
+    assert.equal(f.exchanges(),2);
+    assert.equal(f.tokens.at(-1),'secret-2');
+});
+
+
+test('concurrent cold player requests share verification and each sends only its authenticated operation', async () => {
+    const exchange=deferred();let exchanges=0;
+    const f=fixture({exchange:async()=>{exchanges++;return exchange.promise;}});
+    const requests=Array.from({length:4},()=>f.client.request('https://api.example',f.send,{ensureToken:true}));
+    await new Promise(setImmediate);
+    assert.equal(exchanges,1);assert.equal(f.tokens.length,0);
+    exchange.resolve({status:'ok',usertoken:'shared'});
+    assert.deepEqual(await Promise.all(requests),Array(4).fill(ok));
+    assert.deepEqual(f.tokens,Array(4).fill('shared'));
+});
+
+test('player preauthentication gate spends no send and the next operation can recover', async () => {
+    const gate=Object.assign(new Error('budget'),{code:'NM_BUDGET',gate:true});let fail=true;
+    const f=fixture({exchange:async()=>{if(fail)throw gate;return {status:'ok',usertoken:'valid'};}});
+    await assert.rejects(f.client.request('https://api.example',f.send,{ensureToken:true}),e=>e===gate);
+    assert.deepEqual(f.tokens,[]);fail=false;
+    assert.equal(await f.client.request('https://api.example',f.send,{ensureToken:true}),ok);
+    assert.deepEqual(f.tokens,['valid']);
+});
+
+
+test('session presence is scoped and expiry triggers proactive renewal before the next metadata send', async () => {
+    let now=1;const f=fixture({now:()=>now,ttlMs:100});
+    assert.equal(f.client.hasToken('https://api.example'),false);
+    await f.client.request('https://api.example',f.send,{ensureToken:true});
+    assert.equal(f.client.hasToken('https://api.example'),true);assert.equal(f.client.hasToken('https://other.example'),false);
+    now+=101;assert.equal(f.client.hasToken('https://api.example'),false);
+    assert.equal(await f.client.request('https://api.example',f.send,{ensureToken:true}),ok);
+    assert.deepEqual(f.tokens,['secret-1','secret-2']);assert.equal(f.exchanges(),2);
+});

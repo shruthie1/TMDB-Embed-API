@@ -42,7 +42,8 @@
     "sessionTtlMs": 600000,
     "unavailableMarker": "playback-unavailable",
     "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
-    "powMaxIterations": 20000000
+    "powMaxIterations": 20000000,
+    "betterWaitMaxMs": 12000
   },
   "vaplayer": {
     "enabled": true,

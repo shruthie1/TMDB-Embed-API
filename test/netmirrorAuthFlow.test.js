@@ -43,6 +43,7 @@ function install({ challengeAt = 'search.php', invalidOtp = false, repeated = fa
                 // before auth retries the ORIGINAL player operation.
                 return json({ status: 'otp', video_link: 'https://cdn.example/clip.m3u8' });
             }
+            if (u.pathname.endsWith('ott.php')) return json({ ott: ['nf', 'pv', 'hs'].map(value => ({ value })) });
             if (u.pathname.endsWith('search.php')) return json({ searchResult: [{ id: '123', t: 'Test Movie' }] });
             if (u.pathname.endsWith('post.php')) return json({ type: series ? 't' : 'm', main_id: '123',
                 lang: [{ l: 'Telugu' }, { l: 'Hindi' }], ...(series ? { season: [{ id: 's1', selected: true }], nextPageShow: 1, episodes: [] } : {}) });
@@ -55,8 +56,8 @@ function install({ challengeAt = 'search.php', invalidOtp = false, repeated = fa
     return calls;
 }
 
-for (const challengeAt of ['search.php', 'post.php', 'player.php', 'episodes.php']) {
-    test(`${challengeAt} challenge: exchange, replay, carry credentials downstream, keep every audio language`, async () => {
+for (const challengeAt of ['ott.php', 'search.php', 'post.php', 'player.php', 'episodes.php']) {
+    test(`${challengeAt} requires auth: verify before metadata, carry credentials downstream, keep every audio language`, async () => {
         const series = challengeAt === 'episodes.php';
         const calls = install({ challengeAt, series });
         const rows = await provider.getNetmirrorStreams(101, series ? 'tv' : 'movie', series ? 1 : null, series ? 2 : null);
@@ -70,7 +71,7 @@ for (const challengeAt of ['search.php', 'post.php', 'player.php', 'episodes.php
         for (const c of calls.filter((c) => c.path.startsWith('/newtv/'))) {
             assert.equal(c.redirect, 'error', 'custom credential headers cannot follow a redirect');
         }
-        assert.equal(calls[authIndex + 1].path, `/newtv/${challengeAt}`, 'original operation retried immediately');
+        assert.equal(calls[authIndex + 1].path, '/newtv/ott.php', 'verification precedes the first metadata request');
         for (const c of calls.slice(authIndex + 1).filter((c) => c.path.startsWith('/newtv/'))) {
             assert.equal(c.headers.Usertoken, 'private-session-token', c.path);
         }
@@ -88,15 +89,15 @@ test('invalid OTP is an upstream failure and cannot become empty cached metadata
     const calls = install({ challengeAt: 'post.php', invalidOtp: true });
     await assert.rejects(provider.getNetmirrorStreams(102, 'movie'), /OTP verification required/);
     assert.equal(calls.filter((c) => c.path === '/newtv/otp.php').length, 1);
-    assert.equal(guard.cacheGet('nt|nf|/newtv/post.php?id=123'), undefined);
+    assert.equal(guard.cacheGet('nt3|nf|/newtv/post.php?id=123'), undefined);
     assert.ok(!calls.some((c) => c.path === '/newtv/player.php'));
 });
 
-test('a repeated auth challenge stops after one replay, without fetching its decoy', async () => {
+test('a player rejecting the established token renews once and never fetches its decoy', async () => {
     const calls = install({ challengeAt: 'player.php', repeated: true });
     await assert.rejects(provider.getNetmirrorStreams(103, 'movie'), /OTP verification required/);
     assert.equal(calls.filter((c) => c.path === '/newtv/player.php').length, 2);
-    assert.equal(calls.filter((c) => c.path === '/newtv/otp.php').length, 1);
+    assert.equal(calls.filter((c) => c.path === '/newtv/otp.php').length, 2);
     assert.ok(!calls.some((c) => c.path.endsWith('.m3u8')));
 });
 
@@ -111,6 +112,65 @@ test('authenticated status ok still cannot admit a wrong-title master', async ()
 test('JSON HTTP errors remain failures instead of becoming cached empty catalogues', async () => {
     const calls = install({ rejectJson: true });
     await assert.rejects(provider.getNetmirrorStreams(105, 'movie'), /HTTP 403/);
-    assert.equal(guard.cacheGet('nt|nf|/newtv/search.php?s=Test%20Movie'), undefined);
+    assert.equal(guard.cacheGet('nt3|nf|/newtv/search.php?s=Test%20Movie'), undefined);
     assert.ok(!calls.some((c) => c.path === '/newtv/player.php'));
+});
+
+
+test('cold series resolves all catalogs with two anonymous calls and a bounded authenticated allowance', async () => {
+    const calls=install({challengeAt:'player.php',series:true});
+    while(guard.tokens()>6) guard.take();
+    const rows=await provider.getNetmirrorStreams(202,'tv',1,2);
+    assert.ok(rows.some(s=>s.url==='https://cdn.example/master.m3u8'));
+    assert.equal(calls.filter(c=>c.path.startsWith('/newtv/')||c.path==='/checknewtv.php').length,9);
+    assert.equal(guard.tokens(),4);
+    assert.equal(guard.tokens(true),17);
+    assert.equal(rows.upstreamError,undefined);
+    assert.equal(calls.filter(c=>c.path==='/newtv/player.php').length,1);
+    assert.equal(calls.filter(c=>c.path==='/newtv/otp.php').length,1);
+    assert.equal(calls.find(c=>c.path==='/newtv/player.php').headers.Usertoken,'private-session-token');
+});
+
+
+test('an exhausted anonymous bucket does not block a current valid token', async () => {
+    install();await provider.getNetmirrorStreams(203,'movie');
+    while(guard.take()) { /* anonymous exhausted */ }
+    guard.cacheDelete('nt3|nf|player|123');
+    const calls=install();const rows=await provider.getNetmirrorStreams(204,'movie');
+    assert.ok(rows.some(s=>s.url==='https://cdn.example/master.m3u8'));
+    assert.equal(calls.filter(c=>c.path==='/newtv/player.php').length,1);
+    assert.ok(!calls.some(c=>c.path==='/newtv/otp.php'||c.path==='/checknewtv.php'));
+});
+
+test('authenticated allowance exhaustion stops metadata before sending and reports partial failure', async () => {
+    while(guard.take(true)) { /* auth allowance exhausted */ }
+    const calls=install();await assert.rejects(provider.getNetmirrorStreams(205,'movie'),/netmirror-budget/);
+    assert.equal(calls.filter(c=>c.path==='/newtv/otp.php').length,1);
+    assert.ok(!calls.some(c=>c.path==='/newtv/ott.php'||c.path==='/newtv/search.php'));
+});
+
+test('a freshly verified metadata token rejected immediately gets no second exchange', async () => {
+    const calls=install({challengeAt:'ott.php',repeated:true});
+    await assert.rejects(provider.getNetmirrorStreams(206,'movie'),/OTP verification required/);
+    assert.equal(calls.filter(c=>c.path==='/newtv/ott.php').length,1);
+    assert.equal(calls.filter(c=>c.path==='/newtv/otp.php').length,1);
+});
+
+test('authenticated HTTP 429 opens the same shared cooldown and the next lookup sends nothing', async () => {
+    const calls=install();const route=global.fetch;
+    global.fetch=async(url,init)=>String(url).includes('/newtv/search.php')?new Response('',{status:429}):route(url,init);
+    await assert.rejects(provider.getNetmirrorStreams(207,'movie'),/netmirror-throttled/);
+    assert.ok(guard.coolingMs()>0);const before=calls.length;
+    await assert.rejects(provider.getNetmirrorStreams(208,'movie'),/netmirror-throttled/);
+    assert.equal(calls.length,before);
+});
+
+
+test('authenticated IP refusal blocks subsequent newtv calls using the shared refusal gate', async () => {
+    const calls=install();const route=global.fetch;
+    global.fetch=async(url,init)=>String(url).includes('/newtv/ott.php')?new Response('<html>Page Not Found</html>',{status:403}):route(url,init);
+    await assert.rejects(provider.getNetmirrorStreams(209,'movie'),/netmirror-newtv-blocked/);
+    assert.ok(guard.newtvBlockedMs()>0);const before=calls.filter(c=>c.path.startsWith('/newtv/')).length;
+    await assert.rejects(provider.getNetmirrorStreams(210,'movie'),/netmirror-newtv-blocked/);
+    assert.equal(calls.filter(c=>c.path.startsWith('/newtv/')).length,before);
 });

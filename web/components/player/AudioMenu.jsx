@@ -1,6 +1,7 @@
 'use client';
 import Icon from '../Icon';
 import MenuRow from './MenuRow';
+import PlayerMenu from './PlayerMenu';
 import SyncBar from './SyncBar';
 
 /**
@@ -63,11 +64,7 @@ export default function AudioMenu({
       </button>
 
       {open && !only && (
-        <div className="pmenu pmenu-pick" role="menu" data-focus-group=""
-             onClick={e => { e.stopPropagation(); onTouch?.(); }}
-             onPointerDown={onTouch} onKeyDown={onTouch}
-             onScroll={onTouch} onWheel={onTouch}>
-          <p className="pmenu-label">Audio</p>
+        <PlayerMenu title="Audio" icon="audio" onClose={onToggle} onTouch={onTouch}>
           {audioTracks.map(t => (
             <MenuRow key={t.id} label={t.name} selected={t.id === currentAudio}
                      onClick={() => onPickAudio?.(t.id)} />
@@ -93,7 +90,7 @@ export default function AudioMenu({
             <SyncBar value={sync.value} onPreview={sync.onPreview}
                      onCommit={sync.onCommit} onTouch={onTouch} />
           )}
-        </div>
+        </PlayerMenu>
       )}
     </div>
   );

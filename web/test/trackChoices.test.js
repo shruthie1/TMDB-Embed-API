@@ -148,3 +148,9 @@ describe('audioChoices uses real renditions over post.php languages', () => {
     expect(labels).toContain('src:CastleTV-0:Tamil');
   });
 });
+
+
+it('catalog display languages never become selectable audio choices', () => {
+  const nm = { id: 'nm', provider: 'NetMirror', masterUrl: 'https://x/nm.m3u8', languages: ['Hindi'], catalogLanguages: ['Hindi', 'Telugu'], audio: [{ language: 'Hindi' }], selectableAudio: true };
+  expect(audioChoices([SHOWSST, nm], SHOWSST.id).map(c=>c.language)).toEqual(['Hindi']);
+});

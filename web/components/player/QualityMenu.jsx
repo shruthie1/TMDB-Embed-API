@@ -1,6 +1,7 @@
 'use client';
 import Icon from '../Icon';
 import MenuRow from './MenuRow';
+import PlayerMenu from './PlayerMenu';
 
 /**
  * Video quality, as its own control.
@@ -40,11 +41,7 @@ export default function QualityMenu({
       </button>
 
       {open && (
-        <div className="pmenu pmenu-pick" role="menu" data-focus-group=""
-             onClick={e => { e.stopPropagation(); onTouch?.(); }}
-             onPointerDown={onTouch} onKeyDown={onTouch}
-             onScroll={onTouch} onWheel={onTouch}>
-          <p className="pmenu-label">Quality</p>
+        <PlayerMenu title="Quality" icon="quality" onClose={onToggle} onTouch={onTouch}>
           {/* Auto stays first and stays selectable: someone who pinned 480p on
               a bad line needs an obvious way back to adaptive. */}
           <MenuRow label="Auto" meta={autoLevel} selected={currentLevel === -1}
@@ -54,7 +51,7 @@ export default function QualityMenu({
                      selected={currentLevel === l.index}
                      onClick={() => onPickLevel?.(l.index)} />
           ))}
-        </div>
+        </PlayerMenu>
       )}
     </div>
   );

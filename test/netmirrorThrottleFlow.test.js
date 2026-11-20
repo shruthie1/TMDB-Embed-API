@@ -48,6 +48,7 @@ function install(opts) {
             calls.checknewtv++; calls.newtv++;
             return resp(200, JSON.stringify({ token_hash: Buffer.from('https://newtv.example').toString('base64') }));
         }
+        if (u.includes('/newtv/ott.php')) { calls.newtv++; return resp(200, JSON.stringify({ ott: ['nf', 'pv', 'hs'].map(value => ({ value })) })); }
         if (u.includes('/newtv/search.php')) {
             calls.search++; calls.newtv++;
             if (opts.search === 'refuse') return resp(403, '﻿<html><title>Page Not Found</title></html>');
