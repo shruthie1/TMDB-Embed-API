@@ -46,12 +46,18 @@ object WvcCast {
         data class Store(val uri: String) : Launch
     }
 
-    fun spec(s: Source, r: PlayRequest): Spec {
+    /**
+     * `lanUrl` (C5): the phone's LAN proxy URL for an on-device row. The phone
+     * then adds the headers and vaplayer's token itself, so the TV needs neither
+     * the headers nor WVC's phone routing.
+     */
+    fun spec(s: Source, r: PlayRequest, lanUrl: String? = null): Spec {
         val title = if (r.type == "tv" && r.season > 0) "${r.title} S${r.season} E${r.episode}" else r.title
-        val headers = if (s.onDevice == null) emptyMap()
+        val viaPhone = lanUrl != null && s.onDevice != null
+        val headers = if (s.onDevice == null || viaPhone) emptyMap()
         else NEEDED.mapNotNull { k -> s.headers.entries.firstOrNull { it.key.equals(k, ignoreCase = true) }?.let { k to it.value } }.toMap()
         return Spec(
-            url = s.url,
+            url = if (viaPhone) lanUrl!! else s.url,
             // Lowercase: Android matches intent MIME types case-sensitively, and
             // WVC registers application/x-mpegurl. "x-mpegURL" found no activity
             // and fell through to the Play Store (owner report, 1.2.0).
@@ -59,7 +65,7 @@ object WvcCast {
             title = title,
             poster = Api.image(r.poster, "w500"),
             headers = headers,
-            hint = if (s.onDevice != null) ROUTE_HINT else null,
+            hint = if (s.onDevice != null && !viaPhone) ROUTE_HINT else null,
         )
     }
 

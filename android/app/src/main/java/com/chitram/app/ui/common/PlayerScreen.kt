@@ -106,6 +106,8 @@ import com.chitram.app.player.MenuItem
 import com.chitram.app.player.PlayRequest
 import com.chitram.app.player.PlayerVm
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import androidx.compose.runtime.rememberCoroutineScope
 
 private enum class Menu(val title: String) { Server("Server"), Audio("Audio"), Quality("Quality"), Subtitles("Subtitles") }
 
@@ -524,13 +526,16 @@ private fun Controls(
             // Cast to TV through Web Video Caster. Phone only: the TV layout has no use for it.
             if (!isTv && vm.current != null) {
                 val ctx = LocalContext.current
+                val castScope = rememberCoroutineScope()
                 Spacer(Modifier.width(8.dp))
                 CtlButton(Glyphs.cast, "Cast to TV", m) {
-                    val spec = vm.castSpec() ?: return@CtlButton
-                    when (WvcCast.open(ctx, spec)) {
-                        is WvcCast.Launch.Wvc -> spec.hint?.let { Toast.makeText(ctx, it, Toast.LENGTH_LONG).show() }
-                        is WvcCast.Launch.Store -> Toast.makeText(ctx, "Install Web Video Caster to cast to your TV", Toast.LENGTH_LONG).show()
-                        null -> Toast.makeText(ctx, "Could not open Web Video Caster", Toast.LENGTH_LONG).show()
+                    castScope.launch {
+                        val spec = vm.castSpec() ?: return@launch
+                        when (WvcCast.open(ctx, spec)) {
+                            is WvcCast.Launch.Wvc -> spec.hint?.let { Toast.makeText(ctx, it, Toast.LENGTH_LONG).show() }
+                            is WvcCast.Launch.Store -> Toast.makeText(ctx, "Install Web Video Caster to cast to your TV", Toast.LENGTH_LONG).show()
+                            null -> Toast.makeText(ctx, "Could not open Web Video Caster", Toast.LENGTH_LONG).show()
+                        }
                     }
                 }
             }
