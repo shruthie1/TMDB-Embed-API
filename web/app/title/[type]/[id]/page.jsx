@@ -20,6 +20,21 @@ function runtime(min) {
   return h ? `${h}h ${min % 60}m` : `${min}m`;
 }
 
+// Detail poster. Same w342 URL as the row card, so a click from a row is a
+// cache hit. fetchpriority puts it ahead of the rows below the fold; the
+// shimmer covers the wait when the poster comes from the slower metahub host.
+function HeroPoster({ src }) {
+  const [loading, setLoading] = useState(true);
+  // A cached image can finish before React attaches onLoad.
+  const ref = useCallback(img => { if (img?.complete && img.naturalWidth) setLoading(false); }, []);
+  return (
+    <div className={`hero-poster enter${loading ? ' loading' : ''}`}>
+      <img ref={ref} src={src} alt="" width="342" height="513" decoding="async"
+           fetchpriority="high" onLoad={() => setLoading(false)} onError={() => setLoading(false)} />
+    </div>
+  );
+}
+
 export default function TitlePage() {
   const { type, id } = useParams();
   const router = useRouter();
@@ -131,9 +146,7 @@ export default function TitlePage() {
                     style={{ '--bg-lg': `url(${bg})`, '--bg-sm': `url(${poster(t.backdrop, 'w780')})` }} />}
         <div className="hero-inner">
           {pos && (
-            <div className="hero-poster enter">
-              <img src={pos} alt="" width="342" height="513" />
-            </div>
+            <HeroPoster key={pos} src={pos} />
           )}
           <div className="hero-text">
             <h1 className="detail-title">{t.title}</h1>

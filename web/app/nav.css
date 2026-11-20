@@ -58,11 +58,11 @@ html[data-tv="true"] body:not(:has(.page-backdrop)) main{padding-top:var(--heade
    must not crop the rail or the first poster. --tv-gap is clear space
    between the rail and the first poster, and the page's side margin. */
 html[data-tv="true"]{
-  --tv-safe-x:clamp(24px,3vw,64px);
-  --tv-gap:clamp(32px,3vw,64px);
-  --rail-icon:clamp(56px,3.75vw,72px);
-  --rail-w:calc(var(--tv-safe-x) + var(--rail-icon) + var(--space-3));
-  --rail-open-w:calc(var(--rail-w) + clamp(180px,12vw,240px));
+  --tv-safe-x:clamp(8px,.8vw,16px);
+  --tv-gap:clamp(16px,1.6vw,32px);
+  --rail-icon:clamp(44px,2.5vw,52px);
+  --rail-w:calc(var(--tv-safe-x) + var(--rail-icon) + var(--space-1));
+  --rail-open-w:calc(var(--rail-w) + clamp(150px,11vw,210px));
 }
 html[data-tv="true"] main{margin-left:var(--rail-w);padding-left:var(--tv-gap);padding-right:var(--tv-gap)}
 html[data-tv="true"] .home-hero{margin-inline:calc(-1 * var(--tv-gap));padding-inline:var(--tv-gap)}
@@ -74,9 +74,9 @@ html[data-tv="true"] .rail{padding-inline:var(--space-4);margin-inline:calc(-1 *
 /* Hero art still runs to the left edge, under the rail. */
 html[data-tv="true"] .page-backdrop{left:calc(-1 * var(--rail-w))}
 html[data-tv="true"] .app-nav{
-  display:flex;flex-direction:column;justify-content:center;gap:var(--space-2);
+  display:flex;flex-direction:column;justify-content:center;gap:var(--space-1);
   position:fixed;top:0;bottom:0;left:0;z-index:var(--z-header);
-  width:var(--rail-w);padding:0 var(--space-3) 0 var(--tv-safe-x);overflow:hidden;
+  width:var(--rail-w);padding:0 var(--space-1) 0 var(--tv-safe-x);overflow:hidden;
   background:linear-gradient(to right,rgb(var(--rgb-bg) / .9),rgb(var(--rgb-bg) / .55) 75%,rgb(var(--rgb-bg) / 0));
   transition:width var(--duration-base) var(--ease-out),box-shadow var(--duration-base) var(--ease-out);
 }
@@ -88,11 +88,11 @@ html[data-tv="true"] .app-nav:focus-within{
 }
 html[data-tv="true"] .app-nav-item{
   display:flex;align-items:center;gap:var(--space-5);flex:none;
-  height:64px;width:100%;min-width:var(--rail-icon);padding:0 calc((var(--rail-icon) - 28px) / 2);border:0;border-radius:var(--radius-pill);
-  background:none;font:inherit;font-size:24px;white-space:nowrap;
+  height:var(--rail-icon);width:100%;min-width:var(--rail-icon);padding:0 calc((var(--rail-icon) - 24px) / 2);border:0;border-radius:var(--radius-pill);
+  background:none;font:inherit;font-size:clamp(18px,1.15vw,22px);white-space:nowrap;
   color:var(--color-text-muted);text-align:left;
 }
-html[data-tv="true"] .app-nav-item svg{width:28px;height:28px;flex:none}
+html[data-tv="true"] .app-nav-item svg{width:24px;height:24px;flex:none}
 html[data-tv="true"] .app-nav-item.on{color:var(--color-white)}
 html[data-tv="true"] .app-nav-item.on svg{stroke-width:2.4}
 html[data-tv="true"] .app-nav-label{opacity:0;transition:opacity var(--duration-base) var(--ease-out)}

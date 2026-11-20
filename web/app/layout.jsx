@@ -53,6 +53,10 @@ export default function RootLayout({ children }) {
             referer=localhost -> 403, no referer -> 200). Browsers forbid JS from
             setting Referer, so we suppress it document-wide instead. */}
         <meta name="referrer" content="no-referrer" />
+        {/* Poster hosts. The detail poster can come from metahub, a second
+            origin; a warm connection saves its DNS and TLS round trips. */}
+        <link rel="preconnect" href="https://image.tmdb.org" />
+        <link rel="preconnect" href="https://images.metahub.space" />
       </head>
       <body>
         {/* Desktop: this is the sticky top bar. TV and phone: only the
