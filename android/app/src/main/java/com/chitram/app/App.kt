@@ -33,7 +33,7 @@ class App : Application(), ImageLoaderFactory {
         super.onCreate()
         instance = this
         val kv = PrefsKeyValue(this)
-        api = Api(Api.buildClient(cacheDir))
+        api = Api(Api.buildClient(), httpCache = Api.httpCache(cacheDir))
         prefs = LanguagePrefs(kv)
         progress = ProgressStore(kv)
         myList = MyListStore(kv)
@@ -43,11 +43,15 @@ class App : Application(), ImageLoaderFactory {
         isTv = Device.isTv(this)
     }
 
-    /** Coil shares the API's OkHttp pool; small memory cache for the 1 GB stick. */
+    /**
+     * Coil shares the API's OkHttp pool (no HTTP cache; Coil has its own).
+     * TMDB images are immutable per URL, so cache headers are ignored and the
+     * disk cache keeps them across launches. Small memory cache for the 1 GB stick.
+     */
     override fun newImageLoader(): ImageLoader = ImageLoader.Builder(this)
-        .okHttpClient { api.client.newBuilder().cache(null).build() }
+        .okHttpClient { api.client }
         .memoryCache { MemoryCache.Builder(this).maxSizePercent(if (isTv) 0.15 else 0.2).build() }
-        .diskCache { DiskCache.Builder().directory(cacheDir.resolve("img")).maxSizeBytes(80L * 1024 * 1024).build() }
+        .diskCache { DiskCache.Builder().directory(cacheDir.resolve("img")).maxSizeBytes(if (isTv) 128L * 1024 * 1024 else 256L * 1024 * 1024).build() }
         .crossfade(false)
         .respectCacheHeaders(false)
         .build()

@@ -22,8 +22,8 @@ android {
         applicationId = "com.chitram.app"
         minSdk = 25
         targetSdk = 35
-        versionCode = 8
-        versionName = "1.1.5"
+        versionCode = 10
+        versionName = "1.1.7"
         // Only ship the locales and densities we use.
         resourceConfigurations += listOf("en")
     }
@@ -91,4 +91,5 @@ dependencies {
     implementation("io.coil-kt:coil-compose:2.7.0")
 
     testImplementation("junit:junit:4.13.2")
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }

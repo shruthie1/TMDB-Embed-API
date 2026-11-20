@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.windowInsetsTopHeight
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -423,9 +424,12 @@ private fun PhoneDetail(nav: Nav, type: String, id: Long, rowPoster: String? = n
                     val cfg = LocalConfiguration.current
                     val wideArtH = maxWidth * 9f / 16f + 40.dp
                     val artH = if (cfg.orientation == Configuration.ORIENTATION_LANDSCAPE) wideArtH.coerceAtMost(cfg.screenHeightDp.dp * 0.45f) else wideArtH
-                    Box(Modifier.fillMaxWidth().height(artH + 96.dp)) {
-                        Art(t.backdrop, "w780", Modifier.fillMaxWidth().height(artH), alignment = BiasAlignment(0f, -0.6f))
-                        Box(Modifier.fillMaxWidth().height(artH).background(Brush.verticalGradient(0f to Tok.bg.copy(alpha = 0.35f), 0.25f to Color.Transparent, 0.7f to Tok.bg.copy(alpha = 0.6f), 1f to Tok.bg)))
+                    // The art starts below the status bar, so faces at the top of the
+                    // backdrop are not hidden under the clock or the Back button.
+                    val topInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+                    Box(Modifier.fillMaxWidth().height(topInset + artH + 96.dp)) {
+                        Art(t.backdrop, "w780", Modifier.padding(top = topInset).fillMaxWidth().height(artH), alignment = BiasAlignment(0f, -0.85f))
+                        Box(Modifier.padding(top = topInset).fillMaxWidth().height(artH).background(Brush.verticalGradient(0f to Tok.bg.copy(alpha = 0.35f), 0.25f to Color.Transparent, 0.7f to Tok.bg.copy(alpha = 0.6f), 1f to Tok.bg)))
                         Row(Modifier.align(Alignment.BottomStart).padding(horizontal = GUTTER), verticalAlignment = Alignment.Bottom) {
                             Box(Modifier.width(104.dp).aspectRatio(2f / 3f).clip(Tok.radiusMd).border(1.dp, Tok.border, Tok.radiusMd)) {
                                 // The title API sends the metahub small poster here; it is a cache

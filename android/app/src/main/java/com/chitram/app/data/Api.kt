@@ -7,8 +7,10 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.DeserializationStrategy
 import kotlinx.serialization.json.Json
 import okhttp3.Cache
+import okhttp3.CacheControl
 import okhttp3.Call
 import okhttp3.Callback
+import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -26,17 +28,55 @@ class HttpException(val code: Int) : IOException("HTTP $code")
  * site uses: /api/rows, /api/search, /api/title, /api/season, and /api/streams,
  * which Vercel rewrites to the stream backend.
  */
-class Api(val client: OkHttpClient, private val base: String = BASE) {
+/**
+ * `client` has no HTTP cache: the player and Coil share it, and video must never
+ * land in a cache. Catalog calls go through `catalogClient`, which adds `httpCache`
+ * and a 1 h policy. Streams always use `client` with no-store.
+ */
+class Api(val client: OkHttpClient, private val base: String = BASE, httpCache: Cache? = null) {
+    internal val catalogClient: OkHttpClient =
+        if (httpCache == null) client
+        else client.newBuilder().cache(httpCache).addNetworkInterceptor(CatalogCachePolicy).build()
+
     companion object {
         const val BASE = "https://chtrm2.vercel.app"
         const val IMG = "https://image.tmdb.org/t/p"
         val json = Json { ignoreUnknownKeys = true; coerceInputValues = true; explicitNulls = false; isLenient = true }
 
-        fun buildClient(cacheDir: File?): OkHttpClient = OkHttpClient.Builder()
+        /** How long a catalog response stays fresh on the device. */
+        const val CATALOG_MAX_AGE_S = 3600
+        const val HTTP_CACHE_BYTES = 30L * 1024 * 1024
+
+        /** Only these routes are cached. Anything else (streams included) is not. */
+        private val CATALOG_PREFIXES = listOf(
+            "/api/rows/", "/api/search", "/api/title/", "/api/similar/",
+            "/api/person/", "/api/discover", "/api/season/",
+        )
+
+        fun isCatalogPath(path: String): Boolean =
+            !path.startsWith("/api/streams") && CATALOG_PREFIXES.any { path.startsWith(it) }
+
+        /** Uncached client for the player, Coil and streams. */
+        fun buildClient(): OkHttpClient = OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
-            .apply { if (cacheDir != null) cache(Cache(File(cacheDir, "http"), 20L * 1024 * 1024)) }
             .build()
+
+        fun httpCache(cacheDir: File): Cache = Cache(File(cacheDir, "http"), HTTP_CACHE_BYTES)
+
+        /**
+         * The backend sends `max-age=0` on catalog routes. Rewrite a 2xx catalog
+         * response to 1 h; mark everything else (errors, unknown routes) no-store.
+         */
+        internal val CatalogCachePolicy = Interceptor { chain ->
+            val res = chain.proceed(chain.request())
+            val cacheable = (res.isSuccessful || res.code == 304) && isCatalogPath(chain.request().url.encodedPath)
+            res.newBuilder()
+                .removeHeader("Pragma")
+                .removeHeader("Expires")
+                .header("Cache-Control", if (cacheable) "public, max-age=$CATALOG_MAX_AGE_S" else "no-store")
+                .build()
+        }
 
         /** TMDB image url sized for the surface. Never `original`. */
         fun image(path: String?, size: String): String? = when {
@@ -48,9 +88,18 @@ class Api(val client: OkHttpClient, private val base: String = BASE) {
         private val RETRY_DELAYS_MS = longArrayOf(800, 2500)
     }
 
+    /** Request for `path`. Non-catalog paths (streams) carry no-store. */
+    internal fun request(path: String): Request = Request.Builder().url(base + path)
+        .apply { if (!isCatalogPath(path)) cacheControl(CacheControl.Builder().noStore().noCache().build()) }
+        .build()
+
     private suspend fun get(path: String, streamsTimeout: Boolean = false): String {
-        val c = if (streamsTimeout) client.newBuilder().readTimeout(120, TimeUnit.SECONDS).callTimeout(125, TimeUnit.SECONDS).build() else client
-        val call = c.newCall(Request.Builder().url(base + path).build())
+        val c = when {
+            streamsTimeout -> client.newBuilder().readTimeout(120, TimeUnit.SECONDS).callTimeout(125, TimeUnit.SECONDS).build()
+            isCatalogPath(path) -> catalogClient
+            else -> client
+        }
+        val call = c.newCall(request(path))
         return withContext(Dispatchers.IO) {
             suspendCancellableCoroutine { cont ->
                 cont.invokeOnCancellation { call.cancel() }

@@ -432,7 +432,8 @@ private fun TvDetail(nav: Nav, type: String, id: Long) {
     val t = vm.full
     val playFocus = remember { FocusRequester() }
     Box(Modifier.fillMaxSize()) {
-        Art(t?.backdrop, "w1280", Modifier.align(Alignment.TopEnd).fillMaxWidth(0.72f).fillMaxHeight(0.8f))
+        // Inset from the top edge so faces at the top of the backdrop are not cut by the screen edge.
+        Art(t?.backdrop, "w1280", Modifier.align(Alignment.TopEnd).padding(top = 32.dp).fillMaxWidth(0.72f).fillMaxHeight(0.8f), alignment = Alignment.TopCenter)
         Box(Modifier.fillMaxSize().background(Tok.scrimLeft))
         Box(Modifier.fillMaxSize().background(Tok.scrimBottom))
         if (t == null) {
