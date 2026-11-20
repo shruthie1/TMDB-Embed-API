@@ -431,6 +431,13 @@ async function getCastletvStreams(tmdbId, mediaType = 'movie', seasonNum = null,
         if (type === 'series') {
             const seasons = (unwrap(castleDetails).seasons || []);
             const seasonEntry = seasons.find((s) => s.number === season);
+            // Castle lists the title's seasons and the one asked for is not
+            // among them. Falling through used to read episode N from
+            // whichever season the search row was, and serve it as a hit.
+            if (seasons.length && !seasonEntry) {
+                console.log(`[CastleTV] season-missing ${tmdbId} S${season} (has ${seasons.map((s) => s.number).join(',')})`);
+                return [];
+            }
             if (seasonEntry && seasonEntry.movieId && seasonEntry.movieId.toString() !== castleId) {
                 castleDetails = await getCastleDetails(secKey, seasonEntry.movieId.toString());
                 activeId = seasonEntry.movieId.toString();
@@ -466,6 +473,12 @@ async function getCastletvStreams(tmdbId, mediaType = 'movie', seasonNum = null,
         // Keyed by media identity, so the [3,2,1] resolution fan-out and the
         // rotating URL suffix collapse into one entry per real file.
         const seenMedia = new Set();
+        // Upstream calls that failed (HTTP error, timeout). A language track
+        // whose every resolution failed is a language we cannot see, so the
+        // answer is incomplete and must not be cached as the whole truth.
+        const failedTracks = [];
+        let rejected = 0;
+        let lastRejection = null;
 
         if (tracks.length > 0) {
             const langJobs = tracks.map((track) =>
@@ -477,6 +490,14 @@ async function getCastletvStreams(tmdbId, mediaType = 'movie', seasonNum = null,
                 )
             );
             const allResults = await Promise.all(langJobs);
+            allResults.forEach((trackResults, i) => {
+                const bad = trackResults.filter((r) => r.status === 'rejected');
+                rejected += bad.length;
+                if (bad.length) lastRejection = bad[bad.length - 1].reason;
+                if (bad.length === trackResults.length) {
+                    failedTracks.push(tracks[i].languageName || tracks[i].abbreviate || String(tracks[i].languageId));
+                }
+            });
 
             // One entry per DISTINCT media file. Several languageIds often
             // resolve to the same file (one multi-audio or original-language
@@ -526,7 +547,7 @@ async function getCastletvStreams(tmdbId, mediaType = 'movie', seasonNum = null,
                 )
             );
             for (const r of sharedResults) {
-                if (r.status !== 'fulfilled') continue;
+                if (r.status !== 'fulfilled') { rejected++; lastRejection = r.reason; continue; }
                 const { raw, resolution } = r.value;
                 for (const s of buildCastleStreams(raw, sharedLabel, titleLine, resolution)) {
                     const identity = mediaIdentity(s.url);
@@ -539,6 +560,14 @@ async function getCastletvStreams(tmdbId, mediaType = 'movie', seasonNum = null,
         }
 
         console.log(`[CastleTV] Got ${streams.length} stream(s) for "${title}"`);
+        const why = lastRejection && (lastRejection.message || String(lastRejection));
+        if (!streams.length && rejected) {
+            throw new Error(`${rejected} video call(s) failed, none returned a stream: ${why}`);
+        }
+        if (failedTracks.length) {
+            console.log(`[CastleTV] partial ${tmdbId} failed-tracks=${failedTracks.join('/')}: ${why}`);
+            streams.upstreamError = `track(s) ${failedTracks.join('/')} failed: ${why}`;
+        }
         return streams;
     } catch (err) {
         console.error(`[CastleTV] Error: ${err.message}`);

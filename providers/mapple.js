@@ -295,7 +295,7 @@ async function getMappleStreams(tmdbId, mediaType = 'movie', seasonNum = null, e
 
         if (init?.requiresPow) {
             const nonce = solvePow(init.pow.challenge, init.pow.difficulty);
-            if (!nonce) { console.warn(`[mapple] PoW unsolved for ${tmdbId}`); return []; }
+            if (!nonce) throw new Error(`PoW unsolved for ${tmdbId}`);
             init = await json(await go(jar, `${BASE}${PLAYBACK_INIT_PATH}`, {
                 method: 'POST',
                 headers: { 'content-type': 'application/json' },
@@ -306,10 +306,9 @@ async function getMappleStreams(tmdbId, mediaType = 'movie', seasonNum = null, e
             }));
         }
 
-        if (!init?.token) {
-            console.warn(`[mapple] no streamToken for ${tmdbId}`);
-            return [];
-        }
+        // Measured 2026-11-20: a title mapple lacks (999999991) still gets a
+        // streamToken, so a missing one is a failed handshake, not "not here".
+        if (!init?.token) throw new Error(`no streamToken for ${tmdbId}`);
 
         // Errors are per front: one front that hangs or aborts must not end
         // the sweep. If every front tried failed with an error and none said
@@ -418,10 +417,12 @@ async function getMappleStreams(tmdbId, mediaType = 'movie', seasonNum = null, e
             console.error(`[mapple] TLS interception blocking ${BASE} (${code}).`
                 + ' A middlebox is re-signing this domain; mapple cannot be reached'
                 + ' until its CA is trusted or the domain is exempted.');
-            return [];
+            throw e;
         }
+        // Rethrown: a failed session, PoW or handshake says nothing about
+        // whether mapple has the title, so it must not be cached as empty.
         console.error(`[mapple] error for ${tmdbId}:`, e.message, code || '');
-        return [];
+        throw e;
     }
 }
 

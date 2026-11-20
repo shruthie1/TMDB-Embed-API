@@ -170,10 +170,18 @@ function createFetchFunction(providerInfo) {
 
       if (!Array.isArray(result)) return [];
 
+      // A provider marks `upstreamError` on its result when part of its
+      // upstream failed. With no rows that is a failure, not an empty; with
+      // rows the marker must survive normalisation so the caller does not
+      // cache an incomplete answer.
+      if (result.upstreamError && result.length === 0) throw new Error(String(result.upstreamError));
+
       // Add provider name if not present, then normalise to the canonical
       // stream contract (utils/streamSchema.js) so every provider's output
       // is shaped identically regardless of what that provider emits.
-      return normaliseStreams(result.map(s => ({ ...s, provider: s.provider || providerInfo.name })));
+      const out = normaliseStreams(result.map(s => ({ ...s, provider: s.provider || providerInfo.name })));
+      if (result.upstreamError) out.upstreamError = result.upstreamError;
+      return out;
 
     } catch (e) {
       // Rethrow. The caller records a provider failure as an 'error' and

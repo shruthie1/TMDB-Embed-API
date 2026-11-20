@@ -20,7 +20,8 @@ test('mapple calls /api/ui/session then /api/media-session', async (t) => {
     };
     delete require.cache[require.resolve('../providers/mapple')];
     const { getMappleStreams } = require('../providers/mapple');
-    await getMappleStreams('693134', 'movie');
+    // media-session answers 401 here, so mapple now throws (unknown, not empty).
+    await assert.rejects(getMappleStreams('693134', 'movie'), /streamToken/);
     assert.ok(calls.includes('POST /api/ui/session'), calls.join(', '));
     assert.ok(calls.includes('POST /api/media-session'), calls.join(', '));
     assert.ok(!calls.some((c) => c.includes('/api/request-token') || c.includes('/api/playback-init')));

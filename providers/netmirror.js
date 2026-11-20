@@ -218,7 +218,19 @@ async function resolveNewTvApi() {
     throw new Error('NetMirror NewTV API discovery failed');
 }
 
+// An upstream failure (HTTP error, timeout, throttle) is "unknown", not
+// "this title has no streams". Rows carry the reason as `upstreamError` so
+// getNetmirrorStreams can keep it out of the long caches and the aggregator
+// does not cache it as empty (providers/registry.js).
+function failure(reason, rows = []) {
+    return Object.assign(rows, { upstreamError: String(reason) });
+}
+
 async function fetchNetflix(tmdbId, type, title, season, episode) {
+    // True once a mirror answered with a well-formed "no" (ok:false). Without
+    // one, a null from withMirror means every mirror failed with an HTTP error.
+    let answeredNo = false;
+    let lastStatus = null;
     try {
         // Resolved per attempt: withMirror may settle on a different mirror than
         // the one this call started with, and the Referer and caption URLs below
@@ -237,13 +249,16 @@ async function fetchNetflix(tmdbId, type, title, season, episode) {
                 },
                 signal: AbortSignal.timeout(20000)
             });
-            if (!response.ok) return null;          // null = try the next mirror
+            if (!response.ok) { lastStatus = response.status; return null; } // null = try the next mirror
             const body = await response.json();
-            if (body.ok !== true) return null;
+            if (body.ok !== true) { answeredNo = true; return null; }
             base = candidate;
             return body;
         });
-        if (!data) return [];
+        if (!data) {
+            if (answeredNo) return [];
+            return failure(`netflix: every mirror failed (last HTTP ${lastStatus})`);
+        }
         const subtitles = (data.captions || []).flatMap((caption, index) => {
             if (!caption.url) return [];
             return [{
@@ -322,7 +337,7 @@ async function fetchNetflix(tmdbId, type, title, season, episode) {
         }]);
     } catch (error) {
         console.log(`[NetMirror] Netflix direct failed: ${error.message}`);
-        return [];
+        return failure(`netflix: ${error.message}`);
     }
 }
 
@@ -521,14 +536,16 @@ async function fetchPlatform(platform, title, type, season, episode) {
         // exposes one audio track per file, so a second language is a second
         // catalogue entry - dropping the rest is dropping the language choice.
         const out = [];
+        let err = null;
         for (const match of matches.slice(0, MAX_LANGUAGE_ROWS)) {
             const rows = await resolveMatch(api, config, platform, match, title, type, season, episode);
+            if (rows.upstreamError) err = rows.upstreamError;
             out.push(...rows);
         }
-        return out;
+        return err ? failure(err, out) : out;
     } catch (error) {
         console.log(`[NetMirror] ${platform} failed: ${error.message}`);
-        return [];
+        return failure(`${platform}: ${error.message}`);
     }
 }
 
@@ -599,8 +616,10 @@ async function resolveMatch(api, config, platform, match, title, type, season, e
         // the title, and the player's startup fallback bounces straight back to
         // another provider. Catch it here, where the id is known.
         if (!(await masterMatchesTitle(player.video_link, targetId, player.referer || api))) {
+            // Still rejected (CLAUDE.md rule 4), but reported as a throttle:
+            // the title IS there, so this must not be cached as "no streams".
             console.log(`[NetMirror] ${platform} returned a placeholder master for "${title}" — rejecting`);
-            return [];
+            return failure(`${platform}: throttled (placeholder master)`);
         }
 
         return [{
@@ -617,7 +636,7 @@ async function resolveMatch(api, config, platform, match, title, type, season, e
         }];
     } catch (error) {
         console.log(`[NetMirror] ${platform} failed: ${error.message}`);
-        return [];
+        return failure(`${platform}: ${error.message}`);
     }
 }
 
@@ -739,13 +758,20 @@ async function getNetmirrorStreams(tmdbId, mediaType = 'movie', seasonNum = null
         const key = `${tmdbId}:${type}:${season || 0}:${episode || 0}`;
         const cached = streamCache.get(key);
         if (cached && cached.expiresAt > Date.now()) {
-            return hdOnly(cached.streams, true);
+            if (cached.error && !cached.streams.length) {
+                // Not via the catch below: that would re-arm the backoff on
+                // every request and never let NetMirror be asked again.
+                return Promise.reject(new Error(`backing off: ${cached.error}`));
+            }
+            const out = hdOnly(cached.streams, true);
+            return cached.error ? failure(cached.error, [...out]) : out;
         }
         const running = inflight.get(key);
         if (running) return running;
 
         const request = (async () => {
             const direct = await fetchNetflix(tmdbId, type, title, season, episode);
+            let upstreamError = direct.upstreamError || null;
             // Previously every remaining platform ran to completion through
             // Promise.all even once one had returned a stream. Each platform is
             // a three request chain (search -> post -> player), so a title
@@ -796,6 +822,7 @@ async function getNetmirrorStreams(tmdbId, mediaType = 'movie', seasonNum = null
                     if (platform === 'netflix') continue;
                     if (asked++) await sleep(PLATFORM_GAP_MS);
                     const found = await fetchPlatform(platform, title, type, season, episode);
+                    if (found.upstreamError) upstreamError = found.upstreamError;
                     if (found.length) collected.push(...found);
                 }
             }
@@ -804,6 +831,7 @@ async function getNetmirrorStreams(tmdbId, mediaType = 'movie', seasonNum = null
             // stream for 25 minutes and fails later in the player instead.
             const { streams: live, throttled } = await dropThrottled(hdOnly(collected, true));
             const streams = live;
+            if (throttled && !upstreamError) upstreamError = 'CDN throttled';
 
             // Three different outcomes, three different TTLs. A throttle is the
             // shortest: the limit lifts by itself, so re-asking soon is right,
@@ -811,7 +839,14 @@ async function getNetmirrorStreams(tmdbId, mediaType = 'movie', seasonNum = null
             // minutes over something that fixed itself in a few.
             let ttl;
             let why;
-            if (streams.length) {
+            if (upstreamError) {
+                // Part or all of the answer is unknown. Short backoff (the
+                // rate limiter still gets its rest), never the 25 min hit TTL,
+                // and the failure travels with the result so nothing above
+                // caches it as complete or as empty.
+                ttl = throttled ? Math.min(CDN_COOLDOWN_MS, EMPTY_CACHE_TTL) : EMPTY_CACHE_TTL;
+                why = ` (upstream failed: ${upstreamError} - retrying in ${Math.round(ttl / 1000)}s)`;
+            } else if (streams.length) {
                 ttl = STREAM_CACHE_TTL;
             } else if (throttled) {
                 ttl = Math.min(CDN_COOLDOWN_MS, EMPTY_CACHE_TTL);
@@ -820,9 +855,10 @@ async function getNetmirrorStreams(tmdbId, mediaType = 'movie', seasonNum = null
                 ttl = EMPTY_CACHE_TTL;
                 why = ` (empty - backing off ${Math.round(EMPTY_CACHE_TTL / 1000)}s)`;
             }
-            streamCache.set(key, { streams, expiresAt: Date.now() + ttl });
+            streamCache.set(key, { streams, expiresAt: Date.now() + ttl, error: upstreamError });
             console.log(`[NetMirror] ${tmdbId} streams ready: ${streams.length}${why || ''}`);
-            return streams;
+            if (upstreamError && !streams.length) throw new Error(upstreamError);
+            return upstreamError ? failure(upstreamError, [...streams]) : streams;
         })().finally(() => inflight.delete(key));
 
         inflight.set(key, request);
@@ -834,9 +870,9 @@ async function getNetmirrorStreams(tmdbId, mediaType = 'movie', seasonNum = null
         console.error(`[NetMirror] Error: ${err.message} - backing off ${Math.round(EMPTY_CACHE_TTL / 1000)}s`);
         try {
             const k = `${tmdbId}:${type}:${seasonNum || 0}:${episodeNum || 0}`;
-            streamCache.set(k, { streams: [], expiresAt: Date.now() + EMPTY_CACHE_TTL });
+            streamCache.set(k, { streams: [], expiresAt: Date.now() + EMPTY_CACHE_TTL, error: err.message });
         } catch (_) { /* key build is best effort */ }
-        return [];
+        throw err; // unknown, not "no streams"
     }
 }
 

@@ -96,6 +96,13 @@ async function fetchStreamUrls(imdb, type, season, episode) {
         }
         const url = `${STREAM_API}?${params.toString()}&stream_urls&api_token=${encodeURIComponent(apiToken)}`;
         const json = JSON.parse(await getText(url, apiHeaders()));
+        // Measured 2026-11-20: a title VaPlayer lacks answers HTTP 200
+        // {"status_code":404}. That is the only clean "not here"; a rejected
+        // token is {"status_code":"403","error":"invalid api token"} - a failure.
+        if (String(json.status_code) === '404') {
+            console.log(`[VaPlayer] not-found ${imdb} (api status_code 404)`);
+            return { urls: [], fileName: '' };
+        }
         if (json.status_code !== '200' && json.status_code !== 200) {
             throw new Error(`VaPlayer API error: ${json.error || `status_code=${json.status_code}`}`);
         }
@@ -112,8 +119,10 @@ async function fetchStreamUrls(imdb, type, season, episode) {
         const signed = await Promise.all(urls.map(async (u) => applyToken(u, await tokens.get(new URL(u).origin))));
         return { urls: signed, fileName: data.file_name || '' };
     } catch (err) {
+        // Rethrown: an HTTP error, timeout or bad token is "unknown", and the
+        // aggregator must not cache it as "this title has no streams".
         console.warn(`[VaPlayer] fetch failed for ${imdb}: ${err.message}`);
-        return { urls: [], fileName: '' };
+        throw err;
     }
 }
 

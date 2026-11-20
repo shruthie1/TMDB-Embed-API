@@ -372,11 +372,23 @@ function fetchProviderShared(prov, ck, ctx, { titleIsResolvable, titleKey }) {
       console.log(`[api] invoking provider ${name} for tmdbId=${ctx.tmdbId}`);
       const r = await prov.fetch(ctx);
       if (r && r.timedOut) {
+        // Unknown, not empty: never cached, and the caller keeps the whole
+        // response out of the memo and the browser cache.
         recordProviderOutcome(name, 'timeout', Date.now()-t0, 0);
-        return { outcome: 'timeout', ms: null, streams: [] };
+        console.log(`[api] provider-unknown ${name} tmdbId=${ctx.tmdbId} reason=timeout`);
+        return { outcome: 'timeout', ms: null, streams: [], error: `timeout after ${Date.now()-t0}ms` };
       }
       const ms = Date.now()-t0;
       const n = Array.isArray(r) ? r.length : 0;
+      // Part of the provider's upstream failed (one language track, one
+      // platform). Serve the rows it got, but cache none of them: a cached
+      // partial answer would hide the missing row (often the Telugu one) for
+      // PROVIDER_HIT_TTL_MS after a blip that lasted seconds.
+      if (r && r.upstreamError) {
+        recordProviderOutcome(name, n > 0 ? 'hit' : 'error', ms, n, titleIsResolvable, titleKey);
+        console.log(`[api] provider-partial ${name} tmdbId=${ctx.tmdbId} rows=${n} reason=${String(r.upstreamError).slice(0, 120)}`);
+        return { outcome: 'partial', ms, streams: Array.isArray(r) ? r : [], error: String(r.upstreamError).slice(0, 200) };
+      }
       recordProviderOutcome(name, n > 0 ? 'hit' : 'empty', ms, n, titleIsResolvable, titleKey);
       if (n > 0) providerHitCache.set(ck, r);
       else if (titleIsResolvable) providerEmptyCache.set(ck, true);
@@ -571,6 +583,22 @@ function routeStreamsForBrowser(streams, serverUrl) {
   return streams;
 }
 
+// season/episode are TMDB numbers: positive integers when given. Season 0
+// (specials) or a non-integer used to reach the providers as `0 || null` or
+// NaN, and several default a missing season to 1 - so S0E1 played S1E1 as if
+// it were the requested episode. The web never asks for season 0.
+function parseSeasonEpisode(query) {
+  const one = (raw, label) => {
+    if (raw === undefined || raw === '') return { v: null };
+    const n = Number(raw);
+    if (!/^\d+$/.test(String(raw)) || !Number.isSafeInteger(n) || n < 1) return { bad: `INVALID_${label}` };
+    return { v: n };
+  };
+  const s = one(query.season, 'SEASON');
+  const e = one(query.episode, 'EPISODE');
+  return { season: s.v, episode: e.v, badSeason: s.bad || e.bad || null };
+}
+
 app.get('/api/streams/:type/:tmdbId', async (req,res) => {
   const { type, tmdbId } = req.params;
   if (!['movie','series'].includes(type)) return res.status(400).json({ success:false, error:'INVALID_TYPE' });
@@ -583,8 +611,8 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
   if (!/^\d+$/.test(String(tmdbId))) {
     return res.status(400).json({ success:false, error:'INVALID_TMDB_ID' });
   }
-  const season = req.query.season ? Number(req.query.season) : null;
-  const episode = req.query.episode ? Number(req.query.episode) : null;
+  const { season, episode, badSeason } = parseSeasonEpisode(req.query);
+  if (badSeason) return res.status(400).json({ success:false, error: badSeason });
   try {
     metrics.streamRequests++;
     const wantCaps = req.query.capabilities === '1';
@@ -647,7 +675,9 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
       const o = await fetchProviderShared(prov, ck,
         { tmdbId, type, season, episode, imdbId, filters:{ } }, { titleIsResolvable, titleKey });
       providerTimings[name] = o.ms;
-      if (o.outcome === 'error') erroredProviders.push(name);
+      // error, timeout and partial all leave this title's answer UNKNOWN for
+      // the provider, so the response must not be cached (see below).
+      if (o.outcome !== 'hit' && o.outcome !== 'empty') erroredProviders.push(name);
       return o.streams;
     };
 
@@ -742,6 +772,13 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
       }
       const others = retry.filter((name) => name !== GATE_PROVIDER);
       results.push(...await Promise.all(others.map((name) => runProvider(name, { bypassBreaker: true }))));
+    }
+    // A provider still skipped by its breaker was never asked about this
+    // title. Its answer is unknown, so this response must not be memoized as
+    // complete for STREAMS_MEMO_MS or kept by the browser.
+    for (const name of skippedByBreaker) {
+      console.log(`[api] provider-unknown ${name} tmdbId=${tmdbId} reason=breaker-open`);
+      erroredProviders.push(name);
     }
     let streams = [...castleStreams, ...results.flat()];
     streams = applyFilters(streams, 'aggregate', config.minQualities, config.excludeCodecs);
@@ -859,8 +896,8 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
 app.get('/api/streams/:provider/:type/:tmdbId', async (req,res) => {
   const { provider, type, tmdbId } = req.params;
   if (!['movie','series'].includes(type)) return res.status(400).json({ success:false, error:'INVALID_TYPE' });
-  const season = req.query.season ? Number(req.query.season) : null;
-  const episode = req.query.episode ? Number(req.query.episode) : null;
+  const { season, episode, badSeason } = parseSeasonEpisode(req.query);
+  if (badSeason) return res.status(400).json({ success:false, error: badSeason });
   const prov = getProvider(provider);
   if (!prov) return res.status(404).json({ success:false, error:'PROVIDER_NOT_FOUND' });
   if (!prov.enabled) return res.status(503).json({ success:false, error:'PROVIDER_DISABLED' });
@@ -888,7 +925,7 @@ app.get('/api/streams/:provider/:type/:tmdbId', async (req,res) => {
     if (!raw) {
       const o = await fetchProviderShared(prov, ck, { tmdbId, type, season, episode, imdbId, filters:{} },
         { titleIsResolvable: Boolean(imdbId), titleKey });
-      if (o.outcome === 'error') providerError = o.error;
+      if (o.outcome !== 'hit' && o.outcome !== 'empty') providerError = o.error || o.outcome;
       raw = o.streams;
     }
     let streams = raw;

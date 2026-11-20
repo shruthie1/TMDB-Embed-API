@@ -127,6 +127,8 @@ async function getShowsstStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
             console.log(`[showsst] ${m.api} failed for ${tmdbId}: ${e.message}`);
         }
     }
+    // Every mirror failed (transport error or non-2xx): unknown, not empty.
+    if (!body) throw new Error(`showsst: all ${MIRRORS.length} mirrors failed for ${tmdbId}`);
     const source = body && body.source;
     if (!source || !source.url) {
         console.log(`[showsst] No source url for ${tmdbId}`);
