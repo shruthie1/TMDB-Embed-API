@@ -115,6 +115,40 @@ function cachePut(key, d) {
 }
 
 /**
+ * One /api/streams request per title at a time, shared by every caller.
+ *
+ * The title page warms the list while the viewer reads (prewarmStreams), and
+ * Play then joins that request instead of starting a second fan-out. Not
+ * aborted when one caller goes away: the answer still lands in the session
+ * cache and the backend's own cache, which is the point of warming.
+ * A refresh never joins: it exists to mint new signed urls.
+ */
+const inflight = new Map();
+function fetchStreamsShared(key, path) {
+  const running = inflight.get(key);
+  if (running) return running;
+  const p = getJsonWithRetry(path, { timeoutMs: 120000 })
+    .then((d) => { cachePut(key, d); return d; })
+    .finally(() => inflight.delete(key));
+  inflight.set(key, p);
+  return p;
+}
+
+/**
+ * Start resolving a title the viewer has opened, before Play is pressed.
+ *
+ * Only for the title page, which is a strong play intent. Hover and D-pad
+ * dwell stay on the no-op in lib/prefetch.js: a row of cards must not start a
+ * fan-out for every title the pointer crosses. Fire-and-forget.
+ */
+export function prewarmStreams(type, id, { season = 0, episode = 0 } = {}) {
+  if (!id) return;
+  const key = cacheKey(type, id, season, episode);
+  if (cacheGet(key) || inflight.has(key)) return;
+  fetchStreamsShared(key, endpoint(type, id, { season, episode })).catch(() => {});
+}
+
+/**
  * One backend stream -> one UI "source".
  *
  * `masterUrl` is what useHls attaches. `referer` stays null on purpose: see
@@ -234,7 +268,7 @@ export function rankSources(sources) {
   });
 }
 
-function endpoint(type, id, { season, episode, provider, refresh, capabilities }) {
+function endpoint(type, id, { season, episode, provider, refresh, capabilities, full }) {
   // The backend's own route vocabulary is movie|series, not movie|tv.
   const kind = type === 'tv' || type === 'series' ? 'series' : 'movie';
   const qs = new URLSearchParams();
@@ -242,6 +276,7 @@ function endpoint(type, id, { season, episode, provider, refresh, capabilities }
   if (episode) qs.set('episode', String(episode));
   if (refresh) qs.set('refresh', '1');
   if (capabilities) qs.set('capabilities', '1');
+  if (full) qs.set('full', '1');
   const q = qs.toString();
   const path = provider
     ? `/api/streams/${provider}/${kind}/${id}`
@@ -274,7 +309,7 @@ export async function listSources(type, id, opts = {}) {
  */
 export function resolveLive(type, id, {
   season = 0, episode = 0, provider = null, refresh = false,
-  onEvent, onDone, onFail,
+  onEvent, onDone, onFail, onMore,
 } = {}) {
   const ac = new AbortController();
   let settled = false;
@@ -299,8 +334,10 @@ export function resolveLive(type, id, {
   const cached = refresh ? null : cacheGet(key);
   if (cached) emit({ type: 'cache-hit', provider: 'list from this session' });
   (cached ? Promise.resolve(cached)
-    : getJsonWithRetry(endpoint(type, id, { season, episode, provider: null, refresh }),
-      { timeoutMs: 120000, signal: ac.signal }).then((d) => { cachePut(key, d); return d; }))
+    : refresh
+      ? getJsonWithRetry(endpoint(type, id, { season, episode, provider: null, refresh }),
+        { timeoutMs: 120000, signal: ac.signal }).then((d) => { cachePut(key, d); return d; })
+      : fetchStreamsShared(key, endpoint(type, id, { season, episode })))
     .then((d) => {
       if (settled) return;
       const raw = Array.isArray(d?.streams) ? d.streams : [];
@@ -346,6 +383,20 @@ export function resolveLive(type, id, {
       settled = true;
       if (!sources.length) { onFail?.(new Error('No playable source found.')); return; }
       onDone?.({ ...sources[0], sources });
+      // A partial answer went out while slower providers were still running
+      // (backend PRIMARY_PROVIDERS). Ask once more for the complete list; the
+      // backend joins those running calls rather than starting them again.
+      // The picture never waits for this: rows are merged as they land.
+      if (d?.partial && onMore) {
+        getJson(endpoint(type, id, { season, episode, full: true }), { timeoutMs: 60000, signal: ac.signal })
+          .then((full) => {
+            if (ac.signal.aborted) return;
+            cachePut(key, full);
+            const more = rankSources((Array.isArray(full?.streams) ? full.streams : []).map(toSource).filter(Boolean));
+            if (more.length) onMore(more);
+          })
+          .catch(() => { /* the first list stands */ });
+      }
     })
     .catch((err) => {
       if (settled || ac.signal.aborted) return;

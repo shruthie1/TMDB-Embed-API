@@ -10,7 +10,7 @@ import { Row } from '../../../../components/Row';
 import { Button, Badge, Skeleton, Toast } from '../../../../components/ui';
 import { getProgress, getNextUp } from '../../../../lib/progress';
 import { inList, toggleList } from '../../../../lib/list';
-import { preresolve } from '../../../../lib/prefetch';
+import { prewarmStreams } from '../../../../lib/backend';
 import { languageName } from '../../../../lib/subtitles';
 import Icon from '../../../../components/Icon';
 
@@ -57,8 +57,8 @@ export default function TitlePage() {
   // The detail page is already a strong play intent: the viewer has opened a
   // title, then usually spends a few seconds reading before pressing Resume.
   // Warm the resolver during that natural dwell so the click does not pay a
-  // cold browser extraction. This is background work, so the resolver keeps a
-  // reserved viewer slot and a viewer arriving mid-prefetch is prioritized.
+  // cold fan-out (prod p50 6-14s). Play joins the request if it is still
+  // running (lib/backend.js prewarmStreams).
   useEffect(() => {
     if (!t || !full) return;
     const target = type === 'tv'
@@ -68,7 +68,9 @@ export default function TitlePage() {
     // reading dwell as the resolver warmup so the click only waits for media,
     // not for a JavaScript chunk to arrive first.
     import('hls.js').catch(() => {});
-    const timer = setTimeout(() => preresolve(type, tmdbId, target), 700);
+    // Same key the Player's resolve uses (title.mediaType/tmdbId), so Play
+    // joins this request or reads its cached answer.
+    const timer = setTimeout(() => prewarmStreams(t.mediaType, t.tmdbId, target), 700);
     return () => clearTimeout(timer);
   }, [t, full, type, tmdbId, resume?.season, resume?.episode]);
 

@@ -243,3 +243,17 @@ describe('useResolve — replaceSource (an expired signed url renewed)', () => {
     ]);
   });
 });
+
+describe('useResolve — the rest of a partial answer', () => {
+  it('onMore adds the late rows and leaves the playing stream alone', () => {
+    const api = harness({ mediaType: 'movie', tmdbId: 77 });
+    const castle = { id: 'c', provider: 'CastleTV', masterUrl: 'https://cdn/castle.m3u8', quality: '1080p', variants: [] };
+    const mapple = { id: 'm', provider: 'Mapple', masterUrl: 'https://cdn/mapple.m3u8', quality: '2160p', variants: [] };
+    act(() => emit.fn.onDone({ ...castle, sources: [castle] }));
+    expect(api.sources.map(s => s.provider)).toEqual(['CastleTV']);
+    act(() => emit.fn.onMore([castle, mapple]));
+    expect(api.sources.map(s => s.provider)).toEqual(['CastleTV', 'Mapple']);
+    expect(api.stream.masterUrl).toBe(castle.masterUrl);
+    expect(api.sourcesPending).toBe(false);
+  });
+});

@@ -248,6 +248,22 @@ export function useResolve({ mediaType, tmdbId, season = 0, episode = 0 }) {
         }
         if (d.cached) setSourcesPending(false);
       },
+      // The rest of a partial answer, merged under the same identity rule as
+      // onDone. Never touches `stream`: what is playing keeps playing.
+      onMore: (more) => {
+        setSources(prev => {
+          const merged = [...prev];
+          for (const src of more) {
+            const at = merged.findIndex(m => sameSource(m, src));
+            const entry = { ...src, best: bestLabel(src.variants, null),
+              audioTracks: src.audioTracks ?? [], codecs: src.codecs ?? null };
+            if (at === -1) merged.push(entry);
+            else merged[at] = { ...merged[at], ...entry };
+          }
+          return merged;
+        });
+        setSourcesPending(false);
+      },
       onFail: (d) => setError({
         message: d.reason || 'No source available right now.',
         tried: d.tried || [], providers: d.providers || [],
