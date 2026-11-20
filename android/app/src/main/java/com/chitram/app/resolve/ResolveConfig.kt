@@ -1,0 +1,219 @@
+package com.chitram.app.resolve
+
+import com.chitram.app.data.KeyValue
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.longOrNull
+import okhttp3.CacheControl
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import java.util.concurrent.TimeUnit
+
+/**
+ * Everything a provider site can change without notice: hosts, endpoint paths,
+ * the mapple front list, the vaplayer token regex, timeouts. The values below are
+ * the defaults the app ships with (read from providers/mapple.js and
+ * providers/vaplayer.js on 2026-11-20). The backend can override any field via
+ * GET /api/resolve-config, so a site change is a server edit, not an app update.
+ *
+ * Parsed by hand from a JsonElement: any field may be missing or wrong and only
+ * that field falls back to the default. No reflection, so R8 cannot strip it.
+ */
+data class MappleConfig(
+    val enabled: Boolean = true,
+    val bases: List<String> = listOf("https://mapple.fun"),
+    val watchPath: String = "/watch/{type}/{id}",
+    val sessionPath: String = "/api/ui/session",
+    val mediaSessionPath: String = "/api/media-session",
+    val encryptPath: String = "/api/encrypt",
+    val encryptEndpoint: String = "stream-encrypted",
+    val fronts: List<String> = listOf("s25", "mapple", "s2", "s28", "s27", "s10", "s19", "s4", "s12", "s6", "s7", "s8", "s16"),
+    /** The site player's own per-front timeouts; other fronts get defaultFrontTimeoutMs. */
+    val frontTimeoutMs: Map<String, Long> = mapOf("mapple" to 8000L, "s10" to 12000L, "s2" to 22000L, "s25" to 24000L, "s28" to 25000L),
+    val defaultFrontTimeoutMs: Long = 5000,
+    val frontParallelism: Int = 3,
+    val stepTimeoutMs: Long = 8000,
+    val budgetMs: Long = 25000,
+    val sessionTtlMs: Long = 10 * 60 * 1000L,
+    val unavailableMarker: String = "playback-unavailable",
+    val userAgent: String = MAPPLE_UA,
+    val powMaxIterations: Int = 20_000_000,
+) {
+    companion object {
+        const val MAPPLE_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+    }
+}
+
+data class VaplayerConfig(
+    val enabled: Boolean = true,
+    val wrapperBases: List<String> = listOf("https://vaplayer.ru"),
+    val vaSrcPath: String = "/embed/va_src.php",
+    val embedMoviePath: String = "/embed/movie/{imdb}",
+    val embedTvPath: String = "/embed/tv/{imdb}/{season}/{episode}",
+    /** api.php. After a wrapper heal it follows the new host as streamdata.<host>. */
+    val apiUrl: String = "https://streamdata.vaplayer.ru/api.php",
+    val playerOrigin: String = "https://nextgencloudfabric.com",
+    val apiTokenRegex: String = "\"apiToken\":\"([^\"]+)\"",
+    val generatePath: String = "/generate.php",
+    val tokenPlaceholder: String = "__TOKEN__",
+    val plaintextOffset: Int = 12,
+    val userAgent: String = VA_UA,
+    val stepTimeoutMs: Long = 8000,
+    val budgetMs: Long = 20000,
+    /** Fetch the first segment once at resolve time, so a 403 (CGNAT) fails fast. */
+    val probeSegment: Boolean = true,
+) {
+    companion object {
+        const val VA_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+}
+
+data class ResolveConfig(
+    val version: Int = 1,
+    val ttlSec: Long = 6 * 3600L,
+    val mapple: MappleConfig = MappleConfig(),
+    val vaplayer: VaplayerConfig = VaplayerConfig(),
+) {
+    companion object {
+        private val json = Json { ignoreUnknownKeys = true; isLenient = true }
+
+        /** Defaults overlaid with whatever valid fields `text` carries. Throws only on non-JSON. */
+        fun parse(text: String): ResolveConfig {
+            val root = json.parseToJsonElement(text) as? JsonObject ?: return ResolveConfig()
+            val d = ResolveConfig()
+            return ResolveConfig(
+                version = root.int("version") ?: d.version,
+                ttlSec = root.long("ttlSec")?.coerceIn(60, 7 * 86400L) ?: d.ttlSec,
+                mapple = (root["mapple"] as? JsonObject)?.let { mapple(it) } ?: d.mapple,
+                vaplayer = (root["vaplayer"] as? JsonObject)?.let { vaplayer(it) } ?: d.vaplayer,
+            )
+        }
+
+        private fun mapple(o: JsonObject): MappleConfig {
+            val d = MappleConfig()
+            return MappleConfig(
+                enabled = o.bool("enabled") ?: d.enabled,
+                bases = o.hosts("bases") ?: d.bases,
+                watchPath = o.path("watchPath") ?: d.watchPath,
+                sessionPath = o.path("sessionPath") ?: d.sessionPath,
+                mediaSessionPath = o.path("mediaSessionPath") ?: d.mediaSessionPath,
+                encryptPath = o.path("encryptPath") ?: d.encryptPath,
+                encryptEndpoint = o.str("encryptEndpoint") ?: d.encryptEndpoint,
+                fronts = o.strings("fronts")?.takeIf { it.isNotEmpty() } ?: d.fronts,
+                frontTimeoutMs = (o["frontTimeoutMs"] as? JsonObject)?.let { m ->
+                    m.mapNotNull { (k, v) -> (v as? JsonPrimitive)?.longOrNull?.let { k to it.coerceIn(500, 60_000) } }.toMap()
+                } ?: d.frontTimeoutMs,
+                defaultFrontTimeoutMs = o.long("defaultFrontTimeoutMs")?.coerceIn(500, 60_000) ?: d.defaultFrontTimeoutMs,
+                frontParallelism = o.int("frontParallelism")?.coerceIn(1, 8) ?: d.frontParallelism,
+                stepTimeoutMs = o.long("stepTimeoutMs")?.coerceIn(1000, 60_000) ?: d.stepTimeoutMs,
+                budgetMs = o.long("budgetMs")?.coerceIn(3000, 90_000) ?: d.budgetMs,
+                sessionTtlMs = o.long("sessionTtlMs")?.coerceIn(0, 3_600_000) ?: d.sessionTtlMs,
+                unavailableMarker = o.str("unavailableMarker") ?: d.unavailableMarker,
+                userAgent = o.str("userAgent") ?: d.userAgent,
+                powMaxIterations = o.int("powMaxIterations")?.coerceIn(1000, 200_000_000) ?: d.powMaxIterations,
+            )
+        }
+
+        private fun vaplayer(o: JsonObject): VaplayerConfig {
+            val d = VaplayerConfig()
+            return VaplayerConfig(
+                enabled = o.bool("enabled") ?: d.enabled,
+                wrapperBases = o.hosts("wrapperBases") ?: d.wrapperBases,
+                vaSrcPath = o.path("vaSrcPath") ?: d.vaSrcPath,
+                embedMoviePath = o.path("embedMoviePath") ?: d.embedMoviePath,
+                embedTvPath = o.path("embedTvPath") ?: d.embedTvPath,
+                apiUrl = o.str("apiUrl")?.takeIf { it.startsWith("https://") } ?: d.apiUrl,
+                playerOrigin = o.str("playerOrigin")?.takeIf { it.startsWith("https://") }?.trimEnd('/') ?: d.playerOrigin,
+                apiTokenRegex = o.str("apiTokenRegex")?.takeIf { r -> runCatching { Regex(r) }.isSuccess } ?: d.apiTokenRegex,
+                generatePath = o.path("generatePath") ?: d.generatePath,
+                tokenPlaceholder = o.str("tokenPlaceholder") ?: d.tokenPlaceholder,
+                plaintextOffset = o.int("plaintextOffset")?.coerceIn(0, 64) ?: d.plaintextOffset,
+                userAgent = o.str("userAgent") ?: d.userAgent,
+                stepTimeoutMs = o.long("stepTimeoutMs")?.coerceIn(1000, 60_000) ?: d.stepTimeoutMs,
+                budgetMs = o.long("budgetMs")?.coerceIn(3000, 90_000) ?: d.budgetMs,
+                probeSegment = o.bool("probeSegment") ?: d.probeSegment,
+            )
+        }
+
+        private fun JsonObject.prim(k: String): JsonPrimitive? = this[k] as? JsonPrimitive
+        private fun JsonObject.str(k: String): String? = prim(k)?.takeIf { it.isString }?.contentOrNull?.takeIf { it.isNotBlank() }
+        private fun JsonObject.path(k: String): String? = str(k)?.takeIf { it.startsWith("/") }
+        private fun JsonObject.int(k: String): Int? = prim(k)?.intOrNull
+        private fun JsonObject.long(k: String): Long? = prim(k)?.longOrNull
+        private fun JsonObject.bool(k: String): Boolean? = prim(k)?.booleanOrNull
+        private fun JsonObject.strings(k: String): List<String>? = (this[k] as? JsonArray)
+            ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf(String::isNotEmpty) }
+        /** https hosts only; an empty or all-invalid list keeps the default. */
+        private fun JsonObject.hosts(k: String): List<String>? = strings(k)
+            ?.filter { it.startsWith("https://") }?.map { it.trimEnd('/') }?.takeIf { it.isNotEmpty() }
+    }
+}
+
+/**
+ * The override config: fetched from the backend, kept in KeyValue with its TTL,
+ * defaults when nothing was ever fetched. A failed fetch keeps the last good copy
+ * (even if stale) and is not retried for RETRY_MS, so a down backend never adds
+ * its timeout to every play.
+ */
+class ResolveConfigStore(
+    client: OkHttpClient,
+    private val url: String,
+    private val kv: KeyValue,
+    private val now: () -> Long = System::currentTimeMillis,
+) {
+    private val http = client.newBuilder().callTimeout(FETCH_TIMEOUT_MS, TimeUnit.MILLISECONDS).build()
+    @Volatile private var mem: Pair<ResolveConfig, Long>? = null
+    @Volatile private var lastAttempt = 0L
+
+    /** Cached or default config, no network. */
+    fun current(): ResolveConfig = cached()?.first ?: ResolveConfig()
+
+    suspend fun get(): ResolveConfig {
+        val c = cached()
+        if (c != null && now() - c.second < c.first.ttlSec * 1000) return c.first
+        if (now() - lastAttempt < RETRY_MS) return c?.first ?: ResolveConfig()
+        return refresh()
+    }
+
+    suspend fun refresh(): ResolveConfig {
+        lastAttempt = now()
+        return try {
+            val req = Request.Builder().url(url).cacheControl(CacheControl.Builder().noStore().noCache().build()).build()
+            val r = http.fetch(req)
+            if (!r.ok) throw StepException("resolve-config", r.code, "HTTP ${r.code}")
+            val cfg = ResolveConfig.parse(r.body)
+            val at = now()
+            mem = cfg to at
+            kv.put(KEY, r.body)
+            kv.put(KEY_AT, at.toString())
+            android.util.Log.i("Chitram", "resolve-config: fetched v${cfg.version}")
+            cfg
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            android.util.Log.i("Chitram", "resolve-config: fetch failed (${e.message}); using ${if (cached() != null) "cached" else "defaults"}")
+            current()
+        }
+    }
+
+    private fun cached(): Pair<ResolveConfig, Long>? {
+        mem?.let { return it }
+        val raw = kv.get(KEY) ?: return null
+        val at = kv.get(KEY_AT)?.toLongOrNull() ?: 0L
+        return runCatching { ResolveConfig.parse(raw) }.getOrNull()?.let { (it to at).also { p -> mem = p } }
+    }
+
+    companion object {
+        /** Proposed backend route; until it exists the fetch 404s and defaults apply. */
+        const val PATH = "/api/resolve-config"
+        const val KEY = "resolve.config"
+        const val KEY_AT = "resolve.config.at"
+        const val RETRY_MS = 10 * 60 * 1000L
+        const val FETCH_TIMEOUT_MS = 4000L
+    }
+}

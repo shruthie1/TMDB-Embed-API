@@ -22,6 +22,12 @@ data class Source(
     val videoCodec: String?,
     val codecString: String?,
     val unsupported: Boolean,
+    /** Set for a row resolved on this device (mapple, VaPlayer); null for backend rows. */
+    val onDevice: String? = null,
+    /** Sent on every player request for this row (provider Referer/Origin). */
+    val headers: Map<String, String> = emptyMap(),
+    /** vaplayer host token: appended as ?token= to every request that lacks one. */
+    val segmentToken: String? = null,
 )
 
 /** Answers "can this device decode this video codec family?" null = unknown. */
@@ -86,6 +92,9 @@ object Ranking {
         sources.sortedWith(
             compareBy<Source> { if (it.unsupported) 1 else 0 }
                 .thenBy { tier(it, preferred) }
+                // Same tier: on-device vaplayer goes after mapple and the backend
+                // rows (its token is bound to an IP that can change under CGNAT).
+                .thenBy { if (it.onDevice == VAPLAYER) 1 else 0 }
                 .thenBy { if (it.progressive) 1 else 0 }
                 .thenByDescending { height(it) },
         )
@@ -104,8 +113,16 @@ object Ranking {
         return listOfNotNull(best) + pinned + rest + last
     }
 
-    fun fromResponse(r: StreamsResponse, preferred: String, codecs: CodecSupport, pin: String? = null): List<Source> =
-        applyPin(rank(r.streams.mapIndexedNotNull { i, s -> toSource(s, i, codecs) }, preferred), pin)
+    fun fromResponse(r: StreamsResponse, preferred: String, codecs: CodecSupport, pin: String? = null, extra: List<Source> = emptyList()): List<Source> =
+        merge(r.streams.mapIndexedNotNull { i, s -> toSource(s, i, codecs) }, extra, preferred, pin)
+
+    /** Backend rows plus on-device rows, ranked together. A row id appears once. */
+    fun merge(sources: List<Source>, extra: List<Source>, preferred: String, pin: String? = null): List<Source> {
+        val ids = extra.map { it.id }.toSet()
+        return applyPin(rank(sources.filter { it.id !in ids } + extra, preferred), pin)
+    }
+
+    const val VAPLAYER = "VaPlayer"
 
     /** Server menu labels: "CastleTV 1", "CastleTV 2" when a name repeats. */
     fun labels(sources: List<Source>): List<String> {

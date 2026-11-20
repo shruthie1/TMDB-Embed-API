@@ -15,6 +15,15 @@ import com.chitram.app.data.ProgressStore
 import com.chitram.app.data.RecentSearchStore
 import com.chitram.app.player.Device
 import com.chitram.app.player.MediaCodecSupport
+import com.chitram.app.resolve.HostBook
+import com.chitram.app.resolve.MappleResolver
+import com.chitram.app.resolve.OnDeviceResolver
+import com.chitram.app.resolve.ResolveConfigStore
+import com.chitram.app.resolve.VaplayerResolver
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 /** One small object graph for the whole app. No DI framework: it is lite. */
 class App : Application(), ImageLoaderFactory {
@@ -25,6 +34,9 @@ class App : Application(), ImageLoaderFactory {
     lateinit var lastProvider: LastProviderStore
     lateinit var recent: RecentSearchStore
     lateinit var playerPrefs: PlayerPrefs
+    lateinit var resolveConfig: ResolveConfigStore
+    lateinit var onDevice: OnDeviceResolver
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     val codecs = MediaCodecSupport()
     var isTv = false
         private set
@@ -41,6 +53,16 @@ class App : Application(), ImageLoaderFactory {
         recent = RecentSearchStore(kv)
         playerPrefs = PlayerPrefs(kv)
         isTv = Device.isTv(this)
+        // mapple and vaplayer resolve from this device; their hosts, paths and
+        // fronts can be overridden by the backend (fetched now, cached with a TTL).
+        resolveConfig = ResolveConfigStore(api.client, Api.BASE + ResolveConfigStore.PATH, kv)
+        val hosts = HostBook(kv)
+        onDevice = OnDeviceResolver(
+            api, resolveConfig,
+            MappleResolver(api.client, hosts, kv),
+            VaplayerResolver(api.client, hosts) { runCatching { assets.open("va.wasm").use { it.readBytes() } }.getOrNull() },
+        )
+        appScope.launch { resolveConfig.get() }
     }
 
     /**

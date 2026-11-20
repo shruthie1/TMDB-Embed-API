@@ -33,6 +33,8 @@ import com.chitram.app.data.Progress
 import com.chitram.app.data.Ranking
 import com.chitram.app.data.SeasonInfo
 import com.chitram.app.data.Source
+import com.chitram.app.resolve.StreamInterceptor
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -104,6 +106,11 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     private var refreshedOnce = false
     private var resolveJob: Job? = null
     private var guardJob: Job? = null
+    /** On-device resolves still running after the first source started; they join late. */
+    private var lateJobs: List<Job> = emptyList()
+    private var deviceJobs: List<Deferred<Source?>> = emptyList()
+    /** The preferred-language audio pick is done once per on-device source. */
+    private var audioPickedFor: String? = null
 
     init {
         player.addListener(object : Player.Listener {
@@ -122,7 +129,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             }
             override fun onVideoSizeChanged(size: VideoSize) { videoSize = size }
             override fun onCues(cueGroup: CueGroup) { cues = cueGroup.cues.joinToString("\n") { it.text ?: "" }.trim() }
-            override fun onTracksChanged(t: Tracks) { tracks = t }
+            override fun onTracksChanged(t: Tracks) { tracks = t; pickPreferredAudio(t) }
             override fun onPlayerError(error: PlaybackException) { handleError(error) }
         })
         viewModelScope.launch {
@@ -167,25 +174,54 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         resolve(refresh = false, keepProvider = null, startMs = if (r.fromStart) 0 else g.progress.resumeMs(r.type, r.id, r.season, r.episode))
     }
 
+    /**
+     * Backend streams and the on-device resolves (mapple, vaplayer) run together.
+     * Once the backend answers, on-device rows get DEVICE_GRACE_MS more to join
+     * the first ranking (all of their budget when the backend gave nothing); any
+     * that finish later are merged into the list without interrupting playback.
+     */
     private fun resolve(refresh: Boolean, keepProvider: String?, startMs: Long) {
         val r = request ?: return
         resolveJob?.cancel()
+        lateJobs.forEach { it.cancel() }
+        deviceJobs.forEach { it.cancel() }
         player.stop()
         phase = Phase.Resolving
         status = if (refresh) "Refreshing links…" else "Getting your stream ready"
         resolveJob = viewModelScope.launch {
-            val list = try {
-                val resp = g.api.streams(r.type, r.id, r.season, r.episode, refresh)
-                Ranking.fromResponse(resp, g.prefs.preferredAudio(), g.codecs, keepProvider ?: g.lastProvider.get(r.type, r.id))
+            val pin = keepProvider ?: g.lastProvider.get(r.type, r.id)
+            val preferred = g.prefs.preferredAudio()
+            val device = g.onDevice.launch(viewModelScope, r.type, r.id, r.season, r.episode, g.codecs)
+            deviceJobs = device
+            var backendError: Exception? = null
+            val backend = try {
+                Ranking.fromResponse(g.api.streams(r.type, r.id, r.season, r.episode, refresh), preferred, g.codecs, pin)
             } catch (e: Exception) {
-                if (e is kotlinx.coroutines.CancellationException) throw e
-                phase = Phase.Failed("Could not reach the server (${e.message ?: e.javaClass.simpleName}).")
+                if (e is kotlinx.coroutines.CancellationException) { device.forEach { it.cancel() }; throw e }
+                backendError = e
+                emptyList()
+            }
+            val graceEnd = System.currentTimeMillis() + if (backend.isEmpty()) DEVICE_WAIT_MS else DEVICE_GRACE_MS
+            val early = device.mapNotNull { d ->
+                kotlinx.coroutines.withTimeoutOrNull((graceEnd - System.currentTimeMillis()).coerceAtLeast(1)) { d.await() }
+            }
+            val list = Ranking.merge(backend, early, preferred, pin)
+            sources = list
+            lateJobs = device.filter { !it.isCompleted }.map { d -> viewModelScope.launch { joinLate(r, d, preferred, pin) } }
+            if (list.isEmpty()) {
+                phase = Phase.Failed(backendError?.let { "Could not reach the server (${it.message ?: it.javaClass.simpleName})." } ?: "No playable source found.")
                 return@launch
             }
-            sources = list
-            if (list.isEmpty()) { phase = Phase.Failed("No playable source found."); return@launch }
             play(list.first(), startMs)
         }
+    }
+
+    private suspend fun joinLate(r: PlayRequest, d: Deferred<Source?>, preferred: String, pin: String?) {
+        val s = d.await() ?: return
+        if (request != r) return
+        sources = Ranking.merge(sources, listOf(s), preferred, pin)
+        android.util.Log.i("Chitram", "on-device ${s.provider} joined late")
+        if (phase is Phase.Failed) { play(s, g.progress.resumeMs(r.type, r.id, r.season, r.episode)); notice = "" }
     }
 
     fun play(s: Source, startMs: Long = player.currentPosition.coerceAtLeast(0)) {
@@ -204,13 +240,20 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             .setSubtitleConfigurations(subs)
             .setMediaMetadata(metadata(request))
             .build()
+        audioPickedFor = null
         // Prefer the viewer's language inside multi-audio masters; subtitles off by default.
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             .clearOverrides()
             .setPreferredAudioLanguages(*isoFor(g.prefs.preferredAudio()))
             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
             .build()
-        player.setMediaItem(item, startMs)
+        if (s.onDevice != null) {
+            // Provider Referer/Origin on every request; vaplayer's token on every segment.
+            val http = OkHttpDataSource.Factory(StreamInterceptor.client(g.api.client, s.headers, s.segmentToken))
+            player.setMediaSource(DefaultMediaSourceFactory(http).createMediaSource(item), startMs)
+        } else {
+            player.setMediaItem(item, startMs)
+        }
         player.prepare()
         player.playWhenReady = true
         phase = Phase.Playing
@@ -222,7 +265,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     private fun handleError(e: PlaybackException) {
         val http = generateSequence<Throwable>(e) { it.cause }.filterIsInstance<HttpDataSource.InvalidResponseCodeException>().firstOrNull()
         val pos = player.currentPosition.coerceAtLeast(0)
-        if (http != null && (http.responseCode == 403 || http.responseCode == 410) && !refreshedOnce) {
+        if (FailPolicy.onError(current, http?.responseCode, refreshedOnce) == FailPolicy.Action.REFRESH) {
             refreshedOnce = true
             tried.clear()
             resolve(refresh = true, keepProvider = current?.provider, startMs = pos)
@@ -241,6 +284,34 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         android.util.Log.i("Chitram", "failover: $reason -> ${next.provider}")
         play(next, pos)
         notice = "Trying another source…"
+    }
+
+    /**
+     * Telugu first: an on-device master lists many audio renditions (mapple: 14).
+     * If the player did not land on the preferred language, select it once.
+     */
+    private fun pickPreferredAudio(t: Tracks) {
+        val s = current ?: return
+        if (s.onDevice == null || audioPickedFor == s.id) return
+        val audio = t.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
+        if (audio.isEmpty()) return
+        audioPickedFor = s.id
+        val want = isoFor(g.prefs.preferredAudio()).map { it.lowercase() }
+        fun matches(f: androidx.media3.common.Format): Boolean {
+            val lang = f.language?.lowercase()?.substringBefore('-')
+            val name = langName(f.language)?.lowercase()
+            return lang in want || name in want || f.label?.lowercase() in want ||
+                (lang != null && lang.length == 3 && langName(lang)?.lowercase() in want)
+        }
+        if (audio.any { gr -> (0 until gr.length).any { gr.isTrackSelected(it) && matches(gr.getTrackFormat(it)) } }) return
+        for (gr in audio) for (i in 0 until gr.length) {
+            if (gr.isTrackSupported(i) && matches(gr.getTrackFormat(i))) {
+                player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                    .setOverrideForType(TrackSelectionOverride(gr.mediaTrackGroup, i)).build()
+                android.util.Log.i("Chitram", "audio: picked ${gr.getTrackFormat(i).language} on ${s.provider}")
+                return
+            }
+        }
     }
 
     /**
@@ -304,6 +375,8 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     fun leave() {
         saveProgress()
         resolveJob?.cancel()
+        lateJobs.forEach { it.cancel() }
+        deviceJobs.forEach { it.cancel() }
         guardJob?.cancel()
         player.stop()
         player.clearMediaItems()
@@ -422,6 +495,11 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     companion object {
         /** Web useRecovery STAGES.switching. */
         const val STALL_SWITCH_MS = 25_000L
+
+        /** After the backend answers, how long on-device rows may still join the first ranking. */
+        const val DEVICE_GRACE_MS = 3_000L
+        /** When the backend gave nothing: wait for on-device rows up to their own budgets. */
+        const val DEVICE_WAIT_MS = 30_000L
 
         /** Now-playing info: show or film title, episode line, backdrop art. */
         fun metadata(r: PlayRequest?): MediaMetadata {

@@ -50,6 +50,8 @@ data class TitleFull(
     val director: List<String> = emptyList(),
     val writers: List<String> = emptyList(),
     val country: List<String> = emptyList(),
+    /** For providers keyed by imdb (vaplayer resolves on the device). */
+    val imdbId: String? = null,
 ) {
     fun asTitle() = Title(tmdbId, mediaType, title, poster, backdrop, year, rating, originalLang, overview)
 }
