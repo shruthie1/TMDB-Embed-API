@@ -38,6 +38,11 @@ export default {
       // Segment timestamp shifting, used by a pairing whose two halves
       // disagree on where zero is. The master references it directly.
       { source: '/pts-rebase',              destination: `${origin}/pts-rebase` },
+      // Cast to TV (lib/cast.js): POST /cast mints a long-lived cast master.
+      { source: '/cast',                    destination: `${origin}/cast` },
+      { source: '/cast/:path*',             destination: `${origin}/cast/:path*` },
+      // The Android app reads its resolver config from chtrm2.vercel.app.
+      { source: '/api/resolve-config',      destination: `${origin}/api/resolve-config` },
     ];
   },
   images: {

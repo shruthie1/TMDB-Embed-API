@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "ttlSec": 21600,
+  "mapple": {
+    "enabled": true,
+    "bases": ["https://mapple.fun"],
+    "watchPath": "/watch/{type}/{id}",
+    "sessionPath": "/api/ui/session",
+    "mediaSessionPath": "/api/media-session",
+    "encryptPath": "/api/encrypt",
+    "encryptEndpoint": "stream-encrypted",
+    "fronts": ["s25", "mapple", "s2", "s28", "s27", "s10", "s19", "s4", "s12", "s6", "s7", "s8", "s16"],
+    "frontTimeoutMs": { "mapple": 8000, "s10": 12000, "s2": 22000, "s25": 24000, "s28": 25000 },
+    "defaultFrontTimeoutMs": 8000,
+    "frontParallelism": 3,
+    "frontCooldownMs": 60000,
+    "betterWaitMs": 2500,
+    "stepTimeoutMs": 8000,
+    "budgetMs": 25000,
+    "sessionTtlMs": 600000,
+    "unavailableMarker": "playback-unavailable",
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+    "powMaxIterations": 20000000
+  },
+  "vaplayer": {
+    "enabled": true,
+    "wrapperBases": ["https://vaplayer.ru"],
+    "vaSrcPath": "/embed/va_src.php",
+    "embedMoviePath": "/embed/movie/{imdb}",
+    "embedTvPath": "/embed/tv/{imdb}/{season}/{episode}",
+    "apiUrl": "https://streamdata.vaplayer.ru/api.php",
+    "playerOrigin": "https://nextgencloudfabric.com",
+    "apiTokenRegex": "\"apiToken\":\"([^\"]+)\"",
+    "generatePath": "/generate.php",
+    "tokenPlaceholder": "__TOKEN__",
+    "plaintextOffset": 12,
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "stepTimeoutMs": 8000,
+    "budgetMs": 20000,
+    "probeSegment": true
+  }
+}

@@ -24,6 +24,7 @@ import {
 import { createWarmScheduler } from '../lib/player/warmSources';
 import useNoPictureGuard from '../lib/player/useNoPictureGuard';
 import { pairSources, listSources as listBackendSources } from '../lib/backend';
+import { canCast, castBody, prepareCast } from '../lib/cast';
 import { pairDecodable } from '../lib/player/codecSupport';
 import {
   useResolve, useHls, useRecovery, useControlVisibility, HIDE_MS, HIDE_TV_MS,
@@ -1732,6 +1733,23 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   }, [audioSyncState, beginSwitch, endSwitch, recovery, resolve, title.tmdbId, title.mediaType]);
 
 
+  // Cast to a TV through Web Video Caster (lib/cast.js). Phone only: hidden
+  // on desktop and on a TV, which is the receiver, not the sender.
+  const castable = useMemo(() => typeof navigator !== 'undefined'
+    && canCast({ ua: navigator.userAgent, tv: tvRemote || onTvDevice }), [tvRemote, onTvDevice]);
+  const castPrepare = useCallback(() => {
+    const name = epTag ? `${title.title} ${epTag}` : title.title;
+    return prepareCast({
+      body: castBody({
+        stream, pair: lastPair.current, tmdbId: title.tmdbId, mediaType: title.mediaType,
+        title: name, nudge: audioSyncState.offset,
+      }),
+      meta: { title: name, poster: poster(title.poster, 'w500') || undefined },
+      ua: navigator.userAgent,
+    });
+  }, [stream, title.title, title.tmdbId, title.mediaType, title.poster, epTag, audioSyncState.offset]);
+  const cast = useMemo(() => (castable ? { prepare: castPrepare } : null), [castable, castPrepare]);
+
   // Embeddable providers for this title, fetched only once our own playback
   // has failed - there is no reason to ask otherwise, and it keeps the happy
   // path free of an extra request.
@@ -1842,6 +1860,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
 
       {stream && !useNative && !embedOn && (
         <PlayerControls
+          cast={cast}
           embed={vaEmbed}
           onPickEmbed={pickEmbed}
           videoRef={videoRef}

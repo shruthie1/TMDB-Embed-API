@@ -666,26 +666,37 @@ function withPts(url, ptsOffset, opts = {}) {
     return `${url}${sep}pts=${ptsOffset}${remote}`;
 }
 
+// The rendition hls.js should start on: PREFERRED_AUDIO_LANGUAGE by name or
+// language code, else index 0. Shared with the cast route so both agree.
+function defaultAudioIndex(renditions) {
+    const preferred = PREFERRED_LANGUAGE.toLowerCase();
+    const i = (renditions || []).findIndex((r) =>
+        String(r.name || '').toLowerCase() === preferred
+        || String(r.language || '').toLowerCase().startsWith(preferred.slice(0, 3)));
+    return i < 0 ? 0 : i;
+}
+
 // audioCodec: the donor's audio codec when measured (probe or stream.codecs).
 // Each rendition's own codec from its master wins over it; mp4a.40.2 is the
 // fallback only when neither is known.
-function buildMaster(plan, serverUrl, videoCodec, ptsOffset = 0, audioCodec = null) {
+//
+// opts.castSingleAudio: emit ONLY the default (preferred-language) rendition.
+// For casting (docs/PENDING-WORK.md C2): a TV receiver may offer no audio menu,
+// so every extra rendition is a chance to play the wrong language.
+function buildMaster(plan, serverUrl, videoCodec, ptsOffset = 0, audioCodec = null, opts = {}) {
     const { video, audio } = plan;
     const renditions = audio.desc.audio.renditions;
-    const preferred = PREFERRED_LANGUAGE.toLowerCase();
 
     // DEFAULT=YES decides what actually comes out of the speakers, because
     // hls.js starts on the default rendition. Index 0 is whichever track the
     // provider happened to list first, which has nothing to do with the film's
     // language: on Devara (811941), a Telugu original, Castle's track 0 is
     // Kannada. Honour PREFERRED_AUDIO_LANGUAGE and fall back to 0.
-    let defaultIndex = renditions.findIndex((r) =>
-        String(r.name || '').toLowerCase() === preferred
-        || String(r.language || '').toLowerCase().startsWith(preferred.slice(0, 3)));
-    if (defaultIndex < 0) defaultIndex = 0;
+    const defaultIndex = defaultAudioIndex(renditions);
 
     const lines = ['#EXTM3U', '#EXT-X-VERSION:3'];
     renditions.forEach((r, i) => {
+        if (opts.castSingleAudio && i !== defaultIndex) return;
         // Decide local vs remote from the upstream, not the wrapper. A
         // rendition that arrived already proxied is re-wrapped once, carrying
         // the wrapper's headers when the description has none.
@@ -750,7 +761,7 @@ function buildMaster(plan, serverUrl, videoCodec, ptsOffset = 0, audioCodec = nu
  * codec probe). Listing is cheap; only the pairing the viewer actually picks
  * pays this.
  */
-async function realisePlan(plan, serverUrl) {
+async function realisePlan(plan, serverUrl, opts = {}) {
     if (!plan) return null;
     // Both probes hit the network; they are independent, so run them together.
     // The audio side reads the FIRST rendition: all of Castle's tracks are
@@ -795,7 +806,8 @@ async function realisePlan(plan, serverUrl) {
         + `delta=${plan.delta.toFixed(1)}s codec=${codec || DEFAULT_VIDEO_CODEC} `
         + `vpts=${videoPts} apts=${audioPts} auto=${auto} nudge=${nudge} `
         + `ptsOffset=${ptsOffset}`);
-    const playlist = buildMaster(plan, serverUrl, codec, ptsOffset, audioCodec);
+    const playlist = buildMaster(plan, serverUrl, codec, ptsOffset, audioCodec,
+        { castSingleAudio: Boolean(opts.castSingleAudio) });
     return {
         playlist,
         codecs: masterCodecs(playlist),
@@ -880,6 +892,7 @@ function describePlansAsStreams(plans, serverUrl) {
 }
 
 module.exports.buildMaster = buildMaster;
+module.exports.defaultAudioIndex = defaultAudioIndex;
 module.exports.realisePlan = realisePlan;
 module.exports.masterCodecs = masterCodecs;
 module.exports.planId = planId;

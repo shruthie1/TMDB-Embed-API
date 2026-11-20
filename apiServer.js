@@ -699,6 +699,10 @@ registerHybridRoutes(app);
 registerRebaseRoute(app);
 // Pair a viewer-chosen video source with a viewer-chosen audio source.
 registerPairRoute(app);
+// Cast to a TV through Web Video Caster: long-lived single-audio masters.
+require('./lib/media/castRoutes').registerCastRoutes(app);
+// The Android app's resolver override config (routes/resolve-config.json).
+require('./routes/resolveConfig').registerResolveConfigRoute(app);
 
 // The absolute base a player should call back on. Child URLs inside a hybrid
 // master must be absolute, because hls.js resolves them against the master's
