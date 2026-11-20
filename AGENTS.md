@@ -242,8 +242,10 @@ largest discard 2569831 bytes
 ```
 
 Ruled out, do NOT re-tread:
-- `pipeUpstream` already destroys the upstream body on client close — not a
-  teardown leak. A body that drained cleanly must NOT be destroyed or the
+- CORRECTED 2026-11-20: destroying a node-fetch v2 body does NOT free its
+  socket (it is a PassThrough; the real response just pauses). `discardBody`
+  now aborts the request first, and `pipeUpstream` uses it on client hang-up.
+  Prod before: `[pool] active=16 queued=0 free=0` for 8h with no viewers. A body that drained cleanly must NOT be destroyed or the
   keep-alive socket never returns to the pool.
 - The segment cache is URL-keyed, so it correctly never serves ranged mp4s.
 - The proxy is NOT a throughput bottleneck for HLS segments. Same cold segments:
@@ -343,6 +345,7 @@ survival of the fleet outranks this app: never restart the fleet to fix it.
 | Env | Default | Effect |
 |---|---|---|
 | `FIRST_ANSWER_GRACE_MS` | 400 | With `PRIMARY_PROVIDERS` set, once a preferred-language stream exists the rest get this long, then the answer goes out with `partial: true` and they finish in the background. No Telugu stream yet: it still waits for the primaries. |
+| `PRIMARY_PROVIDERS` | unset | Recommended `castletv,netmirror` (not set on the VM as of 2026-11-20). Unset = wait for every provider. One prod call (628241, 2026-11-20): Castle Telugu at +0.8s, NetMirror 7.5s, mapple 16.0s with 0 streams, answer 16.5s. The web follows a `partial: true` answer with one `?full=1` call. |
 | `PROXY_RATE_LIMIT_PER_MIN` | 600 | Per IP, shared by /m3u8-proxy, /ts-proxy, /sub-proxy. 0 = off. |
 | `SHUTDOWN_GRACE_MS` | 8000 | SIGTERM/SIGINT drain. PM2's default kill_timeout is 1600ms, so set `--kill-timeout 10000` on the app to use it. |
 | `CASTLE_DEMUX_FETCH_TIMEOUT_MS` | 8000 | Castle playlist/probe fetch on the /api/streams path. |
