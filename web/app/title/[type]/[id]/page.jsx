@@ -1,12 +1,12 @@
 'use client';
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { fetchTitle, fetchTitleFull, poster } from '../../../../lib/api';
 import { posterSources } from '../../../../lib/posterSources';
 import Player from '../../../../components/Player';
 import ErrorBoundary from '../../../../components/ErrorBoundary';
 import CastRow, { CastRowSkeleton } from '../../../../components/CastRow';
-import EpisodeList from '../../../../components/EpisodeList';
+import EpisodeList, { EpisodeListSkeleton } from '../../../../components/EpisodeList';
 import { Row } from '../../../../components/Row';
 import { Button, Badge, Skeleton, Toast } from '../../../../components/ui';
 import { getProgress, getNextUp } from '../../../../lib/progress';
@@ -14,8 +14,12 @@ import { inList, toggleList } from '../../../../lib/list';
 import { prewarmStreams } from '../../../../lib/backend';
 import { languageName } from '../../../../lib/subtitles';
 import Icon from '../../../../components/Icon';
-import TitleSkeleton from '../../../../components/TitleSkeleton';
+import { HeroInnerSkeleton, FactsSkeleton } from '../../../../components/TitleSkeleton';
+import HeroBackdrop from '../../../../components/HeroBackdrop';
 import ErrorScreen from '../../../../components/ErrorScreen';
+
+// Measures before paint in the browser; useLayoutEffect warns during SSR.
+const useBrowserLayoutEffect = typeof window !== 'undefined' ? useLayoutEffect : useEffect;
 
 function runtime(min) {
   if (!min) return null;
@@ -26,17 +30,28 @@ function runtime(min) {
 // fetchpriority puts the poster ahead of the rows below the fold; the shimmer
 // covers the wait so the box is never a flat dark tile.
 function HeroPoster({ title }) {
-  // Chosen once per poster: the cache check must not flip mid-load.
-  const [sources] = useState(() => posterSources(title));
+  // Chosen once per title: the cache check must not flip mid-load, and the
+  // full record's poster url must not remount a poster that already shows.
+  const [sources, setSources] = useState(() => posterSources(title));
   const [n, setN] = useState(0);
   const [loading, setLoading] = useState(true);
   const src = sources[n];
   // A cached image can finish before React attaches onLoad.
   const ref = useCallback(img => { if (img?.complete && img.naturalWidth) setLoading(false); }, []);
   // Last source failed too: drop the img so no broken-image icon shows.
-  const onError = () => { setN(n + 1); if (n + 1 >= sources.length) setLoading(false); };
+  // Every source failed: try any the full record added before giving up.
+  const onError = () => {
+    if (n + 1 >= sources.length) {
+      const extra = posterSources(title).filter(u => !sources.includes(u));
+      if (extra.length) setSources([...sources, ...extra]);
+      else setLoading(false);
+    }
+    setN(n + 1);
+  };
+  // No .enter fade: the poster replaces a skeleton box, and a fade from 0
+  // read as a flash on arrival.
   return (
-    <div className={`hero-poster enter${loading ? ' loading' : ''}`}>
+    <div className={`hero-poster${loading ? ' loading' : ''}`}>
       {src && (
         <img key={src} ref={ref} src={src} alt="" width="342" height="513" decoding="async"
              fetchpriority="high" onLoad={() => setLoading(false)} onError={onError} />
@@ -54,6 +69,10 @@ export default function TitlePage() {
   const [full, setFull] = useState(false);
   const [similar, setSimilar] = useState(undefined);
   const [overviewOpen, setOverviewOpen] = useState(false);
+  // Desktop/TV clamp the synopsis to its reserved three lines; Read more only
+  // shows when that clamp actually hides text.
+  const [overviewClamped, setOverviewClamped] = useState(false);
+  const overviewRef = useRef(null);
   const [play, setPlay] = useState(null);      // {season, episode, startAt} | null
   const [resume, setResume] = useState(null);
   const [saved, setSaved] = useState(false);
@@ -132,12 +151,54 @@ export default function TitlePage() {
     setTimeout(() => setToast(null), 2200);
   }, [t]);
 
+  useBrowserLayoutEffect(() => {
+    const el = overviewRef.current;
+    if (!el) return undefined;
+    const check = () => {
+      if (!el.classList.contains('expanded')) setOverviewClamped(el.scrollHeight > el.clientHeight + 1);
+    };
+    check();
+    window.addEventListener('resize', check);
+    return () => window.removeEventListener('resize', check);
+  }, [t?.overview]);
+
   if (!t && loadError) return <ErrorScreen error={loadError} onRetry={() => setAttempt(n => n + 1)} />;
-  if (!t) return <TitleSkeleton />;
 
   // What the Play button does, and what it should say. For a series this is
   // an episode; for a film, a position. Falls back to S1E1 for a new show.
   const isTv = type === 'tv';
+  const backButton = (
+    <button
+      type="button"
+      className="detail-back focusable"
+      data-focus=""
+      onClick={() => router.back()}
+      aria-label="Go back"
+    >
+      <Icon name="back" size={16} />
+      <span>Back</span>
+    </button>
+  );
+
+  // Loading: the same article, hero and backdrop element the loaded page
+  // uses, so React keeps them mounted when the data lands. A separate
+  // skeleton tree unmounted the backdrop and repainted it from black.
+  if (!t) {
+    return (
+      <article className="detail title-skeleton" aria-busy="true" aria-label="Loading title">
+        {backButton}
+        <div className="hero">
+          <HeroBackdrop path={null} />
+          <HeroInnerSkeleton />
+        </div>
+        {isTv && <EpisodeListSkeleton />}
+        <CastRowSkeleton />
+        <Row label="More like this" titles={[]} loading />
+        <FactsSkeleton />
+      </article>
+    );
+  }
+
   const playTarget = isTv
     ? { season: resume?.season ?? 1, episode: resume?.episode ?? 1,
         startAt: resume?.resume ? resume.positionSec : 0 }
@@ -152,7 +213,6 @@ export default function TitlePage() {
     // made the label wrap on a phone.
     : (resume ? 'Resume' : 'Play');
 
-  const bg = t.backdrop ? poster(t.backdrop, 'w1280') : null;
   const pos = t.poster ? poster(t.poster, 'w342') : null;
   const meta = [
     t.year,
@@ -162,26 +222,20 @@ export default function TitlePage() {
 
   return (
     <article className="detail">
-      <button
-        type="button"
-        className="detail-back focusable"
-        data-focus=""
-        onClick={() => router.back()}
-        aria-label="Go back"
-      >
-        <Icon name="back" size={16} />
-        <span>Back</span>
-      </button>
+      {backButton}
       <div className="hero">
-        {bg && <div className="hero-art page-backdrop" aria-hidden="true"
-                    style={{ '--bg-lg': `url(${bg})`, '--bg-sm': `url(${poster(t.backdrop, 'w780')})` }} />}
+        <HeroBackdrop path={t.backdrop || null} />
         <div className="hero-inner">
           {pos && (
-            <HeroPoster key={pos} title={t} />
+            <HeroPoster key={`${type}/${id}`} title={t} />
           )}
           <div className="hero-text">
             <h1 className="detail-title">{t.title}</h1>
-            {t.tagline && <p className="tagline">{t.tagline}</p>}
+            {/* Always rendered: the line is reserved on desktop/TV so the
+                tagline, which only the full record carries, lands in place. */}
+            <p className="tagline">
+              {t.tagline || (!full && <span className="skel skel-line" style={{ width: '32%' }} />)}
+            </p>
 
             <div className="detail-meta">
               {meta.map((m, i) => <span key={i}>{m}</span>)}
@@ -191,7 +245,7 @@ export default function TitlePage() {
 
             {t.overview && (
               <>
-                <p className={`detail-overview${overviewOpen ? ' expanded' : ''}`}>
+                <p ref={overviewRef} className={`detail-overview${overviewOpen ? ' expanded' : ''}`}>
                   {t.overview}
                 </p>
                 <button
@@ -199,6 +253,7 @@ export default function TitlePage() {
                   className="detail-overview-toggle focusable"
                   data-focus=""
                   aria-expanded={overviewOpen}
+                  data-clamped={overviewClamped || overviewOpen ? '' : undefined}
                   onClick={() => setOverviewOpen(open => !open)}
                 >
                   {overviewOpen ? 'Show less' : 'Read more'}
@@ -229,7 +284,8 @@ export default function TitlePage() {
         </div>
       </div>
 
-      {type === 'tv' && full && (
+      {isTv && !full && <EpisodeListSkeleton />}
+      {isTv && full && (
         <EpisodeList
           tmdbId={tmdbId}
           initialSeason={resume?.season}
@@ -248,8 +304,9 @@ export default function TitlePage() {
         <Row label="More like this" titles={similar || []} loading={similar === undefined} />
       )}
 
+      {!full && <FactsSkeleton />}
       {full && (
-        <div className="facts enter">
+        <div className="facts">
           {t.genres?.length > 0 && (
             <div className="fact"><span className="k">Genres</span><span className="v">{t.genres.join(' · ')}</span></div>
           )}

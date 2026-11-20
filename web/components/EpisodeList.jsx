@@ -41,6 +41,40 @@ function Episode({ ep, tmdbId, onPlay, isNext }) {
   );
 }
 
+function EpisodeRowsSkeleton() {
+  return Array.from({ length: 4 }, (_, i) => (
+    <div className="ep" key={i} aria-hidden="true">
+      <Skeleton className="ep-still" />
+      <div className="ep-body">
+        <Skeleton variant="text" width="42%" />
+        <Skeleton variant="text" width="24%" style={{ marginTop: 8, height: '.62em' }} />
+        <Skeleton variant="text" width="92%" style={{ marginTop: 10, height: '.62em' }} />
+      </div>
+    </div>
+  ));
+}
+
+/**
+ * Holds the Episodes section's place until the full record (and its season
+ * list) arrives. Without it the section mounted late and pushed Cast and the
+ * rows below down by 786px on TV, 951px on a phone (measured 2026-11-20,
+ * tv/1399). Same section, label, a season-tab row and the same four rows the
+ * loaded list shows while its first season loads.
+ */
+export function EpisodeListSkeleton() {
+  return (
+    <section className="row-sec" aria-hidden="true">
+      <div className="row-head"><h2 className="row-label">Episodes</h2></div>
+      <div className="season-tabs">
+        {['6em', '6em', '6em'].map((w, i) => (
+          <span key={i} className="chip skel" style={{ width: w }}>&nbsp;</span>
+        ))}
+      </div>
+      <div className="ep-list"><EpisodeRowsSkeleton /></div>
+    </section>
+  );
+}
+
 export default function EpisodeList({ tmdbId, seasons = [], onPlay,
                                       initialSeason, nextUp }) {
   // Open on the season you were last watching, not always season 1.
@@ -85,16 +119,7 @@ export default function EpisodeList({ tmdbId, seasons = [], onPlay,
 
       <div className="ep-list" data-focus-group="">
         {episodes === null
-          ? Array.from({ length: 4 }, (_, i) => (
-              <div className="ep" key={i} aria-hidden="true">
-                <Skeleton className="ep-still" />
-                <div className="ep-body">
-                  <Skeleton variant="text" width="42%" />
-                  <Skeleton variant="text" width="24%" style={{ marginTop: 8, height: '.62em' }} />
-                  <Skeleton variant="text" width="92%" style={{ marginTop: 10, height: '.62em' }} />
-                </div>
-              </div>
-            ))
+          ? <EpisodeRowsSkeleton />
           : episodes.map(ep => (
               <Episode key={`${ep.season}-${ep.episode}`} ep={ep} tmdbId={tmdbId}
                        onPlay={onPlay}

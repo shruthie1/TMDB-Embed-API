@@ -2562,6 +2562,28 @@ body:not(:has(.page-backdrop)) .topbar::after{opacity:1}
   .hero-actions .btn.primary{flex:1 1 100%}
 }
 
+/* ── Detail page: nothing moves while it loads (2026-11-20) ────────────────
+   Desktop and TV reserve every hero line the skeleton shows: one tagline
+   line (only the full record has it), three synopsis lines (clamped, Read
+   more when the clamp hides text) and the Read more line. Before this the
+   text above the buttons jumped 35-73px on TV when the data and tagline
+   landed. Phones keep their own layout above. */
+@media (min-width:560px){
+  .hero-text .tagline{line-height:1.4;min-height:1.4em}
+  .hero-text .detail-overview{
+    display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden;
+    min-height:calc(3em * 1.62);
+  }
+  .hero-text .detail-overview.expanded{display:block;-webkit-line-clamp:unset}
+  html[data-tv="true"] .hero-text .detail-overview{min-height:calc(3em * 1.5)}
+  .hero-text .detail-overview-toggle{display:inline-block;visibility:hidden}
+  .hero-text .detail-overview-toggle[data-clamped]{visibility:visible}
+}
+/* The backdrop and skeleton blocks stay mounted from skeleton to page, so no
+   arrival fade: a fade from 0 flashed the hero dark and popped the cards in
+   one by one. */
+.detail .hero-art:not(.skel),.detail .enter:not(.skel){animation:none}
+
 /* ── Avatars ─────────────────────────────────────────────────────────────── */
 .person-ph,.person-hero-ph{background:var(--color-surface-solid);border-color:var(--color-border)}
 .person-initial{font-family:var(--font-display);font-weight:var(--weight-semibold);color:var(--color-text-muted)}
