@@ -144,6 +144,21 @@ object Ranking {
         return applyPin(rank(sources.filter { it.id !in ids } + extra, preferred), pin, preferred, manual)
     }
 
+    /**
+     * A9: rows of the ?full=1 answer join the list on screen. A row already
+     * shown (same provider and url) stays as it is, so a source that started
+     * keeps its id; new rows get ids that cannot collide; then one re-rank.
+     */
+    fun mergeMore(sources: List<Source>, more: StreamsResponse, preferred: String, codecs: CodecSupport, pin: String? = null, manual: Boolean = false): List<Source> {
+        val seen = sources.map { it.provider.lowercase() to it.url }.toHashSet()
+        val ids = sources.map { it.id }.toHashSet()
+        val fresh = more.streams.mapIndexedNotNull { i, s -> toSource(s, i, codecs) }
+            .filter { seen.add(it.provider.lowercase() to it.url) }
+            .map { s -> var id = "${s.id}-full"; var n = 2; while (id in ids) id = "${s.id}-full${n++}"; ids += id; s.copy(id = id) }
+        if (fresh.isEmpty()) return sources
+        return merge(sources, fresh, preferred, pin, manual)
+    }
+
     const val VAPLAYER = "VaPlayer"
 
     /** Server menu labels: "CastleTV 1", "CastleTV 2" when a name repeats. */

@@ -23,8 +23,8 @@ class OnDeviceResolver(
     private val vaplayer: VaplayerResolver,
     /** imdb id for a title; default asks /api/title/:type/:id/full (cached 1 h). */
     private val imdbFor: suspend (type: String, id: Long) -> String? = { t, i -> api?.titleFull(if (t == "tv") "tv" else "movie", i)?.imdbId },
-    /** Search title and year for Castle; default asks /api/title/:type/:id/full (cached 1 h). */
-    private val titleFor: suspend (type: String, id: Long) -> Pair<String, Int?>? = { t, i -> api?.titleFull(if (t == "tv") "tv" else "movie", i)?.let { it.title to it.year } },
+    /** Search title, year and original title for Castle; default asks /api/title/:type/:id/full (cached 1 h). */
+    private val titleFor: suspend (type: String, id: Long) -> Triple<String, Int?, String?>? = { t, i -> api?.titleFull(if (t == "tv") "tv" else "movie", i)?.let { Triple(it.title, it.year, it.originalTitle) } },
     private val castle: CastleResolver? = null,
     private val multimovies: MultiMoviesResolver? = null,
     private val now: () -> Long = System::currentTimeMillis,
@@ -76,8 +76,8 @@ class OnDeviceResolver(
                     val r = withTimeoutOrNull(CASTLE_BUDGET_MS) {
                         // The catalog title (with year) when it answers quickly; else the title on screen.
                         val t = withTimeoutOrNull(TITLE_WAIT_MS) { runCatching { titleFor(type, id) }.getOrNull() }
-                            ?.takeIf { it.first.isNotBlank() } ?: title?.let { it to null }
-                        val out = if (t == null) null else c.resolve(type, t.first, t.second, season, episode, preferred)
+                            ?.takeIf { it.first.isNotBlank() } ?: title?.let { Triple(it, null, null) }
+                        val out = if (t == null) null else c.resolve(type, t.first, t.second, season, episode, preferred, listOfNotNull(t.third))
                         timedOut = false
                         out
                     }

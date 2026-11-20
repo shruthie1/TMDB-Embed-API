@@ -65,6 +65,7 @@ class Api(
     private val vmBase: String = VM,
     private val vm: VmHealth? = null,
     private val streamsCallTimeoutMs: Long = STREAMS_CALL_TIMEOUT_MS,
+    private val streamsFullTimeoutMs: Long = STREAMS_FULL_TIMEOUT_MS,
 ) {
     /** False while the VM breaker is open (paused after failures): no VM call would go out. */
     val vmUp: Boolean get() = vm?.allow() != false
@@ -78,6 +79,14 @@ class Api(
             .connectTimeout(VM_CONNECT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
             .readTimeout(streamsCallTimeoutMs, TimeUnit.MILLISECONDS)
             .callTimeout(streamsCallTimeoutMs, TimeUnit.MILLISECONDS)
+            .build()
+    }
+    /** The ?full=1 follow-up waits for every provider on the VM (web uses 60s). */
+    private val fullClient: OkHttpClient by lazy {
+        client.newBuilder()
+            .connectTimeout(VM_CONNECT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            .readTimeout(streamsFullTimeoutMs, TimeUnit.MILLISECONDS)
+            .callTimeout(streamsFullTimeoutMs, TimeUnit.MILLISECONDS)
             .build()
     }
     private val statusClient: OkHttpClient by lazy {
@@ -96,6 +105,8 @@ class Api(
         const val VM_CONNECT_TIMEOUT_MS = 3_000L
         /** Was readTimeout 120s + callTimeout 125s with 2 retries. */
         const val STREAMS_CALL_TIMEOUT_MS = 22_000L
+        /** A9 follow-up, same as web/lib/backend.js. */
+        const val STREAMS_FULL_TIMEOUT_MS = 60_000L
         const val IMG = "https://image.tmdb.org/t/p"
         val json = Json { ignoreUnknownKeys = true; coerceInputValues = true; explicitNulls = false; isLenient = true }
 
@@ -234,14 +245,39 @@ class Api(
         }
     }
 
-    suspend fun streams(type: String, id: Long, season: Int = 0, episode: Int = 0, refresh: Boolean = false): StreamsResponse {
+    private fun streamsPath(type: String, id: Long, season: Int, episode: Int, refresh: Boolean, full: Boolean): String {
         val kind = if (type == "tv" || type == "series") "series" else "movie"
         val qs = buildList {
             if (season > 0) add("season=$season")
             if (episode > 0) add("episode=$episode")
             if (refresh) add("refresh=1")
+            if (full) add("full=1")
         }.joinToString("&")
-        val path = "/api/streams/$kind/$id${if (qs.isNotEmpty()) "?$qs" else ""}"
+        return "/api/streams/$kind/$id${if (qs.isNotEmpty()) "?$qs" else ""}"
+    }
+
+    /**
+     * A9: the one ?full=1 follow-up after a partial answer. The VM joins the
+     * provider calls still running. Optional: null on any failure, never
+     * throws an IOException, and never moves the breaker (the first call
+     * already proved the VM up; a slow full answer is not a VM fault).
+     */
+    suspend fun streamsFull(type: String, id: Long, season: Int = 0, episode: Int = 0): StreamsResponse? {
+        if (vm?.allow() == false) return null
+        val path = streamsPath(type, id, season, episode, refresh = false, full = true)
+        return try {
+            json.decodeFromString(StreamsResponse.serializer(), call(fullClient, noStore(vmBase + path)))
+        } catch (e: IOException) {
+            android.util.Log.i("Chitram", "[vm] full follow-up failed: ${e.javaClass.simpleName} ${e.message}")
+            null
+        } catch (e: kotlinx.serialization.SerializationException) {
+            android.util.Log.i("Chitram", "[vm] full follow-up unreadable: ${e.message?.take(80)}")
+            null
+        }
+    }
+
+    suspend fun streams(type: String, id: Long, season: Int = 0, episode: Int = 0, refresh: Boolean = false): StreamsResponse {
+        val path = streamsPath(type, id, season, episode, refresh, full = false)
         val h = vm
         if (h != null && !h.allow()) throw VmDown("VM paused for ${(h.openUntil - System.currentTimeMillis()) / 1000}s")
         if (h != null && h.halfOpen && !vmAnswers()) {

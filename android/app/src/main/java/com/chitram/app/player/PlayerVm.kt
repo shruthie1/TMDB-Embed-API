@@ -148,6 +148,8 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     private var deviceNames: List<String> = emptyList()
     /** The VM /api/streams call of this start (null when the breaker skipped it). */
     private var vmJob: Deferred<List<Source>>? = null
+    /** A9: the one ?full=1 follow-up after a partial VM answer. */
+    private var fullJob: Job? = null
     /** Device rows hidden behind a VM row of the same provider, by lowercase provider. */
     private var twins: Map<String, Source> = emptyMap()
     /** Providers whose VM row already fell back to the device once in this title. */
@@ -307,9 +309,14 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             }
             deviceJobs = device
             vmJob?.cancel()
+            fullJob?.cancel()
+            // A9: set when the VM answered partial or a provider threw; read after the answer lands.
+            val wantsFull = java.util.concurrent.atomic.AtomicBoolean(false)
             // The VM call lives in the supervisor scope: its failure must not cancel the start.
             val vm = if (vmDown) null else viewModelScope.async {
-                Ranking.fromResponse(g.api.streams(r.type, r.id, r.season, r.episode, refresh), preferred, g.codecs, pin, manual = manualPin)
+                val resp = g.api.streams(r.type, r.id, r.season, r.episode, refresh)
+                wantsFull.set(resp.wantsFull)
+                Ranking.fromResponse(resp, preferred, g.codecs, pin, manual = manualPin)
             }
             vmJob = vm
             if (vm == null) android.util.Log.i("Chitram", "[vm] paused: starting from device rows only")
@@ -328,7 +335,8 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             if (firstListSize == 0) firstListSize = list.size
             listReady = true
             lateJobs = device.filter { !it.isCompleted }.map { d -> viewModelScope.launch { joinLate(r, d, preferred, pin, manualPin) } } +
-                listOfNotNull(vm?.takeIf { first.backendPending }?.let { j -> viewModelScope.launch { joinVm(r, j, preferred, pin, manualPin, t0) } })
+                listOfNotNull(vm?.takeIf { first.backendPending }?.let { j -> viewModelScope.launch { joinVm(r, j, preferred, pin, manualPin, t0, wantsFull) } })
+            if (!first.backendPending && backendError == null && wantsFull.get()) followFull(r, preferred, pin, manualPin)
             if (list.isEmpty() && isOffline()) {
                 pendingResolveMs = startMs
                 goOffline()
@@ -365,7 +373,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     }
 
     /** VM rows that came after the film started from a device row: join without interrupting. */
-    private suspend fun joinVm(r: PlayRequest, j: Deferred<List<Source>>, preferred: String, pin: String?, manualPin: Boolean, t0: Long) {
+    private suspend fun joinVm(r: PlayRequest, j: Deferred<List<Source>>, preferred: String, pin: String?, manualPin: Boolean, t0: Long, wantsFull: java.util.concurrent.atomic.AtomicBoolean) {
         val rows = try { j.await() } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException && !j.isCancelled) throw e
             android.util.Log.i("Chitram", "[vm] late answer failed: ${e.message}")
@@ -377,6 +385,27 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         putSources(Ranking.merge(sources, rows, preferred, pin, manualPin))
         android.util.Log.i("Chitram", "[vm] ${rows.size} row(s) joined late")
         if (phase is Phase.Failed && rows.isNotEmpty()) { play(sources.first(), g.progress.resumeMs(r.type, r.id, r.season, r.episode)); notice = "" }
+        if (wantsFull.get()) followFull(r, preferred, pin, manualPin)
+    }
+
+    /**
+     * A9: the VM answered with only its ready rows. One ?full=1 call (60s) in the
+     * background, as web/lib/backend.js does; new rows join and the list is
+     * re-ranked in place. The playing source is never interrupted. A timeout or
+     * a down VM leaves the first list as it is.
+     */
+    private fun followFull(r: PlayRequest, preferred: String, pin: String?, manualPin: Boolean) {
+        fullJob?.cancel()
+        val t0 = System.currentTimeMillis()
+        fullJob = viewModelScope.launch {
+            val more = g.api.streamsFull(r.type, r.id, r.season, r.episode)
+            if (request != r) return@launch
+            if (more == null) { android.util.Log.i("Chitram", "[vm] full follow-up gave nothing; first list stands"); return@launch }
+            val before = sources.size
+            putSources(Ranking.mergeMore(sources, more, preferred, g.codecs, pin, manualPin))
+            android.util.Log.i("Chitram", "[vm] full follow-up: ${sources.size - before} new row(s) of ${more.streams.size} in ${System.currentTimeMillis() - t0}ms")
+            if (phase is Phase.Failed && sources.isNotEmpty()) { play(sources.first(), g.progress.resumeMs(r.type, r.id, r.season, r.episode)); notice = "" }
+        }
     }
 
     private suspend fun joinLate(r: PlayRequest, d: Deferred<Source?>, preferred: String, pin: String?, manualPin: Boolean) {
@@ -771,6 +800,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         lateJobs.forEach { it.cancel() }
         deviceJobs.forEach { it.cancel() }
         vmJob?.cancel()
+        fullJob?.cancel()
         guardJob?.cancel()
         subsJob?.cancel()
         pendingResolveMs = null

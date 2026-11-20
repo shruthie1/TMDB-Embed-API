@@ -270,7 +270,8 @@ class V123Test {
         val rows = listOf("RRR (Hindi)", "Pushpa 2 - The Rule", "Mirai")
         assertEquals("RRR (Hindi)", TitleMatch.find(rows, "RRR") { it })
         assertEquals("Pushpa 2 - The Rule", TitleMatch.find(rows, "Pushpa 2: The Rule") { it })
-        assertNull(TitleMatch.find(rows, "Mirayi") { it })
+        // 1.2.4: the fold pass closes the Mirayi/Mirai gap (V124Test.mirayiFindsCastleMirai).
+        assertEquals("Mirai", TitleMatch.find(rows, "Mirayi") { it })
         assertNull(TitleMatch.find(listOf("Kalki 2898 AD Part 2"), "Kalki 2898 AD Part 1") { it })
     }
 

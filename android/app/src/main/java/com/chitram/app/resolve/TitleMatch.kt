@@ -93,8 +93,49 @@ object TitleMatch {
         return out
     }
 
-    /** The row that is the same title, or null (findTitleMatch). */
-    fun <T> find(rows: List<T>, title: String, getTitle: (T) -> String): T? {
+    /** Title with every space and punctuation mark gone: "Ala Vaikunthapurramuloo" = "Alavaikunthapurramuloo". */
+    private fun compact(v: String) = normalize(stripLanguageTag(v)).replace(" ", "")
+
+    /**
+     * Telugu transliteration fold on top of [compact]: a glide y before i drops
+     * ("Mirayi" = "Mirai") and doubled vowels collapse ("Baahubali" = "Bahubali").
+     * Narrow on purpose: "Maya" stays "maya", never "ma".
+     */
+    private fun fold(v: String) = compact(v).replace(Regex("([aeiou])y(i)"), "$1$2").replace(Regex("([aeiou])\\1+"), "$1")
+
+    /**
+     * The row that is the same title, or null. First the strict server passes
+     * on the title ([strict], findTitleMatch). Then, only among rows whose year
+     * is within one of [year] (when both are known): the [alternates] (original
+     * title) through the strict passes, then a [compact] compare, then a [fold]
+     * compare, for the title and each alternate. Shorter than 4 letters never
+     * matches loosely.
+     */
+    fun <T> find(
+        rows: List<T>,
+        title: String,
+        alternates: List<String> = emptyList(),
+        year: Int? = null,
+        getYear: (T) -> Int? = { null },
+        getTitle: (T) -> String,
+    ): T? {
+        strict(rows, title, getTitle)?.let { return it }
+        val near = rows.filter { r -> val y = getYear(r); year == null || y == null || kotlin.math.abs(y - year) <= 1 }
+        if (near.isEmpty()) return null
+        val names = (listOf(title) + alternates).map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        for (n in names.drop(1)) strict(near, n, getTitle)?.let { return it }
+        for (key in listOf(::compact, ::fold)) {
+            for (n in names) {
+                val want = key(n)
+                if (want.length < 4) continue
+                near.firstOrNull { key(getTitle(it)) == want }?.let { return it }
+            }
+        }
+        return null
+    }
+
+    /** The server's passes (findTitleMatch). */
+    private fun <T> strict(rows: List<T>, title: String, getTitle: (T) -> String): T? {
         val want = normalize(title)
         if (rows.isEmpty() || want.isEmpty()) return null
         val wantLoose = loose(title)

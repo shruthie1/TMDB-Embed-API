@@ -42,6 +42,8 @@ data class TitleFull(
     val cast: List<String> = emptyList(),
     val runtimeMin: Int? = null,
     val originalLang: String? = null,
+    /** TMDB original_title when the API sends it; Castle tries it after `title`. */
+    val originalTitle: String? = null,
     val tagline: String? = null,
     val seasons: Int? = null,
     val seasonList: List<SeasonInfo> = emptyList(),
@@ -117,4 +119,12 @@ data class StreamsResponse(
     val partial: Boolean = false,
     val providerTimings: Map<String, Long?> = emptyMap(), // a provider that timed out reports null
     val streams: List<RawStream> = emptyList(),
-)
+    /** Providers that threw (strings today; any shape is kept so a change never breaks the parse). */
+    val providerErrors: List<kotlinx.serialization.json.JsonElement> = emptyList(),
+) {
+    /**
+     * A9: the VM sent only the ready rows (`partial`, PRIMARY_PROVIDERS) or a
+     * provider threw. Ask once more with ?full=1, as web/lib/backend.js does.
+     */
+    val wantsFull: Boolean get() = partial || providerErrors.isNotEmpty()
+}

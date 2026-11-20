@@ -43,18 +43,25 @@ class CastleResolver(
     private val http = client.newBuilder().callTimeout(STEP_TIMEOUT_MS, TimeUnit.MILLISECONDS).build()
 
     /** null: Castle has no confident match. Throws when the chain failed. */
-    suspend fun resolve(type: String, title: String, year: Int?, season: Int, episode: Int, preferred: String): Resolved? {
+    suspend fun resolve(type: String, title: String, year: Int?, season: Int, episode: Int, preferred: String, alternates: List<String> = emptyList()): Resolved? {
         if (title.isBlank()) return null
         val series = type == "tv" || type == "series"
         val sec = securityKey()
+        // Year guard for films only: a series row can carry a later season's date.
+        val guardYear = if (series) null else year
         var rows: List<Row> = emptyList()
+        var match: Row? = null
+        // Next spelling while rows come back but none is the title: "Mirayi 2025"
+        // returns 30 unrelated rows, "Mirayi" returns Castle's "Mirai" (live, 2026-11-21).
         for (kw in TitleMatch.spellings(title, year)) {
-            rows = rows(search(sec, kw))
-            if (rows.isNotEmpty()) break
+            val got = rows(search(sec, kw))
+            if (got.isEmpty()) continue
+            rows = got
+            match = TitleMatch.find(got, title, alternates, guardYear, { it.year }) { it.title }
+            if (match != null) break
         }
         if (rows.isEmpty()) return null.also { log("no search results for \"$title\"") }
-        val match = TitleMatch.find(rows, title) { it.title }
-            ?: return null.also { log("no confident match for \"$title\" (saw: ${rows.take(6).joinToString(" | ") { it.title }})") }
+        if (match == null) return null.also { log("no confident match for \"$title\" (saw: ${rows.take(6).joinToString(" | ") { it.title }})") }
         var details = unwrap(parse(details(sec, match.id)))
         var activeId = match.id
         val s = season.coerceAtLeast(1)
@@ -143,7 +150,8 @@ class CastleResolver(
         return unwrap(parse(decrypt(cipher(req(url).post(body).build(), "video"), sec)))
     }
 
-    data class Row(val id: String, val title: String)
+    /** `year` from publishTime (epoch ms, UTC); null when absent. */
+    data class Row(val id: String, val title: String, val year: Int? = null)
     data class Hit(val lang: String, val url: String, val quality: String)
     data class Group(val url: String, val languages: List<String>, val quality: String)
 
@@ -195,7 +203,9 @@ class CastleResolver(
         fun rows(plain: String): List<Row> = (unwrap(parse(plain))["rows"] as? JsonArray).orEmpty().mapNotNull { el: JsonElement ->
             val o = el as? JsonObject ?: return@mapNotNull null
             val id = str(o, "id") ?: str(o, "redirectId") ?: str(o, "redirectIdStr") ?: return@mapNotNull null
-            Row(id, str(o, "title") ?: str(o, "name") ?: "")
+            val year = (o["publishTime"] as? JsonPrimitive)?.contentOrNull?.toLongOrNull()?.takeIf { it > 0 }
+                ?.let { ms -> java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC")).apply { timeInMillis = ms }.get(java.util.Calendar.YEAR) }
+            Row(id, str(o, "title") ?: str(o, "name") ?: "", year)
         }
 
         private fun isPreview(url: String) = Regex("""/index_preview_\d+\.m3u8""", RegexOption.IGNORE_CASE).containsMatchIn(url)
