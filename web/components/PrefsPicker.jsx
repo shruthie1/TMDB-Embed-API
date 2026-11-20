@@ -113,14 +113,16 @@ export function PrefsModal({ open, onClose, firstVisit = false }) {
 }
 
 /** Header button plus the dialog; opens once on a first visit, after load. */
-export default function PrefsButton() {
+export default function PrefsButton({ className = 'nav-link nav-search', iconSize = 15, firstVisit = true }) {
   const [open, setOpen] = useState(false);
   const [first, setFirst] = useState(false);
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
     setMounted(true);
-    if (hasPrefs()) return undefined;
+    // Two buttons exist (desktop top bar, TV/phone AppNav); only one may
+    // open the first-visit picker, or it would open twice.
+    if (!firstVisit || hasPrefs()) return undefined;
     // After the page has loaded and painted, so the home page is visible
     // behind the dimmed backdrop rather than replaced by it.
     let t;
@@ -128,14 +130,14 @@ export default function PrefsButton() {
     if (document.readyState === 'complete') show();
     else window.addEventListener('load', show, { once: true });
     return () => { clearTimeout(t); window.removeEventListener('load', show); };
-  }, []);
+  }, [firstVisit]);
 
   return (
     <>
-      <button type="button" className="nav-link nav-search focusable" data-focus=""
+      <button type="button" className={`${className} focusable`} data-focus=""
               aria-label="Your languages" onClick={() => { setFirst(false); setOpen(true); }}>
-        <Icon name="settings" size={15} />
-        <span>Languages</span>
+        <Icon name="settings" size={iconSize} />
+        <span className="app-nav-label">Languages</span>
       </button>
       {/* Portalled to <body>: inside the sticky header it shared the
           header's stacking context (z-index 20), so on a phone the bottom

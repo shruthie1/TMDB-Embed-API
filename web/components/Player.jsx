@@ -20,7 +20,7 @@ import { fatalAction } from '../lib/player/fatalPolicy';
 import useNoPictureGuard from '../lib/player/useNoPictureGuard';
 import { pairSources, listSources as listBackendSources } from '../lib/backend';
 import {
-  useResolve, useHls, useRecovery, useControlVisibility,
+  useResolve, useHls, useRecovery, useControlVisibility, HIDE_MS, HIDE_TV_MS,
   useSubtitles, useEpisodeProgress, useDeviceCapability, useCueOverlay,
   useRotateFullscreen,
   useNetworkStatus,
@@ -625,14 +625,42 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       .catch(() => { /* NetMirror is extra; the list we have stands */ });
     return () => ac.abort(abortReason('netmirror lookup superseded or unmounted'));
   }, [hasStream, title.mediaType, title.tmdbId, season, episode, mergeSources]);
+  // Buffering keeps the bar up, so a stall shows where playback is instead
+  // of a frozen picture with nothing on it.
+  const [stalled, setStalled] = useState(false);
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v || !stream) return undefined;
+    const on = () => setStalled(true);
+    const off = () => setStalled(false);
+    v.addEventListener('waiting', on);
+    v.addEventListener('playing', off);
+    v.addEventListener('emptied', off);
+    return () => {
+      v.removeEventListener('waiting', on);
+      v.removeEventListener('playing', off);
+      v.removeEventListener('emptied', off);
+      setStalled(false);
+    };
+  }, [stream, videoRef]);
   const controls = useControlVisibility({
-    holdOpen: menuOpen || !playing,
+    holdOpen: menuOpen || !playing || stalled,
     surface: videoRef.current?.parentElement ?? null,
+    hideMs: (onTvDevice || tvRemote) ? HIDE_TV_MS : HIDE_MS,
   });
 
   /** The player root — the element that goes fullscreen, and the cue-lift base. */
   const playerRef = useRef(null);
   const revealControls = controls.reveal;
+  // The bar control a remote last stood on: revealing the bar returns there.
+  const lastBarFocus = useRef(null);
+  useEffect(() => {
+    const root = playerRef.current;
+    if (!root) return undefined;
+    const onIn = (e) => { if (e.target.closest?.('.pctl')) lastBarFocus.current = e.target; };
+    root.addEventListener('focusin', onIn);
+    return () => root.removeEventListener('focusin', onIn);
+  });
 
   /**
    * Rotate-to-fullscreen.
@@ -828,7 +856,11 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
           else if (act === 'forward') seekBy(v, MEDIA_SEEK_SECS);
           else if (act === 'toggle') { v.paused ? v.play().catch(() => {}) : v.pause(); }
           else if (act === 'enter-bar') {
-            playerRef.current?.querySelector('.pctl [data-primary]')?.focus({ preventScroll: true });
+            // Back to the control used last, else Play.
+            const last = lastBarFocus.current;
+            const target = last && bar?.contains(last) ? last
+              : playerRef.current?.querySelector('.pctl [data-primary]');
+            target?.focus({ preventScroll: true });
           }
           revealControls();
           e.preventDefault();

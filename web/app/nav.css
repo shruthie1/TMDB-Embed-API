@@ -1,0 +1,92 @@
+/* ── Navigation per device (2026-11-20, owner decision) ────────────────────
+   Desktop: the sticky top bar, unchanged (globals.css .topbar / .nav).
+   TV:      no top bar. A left icon rail that opens to icon + label while
+            focus is inside it (Netflix, Hotstar).
+   Phone:   no top bar. A bottom tab bar.
+   On TV and phone only the wordmark stays at the top, and it scrolls away
+   with the page. Markup: components/Nav.jsx (AppNav). Loaded last. */
+
+:root{--rail-w:0px}
+.app-nav{display:none}
+
+/* ── TV and phone: the top bar becomes a wordmark that scrolls away ── */
+@media (max-width:899px){
+  html:not([data-tv="true"]) .topbar{position:absolute;top:0;left:0;right:0}
+  html:not([data-tv="true"]) .topbar .nav{display:none}
+  html:not([data-tv="true"]) .topbar::before,
+  html:not([data-tv="true"]) .topbar::after{display:none}
+  /* Pages without hero art start below the wordmark; art pages run under it. */
+  html:not([data-tv="true"]) body:not(:has(.page-backdrop)) main{padding-top:var(--header-h)}
+}
+html[data-tv="true"] .topbar{position:absolute;top:0;left:var(--rail-w);right:0;padding-left:var(--space-12)}
+html[data-tv="true"] .topbar .nav{display:none}
+html[data-tv="true"] .topbar::before,html[data-tv="true"] .topbar::after{display:none}
+/* The rail has Home; the wordmark is not a D-pad stop (dpad.js skips
+   pointer-events:none). */
+html[data-tv="true"] .topbar .brand{pointer-events:none}
+html[data-tv="true"] body:not(:has(.page-backdrop)) main{padding-top:var(--header-h)}
+/* Browsers without :has() put every page below the wordmark. */
+@supports not selector(:has(a)){
+  html[data-tv="true"] main{padding-top:var(--header-h)}
+  @media (max-width:899px){ html:not([data-tv="true"]) main{padding-top:var(--header-h)} }
+}
+
+/* ── Phone: bottom tab bar ── */
+@media (max-width:899px){
+  html:not([data-tv="true"]) .app-nav{
+    display:flex;position:fixed;left:0;right:0;bottom:0;z-index:var(--z-bottom-nav);
+    height:calc(var(--tabbar-h) + var(--safe-b));padding:0 0 var(--safe-b);
+    background:var(--glass-bg);border-top:1px solid var(--glass-hairline);
+    -webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);
+  }
+  html:not([data-tv="true"]) .app-nav-item{
+    flex:1 1 0;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:var(--space-1);min-width:0;border:0;background:none;padding:0;
+    font:inherit;font-size:var(--text-xs);color:var(--color-text-muted);
+    transition:color var(--duration-fast) var(--ease-standard);
+  }
+  html:not([data-tv="true"]) .app-nav-item svg{width:22px;height:22px}
+  html:not([data-tv="true"]) .app-nav-item[data-home]{order:-1}
+  html:not([data-tv="true"]) .app-nav-item.on{color:var(--color-white);font-weight:var(--weight-medium)}
+  html:not([data-tv="true"]) .app-nav-item.on svg{stroke-width:2.4}
+  html:not([data-tv="true"]) .app-nav-item.focusable:focus{transform:none}
+}
+
+/* ── TV: left rail ── */
+html[data-tv="true"]{--rail-w:112px;--rail-open-w:340px}
+html[data-tv="true"] main{margin-left:var(--rail-w)}
+/* Hero art still runs to the left edge, under the rail. */
+html[data-tv="true"] .page-backdrop{left:calc(-1 * var(--rail-w))}
+html[data-tv="true"] .app-nav{
+  display:flex;flex-direction:column;justify-content:center;gap:var(--space-2);
+  position:fixed;top:0;bottom:0;left:0;z-index:var(--z-header);
+  width:var(--rail-w);padding:0 var(--space-5);overflow:hidden;
+  background:linear-gradient(to right,rgb(var(--rgb-bg) / .9),rgb(var(--rgb-bg) / .55) 75%,rgb(var(--rgb-bg) / 0));
+  transition:width var(--duration-base) var(--ease-out),box-shadow var(--duration-base) var(--ease-out);
+}
+/* Open while focus is inside. The page behind dims instead of reflowing. */
+html[data-tv="true"] .app-nav:focus-within{
+  width:var(--rail-open-w);
+  background:linear-gradient(to right,rgb(var(--rgb-bg) / .98),rgb(var(--rgb-bg) / .94) 80%,rgb(var(--rgb-bg) / .85));
+  box-shadow:0 0 0 100vmax rgb(var(--rgb-black) / .5);
+}
+html[data-tv="true"] .app-nav-item{
+  display:flex;align-items:center;gap:var(--space-5);flex:none;
+  height:64px;width:100%;padding:0 22px;border:0;border-radius:var(--radius-pill);
+  background:none;font:inherit;font-size:24px;white-space:nowrap;
+  color:var(--color-text-muted);text-align:left;
+}
+html[data-tv="true"] .app-nav-item svg{width:28px;height:28px;flex:none}
+html[data-tv="true"] .app-nav-item.on{color:var(--color-white)}
+html[data-tv="true"] .app-nav-item.on svg{stroke-width:2.4}
+html[data-tv="true"] .app-nav-label{opacity:0;transition:opacity var(--duration-base) var(--ease-out)}
+html[data-tv="true"] .app-nav:focus-within .app-nav-label{opacity:1}
+html[data-tv="true"] .app-nav:focus-within .app-nav-item{color:var(--color-text-secondary)}
+html[data-tv="true"] .app-nav:focus-within .app-nav-item.on{color:var(--color-white)}
+html[data-tv="true"] .app-nav-item:focus{
+  background:#fff;color:var(--ink);outline:none;transform:none;box-shadow:var(--focus-glow);
+}
+html[data-tv="true"] .app-nav .app-nav-item:focus,
+html[data-tv="true"] .app-nav .app-nav-item:focus svg{color:var(--ink)}
+/* Beats the open-rail colours above, which left a white label on white. */
+html[data-tv="true"] .app-nav:focus-within .app-nav-item:focus{color:var(--ink)}

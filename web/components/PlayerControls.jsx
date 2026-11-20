@@ -317,6 +317,7 @@ export default function PlayerControls({
     if (!el || !v()?.duration) return;
     e.preventDefault();
     setScrubbing(true);
+    onReveal?.();
     const frac = fracFrom(e.clientX);
     setDrag(frac * 100);
     try { el.setPointerCapture(e.pointerId); } catch { /* older engines */ }
@@ -330,6 +331,9 @@ export default function PlayerControls({
       seekTo(fracFrom(ev.clientX ?? e.clientX));
       setDrag(null);
       setScrubbing(false);
+      // Restart the idle clock: a drag longer than it would otherwise hide
+      // the bar the moment the finger lifts.
+      onReveal?.();
     };
     el.addEventListener('pointermove', move);
     el.addEventListener('pointerup', up);

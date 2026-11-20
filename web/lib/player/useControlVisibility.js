@@ -1,8 +1,10 @@
 'use client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-/** Long enough to read the time and reach a button without them vanishing. */
-export const HIDE_MS = 8000;
+/** Idle time before the bar fades while playing: mouse/keyboard, then TV.
+ *  A remote is slower to reach for, so the TV bar waits longer. */
+export const HIDE_MS = 4000;
+export const HIDE_TV_MS = 7000;
 
 /**
  * Owns whether the control bar is showing. Nothing else may write it.
@@ -17,14 +19,17 @@ export const HIDE_MS = 8000;
  * @param {boolean} opts.holdOpen  keep the controls up regardless of the timer
  *                                 (a menu is open, or playback is paused)
  * @param {HTMLElement|null} opts.surface  element whose interactions wake them
+ * @param {number}  opts.hideMs    idle time before hiding while playing
  */
-export function useControlVisibility({ holdOpen = false, surface = null } = {}) {
+export function useControlVisibility({ holdOpen = false, surface = null, hideMs = HIDE_MS } = {}) {
   const [visible, setVisible] = useState(true);
   const timer = useRef(null);
   // Read through a ref: the timer is armed inside a closure that would
   // otherwise capture whatever `holdOpen` was when the effect last ran.
   const hold = useRef(holdOpen);
   hold.current = holdOpen;
+  const delay = useRef(hideMs);
+  delay.current = hideMs;
 
   const clear = useCallback(() => clearTimeout(timer.current), []);
 
@@ -32,7 +37,7 @@ export function useControlVisibility({ holdOpen = false, surface = null } = {}) 
     setVisible(true);
     clearTimeout(timer.current);
     if (!hold.current) {
-      timer.current = setTimeout(() => setVisible(false), HIDE_MS);
+      timer.current = setTimeout(() => setVisible(false), delay.current);
     }
   }, []);
 
@@ -41,20 +46,25 @@ export function useControlVisibility({ holdOpen = false, surface = null } = {}) 
     setVisible(false);
   }, []);
 
-  // Wake on real intent only. NOT `mousemove`: it fires constantly and touch
-  // devices synthesise one alongside every tap, which is what raced the tap
-  // handler each time this behaviour broke.
+  // Wake on real intent only. NOT `mousemove`: touch devices synthesise one
+  // alongside every tap, which is what raced the tap handler each time this
+  // behaviour broke. A `pointermove` from a real MOUSE is safe (a finger's
+  // pointermove says pointerType "touch"), and a mouse user expects the bar
+  // when they move it.
   useEffect(() => {
     reveal();
     const el = surface;
     const evts = ['wheel', 'focusin'];
     evts.forEach(n => el?.addEventListener(n, reveal, { passive: true }));
+    const onPointer = (e) => { if (e.pointerType === 'mouse') reveal(); };
+    el?.addEventListener('pointermove', onPointer, { passive: true });
     // Keys go to the document, so a shortcut or a D-pad press on a TV brings
     // the controls back even though they never reach the player element.
     window.addEventListener('keydown', reveal);
     return () => {
       clear();
       evts.forEach(n => el?.removeEventListener(n, reveal));
+      el?.removeEventListener('pointermove', onPointer);
       window.removeEventListener('keydown', reveal);
     };
   }, [surface, reveal, clear]);
@@ -63,7 +73,11 @@ export function useControlVisibility({ holdOpen = false, surface = null } = {}) 
   // restarts the clock rather than hiding immediately.
   useEffect(() => {
     if (holdOpen) { setVisible(true); clear(); return; }
-    timer.current = setTimeout(() => setVisible(false), HIDE_MS);
+    // Clear first: on mount the wake-up effect has already armed a timer, and
+    // overwriting the ref orphaned it, so it hid the bar even after a menu
+    // opened or playback paused.
+    clear();
+    timer.current = setTimeout(() => setVisible(false), delay.current);
     return clear;
   }, [holdOpen, clear]);
 

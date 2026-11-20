@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { act, render } from '@testing-library/react';
-import { useControlVisibility, HIDE_MS } from '../../lib/player/useControlVisibility';
+import { useControlVisibility, HIDE_MS, HIDE_TV_MS } from '../../lib/player/useControlVisibility';
 
 /** Renders the hook and exposes its value for assertions. */
 function harness(props = {}) {
@@ -84,5 +84,41 @@ describe('useControlVisibility', () => {
     const { api } = harness();
     act(() => api.hide());
     expect(api.visible).toBe(false);
+  });
+
+  it('mouse idles out at about 4s; the TV bar waits longer', () => {
+    expect(HIDE_MS).toBeLessThanOrEqual(5000);
+    expect(HIDE_TV_MS).toBeGreaterThan(HIDE_MS);
+    const { api } = harness({ hideMs: HIDE_TV_MS });
+    act(() => { vi.advanceTimersByTime(HIDE_MS + 50); });
+    expect(api.visible).toBe(true);
+    act(() => { vi.advanceTimersByTime(HIDE_TV_MS - HIDE_MS); });
+    expect(api.visible).toBe(false);
+  });
+
+  it('a mouse move reveals; a finger move does not', () => {
+    const surface = document.createElement('div');
+    document.body.appendChild(surface);
+    const { api } = harness({ surface });
+    act(() => { vi.advanceTimersByTime(HIDE_MS + 50); });
+    const move = (pointerType) => {
+      const e = new Event('pointermove');
+      e.pointerType = pointerType;
+      surface.dispatchEvent(e);
+    };
+    act(() => move('touch'));
+    expect(api.visible).toBe(false);
+    act(() => move('mouse'));
+    expect(api.visible).toBe(true);
+    surface.remove();
+  });
+
+  it('the timer is cleared on unmount and while held, so it cannot fire late', () => {
+    const { api, rerender } = harness();
+    act(() => { vi.advanceTimersByTime(HIDE_MS - 100); });
+    act(() => rerender({ holdOpen: true }));   // a menu opened / paused
+    act(() => { vi.advanceTimersByTime(HIDE_MS * 2); });
+    expect(api.visible).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

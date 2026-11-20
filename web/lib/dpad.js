@@ -42,6 +42,52 @@ function rectOf(el) {
   return { x: r.left + r.width / 2, y: r.top + r.height / 2, r };
 }
 
+// A poster in a rail or a results grid.
+const CARD = '[data-rail] [data-focus], .grid-titles [data-focus]';
+
+const onScreenOf = (els) => els.filter((el) => {
+  const r = el.getBoundingClientRect();
+  return r.top >= 0 && r.bottom <= window.innerHeight;
+});
+const firstOnScreen = (els) => onScreenOf(els)[0] || els[0] || null;
+
+/**
+ * The card in the next row up or down that sits under `from`: the row is the
+ * nearest band of cards in that direction, and within it the card with the
+ * most horizontal overlap wins (then the nearest centre). Returns null when
+ * something other than a card sits between the two rows (an episode list, a
+ * button): plain geometry handles that.
+ */
+export function cardBelow(from, dir, candidates) {
+  const a = from.getBoundingClientRect();
+  const down = dir === 'down';
+  const cards = [], others = [];
+  for (const el of candidates) {
+    if (el === from) continue;
+    const r = el.getBoundingClientRect();
+    const ahead = down ? r.top >= a.bottom - 4 : r.bottom <= a.top + 4;
+    if (!ahead) continue;
+    (el.matches(CARD) ? cards : el.matches('.see-all') ? [] : others).push({ el, r });
+  }
+  if (cards.length === 0) return null;
+  const edge = down ? Math.min(...cards.map((c) => c.r.top)) : Math.max(...cards.map((c) => c.r.bottom));
+  const half = a.height / 2;
+  const row = cards.filter((c) => (down ? c.r.top < edge + half : c.r.bottom > edge - half));
+  // Something that is not a card lies before that row: let geometry decide.
+  const centreY = (r) => r.top + r.height / 2;
+  if (others.some((o) => (down ? centreY(o.r) < edge : centreY(o.r) > edge))) return null;
+  const cx = a.left + a.width / 2;
+  let best = null, bestOverlap = -1, bestDx = Infinity;
+  for (const c of row) {
+    const overlap = Math.max(0, Math.min(a.right, c.r.right) - Math.max(a.left, c.r.left));
+    const dx = Math.abs(c.r.left + c.r.width / 2 - cx);
+    if (overlap > bestOverlap || (overlap === bestOverlap && dx < bestDx)) {
+      best = c.el; bestOverlap = overlap; bestDx = dx;
+    }
+  }
+  return best;
+}
+
 /** Nearest element in `dir`, biased so straight-ahead beats diagonal. */
 function nearest(from, dir, candidates) {
   const a = rectOf(from);
@@ -87,6 +133,13 @@ export function initDpad() {
   // are groups too, and remembering only rails meant leaving the header lost
   // your place entirely.
   const memory = new WeakMap();
+  // The last element focused outside the TV side rail: Right from the rail
+  // returns to it.
+  let lastContent = null;
+  const onFocusIn = (e) => {
+    const t = e.target;
+    if (t?.matches?.(FOCUSABLE) && !t.closest('[data-nav]')) lastContent = t;
+  };
   const groupOf = (el) => el?.closest('[data-rail], [data-focus-group]') || null;
 
   const onKey = (e) => {
@@ -158,38 +211,66 @@ export function initDpad() {
       : dialogs.length ? dialogs[dialogs.length - 1] : document;
     const all = [...scope.querySelectorAll(FOCUSABLE)].filter(reachable);
     if (all.length === 0) return;
+    const content = all.filter((el) => !el.closest('[data-nav]'));
 
     if (!active || !active.matches?.(FOCUSABLE)) {
       // Nothing focused yet (a page just opened): start on the page's main
       // action when one is on screen, else the first visible control. The
       // first element in the DOM is the logo, which is never what OK means.
-      const onScreen = all.filter((el) => {
-        const r = el.getBoundingClientRect();
-        return r.top >= 0 && r.bottom <= window.innerHeight;
-      });
-      const first = onScreen.find((el) => el.matches('.btn.primary')) || onScreen[0] || all[0];
+      const pool = content.length ? content : all;
+      const onScreen = onScreenOf(pool);
+      const first = onScreen.find((el) => el.matches('.btn.primary')) || onScreen[0] || pool[0];
       first.focus();
       e.preventDefault();
       return;
     }
 
     const group = groupOf(active);
+    const nav = active.closest('[data-nav]');
+    const vertical = dir === 'down' || dir === 'up';
+    let next = null;
 
-    /**
-     * Direction is decided by geometry alone.
-     *
-     * It used to jump to the NEXT GROUP in DOM order on Up/Down, which skipped
-     * anything not inside a group: on a title page Down from "Go back" went
-     * straight past the Play button to the cast row. Groups now only supply
-     * memory - arriving in a rail you were in before puts you back on the
-     * card you left.
-     */
-    let next = nearest(active, dir, all);
-    if (next && (dir === 'down' || dir === 'up')) {
-      const target = groupOf(next);
-      const remembered = target && target !== group ? memory.get(target) : null;
-      if (remembered && remembered !== next && target.contains(remembered)
-          && reachable(remembered)) next = remembered;
+    if (nav) {
+      /**
+       * The TV side rail (components/Nav.jsx). Up/Down stay inside it; Right
+       * goes back to exactly where the viewer was in the page.
+       */
+      if (vertical) next = nearest(active, dir, all.filter((el) => nav.contains(el)));
+      else if (dir === 'right') {
+        next = lastContent && document.contains(lastContent) && reachable(lastContent)
+          ? lastContent : firstOnScreen(content);
+      }
+    } else {
+      /**
+       * Direction is decided by geometry. Down from a card goes to the card
+       * directly below it in the next row (most horizontal overlap), and the
+       * row's "See all" link is never picked over a card. Group memory is not
+       * applied to cards: it put focus back on an old column, which read as a
+       * random card. The side rail is not a vertical target from the page.
+       */
+      if (vertical && active.matches(CARD)) next = cardBelow(active, dir, content);
+      if (!next && vertical) {
+        next = nearest(active, dir, content.filter((el) => !el.matches('.see-all')))
+          || nearest(active, dir, content);
+      }
+      if (!next && !vertical) next = nearest(active, dir, content);
+      // Left from the first thing on a line opens the side rail.
+      if (!next && dir === 'left') {
+        const items = all.filter((el) => el.closest('[data-nav]'));
+        next = items.find((el) => el.classList.contains('on')) || items[0] || null;
+        if (next) lastContent = active;
+      }
+      // Right from the last card of a row reaches the row's "See all".
+      if (!next && dir === 'right' && active.closest('[data-rail]')) {
+        const more = active.closest('.row-sec')?.querySelector('.see-all[data-focus]');
+        if (more && reachable(more)) next = more;
+      }
+      if (next && vertical && !next.matches(CARD)) {
+        const target = groupOf(next);
+        const remembered = target && target !== group ? memory.get(target) : null;
+        if (remembered && remembered !== next && target.contains(remembered)
+            && reachable(remembered)) next = remembered;
+      }
     }
 
     if (next) {
@@ -240,9 +321,11 @@ export function initDpad() {
 
   window.addEventListener('keydown', onKey);
   window.addEventListener('keydown', onBack);
+  window.addEventListener('focusin', onFocusIn);
   return () => {
     window.removeEventListener('keydown', onKey);
     window.removeEventListener('keydown', onBack);
+    window.removeEventListener('focusin', onFocusIn);
     window.__chitramDpad = false;
   };
 }

@@ -593,26 +593,20 @@ main{padding:0 var(--space-5) var(--space-24)}
 .see-all{font-size:11.5px;color:var(--dim);letter-spacing:.03em}
 .see-all:hover,.see-all:focus-visible{color:var(--paper)}
 
-.rail-wrap{position:relative}
-.rail-wrap::after{
-  content:"";position:absolute;top:0;right:0;bottom:6px;width:34px;
-  pointer-events:none;opacity:0;
-  background:linear-gradient(to right,transparent,var(--ink));
-  transition:opacity .18s var(--ease);
-}
-.rail-wrap.has-right::after{opacity:.96}
-.rail-wrap.has-left::before{
-  content:"";position:absolute;top:0;left:0;bottom:6px;width:18px;z-index:var(--z-raised);
-  pointer-events:none;background:linear-gradient(to left,transparent,var(--ink));
-}
+/* Scroll affordance: a small chevron in the page's side margin, only on a
+   side that can still scroll. Nothing is drawn over a poster: the old edge
+   fades and arrows sat on top of the first and last cards as a dark bar. */
+.rail-wrap{position:relative;--rail-gutter:var(--space-5)}
 .rail-mini-arrow{
-  position:absolute;top:calc(50% - 22px);z-index:var(--z-focus);width:28px;height:44px;
-  display:grid;place-items:center;border:0;color:var(--paper-2);
-  background:var(--color-overlay-2);opacity:.78;backdrop-filter:blur(5px);
+  position:absolute;top:calc(50% - 32px);z-index:var(--z-focus);
+  width:var(--rail-gutter);height:64px;padding:0;
+  display:grid;place-items:center;border:0;background:none;
+  color:var(--color-text-muted);opacity:.8;
+  transition:opacity var(--duration-fast) var(--ease-standard),color var(--duration-fast) var(--ease-standard);
 }
 .rail-mini-arrow:hover,.rail-mini-arrow:focus-visible{color:var(--paper);opacity:1}
-.rail-mini-arrow.left{left:2px;background:linear-gradient(to right,var(--ink),var(--color-overlay-2))}
-.rail-mini-arrow.right{right:2px;background:linear-gradient(to left,var(--ink),var(--color-overlay-2))}
+.rail-mini-arrow.left{left:calc(-1 * var(--rail-gutter))}
+.rail-mini-arrow.right{right:calc(-1 * var(--rail-gutter))}
 .rail-mini-arrow .flip{transform:rotate(180deg)}
 @media (max-width:559px){.rail-mini-arrow{display:none}}
 
@@ -1647,9 +1641,10 @@ kbd{
    D-pad moves focus between links; no on-screen rail arrows are necessary. */
 [data-tv="true"] .rail{gap:var(--space-4-5);padding-bottom:var(--space-2-5);scroll-snap-type:x mandatory;scroll-padding-inline:var(--space-12)}
 [data-tv="true"] .rail > *{flex-basis:290px}
-[data-tv="true"] .rail-wrap::after{width:72px;bottom:10px}
 [data-tv="true"] .row-sec{margin-bottom:var(--space-10)}
-[data-tv="true"] .rail-mini-arrow{width:36px;height:52px;top:calc(50% - 26px)}
+[data-tv="true"] .rail-wrap{--rail-gutter:var(--space-12)}
+[data-tv="true"] .rail-mini-arrow{height:80px;top:calc(50% - 40px)}
+[data-tv="true"] .rail-mini-arrow svg{width:28px;height:28px}
 
 /* ── Player controls on a phone ────────────────────────────────────────────
    Measured: the single row needed 500px inside 350px, so Quality, Subtitles
@@ -2994,3 +2989,6 @@ html .pctl-scrub:focus-visible,html .sync-bar:focus-visible{outline:none}
 /* ErrorBoundary fallback outside the player: cover the viewport, since the
    player container it would normally sit in may be the thing that crashed. */
 .boundary-screen{position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.88)}
+/* The pointer hides with the control bar while a film plays. */
+.pctl:not(.show),.pctl:not(.show) .pctl-mid{cursor:none}
+.player:has(.pctl:not(.show)) video{cursor:none}

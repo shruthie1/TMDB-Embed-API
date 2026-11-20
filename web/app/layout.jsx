@@ -3,10 +3,11 @@ import './tokens.css';
 import './globals.css';
 import './tv-compact.css';
 import './prefs-modal.css';
+import './nav.css';
 import Dpad from '../components/Dpad';
 import HeaderScroll from '../components/HeaderScroll';
 import Diagnostics from '../components/Diagnostics';
-import { TopNav, BottomNav } from '../components/Nav';
+import { TopNav, AppNav } from '../components/Nav';
 import Shortcuts from '../components/Shortcuts';
 import InstallPrompt from '../components/InstallPrompt';
 
@@ -53,6 +54,9 @@ export default function RootLayout({ children }) {
         <meta name="referrer" content="no-referrer" />
       </head>
       <body>
+        {/* Desktop: this is the sticky top bar. TV and phone: only the
+            wordmark shows and it scrolls away with the page; their navigation
+            is AppNav, a left rail (TV) or a bottom tab bar (phone). nav.css. */}
         <header className="topbar">
           <a href="/" className="brand focusable" data-focus="" aria-label="Chitram home">
             <span>Chi<em>tram</em></span>
@@ -61,8 +65,8 @@ export default function RootLayout({ children }) {
           <TopNav />
         </header>
         <HeaderScroll />
+        <AppNav />
         <main>{children}</main>
-        <BottomNav />
         <Shortcuts />
         <InstallPrompt />
         <Dpad />

@@ -112,15 +112,74 @@ describe('D-pad geometry', () => {
     expect(focused()).toBe('langs');
   });
 
-  it('returning to a rail restores the card it was left on', () => {
-    html(titlePage);
-    document.getElementById('c1').focus();
-    press('ArrowUp');
-    expect(focused()).not.toBe('c1');
-    // From My list the nearest card is c2; memory puts the viewer back on c1.
-    document.getElementById('mylist').focus();
+  // Home: a side rail, two rows of cards, each row with a "See all".
+  const home = `
+    <nav data-nav="" data-focus-group="">
+      <a id="n-search" href="#" data-focus="" data-r="22,400,68,64">Search</a>
+      <a id="n-home" class="on" href="#" data-focus="" data-r="22,472,68,64">Home</a>
+      <a id="n-browse" href="#" data-focus="" data-r="22,544,68,64">Browse</a>
+    </nav>
+    <section class="row-sec">
+      <div class="row-head"><a id="more1" class="see-all" href="#" data-focus="" data-r="1700,100,120,40">See all</a></div>
+      <div data-rail="">
+        <a id="a1" href="#" data-focus="" data-r="160,150,220,330">a1</a>
+        <a id="a2" href="#" data-focus="" data-r="396,150,220,330">a2</a>
+        <a id="a3" href="#" data-focus="" data-r="1632,150,220,330">a3</a>
+      </div>
+    </section>
+    <section class="row-sec">
+      <div class="row-head"><a id="more2" class="see-all" href="#" data-focus="" data-r="1700,540,120,40">See all</a></div>
+      <div data-rail="">
+        <a id="b1" href="#" data-focus="" data-r="160,600,220,330">b1</a>
+        <a id="b2" href="#" data-focus="" data-r="396,600,220,330">b2</a>
+        <a id="b3" href="#" data-focus="" data-r="1632,600,220,330">b3</a>
+      </div>
+    </section>`;
+
+  it('Down from a card goes to the card below it, not to See all', () => {
+    html(home);
+    document.getElementById('a3').focus();
     press('ArrowDown');
-    expect(focused()).toBe('c1');
+    expect(focused()).toBe('b3');
+    press('ArrowUp');
+    expect(focused()).toBe('a3');
+    document.getElementById('a2').focus();
+    press('ArrowDown');
+    expect(focused()).toBe('b2');
+  });
+
+  it('the column holds across rows even after visiting another column', () => {
+    html(home);
+    document.getElementById('b1').focus();
+    press('ArrowUp');                     // a1
+    press('ArrowRight');                  // a2
+    press('ArrowDown');
+    expect(focused()).toBe('b2');        // not the remembered b1
+  });
+
+  it('Left from the first card opens the side rail on the current page; Right returns', () => {
+    html(home);
+    document.getElementById('b1').focus();
+    press('ArrowLeft');
+    expect(focused()).toBe('n-home');
+    press('ArrowUp');
+    expect(focused()).toBe('n-search');
+    press('ArrowRight');
+    expect(focused()).toBe('b1');
+  });
+
+  it('Down from the page never lands in the side rail', () => {
+    html(home);
+    document.getElementById('a1').focus();
+    press('ArrowDown');
+    expect(focused()).toBe('b1');
+  });
+
+  it('Right from the last card of a row reaches its See all', () => {
+    html(home);
+    document.getElementById('a3').focus();
+    press('ArrowRight');
+    expect(focused()).toBe('more1');
   });
 
   it('a key the player already used is not also a focus move', () => {
