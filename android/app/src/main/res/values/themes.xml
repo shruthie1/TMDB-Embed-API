@@ -1,0 +1,10 @@
+<resources>
+    <style name="Theme.Chitram" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/bg</item>
+        <item name="android:colorBackground">@color/bg</item>
+        <item name="android:statusBarColor">@color/bg</item>
+        <item name="android:navigationBarColor">@color/bg</item>
+    </style>
+    <color name="bg">#06070C</color>
+    <color name="ic_bg">#06070C</color>
+</resources>
