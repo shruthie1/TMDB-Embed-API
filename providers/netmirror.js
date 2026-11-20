@@ -103,8 +103,9 @@ const NEWTV_MAX_FAILURES = 2;
 let resolvedApiAt = 0;
 let newTvFailures = 0;
 
-function noteNewTvFailure() {
-    if (!resolvedApiUrl) return;
+// `err` marked memoReplay is a refusal already counted on its real request.
+function noteNewTvFailure(err) {
+    if (!resolvedApiUrl || (err && err.memoReplay)) return;
     newTvFailures += 1;
     if (newTvFailures >= NEWTV_MAX_FAILURES) {
         console.log(`[NetMirror] newtv api ${resolvedApiUrl} failed ${newTvFailures}x - rediscovering on next resolve`);
@@ -590,7 +591,7 @@ async function newTvJson(memo, url, ott, extra) {
     const key = `${ott} ${url}`;
     if (memo && memo.has(key)) {
         const hit = memo.get(key);
-        if (hit.error) throw hit.error;
+        if (hit.error) { hit.error.memoReplay = true; throw hit.error; }
         return hit.data;
     }
     try {
@@ -646,7 +647,7 @@ async function fetchPlatform(platform, title, type, season, episode, memo) {
         return err ? failure(err, out) : out;
     } catch (error) {
         console.log(`[NetMirror] ${platform} failed: ${error.message}`);
-        noteNewTvFailure();
+        noteNewTvFailure(error);
         return failure(`${platform}: ${error.message}`);
     }
 }
@@ -755,7 +756,7 @@ async function resolveMatch(api, config, platform, match, title, type, season, e
         }];
     } catch (error) {
         console.log(`[NetMirror] ${platform} failed: ${error.message}`);
-        noteNewTvFailure();
+        noteNewTvFailure(error);
         return failure(`${platform}: ${error.message}`);
     }
 }
@@ -809,7 +810,7 @@ async function netflixLanguageFromPost(title, type, year, memo) {
         return langs[0];
     } catch (error) {
         console.log(`[NetMirror] netflix-lang failed: ${error.message}`);
-        noteNewTvFailure();
+        noteNewTvFailure(error);
         return null;
     }
 }
