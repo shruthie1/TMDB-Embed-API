@@ -23,7 +23,7 @@ class WvcCastTest {
     @Test fun backendHlsRow() {
         val s = WvcCast.spec(src("https://vm.example/m3u8-proxy?url=x.m3u8"), movie)
         assertEquals("https://vm.example/m3u8-proxy?url=x.m3u8", s.url)
-        assertEquals("application/x-mpegURL", s.mime)
+        assertEquals("application/x-mpegurl", s.mime)
         assertEquals("Krack", s.title)
         assertEquals("https://image.tmdb.org/t/p/w500/p.jpg", s.poster)
         // The VM already proxies backend rows: no headers, no hint.

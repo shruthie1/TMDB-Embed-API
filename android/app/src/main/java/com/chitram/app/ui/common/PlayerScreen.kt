@@ -281,7 +281,7 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
                 val note = vm.notice
                 if (vm.buffering || note.isNotEmpty()) {
                     val count = vm.sources.size
-                    CenterNote(note, sub = if (note.isNotEmpty() && count > 1) "Source ${(vm.sources.indexOf(vm.current) + 1).coerceIn(1, count)} of $count" else "")
+                    CenterNote(note, sub = if (note.isNotEmpty() && count > 1 && !vm.offline) "Source ${(vm.sources.indexOf(vm.current) + 1).coerceIn(1, count)} of $count" else "")
                 }
             }
         }

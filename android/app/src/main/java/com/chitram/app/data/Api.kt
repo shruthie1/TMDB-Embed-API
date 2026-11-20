@@ -14,12 +14,36 @@ import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import java.io.File
 import java.io.IOException
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+
+/** One /api/playback-report body (web/lib/api.js reportPlayback). */
+data class PlaybackReport(
+    val type: String,
+    val tmdbId: Long,
+    val season: Int = 0,
+    val episode: Int = 0,
+    val provider: String,
+    val ok: Boolean,
+    val reason: String? = null,
+    val startupMs: Long = 0,
+    val waitMs: Long = 0,
+    val stallCount: Int = 0,
+    val stallMs: Long = 0,
+    val recoveryCount: Int = 0,
+    val mediaUrl: String? = null,
+    val audioLang: String? = null,
+    /** "tv" or "mobile", as the web sends. */
+    val device: String? = null,
+)
 
 class HttpException(val code: Int) : IOException("HTTP $code")
 
@@ -65,6 +89,18 @@ class Api(val client: OkHttpClient, private val base: String = BASE, httpCache: 
 
         /** Calls slower than this are logged with their DNS / connect split ("slow http" in logcat). */
         const val SLOW_CALL_MS = 1500L
+
+        const val REPORT_TIMEOUT_S = 5L
+
+        fun reportBody(r: PlaybackReport): String = buildJsonObject {
+            put("tmdbId", r.tmdbId); put("type", r.type); put("season", r.season); put("episode", r.episode)
+            put("provider", r.provider); put("mediaIdentity", null as String?); put("mediaUrl", r.mediaUrl)
+            put("playedOk", r.ok); put("ok", r.ok); put("reason", r.reason)
+            put("startupMs", r.startupMs); put("waitMs", r.waitMs)
+            put("stallCount", r.stallCount); put("stallMs", r.stallMs); put("recoveryCount", r.recoveryCount)
+            put("audioLang", r.audioLang); put("langOk", null as Boolean?)
+            put("device", r.device); put("connection", null as String?)
+        }.toString()
 
         fun httpCache(cacheDir: File): Cache = Cache(File(cacheDir, "http"), HTTP_CACHE_BYTES)
 
@@ -149,6 +185,31 @@ class Api(val client: OkHttpClient, private val base: String = BASE, httpCache: 
      * /api/streams/:kind/:id. Retries a dropped connection or 5xx/429 twice
      * (800ms, 2.5s) like web/lib/backend.js; never a 4xx.
      */
+    /** Short-fused client for telemetry: the VM may be down, and a report must never hang. */
+    private val reportClient: OkHttpClient by lazy {
+        client.newBuilder().connectTimeout(3, TimeUnit.SECONDS).callTimeout(REPORT_TIMEOUT_S, TimeUnit.SECONDS).build()
+    }
+
+    /**
+     * POST /api/playback-report (web/lib/api.js reportPlayback, same body). It
+     * feeds the server's learned ranking. Fire-and-forget: enqueued, never
+     * awaited, every failure dropped. Telemetry must never break playback.
+     */
+    fun reportPlayback(r: PlaybackReport) {
+        if (r.provider.isBlank() || r.tmdbId <= 0) return
+        try {
+            val body = reportBody(r).toRequestBody("application/json".toMediaType())
+            reportClient.newCall(Request.Builder().url("$base/api/playback-report").post(body).build()).enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    android.util.Log.i("Chitram", "[report] dropped ${r.provider}: ${e.javaClass.simpleName}")
+                }
+                override fun onResponse(call: Call, response: Response) { response.close() }
+            })
+        } catch (e: Exception) {
+            android.util.Log.i("Chitram", "[report] not sent: ${e.javaClass.simpleName}")
+        }
+    }
+
     suspend fun streams(type: String, id: Long, season: Int = 0, episode: Int = 0, refresh: Boolean = false): StreamsResponse {
         val kind = if (type == "tv" || type == "series") "series" else "movie"
         val qs = buildList {

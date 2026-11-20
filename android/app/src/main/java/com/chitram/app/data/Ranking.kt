@@ -4,8 +4,9 @@ package com.chitram.app.data
  * Kotlin port of web/lib/backend.js (toSource, sourceHeight, rankSources and the
  * remembered-provider reorder in resolveLive) and web/lib/player/trackChoices.js.
  *
- * Telugu-first: the scarce resource is LANGUAGE, not pixels, so resolution only
- * breaks ties inside a tier. A row the device cannot decode ranks last.
+ * Telugu-first: the scarce resource is LANGUAGE, not pixels, so resolution
+ * never re-sorts inside a tier (the server's order stands). A row the device
+ * cannot decode ranks last.
  */
 data class Source(
     val id: String,
@@ -95,6 +96,20 @@ object Ranking {
                 // Same tier: on-device vaplayer goes after mapple and the backend
                 // rows (its token is bound to an IP that can change under CGNAT).
                 .thenBy { if (it.onDevice == VAPLAYER) 1 else 0 }
+                .thenBy { if (it.progressive) 1 else 0 },
+            // Within a tier the server's order stands (web backend.js rankSources):
+            // the server ranks by learned playback outcomes and already weights
+            // quality, so a height re-sort here would throw that away. Stable sort.
+        )
+
+    /**
+     * Server menu order (web trackChoices.videoChoices): best picture first,
+     * progressive after HLS, rows this device cannot decode at the bottom.
+     * Label it with [labels] so numbering runs once across the whole menu.
+     */
+    fun menuOrder(sources: List<Source>): List<Source> =
+        sources.sortedWith(
+            compareBy<Source> { if (it.unsupported) 1 else 0 }
                 .thenBy { if (it.progressive) 1 else 0 }
                 .thenByDescending { height(it) },
         )

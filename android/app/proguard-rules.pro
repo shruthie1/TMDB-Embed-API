@@ -6,6 +6,7 @@
     kotlinx.serialization.KSerializer serializer(...);
 }
 -keep,includedescriptorclasses class com.chitram.app.data.**$$serializer { *; }
+-keep,includedescriptorclasses class com.chitram.app.player.**$$serializer { *; }
 -dontwarn org.slf4j.**
 -dontwarn okhttp3.internal.platform.**
 -dontwarn org.conscrypt.**

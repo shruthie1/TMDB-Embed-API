@@ -3,6 +3,9 @@
 package com.chitram.app.player
 
 import android.app.Application
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.net.Uri
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -28,6 +31,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.MediaSession
 import com.chitram.app.data.Api
+import com.chitram.app.data.PlaybackReport
 import com.chitram.app.App
 import com.chitram.app.data.Progress
 import com.chitram.app.data.Ranking
@@ -36,6 +40,8 @@ import com.chitram.app.data.Source
 import com.chitram.app.resolve.StreamInterceptor
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -54,6 +60,10 @@ data class PlayRequest(
     val overview: String? = null,
     /** Start over: ignore the saved position. */
     val fromStart: Boolean = false,
+    /** Subtitles are keyed by imdb id (OpenSubtitles addon). */
+    val imdbId: String? = null,
+    /** TMDB runtime: the episode's when known, else the title's (runtime check). */
+    val runtimeMin: Int? = null,
 )
 
 data class MenuItem(val key: String, val label: String, val detail: String = "", val selected: Boolean = false, val dim: Boolean = false)
@@ -84,6 +94,8 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     var notice by mutableStateOf(""); private set
     /** Set when an episode ends and another follows: the Next episode card. */
     var nextUp by mutableStateOf<PlayRequest?>(null); private set
+    /** No network: playback is paused and waits for it (U8). */
+    var offline by mutableStateOf(false); private set
 
     val player: ExoPlayer = ExoPlayer.Builder(
         app,
@@ -102,6 +114,10 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
      */
     private val session: MediaSession = MediaSession.Builder(app, player).setId("chitram").build()
 
+    /**
+     * Rows that FAILED for this title (web deadSources). A manual switch keeps
+     * it, so auto-advance never returns to a row that already failed (U7).
+     */
     private val tried = HashSet<String>()
     private var refreshedOnce = false
     private var resolveJob: Job? = null
@@ -114,6 +130,32 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     /** The preferred-language audio pick is done once per on-device source. */
     private var audioPickedFor: String? = null
 
+    /** OpenSubtitles tracks for the current request (U1): Telugu, then English. */
+    private var subs: List<OpenSubs.Track> = emptyList()
+    private var subsJob: Deferred<List<OpenSubs.Track>>? = null
+
+    // Dead-source watchdog and report timing (U4, U6), per play().
+    private var requestedAt = 0L
+    private var playStartedAt = 0L
+    private var landed = false
+    private var runtimeDone = false
+    /** Language and height playing when the last row landed: auto-advance keeps them (U7). */
+    private var ctxLang: String? = null
+    private var ctxHeight: Int? = null
+
+    // Offline (U8).
+    private var resumeOnReturn = false
+    /** startMs of a resolve that could not run offline; replayed when the network returns. */
+    private var pendingResolveMs: Long? = null
+    private val cm: ConnectivityManager? = try { app.getSystemService(ConnectivityManager::class.java) } catch (_: Exception) { null }
+    private val netCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) { viewModelScope.launch { if (offline) backOnline() } }
+        override fun onLost(network: Network) {
+            // A Wi-Fi to mobile handoff loses one network and gains another: look again shortly.
+            viewModelScope.launch { delay(1_500); if (isOffline()) goOffline() }
+        }
+    }
+
     init {
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(playing: Boolean) {
@@ -124,14 +166,14 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                 buffering = state == Player.STATE_BUFFERING
                 if (state == Player.STATE_READY) {
                     durationMs = player.duration.coerceAtLeast(0)
-                    notice = ""
+                    if (!offline) notice = ""
                     current?.let { request?.let { r -> g.lastProvider.put(r.type, r.id, it.provider) } }
                 }
                 if (state == Player.STATE_ENDED) onEnded()
             }
             override fun onVideoSizeChanged(size: VideoSize) { videoSize = size }
             override fun onCues(cueGroup: CueGroup) { cues = cueGroup.cues.joinToString("\n") { it.text ?: "" }.trim() }
-            override fun onTracksChanged(t: Tracks) { tracks = t; pickPreferredAudio(t) }
+            override fun onTracksChanged(t: Tracks) { tracks = t; pickPreferredAudio(t); if (landed) current?.let { snapshotCtx(it) } }
             override fun onPlayerError(error: PlaybackException) { handleError(error) }
         })
         viewModelScope.launch {
@@ -142,19 +184,25 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                 bufferedMs = player.bufferedPosition
                 if (player.duration > 0) durationMs = player.duration
                 if (++n % 20 == 0 && player.isPlaying) saveProgress()
+                checkSwitch()
                 checkStall()
+                checkRuntime()
             }
+        }
+        try { cm?.registerDefaultNetworkCallback(netCallback) } catch (e: Exception) {
+            android.util.Log.i("Chitram", "[offline] no network callback: ${e.javaClass.simpleName}")
         }
     }
 
     // Stall ladder (web useRecovery "switching" stage): a buffering stream whose
-    // buffer has not grown for 25s is dead, so move to the next source. ExoPlayer
+    // buffer has not grown for 25s is dead, so move to the next source. Mid-play
+    // only: until the first frame the switch watchdog (8s/20s) judges the row. ExoPlayer
     // retries a refused connection on its own and never raises an error for it.
     private var stallBuffered = -1L
     private var stallSince = 0L
 
     private fun checkStall() {
-        val stalled = phase == Phase.Playing && player.playWhenReady && player.playbackState == Player.STATE_BUFFERING
+        val stalled = landed && !offline && phase == Phase.Playing && player.playWhenReady && player.playbackState == Player.STATE_BUFFERING
         if (!stalled) { stallSince = 0; return }
         val now = System.currentTimeMillis()
         val b = player.bufferedPosition
@@ -174,6 +222,15 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         refreshedOnce = false
         nextUp = null
         notice = ""
+        ctxLang = null
+        ctxHeight = null
+        requestedAt = System.currentTimeMillis()
+        subs = emptyList()
+        subsJob?.cancel()
+        val job = viewModelScope.async { OpenSubs.fetch(g.api.client, r.imdbId, r.season, r.episode, r.runtimeMin) }
+        subsJob = job
+        // Late captions reach the next row put on screen (failover or a manual switch).
+        viewModelScope.launch { val t = job.await(); if (request == r) { subs = t; android.util.Log.i("Chitram", "[subs] ${t.size} tracks: ${t.joinToString { it.label }}") } }
         resolve(refresh = false, keepProvider = null, startMs = if (r.fromStart) 0 else g.progress.resumeMs(r.type, r.id, r.season, r.episode))
     }
 
@@ -217,6 +274,15 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             val list = Ranking.merge(backend, early, preferred, pin)
             sources = list
             lateJobs = device.filter { !it.isCompleted }.map { d -> viewModelScope.launch { joinLate(r, d, preferred, pin) } }
+            if (list.isEmpty() && isOffline()) {
+                pendingResolveMs = startMs
+                goOffline()
+                status = OFFLINE_TEXT
+                return@launch
+            }
+            // Captions ride on the media item, so give the subtitle fetch a moment
+            // to land; it runs alongside the streams call and is usually done.
+            subsJob?.let { j -> withTimeoutOrNull(SUBS_WAIT_MS) { j.await() }?.let { subs = it } }
             if (list.isEmpty()) {
                 phase = Phase.Failed(backendError?.let { "Could not reach the server (${it.message ?: it.javaClass.simpleName})." } ?: "No playable source found.")
                 return@launch
@@ -234,11 +300,18 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     }
 
     fun play(s: Source, startMs: Long = player.currentPosition.coerceAtLeast(0)) {
-        tried += s.id
         current = s
         cues = ""
         videoSize = VideoSize.UNKNOWN
-        val subs = s.subtitles.take(12).map { sub ->
+        playStartedAt = System.currentTimeMillis()
+        landed = false
+        runtimeDone = false
+        // OpenSubtitles first (Telugu, then English), then any the provider row carries.
+        val external = subs.map { t ->
+            MediaItem.SubtitleConfiguration.Builder(Uri.parse(t.url))
+                .setMimeType(MimeTypes.APPLICATION_SUBRIP).setLabel(t.label).setLanguage(t.lang).build()
+        }
+        val own = s.subtitles.take(12).map { sub ->
             val mime = if (sub.url.contains(".srt", ignoreCase = true)) MimeTypes.APPLICATION_SUBRIP else MimeTypes.TEXT_VTT
             MediaItem.SubtitleConfiguration.Builder(Uri.parse(sub.url))
                 .setMimeType(mime).setLabel(sub.lang ?: "Subtitles").setLanguage(sub.lang?.lowercase()).build()
@@ -246,7 +319,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         val item = MediaItem.Builder()
             .setUri(s.url)
             .apply { if (!s.progressive) setMimeType(MimeTypes.APPLICATION_M3U8) }
-            .setSubtitleConfigurations(subs)
+            .setSubtitleConfigurations(external + own)
             .setMediaMetadata(metadata(request))
             .build()
         audioPickedFor = null
@@ -258,7 +331,11 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             .build()
         if (s.onDevice != null) {
             // Provider Referer/Origin on every request; vaplayer's token on every segment.
-            val http = OkHttpDataSource.Factory(StreamInterceptor.client(g.api.client, s.headers, s.segmentToken))
+            // Caption files go out plain: the provider headers and vaplayer token are for the stream only.
+            val streamClient = StreamInterceptor.client(g.api.client, s.headers, s.segmentToken)
+            val http = OkHttpDataSource.Factory(okhttp3.Call.Factory { req ->
+                if (subs.any { it.url == req.url.toString() }) g.api.client.newCall(req) else streamClient.newCall(req)
+            })
             player.setMediaSource(DefaultMediaSourceFactory(http).createMediaSource(item), startMs)
         } else {
             player.setMediaItem(item, startMs)
@@ -275,7 +352,12 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         val http = generateSequence<Throwable>(e) { it.cause }.filterIsInstance<HttpDataSource.InvalidResponseCodeException>().firstOrNull()
         val pos = player.currentPosition.coerceAtLeast(0)
         val cur = current
-        val action = FailPolicy.onError(cur, http?.responseCode, refreshedOnce, cur?.onDevice in reresolved)
+        val action = FailPolicy.onError(cur, http?.responseCode, refreshedOnce, cur?.onDevice in reresolved, offline = offline || isOffline())
+        if (action == FailPolicy.Action.WAIT_ONLINE) {
+            android.util.Log.i("Chitram", "[offline] ${cur?.provider}: ${e.errorCodeName} while offline, waiting")
+            goOffline()
+            return
+        }
         if (action == FailPolicy.Action.RERESOLVE && cur?.onDevice != null) {
             reresolve(cur, pos, "${cur.provider}: ${e.errorCodeName}")
             return
@@ -309,16 +391,140 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * The current row failed: mark it dead, report it, and advance to the next
+     * alive row in the language (and near the height) that was playing (web
+     * switchFlow.advanceTarget).
+     */
     private fun failover(reason: String, pos: Long) {
-        val next = sources.firstOrNull { it.id !in tried && !it.unsupported } ?: sources.firstOrNull { it.id !in tried }
+        val failed = current
+        if (failed != null) {
+            tried += failed.id
+            report(failed, ok = false, reason = reason)
+        }
+        val next = PlayPolicy.nextAlive(sources, tried, ctxLang ?: g.prefs.preferredAudio(), ctxHeight)
         if (next == null) {
             phase = Phase.Failed("Every source failed. Last: $reason")
             player.stop()
             return
         }
-        android.util.Log.i("Chitram", "failover: $reason -> ${next.provider}")
+        android.util.Log.i("Chitram", "failover: $reason -> ${next.provider} (lang ${ctxLang ?: "preferred"}, ${ctxHeight ?: "-"}p)")
         play(next, pos)
-        notice = "Trying another source…"
+        notice = "${failed?.provider ?: "That server"} didn't respond, playing ${next.provider}."
+    }
+
+    /**
+     * Dead-source watchdog (web switchFlow, U6) for every row put on screen: no
+     * sign of life in 8s, or no frame in 20s, is dead. On-device rows still get
+     * their one re-resolve first (1.1.9).
+     */
+    private fun checkSwitch() {
+        val s = current ?: return
+        if (landed || phase != Phase.Playing) return
+        val now = System.currentTimeMillis()
+        // Paused before the first frame, or offline: nothing to judge; restart the clock.
+        if (offline || !player.playWhenReady) { playStartedAt = now; return }
+        val alive = player.totalBufferedDuration > 0 || player.duration > 0 || player.playbackState == Player.STATE_READY
+        when (PlayPolicy.switchVerdict(now - playStartedAt, alive, frames = player.isPlaying)) {
+            PlayPolicy.Switch.LANDED -> onLanded(s, now)
+            PlayPolicy.Switch.DEAD -> {
+                landed = true // judged; play() resets it
+                val reason = if (alive) "switch: no frame in 20s" else "switch: no response in 8s"
+                android.util.Log.i("Chitram", "[switch] ${s.provider} dead: $reason")
+                when (FailPolicy.onError(s, null, refreshedOnce, s.onDevice in reresolved, offline = isOffline())) {
+                    FailPolicy.Action.WAIT_ONLINE -> { landed = false; goOffline() }
+                    FailPolicy.Action.RERESOLVE -> reresolve(s, player.currentPosition.coerceAtLeast(0), "${s.provider}: $reason")
+                    else -> failover("${s.provider}: $reason", player.currentPosition.coerceAtLeast(0))
+                }
+            }
+            PlayPolicy.Switch.WAIT -> {}
+        }
+    }
+
+    private fun onLanded(s: Source, now: Long) {
+        landed = true
+        snapshotCtx(s)
+        android.util.Log.i("Chitram", "[switch] ${s.provider} landed in ${now - playStartedAt}ms")
+        checkRuntime()
+    }
+
+    /** What is playing now, for auto-advance: the selected audio language and the picture height. */
+    private fun snapshotCtx(s: Source) {
+        val audio = groups(C.TRACK_TYPE_AUDIO).flatMap { gr -> (0 until gr.length).filter { gr.isTrackSelected(it) }.map { gr.getTrackFormat(it) } }.firstOrNull()
+        ctxLang = audio?.let { langName(it.language) } ?: s.languages.firstOrNull() ?: ctxLang
+        ctxHeight = videoSize.height.takeIf { it > 0 } ?: Ranking.height(s).takeIf { it > 0 } ?: ctxHeight
+    }
+
+    /**
+     * Runtime check (web runtimeCheck, U5): a stream under 82% of the TMDB
+     * runtime is the wrong title or a truncated file. Fail over when another
+     * row is left; with none, keep playing rather than dead-end. A play is
+     * reported good only once the check passes (never while it is unknown).
+     */
+    private fun checkRuntime() {
+        val s = current ?: return
+        val r = request ?: return
+        if (!landed || runtimeDone || phase != Phase.Playing) return
+        val d = player.duration
+        when (PlayPolicy.runtimeVerdict(r.runtimeMin, d)) {
+            PlayPolicy.Runtime.UNKNOWN -> {}
+            PlayPolicy.Runtime.OK -> {
+                runtimeDone = true
+                report(s, ok = true, reason = null)
+            }
+            PlayPolicy.Runtime.MISMATCH -> {
+                runtimeDone = true
+                val reason = "runtime mismatch (${d / 60_000}m vs ${r.runtimeMin}m)"
+                android.util.Log.i("Chitram", "[runtime] ${s.provider}: $reason")
+                if (PlayPolicy.nextAlive(sources, tried + s.id, ctxLang, ctxHeight) != null) failover(reason, player.currentPosition.coerceAtLeast(0))
+                else report(s, ok = false, reason = reason)
+            }
+        }
+    }
+
+    /** POST /api/playback-report, fire-and-forget (U4). */
+    private fun report(s: Source, ok: Boolean, reason: String?) {
+        val r = request ?: return
+        val now = System.currentTimeMillis()
+        g.api.reportPlayback(PlaybackReport(
+            type = if (r.type == "tv") "tv" else "movie", tmdbId = r.id, season = r.season, episode = r.episode,
+            provider = s.provider, ok = ok, reason = reason?.take(60),
+            startupMs = if (playStartedAt > 0) now - playStartedAt else 0,
+            waitMs = if (requestedAt > 0) now - requestedAt else 0,
+            mediaUrl = s.url, audioLang = ctxLang,
+            device = if (Device.isTv(getApplication<Application>())) "tv" else "mobile",
+        ))
+    }
+
+    // ---- Offline (U8, web Player.jsx offline banner) -------------------------
+
+    private fun isOffline(): Boolean = try {
+        val c = cm
+        if (c == null) false else {
+            val n = c.activeNetwork
+            n == null || c.getNetworkCapabilities(n)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) != true
+        }
+    } catch (_: Exception) { false }
+
+    private fun goOffline() {
+        if (offline) return
+        offline = true
+        resumeOnReturn = player.playWhenReady
+        player.pause()
+        notice = OFFLINE_TEXT
+        android.util.Log.i("Chitram", "[offline] paused ${current?.provider ?: "resolve"}")
+    }
+
+    private fun backOnline() {
+        offline = false
+        notice = ""
+        android.util.Log.i("Chitram", "[offline] back online")
+        pendingResolveMs?.let { ms -> pendingResolveMs = null; resolve(refresh = false, keepProvider = null, startMs = ms); return }
+        if (phase != Phase.Playing) return
+        stallSince = 0
+        playStartedAt = System.currentTimeMillis()
+        if (player.playerError != null || player.playbackState == Player.STATE_IDLE) player.prepare()
+        if (resumeOnReturn) player.play()
     }
 
     /**
@@ -385,8 +591,9 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             if (r.type != "tv" || r.season == 0) return null
             val count = r.seasons.firstOrNull { it.number == r.season }?.episodes ?: 0
             return when {
-                count == 0 || r.episode < count -> r.copy(episode = r.episode + 1, epTitle = null, fromStart = false)
-                r.seasons.any { it.number == r.season + 1 } -> r.copy(season = r.season + 1, episode = 1, epTitle = null, fromStart = false)
+                // Runtime unknown for the next episode: no runtime check (web treats unknown the same).
+                count == 0 || r.episode < count -> r.copy(episode = r.episode + 1, epTitle = null, fromStart = false, runtimeMin = null)
+                r.seasons.any { it.number == r.season + 1 } -> r.copy(season = r.season + 1, episode = 1, epTitle = null, fromStart = false, runtimeMin = null)
                 else -> null
             }
         }
@@ -413,6 +620,9 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         lateJobs.forEach { it.cancel() }
         deviceJobs.forEach { it.cancel() }
         guardJob?.cancel()
+        subsJob?.cancel()
+        pendingResolveMs = null
+        offline = false
         player.stop()
         player.clearMediaItems()
         request = null
@@ -449,8 +659,10 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     // ---- Menus ---------------------------------------------------------------
 
     fun serverItems(): List<MenuItem> {
-        val labels = Ranking.labels(sources)
-        return sources.mapIndexed { i, s ->
+        // Web Servers menu: best picture first, numbered once across the list (U3).
+        val menu = Ranking.menuOrder(sources)
+        val labels = Ranking.labels(menu)
+        return menu.mapIndexed { i, s ->
             val lang = s.languages.joinToString(", ").ifEmpty { "Unknown language" }
             val q = Ranking.height(s).takeIf { it > 0 }?.let { "${it}p" } ?: s.quality
             MenuItem("src:${s.id}", labels[i], "$q · $lang" + if (s.unsupported) " · not supported here" else "", s.id == current?.id, s.unsupported)
@@ -512,7 +724,8 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         when (p[0]) {
             "src" -> sources.firstOrNull { it.id == key.removePrefix("src:") }?.let {
                 if (it.id == current?.id) return
-                tried.clear(); play(it); notice = "Switching to ${it.provider}…"
+                // Keep `tried`: auto-advance after a failed pick must not return to a dead row (U7).
+                play(it); notice = "Switching to ${it.provider}…"
             }
             "trk" -> override(C.TRACK_TYPE_AUDIO, p[1].toInt(), p[2].toInt())
             "q" -> if (p[1] == "auto") player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().clearOverridesOfType(C.TRACK_TYPE_VIDEO).build()
@@ -535,6 +748,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         saveProgress()
+        try { cm?.unregisterNetworkCallback(netCallback) } catch (_: Exception) {}
         session.release()
         player.release()
     }
@@ -542,6 +756,10 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     companion object {
         /** Web useRecovery STAGES.switching. */
         const val STALL_SWITCH_MS = 25_000L
+
+        /** How long the first play waits for the subtitle list after the streams answered. */
+        const val SUBS_WAIT_MS = 1_500L
+        const val OFFLINE_TEXT = "You're offline. Playback will resume when the connection returns."
 
         /** After the backend answers, how long on-device rows may still join the first ranking. */
         const val DEVICE_GRACE_MS = 3_000L

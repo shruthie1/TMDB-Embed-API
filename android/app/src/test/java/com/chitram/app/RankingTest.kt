@@ -39,7 +39,8 @@ class RankingTest {
             raw("H", "720p", listOf("Telugu")),
             raw("H2", "1080p", listOf("Telugu")),
         )
-        assertEquals(listOf("H2-1080p", "H-720p", "M-1080p"), out)
+        // 1.2.1 (U2): same tier keeps the server order, no height re-sort.
+        assertEquals(listOf("H-720p", "H2-1080p", "M-1080p"), out)
     }
 
     @Test fun unsupportedCodecRanksLastButStays() {

@@ -28,6 +28,7 @@ object WvcCast {
     const val ROUTE_HINT = "Turn on 'Route through phone' in Web Video Caster if it fails"
     private const val STORE_MARKET = "market://details?id=$PACKAGE"
     private const val STORE_WEB = "https://play.google.com/store/apps/details?id=$PACKAGE"
+    const val HLS_MIME = "application/x-mpegurl"
     private val NEEDED = listOf("Referer", "Origin", "User-Agent")
 
     data class Spec(
@@ -51,7 +52,10 @@ object WvcCast {
         else NEEDED.mapNotNull { k -> s.headers.entries.firstOrNull { it.key.equals(k, ignoreCase = true) }?.let { k to it.value } }.toMap()
         return Spec(
             url = s.url,
-            mime = if (s.progressive) "video/mp4" else "application/x-mpegURL",
+            // Lowercase: Android matches intent MIME types case-sensitively, and
+            // WVC registers application/x-mpegurl. "x-mpegURL" found no activity
+            // and fell through to the Play Store (owner report, 1.2.0).
+            mime = if (s.progressive) "video/mp4" else HLS_MIME,
             title = title,
             poster = Api.image(r.poster, "w500"),
             headers = headers,
@@ -68,7 +72,8 @@ object WvcCast {
         for (t in listOf(Launch.Wvc(spec), Launch.Store(STORE_MARKET), Launch.Store(STORE_WEB))) {
             try {
                 start(t); return t
-            } catch (_: ActivityNotFoundException) {
+            } catch (e: ActivityNotFoundException) {
+                android.util.Log.w("Chitram", "[cast] no activity for ${if (t is Launch.Wvc) "WVC ${t.spec.mime}" else "store"}: ${e.message}")
             }
         }
         return null
