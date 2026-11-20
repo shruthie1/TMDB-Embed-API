@@ -64,7 +64,7 @@ describe('settings sheet rows are clickable across their whole width', () => {
   // lines and ran straight through the provider name beside it. The Audio
   // control already names the language that is playing, so the list was
   // repeating what the viewer can read one button over.
-  it('states the provider and its ceiling, without a language list', () => {
+  it('states the provider and its ceiling', () => {
     const { container } = openServers({
       sources: playable([
         { provider: 'mapple', best: '2160p', codecs: { video: 'HEVC' },
@@ -96,6 +96,7 @@ describe('settings sheet rows are clickable across their whole width', () => {
       ]),
       currentSource: 'CastleTV',
     });
+    fireEvent.click([...container.querySelectorAll('.pmenu-pick .pmenu-item')].find(r => r.querySelector('.pmenu-text').textContent === 'CastleTV'));
     const rows = [...container.querySelectorAll('.pmenu-pick .pmenu-item')]
       .map((r) => r.textContent);
     // Every CastleTV row is numbered, once, across the WHOLE list.
@@ -111,9 +112,8 @@ describe('settings sheet rows are clickable across their whole width', () => {
     // No ordinal collides with another.
     const ordinals = rows.map((t) => (t.match(/CastleTV (\d)/) || [])[1]).filter(Boolean);
     expect(new Set(ordinals).size).toBe(ordinals.length);
-    // No language anywhere in the menu.
-    expect(container.textContent).not.toContain('Telugu');
-    expect(container.textContent).not.toContain('Kannada');
+    expect(container.textContent).toContain('Telugu');
+    expect(container.textContent).toContain('Kannada');
   });
 
   it('ticks exactly one server row even when two sources share an id', () => {

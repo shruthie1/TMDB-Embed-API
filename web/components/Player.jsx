@@ -1,6 +1,8 @@
 'use client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import PlayerControls from './PlayerControls';
+import VideoMenu from './player/VideoMenu';
+import { audioLanguageKey, isKnownAudioLanguage, languageCandidates, sourceAudioLanguages, trackAudioLanguage } from '../lib/player/languageSources';
 import { Loading, NextUp, PlayerError } from './player/overlays';
 import TvBar from './player/TvBar';
 import Icon from './Icon';
@@ -177,6 +179,12 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   // Rows that failed a server switch. Taken out of the menus (owner: a failed
   // server is not kept selectable). Keyed by url, so a re-resolve that mints
   // a fresh url for the same row brings it back.
+  const [sourceChooserOpen, setSourceChooserOpen] = useState(false);
+  useEffect(() => setSourceChooserOpen(false), [title.mediaType, title.tmdbId, season, episode]);
+  const closeSourceChooser = () => {
+    setSourceChooserOpen(false);
+    playerRef.current?.querySelector('[data-action="choose-server"]')?.focus();
+  };
   const [failedUrls, setFailedUrls] = useState(() => new Set());
   // What the menus offer: every row except the ones that failed a switch.
   const menuSources = useMemo(
@@ -507,6 +515,8 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   const hls = useHls({ videoRef, stream, onFatal, config: hlsConfig,
     preferredLanguage: wantLang, onLanguage: setWantLang,
     onHlsReady: (h) => { hlsInstance.current = h; } });
+  const discoveredTracksRef = useRef(null);
+  discoveredTracksRef.current = { tracks: hls.audioTracks, selected: hls.currentAudio };
   // Same fallback as switchSource: the viewer's pick, else the track playing
   // (initialAudioTrack auto-picks Telugu without ever setting wantLang).
   failoverCtxRef.current = {
@@ -1480,6 +1490,14 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     setSourceLocked(true);
     setSwitching(`Switching to ${label}…`);
     srcTick.current = setInterval(() => {
+      const pending = srcSwitch.current;
+      if (pending?.ctx.strictLanguage && streamRef.current !== pending.streamKey && playedStreamRef.current === streamRef.current) {
+        const known = (discoveredTracksRef.current?.tracks || []).map(trackAudioLanguage).filter(isKnownAudioLanguage);
+        if (known.length && !known.some(name => audioLanguageKey(name) === audioLanguageKey(pending.ctx.lang))) {
+          failSwitchRef.current?.(`${pending.ctx.lang} audio missing`);
+          return;
+        }
+      }
       const r = tickSourceSwitch(srcSwitch.current, {
         streamKey: streamRef.current,
         frames: playedStreamRef.current != null && playedStreamRef.current === streamRef.current,
@@ -1511,6 +1529,15 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       ok: false, reason: `switch: ${reason}` });
     if (failed.masterUrl) setFailedUrls((prev) => new Set(prev).add(failed.masterUrl));
     const alt = advanceTarget(sourceListRef.current, deadSources.current, failed, m.ctx);
+    if (!alt && m.ctx.strictLanguage && m.ctx.fallback?.source?.masterUrl) {
+      const previous = m.ctx.fallback;
+      resumeAt.current = previous.at;
+      setWantLang(previous.lang);
+      resolve.setError(null);
+      resolve.switchSource(previous.source);
+      setNotice(`No playable ${m.ctx.lang} stream responded. Restored previous stream.`);
+      return true;
+    }
     if (!alt) {
       resolve.setError({ message: `${m.label} didn't respond, and no other server is left. Try again in a moment.` });
       return true;
@@ -1520,7 +1547,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       setNotice(advanceNotice(m.label, rowLabel(alt.id, alt.provider),
         attemptsRef.current[attemptsRef.current.length - 1]?.reason === Reason.UNSUPPORTED));
     }
-    switchSourceRef.current?.(alt, null, { at: m.at, ctx: m.ctx });
+    switchSourceRef.current?.(alt, m.ctx.strictLanguage ? m.ctx.lang : null, { at: m.at, ctx: m.ctx });
     return true;
   };
 
@@ -1547,7 +1574,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     // NOW, even when a language pairing has to run before the new stream.
     const at = opts.at ?? (videoRef.current?.currentTime || 0);
     startSourceSwitch(src, rowLabel(src.id, src.provider), at,
-      opts.ctx || { ...failoverCtxRef.current });
+      opts.ctx || { ...failoverCtxRef.current, ...(lang ? { lang, strictLanguage: true } : {}) });
     // Keeping the language across a SERVER change.
     //
     // A server row carries only the picture. When the viewer has a standing
@@ -1568,8 +1595,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     const playing = hls.audioTracks?.find((t) => t.id === hls.currentAudio)?.name || null;
     const want = lang || wantLang || playing;
     if (want && src?.id !== currentSourceId) {
-      const owns = (Array.isArray(src?.languages) ? src.languages : [])
-        .some((l) => String(l).toLowerCase() === String(want).toLowerCase());
+      const owns = sourceAudioLanguages(src).some(l => audioLanguageKey(l) === audioLanguageKey(want));
       if (!owns) {
         // Prefer a donor that can hand over ONE language on its own.
         //
@@ -1621,6 +1647,39 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
 
   // Let the recovery path above reach switchSource without reordering hooks.
   switchSourceRef.current = switchSource;
+
+  // Actual tracks discovered during playback remain available after changing server.
+  useEffect(() => {
+    if (playedStreamRef.current !== stream || !hls.audioTracks?.length) return;
+    const source = sources.find(s => s.id === currentSourceId);
+    if (!source || String(currentSourceId).startsWith('pair-')) return;
+    const names = [...new Set(hls.audioTracks.map(trackAudioLanguage).filter(isKnownAudioLanguage))];
+    if (!names.length || names.map(audioLanguageKey).join('|') === sourceAudioLanguages(source).map(audioLanguageKey).join('|')) return;
+    resolve.replaceSource(source.id, { ...source, languages: names, audio: names.map(language => ({ language })), selectableAudio: names.length > 1 });
+  }, [started, stream, hls.audioTracks, sources, currentSourceId, resolve.replaceSource]);
+
+  const pickLanguage = useCallback((language) => {
+    if (srcSwitch.current) { setNotice(`Still switching to ${srcSwitch.current.label}…`); return; }
+    const track = hls.audioTracks?.find(t => audioLanguageKey(trackAudioLanguage(t)) === audioLanguageKey(language));
+    setWantLang(language);
+    if (track && hls.pickAudio(track.id) !== false) return;
+    const candidates = languageCandidates(sourceListRef.current, language).filter(s => !s.unsupported);
+    let next = nextAlive(candidates, deadSources.current, { lang: language });
+    // An explicit language click retries its failed sources without reviving unrelated rows.
+    if (!next && candidates.length) {
+      for (const source of candidates) deadSources.current.delete(source.id ?? source.provider);
+      setFailedUrls(prev => new Set([...prev].filter(url => !candidates.some(s => s.masterUrl === url))));
+      next = nextAlive(candidates, deadSources.current, { lang: language });
+    }
+    if (next) switchSource(next, language, { ctx: {
+      ...failoverCtxRef.current, lang: language, strictLanguage: true,
+      fallback: { source: sourceListRef.current.find(s => s.id === currentSourceIdRef.current),
+        lang: hls.audioTracks?.find(t => t.id === hls.currentAudio)?.name || wantLang,
+        at: videoRef.current?.currentTime || 0 },
+    } });
+    else setNotice(`No playable ${language} stream has been found yet.`);
+  }, [hls.audioTracks, hls.currentAudio, hls.pickAudio, switchSource, wantLang, videoRef]);
+
 
   /**
    * Play the viewer's chosen picture with their chosen language.
@@ -1958,6 +2017,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
           audioTracks={hls.audioTracks}
           currentAudio={hls.currentAudio}
           onPickAudio={hls.pickAudio}
+          onPickLanguage={pickLanguage} audioSources={sources}
           levels={hls.levels}
           currentLevel={hls.currentLevel}
           autoLevel={hls.autoLevel}
@@ -2014,6 +2074,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
           audioTracks={hls.audioTracks}
           currentAudio={hls.currentAudio}
           onPickAudio={hls.pickAudio}
+          onPickLanguage={pickLanguage} audioSources={sources}
           onPickPair={pickPairGuarded}
           audioSync={{
             value: audioSyncState.offset,
@@ -2093,7 +2154,14 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
         <Loading view={loadView} title={title.title}
           meta={isTv ? `S${season} E${episode}${epTitle ? ` · ${epTitle}` : ''}` : null}
           onArt={Boolean(title.backdrop)}
-          onClose={onClose} onRetry={retrySearch} onPick={pickFromLoading} />
+          onClose={onClose} onRetry={retrySearch} onPick={pickFromLoading} onChooseServer={() => setSourceChooserOpen(true)} />
+      )}
+      {sourceChooserOpen && (
+        <div className="player-loading-menu" onClick={closeSourceChooser}>
+          <VideoMenu choices={videoChoices(sources)} currentId={currentSourceId} currentSource={currentSource}
+            open onToggle={closeSourceChooser} onCheckSources={netmirrorSources.check} checkingSources={netmirrorSources.loading}
+            onPick={choice => { closeSourceChooser(); if (choice.source) pickFromLoading(choice.source.id); }} />
+        </div>
       )}
       {notice && !error && (
         <div className="toast" role="status" key={notice.id}>{notice.text}</div>

@@ -112,7 +112,7 @@ class NetmirrorResolver(
                     }
                     out += Resolved("netmirror", "NetMirror | $label", link, headers, null, audio, master.levels, master.codecs,
                         key = "netmirror-$ott-$target", subtitles = subtitles,
-                        languages = if (audio.isEmpty() && langs.size == 1) langs else Hls.languages(audio), catalogLanguages = langs).also(onRow)
+                        languages = if (audio.isEmpty() && langs.size == 1) langs else Hls.languages(audio), catalogLanguages = langs, netmirrorCatalog = label).also(onRow)
                     } catch (e: Exception) {
                         if (e is CancellationException) throw e
                         failed = true

@@ -24,7 +24,7 @@ import SyncBar from './SyncBar';
 export default function AudioMenu({
   audioTracks = [], currentAudio, onPickAudio,
   open, onToggle, onTouch,
-  sync = null,
+  sync = null, allowSingleSelection = false,
 }) {
   if (!audioTracks.length) return null;
 
@@ -46,7 +46,7 @@ export default function AudioMenu({
   // bar still needs somewhere to live - and a single paired language is
   // exactly the case most likely to need nudging. So the menu stays openable
   // whenever there is a sync control to show.
-  const only = audioTracks.length === 1 && !sync;
+  const only = audioTracks.length === 1 && !sync && !allowSingleSelection;
 
   return (
     <div className="pmenu-wrap">
@@ -66,7 +66,7 @@ export default function AudioMenu({
       {open && !only && (
         <PlayerMenu title="Audio" icon="audio" onClose={onToggle} onTouch={onTouch}>
           {audioTracks.map(t => (
-            <MenuRow key={t.id} label={t.name} selected={t.id === currentAudio}
+            <MenuRow key={t.id} label={t.name} meta={t.meta} selected={t.id === currentAudio}
                      onClick={() => onPickAudio?.(t.id)} />
           ))}
           {/* Timing lives WITH the language list: picking a dubbed track is

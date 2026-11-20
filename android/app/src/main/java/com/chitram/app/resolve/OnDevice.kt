@@ -201,6 +201,7 @@ class OnDeviceResolver(
                 selectableAudio = r.audio.size > 1 && !r.muxed,
                 audioLanguages = if (r.provider == NETMIRROR || r.audio.isNotEmpty()) Hls.languages(r.audio).mapNotNull(com.chitram.app.data.Ranking::languageLabel).distinctBy { it.lowercase() } else null,
                 catalogLanguages = r.catalogLanguages.mapNotNull(com.chitram.app.data.Ranking::languageLabel).distinctBy { it.lowercase() },
+                netmirrorCatalog = r.netmirrorCatalog,
                 incomplete = r.incomplete,
                 hybrid = false,
                 subtitles = r.subtitles,

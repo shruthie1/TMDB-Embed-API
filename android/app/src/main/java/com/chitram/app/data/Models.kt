@@ -118,6 +118,7 @@ data class RawStream(
     val audio: List<RawAudio>? = null,
     /** Availability labels from a catalog, never proof of selectable audio. */
     val catalogLanguages: List<String> = emptyList(),
+    val netmirrorCatalog: String? = null,
 )
 
 @Serializable

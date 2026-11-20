@@ -115,6 +115,7 @@ describe('selecting the embed', () => {
     fireEvent.click(serverBtn(container));
     fireEvent.click([...container.querySelectorAll('.pmenu-pick .pmenu-item')]
       .find((r) => r.textContent.includes('OneTouchTV')));
+    fireEvent.click([...container.querySelectorAll('.pmenu-pick .pmenu-item')].find(r => r.textContent.includes('OneTouchTV')));
     expect(onBack).toHaveBeenCalledWith(expect.objectContaining({ id: 'OneTouchTV-5' }));
     expect(container.querySelector('iframe')).toBeNull();
   });

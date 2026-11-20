@@ -29,6 +29,7 @@ import androidx.compose.ui.unit.dp
 object Glyphs {
     val play = solid("M6 4v16l14-8z")
     val pause = line("M8 5v14M16 5v14")
+    val close = line("M6 6l12 12M18 6L6 18")
     val back = line("M15 5l-7 7 7 7")
     val next = solid("M5 4v16l10-8zM17 4h2v16h-2z")
     val server = line("M4 5h16v5H4zM4 14h16v5H4zM8 7.5h.01M8 16.5h.01")

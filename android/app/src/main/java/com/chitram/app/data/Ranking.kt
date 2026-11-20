@@ -33,6 +33,7 @@ data class Source(
     val audioLanguages: List<String>? = null,
     /** Read-only catalog availability, separate from playable language choices. */
     val catalogLanguages: List<String> = emptyList(),
+    val netmirrorCatalog: String? = null,
     /** The provider returned usable rows while more catalogs/dubs remain unresolved. */
     val incomplete: Boolean = false,
 )
@@ -110,6 +111,7 @@ object Ranking {
             unsupported = codecs.supports(s.videoCodec, s.codecs) == false,
             audioLanguages = audioLanguages,
             catalogLanguages = languageLabels(s.catalogLanguages),
+            netmirrorCatalog = s.netmirrorCatalog,
         )
     }
 

@@ -177,3 +177,9 @@ test('an unusual language still works through the structured field', () => {
     });
     assert.deepEqual(out.languages, ['Tulu']);
 });
+
+test('NetMirror catalog identity survives normalization without becoming an audio language', () => {
+  const row = s.normaliseStream({ url: 'https://fixture/master.m3u8', provider: 'NetMirror', netmirrorCatalog: 'Prime Video', catalogLanguages: ['Telugu'], audio: [], languages: [] });
+  assert.equal(row.netmirrorCatalog, 'Prime Video');
+  assert.deepEqual(row.languages, []);
+});

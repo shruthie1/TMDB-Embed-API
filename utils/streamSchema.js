@@ -214,6 +214,7 @@ function normaliseStream(raw) {
         provider: raw.provider || raw.name || 'Unknown',
         title: raw.title || label || raw.provider || 'Stream',
         quality,
+        ...(raw.netmirrorCatalog ? { netmirrorCatalog: String(raw.netmirrorCatalog) } : {}),
         levels,
         languages,
         ...(Array.isArray(raw.catalogLanguages) ? { catalogLanguages: [...new Set(raw.catalogLanguages.map(canonicalLanguage).filter(Boolean))] } : {}),

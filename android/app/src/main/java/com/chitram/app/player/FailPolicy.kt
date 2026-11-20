@@ -22,12 +22,18 @@ object FailPolicy {
     /** Providers with an on-device resolver for VM rows (OnDeviceResolver.CASTLE, MULTIMOVIES). */
     private val DEVICE_TWINS = setOf("castletv", "multimovies")
 
+    /** A CDN timeout cannot be repaired by attaching the identical NetMirror URL again. */
+    fun unchangedNetmirrorRetry(previous: Source, fresh: Source): Boolean =
+        previous.provider.equals("netmirror", true) && fresh.provider.equals("netmirror", true) &&
+            previous.url == fresh.url && previous.headers == fresh.headers && previous.segmentToken == fresh.segmentToken
+
     fun hasDeviceTwin(provider: String?): Boolean = provider?.lowercase() in DEVICE_TWINS
 
-    fun onError(source: Source?, httpCode: Int?, refreshedOnce: Boolean, deviceRetried: Boolean = false, offline: Boolean = false, twinTried: Boolean = false): Action = when {
+    fun onError(source: Source?, httpCode: Int?, refreshedOnce: Boolean, deviceRetried: Boolean = false, offline: Boolean = false, twinTried: Boolean = false, languageSelection: Boolean = false): Action = when {
         offline -> Action.WAIT_ONLINE
         source?.onDevice != null -> if (deviceRetried) Action.FAILOVER else Action.RERESOLVE
         hasDeviceTwin(source?.provider) && !twinTried -> Action.DEVICE
+        languageSelection -> Action.FAILOVER
         (httpCode == 403 || httpCode == 410) && !refreshedOnce -> Action.REFRESH
         else -> Action.FAILOVER
     }

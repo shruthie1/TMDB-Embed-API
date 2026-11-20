@@ -192,6 +192,7 @@ export function toSource(s, i = 0) {
     // fix in providers/vaplayer.js). [] means unknown, never "one level".
     levels: Array.isArray(s.levels) ? s.levels : [],
     languages,
+    netmirrorCatalog: s.netmirrorCatalog || null,
     catalogLanguages: Array.isArray(s.catalogLanguages) ? s.catalogLanguages : [],
     audio: Array.isArray(s.audio) ? s.audio : [],
     // True only when the manifest really carries selectable renditions, so the

@@ -1,4 +1,6 @@
 'use client';
+import { useState, useEffect } from 'react';
+import { sourceAudioLanguages } from '../../lib/player/languageSources';
 import Icon from '../Icon';
 import MenuRow from './MenuRow';
 import PlayerMenu from './PlayerMenu';
@@ -27,6 +29,9 @@ export default function VideoMenu({
   choices = [], currentId, currentSource = null, onPick,
   open, onToggle, onTouch, onCheckSources, checkingSources = false,
 }) {
+  const [provider, setProvider] = useState(null);
+  const [focusLabel, setFocusLabel] = useState(null);
+  useEffect(() => { if (!open) { setProvider(null); } }, [open]);
   if (!choices.length) return null;
 
   // Name and ceiling, nothing else. The ceiling used to carry the language
@@ -59,7 +64,18 @@ export default function VideoMenu({
     ? labels[selectedIndex]
     : (currentSource || labels[0]);
   const incomplete = choices.some(c => c.source?.incomplete);
-  const only = choices.length === 1 && !incomplete;
+  const only = false;
+  const providerName = c => c.source?.provider || c.label || 'Stream';
+  const groups = new Map();
+  choices.forEach(c => { const name = providerName(c); if (!groups.has(name)) groups.set(name, []); groups.get(name).push(c); });
+  if (onCheckSources && ![...groups.keys()].some(k => k.toLowerCase() === 'netmirror')) groups.set('NetMirror', []);
+  const isNetmirror = provider?.toLowerCase() === 'netmirror';
+  const providerRows = groups.get(provider) || [];
+  const goBack = () => { setFocusLabel(provider); setProvider(null); };
+  const describe = rows => {
+    const languages = [...new Set(rows.flatMap(c => sourceAudioLanguages(c.source)))].slice(0, 3).join(', ');
+    return [rows.length === 1 ? maxOf(rows[0]) : `${rows.length} streams`, languages, rows.some(c => c.source?.incomplete) ? 'More sources pending' : '', !rows.length ? 'Check on demand' : ''].filter(Boolean).join(' · ');
+  };
 
   return (
     <div className="pmenu-wrap">
@@ -77,14 +93,17 @@ export default function VideoMenu({
       </button>
 
       {open && !only && (
-        <PlayerMenu title="Server" icon="server" onClose={onToggle} onTouch={onTouch}>
-          {choices.map((c, i) => (
-            <MenuRow key={c.id ?? i} label={labels[i]} meta={maxOf(c)}
-                     selected={i === selectedIndex}
-                     dim={c.unsupported}
-                     onClick={() => onPick?.(c)} />
+        <PlayerMenu title={provider || 'Server'} icon="server" onClose={onToggle} onBack={provider ? goBack : null} focusLabel={focusLabel} onTouch={onTouch}>
+          {!provider && [...groups].map(([name, rows]) => (
+            <MenuRow key={name} label={name} meta={describe(rows)} selected={rows.some(c => choices.indexOf(c) === selectedIndex)}
+              onClick={() => { if (rows.length === 1 && rows[0].embed) onPick?.(rows[0]); else { setFocusLabel(null); setProvider(name); if (!rows.length && name.toLowerCase() === 'netmirror') onCheckSources?.(); } }} />
           ))}
-          {incomplete && onCheckSources && (
+          {provider && providerRows.map(c => {
+            const i = choices.indexOf(c);
+            return <MenuRow key={c.id ?? i} label={labels[i]} meta={[c.source?.netmirrorCatalog, maxOf(c), sourceAudioLanguages(c.source).join(', ')].filter(Boolean).join(' · ')} selected={i === selectedIndex} dim={c.unsupported} onClick={() => onPick?.(c)} />;
+          })}
+          {provider && !providerRows.length && <p className="pmenu-note">No streams found in current results.</p>}
+          {(incomplete || isNetmirror) && onCheckSources && (
             <button role="menuitem" className="pmenu-item focusable" data-focus=""
                     disabled={checkingSources} aria-busy={checkingSources || undefined}
                     onClick={onCheckSources}>

@@ -1,4 +1,5 @@
 'use client';
+import { audioLanguageKey, languageSourceIndex } from '../../lib/player/languageSources';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { audioOptions } from '../../lib/player/audioOptions';
 
@@ -51,7 +52,7 @@ const isCurrent = (s, currentSourceId, currentSource) => (
 export default function TvBar({
   sources = [], currentSource, currentSourceId, onPickSource,
   levels = [], currentLevel, autoLevel, onPickLevel,
-  audioTracks = [], currentAudio, onPickAudio,
+  audioTracks = [], currentAudio, onPickAudio, onPickLanguage, audioSources = sources,
   sourcesPending = false, onClose, onCheckSources, checkingSources = false,
   fit = 'cover', onSetFit,
   subs = [], currentSub, onPickSub, subLoading = false,
@@ -186,8 +187,15 @@ export default function TvBar({
   // sources. Reused rather than reimplemented so the TV and the custom player
   // can never disagree about which languages exist.
   const audio = useMemo(
-    () => audioOptions({ audioTracks, currentAudio, sources, currentSourceId }),
-    [audioTracks, currentAudio, sources, currentSourceId]);
+    () => {
+      const base = audioOptions({ audioTracks, currentAudio, sources, currentSourceId });
+      if (!onPickLanguage) return base;
+      const options = new Map(base.options.map(o => [audioLanguageKey(o.name), o]));
+      for (const [key, entry] of languageSourceIndex(audioSources).byLanguage) {
+        if (!options.has(key)) options.set(key, { id: `language:${entry.language}`, name: entry.language, kind: 'language' });
+      }
+      return { ...base, options: [...options.values()] };
+    }, [audioTracks, currentAudio, sources, currentSourceId, onPickLanguage, audioSources]);
 
   return (
     <>
@@ -271,7 +279,7 @@ export default function TvBar({
           'muxed' option switches the track inside the file; a 'sources' option
           switches to the sibling stream that carries that language, which is
           how CastleTV ships Telugu/Malayalam/Hindi. */}
-      {audio.options.length > 1 && (
+      {(audio.options.length > 1 || (onPickLanguage && audio.options.length > 0)) && (
         <div className="tvbar-row" data-focus-group="">
           <span className="tvbar-k">Audio</span>
           <div className="tvbar-btns">
@@ -280,6 +288,7 @@ export default function TvBar({
                       className={`tvbar-btn focusable ${o.id === audio.current ? 'on' : ''}`}
                       data-focus="" aria-pressed={o.id === audio.current}
                       onClick={() => {
+                        if (onPickLanguage) { onPickLanguage(o.name); rearm.current(); return; }
                         // An in-file switch keeps the playback position, so it
                         // is always preferred when the menu offers one.
                         if (audio.kind === 'muxed' && onPickAudio?.(o.id) !== false) {

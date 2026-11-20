@@ -60,6 +60,8 @@ describe('Servers menu marks what is playing', () => {
     const { container } = mount({ currentSourceId: 'CastleTV-1', currentSource: 'CastleTV' });
     expect(badge(container)).toBe('CastleTV 2');
     openServers(container);
+    expect(checked(container)).toEqual([row(container, 'CastleTV')]);
+    fireEvent.click(row(container, 'CastleTV'));
     expect(checked(container)).toEqual([row(container, 'CastleTV 2')]);
   });
 });
@@ -94,7 +96,8 @@ describe('picking a server', () => {
     const onSwitch = vi.fn();
     const { container } = render(<Harness onSwitch={onSwitch} notices={[]} guardOut={{}} />);
     openServers(container);
-    expect(checked(container)).toEqual([row(container, 'CastleTV 1')]);
+    expect(checked(container)).toEqual([row(container, 'CastleTV')]);
+    fireEvent.click(row(container, 'OneTouchTV'));
     fireEvent.click(row(container, 'OneTouchTV'));
     expect(onSwitch).toHaveBeenCalledWith(SOURCES[5]);
     expect(container.querySelector('.pmenu-pick')).toBeNull();
@@ -111,13 +114,14 @@ describe('picking a server', () => {
     );
     openServers(container);
     fireEvent.click(row(container, 'OneTouchTV'));
+    fireEvent.click(row(container, 'OneTouchTV'));
     let reverted;
     act(() => { reverted = guardOut.current.fail(); });
     expect(reverted).toBe(true);
     expect(notices).toEqual(['OneTouchTV did not load. Back on CastleTV 1.']);
     expect(badge(container)).toBe('CastleTV 1');
     openServers(container);
-    expect(checked(container)).toEqual([row(container, 'CastleTV 1')]);
+    expect(checked(container)).toEqual([row(container, 'CastleTV')]);
   });
 });
 

@@ -417,6 +417,7 @@ async function fetchNetflix(tmdbId, type, title, season, episode) {
 
         const streams = (data.streams || []).filter((stream) => stream.url).map((stream) => ({
             name: 'NetMirror | Netflix',
+            netmirrorCatalog: 'Netflix',
             title: `${title}\n${stream.resolution ? `${stream.resolution}p` : 'Auto'}`,
             url: stream.url,
             quality: stream.resolution ? `${stream.resolution}p` : 'Auto',
@@ -429,6 +430,7 @@ async function fetchNetflix(tmdbId, type, title, season, episode) {
         if (!data.mp4) return [];
         return withAudio([{
             name: 'NetMirror | Netflix',
+            netmirrorCatalog: 'Netflix',
             title: `${title}\nAuto`,
             url: data.mp4,
             quality: 'Auto',
@@ -1018,6 +1020,7 @@ async function resolveMatch(config, platform, match, title, type, season, episod
 
         return [{
             name: `NetMirror${langTag} | ${label}`,
+            netmirrorCatalog: label,
             title: `${title}\nAuto`,
             url: resolved.video_link,
             quality: 'Auto',

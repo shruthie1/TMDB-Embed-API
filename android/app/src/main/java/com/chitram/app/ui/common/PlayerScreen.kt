@@ -68,6 +68,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.key
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -171,6 +172,7 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
     val now = vm.request ?: req
     var controls by remember { mutableStateOf(true) }
     var menu by remember { mutableStateOf<Menu?>(null) }
+    var serverProvider by remember { mutableStateOf<String?>(null) }
     var lastInput by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var seekHint by remember { mutableIntStateOf(0) } // -1 back, 1 forward, for the double-tap badge
     val playerPrefs = App.instance.playerPrefs
@@ -200,6 +202,7 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
     val back = {
         when {
             details -> details = false
+            menu == Menu.Server && serverProvider != null -> serverProvider = null
             menu != null -> menu = null
             vm.nextUp != null -> vm.dismissNext()
             controls && vm.isPlaying -> controls = false
@@ -296,7 +299,7 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
         }
 
         if (loading || vm.phase is PlayerVm.Phase.Failed) {
-            LoadingScreen(now, vm, isTv, details, onDetails = { details = it }, onBack = onBack)
+            LoadingScreen(now, vm, isTv, details, onDetails = { details = it }, onChooseServer = { details = false; serverProvider = null; menu = Menu.Server }, onBack = onBack)
         } else {
             val note = vm.notice
             if (vm.buffering || note.isNotEmpty()) {
@@ -317,19 +320,32 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
         // The control row cannot fit that width, so wait for landscape before drawing it.
         val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
         if (controls && (isTv || landscape) && vm.phase is PlayerVm.Phase.Playing && vm.framed && vm.nextUp == null) {
-            Controls(vm, now, isTv, playFocus, fit, onFit = { fit = fit.next(); playerPrefs.fit = fit; poke() }, onMenu = { menu = it; poke() }, onBack = onBack, poke = ::poke)
+            Controls(vm, now, isTv, playFocus, fit, onFit = { fit = fit.next(); playerPrefs.fit = fit; poke() }, onMenu = { menu = it; serverProvider = null; poke() }, onBack = onBack, poke = ::poke)
         }
 
         vm.nextUp?.let { next -> NextUpCard(next, isTv, onPlay = { vm.start(next) }, onDismiss = { vm.dismissNext(); controls = true }) }
 
         menu?.let { m ->
             val items = when (m) {
-                Menu.Server -> vm.serverItems()
+                Menu.Server -> vm.serverItems(serverProvider)
                 Menu.Audio -> vm.audioItems()
                 Menu.Quality -> vm.qualityItems()
                 Menu.Subtitles -> vm.subtitleItems()
             }
-            MenuPanel(m.title, items, isTv, onClose = { menu = null }, onPick = { vm.choose(it); menu = null; poke() })
+            val shown = if (m == Menu.Server && serverProvider.equals("netmirror", true)) items + MenuItem("check:netmirror", if (vm.checkingNetmirror) "Checking sources…" else "Check for more streams", "Current playback continues") else items
+            MenuPanel(m, shown, isTv, titleOverride = if (m == Menu.Server) serverProvider else null,
+                onUp = if (m == Menu.Server && serverProvider != null) ({ serverProvider = null }) else null,
+                onClose = { menu = null }, onPick = { key ->
+                    when {
+                        key.startsWith("group:") -> {
+                            serverProvider = key.removePrefix("group:")
+                            if (serverProvider.equals("netmirror", true) && vm.serverItems(serverProvider).isEmpty()) vm.checkNetmirror()
+                        }
+                        key == "check:netmirror" -> vm.checkNetmirror()
+                        else -> { vm.choose(key); menu = null }
+                    }
+                    poke()
+                })
         }
     }
 }
@@ -358,7 +374,7 @@ private fun BackChip(isTv: Boolean, onBack: () -> Unit, modifier: Modifier = Mod
  * loading. TV focus starts on Details and never jumps when a button appears.
  */
 @Composable
-private fun LoadingScreen(r: PlayRequest, vm: PlayerVm, isTv: Boolean, details: Boolean, onDetails: (Boolean) -> Unit, onBack: () -> Unit) {
+private fun LoadingScreen(r: PlayRequest, vm: PlayerVm, isTv: Boolean, details: Boolean, onDetails: (Boolean) -> Unit, onChooseServer: () -> Unit, onBack: () -> Unit) {
     var tick by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) { while (true) { tick = System.currentTimeMillis(); delay(500) } }
     val v = vm.loadingView(tick)
@@ -400,8 +416,7 @@ private fun LoadingScreen(r: PlayRequest, vm: PlayerVm, isTv: Boolean, details: 
                     Row(Modifier.padding(top = 20.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         if (isTv) PillButton("Back", icon = Glyphs.back, onClick = onBack)
                         if (v.showChooser) PillButton("Choose a server", icon = Glyphs.server) {
-                            focusRow = v.rows.firstOrNull { it.clickable && it.state == LoadingModel.RowState.WAITING }?.id
-                            onDetails(true)
+                            onChooseServer()
                         }
                         if (v.showTryAgain) PillButton("Try again", primary = failed, icon = Glyphs.restart, modifier = Modifier.focusRequester(retryFocus), onClick = { vm.retry() })
                         PillButton(
@@ -739,51 +754,58 @@ fun PillButton(text: String, modifier: Modifier = Modifier, primary: Boolean = f
 }
 
 @Composable
-private fun MenuPanel(title: String, items: List<MenuItem>, isTv: Boolean, onClose: () -> Unit, onPick: (String) -> Unit) {
+private fun MenuPanel(menu: Menu, items: List<MenuItem>, isTv: Boolean, titleOverride: String? = null, onUp: (() -> Unit)? = null, onClose: () -> Unit, onPick: (String) -> Unit) {
+    val title = titleOverride ?: menu.title
+    val icon = when (menu) { Menu.Server -> Glyphs.server; Menu.Audio -> Glyphs.audio; Menu.Quality -> Glyphs.quality; Menu.Subtitles -> Glyphs.subtitles }
     val first = remember(title) { FocusRequester() }
     val start = items.indexOfFirst { it.selected }.coerceAtLeast(0)
-    val listState = rememberLazyListState(initialFirstVisibleItemIndex = start)
+    val listState = key(title) { rememberLazyListState(initialFirstVisibleItemIndex = start) }
     LaunchedEffect(title) { runCatching { first.requestFocus() } }
     BoxWithConstraints(
         Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.4f))
             .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClose),
         contentAlignment = Alignment.CenterEnd,
     ) {
-        val bottomSheet = !isTv && maxHeight > maxWidth
-        val panelWidth = minOf(maxWidth, if (isTv) 420.dp else 360.dp)
+        val layout = playerMenuLayout(maxWidth.value, maxHeight.value, isTv)
+        val shape = if (layout.bottomSheet) RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp) else if (isTv) RoundedCornerShape(0.dp) else Tok.radiusLg
         Column(
-            Modifier.align(if (bottomSheet) Alignment.BottomCenter else Alignment.CenterEnd)
-                .then(if (bottomSheet) Modifier.fillMaxWidth().heightIn(max = maxHeight * 0.7f) else Modifier.fillMaxHeight().width(panelWidth))
-                .clip(if (bottomSheet) RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp) else RoundedCornerShape(0.dp))
-                .background(Tok.surfaceSolid)
+            Modifier.align(if (layout.bottomSheet) Alignment.BottomCenter else Alignment.CenterEnd)
+                .padding(layout.inset.dp)
+                .width(layout.width.dp).heightIn(max = layout.height.dp)
+                .clip(shape).background(Tok.surfaceSolid).border(1.dp, Tok.border, shape)
                 .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { }
                 .windowInsetsPadding(WindowInsets.displayCutout)
-                .padding(vertical = if (isTv) 24.dp else 12.dp),
+                .padding(top = if (isTv) 24.dp else 4.dp),
         ) {
             Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (onUp != null) Box(Modifier.size(44.dp).clickable(onClick = onUp).semantics { contentDescription = "Back to servers" }, contentAlignment = Alignment.Center) {
+                    Icon(Glyphs.back, contentDescription = null, tint = Tok.text, modifier = Modifier.size(20.dp))
+                }
+                Icon(icon, contentDescription = null, tint = Tok.textSecondary, modifier = Modifier.padding(start = 8.dp).size(20.dp))
+                BasicText(title, style = TextStyle(color = Tok.text, fontSize = if (isTv) 20.sp else 16.sp, fontWeight = FontWeight.SemiBold), modifier = Modifier.weight(1f).padding(horizontal = 12.dp))
                 val closeSource = remember { MutableInteractionSource() }
                 val closeFocused by closeSource.collectIsFocusedAsState()
                 Box(Modifier.size(48.dp).controlFocus(closeFocused, Tok.radiusMd)
                     .clickable(interactionSource = closeSource, indication = null, onClick = onClose)
                     .semantics { contentDescription = "Close $title" }, contentAlignment = Alignment.Center) {
-                    Icon(Glyphs.back, contentDescription = null, tint = if (closeFocused) Focus.ink else Tok.text, modifier = Modifier.size(20.dp))
+                    Icon(Glyphs.close, contentDescription = null, tint = if (closeFocused) Focus.ink else Tok.text, modifier = Modifier.size(20.dp))
                 }
-                BasicText(title, style = TextStyle(color = Tok.text, fontSize = 20.sp, fontWeight = FontWeight.SemiBold), modifier = Modifier.padding(horizontal = 8.dp))
             }
             Box(Modifier.fillMaxWidth().height(1.dp).background(Tok.fill2))
             if (items.isEmpty()) BasicText("Nothing to choose here.", style = TextStyle(color = Tok.textMuted, fontSize = 14.sp), modifier = Modifier.padding(24.dp))
-            LazyColumn(Modifier.fillMaxWidth().weight(1f, fill = false), state = listState) {
+            LazyColumn(Modifier.fillMaxWidth().weight(1f, fill = false).padding(horizontal = 8.dp, vertical = 4.dp), state = listState) {
                 itemsIndexed(items, key = { _, it -> it.key }) { i, item ->
                     val src = remember { MutableInteractionSource() }
                     val focused by src.collectIsFocusedAsState()
                     Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp)
+                        Modifier.fillMaxWidth().padding(vertical = 2.dp)
                             .then(if (i == start) Modifier.focusRequester(first) else Modifier)
                             .controlFocus(focused, Tok.radiusMd, lift = false)
                             .clip(Tok.radiusMd)
-                            .background(if (focused) Focus.fill else Color.Transparent)
+                            .background(if (focused) Focus.fill else if (item.selected) Tok.fill1 else Color.Transparent)
                             .clickable(interactionSource = src, indication = null) { onPick(item.key) }
-                            .heightIn(min = 48.dp)
+                            .semantics { stateDescription = if (item.selected) "Selected" else "Not selected" }
+                            .heightIn(min = if (isTv) 56.dp else 48.dp)
                             .padding(horizontal = 12.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
@@ -793,7 +815,7 @@ private fun MenuPanel(title: String, items: List<MenuItem>, isTv: Boolean, onClo
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
                             BasicText(item.label, style = TextStyle(color = if (focused) Focus.ink else if (item.dim) Tok.textDim else Tok.text, fontSize = if (isTv) 18.sp else 16.sp))
-                            if (item.detail.isNotEmpty()) BasicText(item.detail, style = TextStyle(color = if (focused) Focus.ink.copy(alpha = 0.7f) else Tok.textMuted, fontSize = if (isTv) 14.sp else 12.sp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            if (item.detail.isNotEmpty()) BasicText(item.detail, style = TextStyle(color = if (focused) Focus.ink.copy(alpha = 0.7f) else Tok.textMuted, fontSize = if (isTv) 14.sp else 12.sp), maxLines = 2, overflow = TextOverflow.Ellipsis)
                         }
 
                     }

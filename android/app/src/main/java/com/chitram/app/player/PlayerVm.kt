@@ -214,7 +214,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             override fun onVideoSizeChanged(size: VideoSize) { videoSize = size }
             override fun onRenderedFirstFrame() { markFramed() }
             override fun onCues(cueGroup: CueGroup) { cues = cueGroup.cues.joinToString("\n") { it.text ?: "" }.trim() }
-            override fun onTracksChanged(t: Tracks) { tracks = t; if (pairedAudio != null) applyPair(t) else pickPreferredAudio(t); if (landed) current?.let { snapshotCtx(it) } }
+            override fun onTracksChanged(t: Tracks) { tracks = t; recordAudio(t); if (pairedAudio != null) applyPair(t) else pickPreferredAudio(t); if (landed) current?.let { snapshotCtx(it) } }
             override fun onPlayerError(error: PlaybackException) { handleError(error) }
         })
         viewModelScope.launch {
@@ -255,6 +255,9 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     }
 
     private var selectedAudioLanguage: String? = null
+    private var languageTrial: String? = null
+    private val discoveredAudio = HashMap<String, List<String>>()
+    private var languageFallback: Triple<Source, String?, Long>? = null
     private fun desiredAudio(): String = selectedAudioLanguage ?: g.prefs.preferredAudio()
 
     fun start(r: PlayRequest) {
@@ -262,6 +265,9 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         saveProgress()
         if (request?.id != r.id || request?.type != r.type) selectedAudioLanguage = null
         request = r
+        languageTrial = null
+        languageFallback = null
+        discoveredAudio.clear()
         tried.clear()
         reresolved.clear()
         twinTried.clear()
@@ -528,7 +534,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         val http = generateSequence<Throwable>(e) { it.cause }.filterIsInstance<HttpDataSource.InvalidResponseCodeException>().firstOrNull()
         val pos = player.currentPosition.coerceAtLeast(0)
         val cur = current
-        val action = FailPolicy.onError(cur, http?.responseCode, refreshedOnce, cur?.onDevice in reresolved, offline = offline || isOffline(), twinTried = cur?.provider?.lowercase() in twinTried)
+        val action = FailPolicy.onError(cur, http?.responseCode, refreshedOnce, cur?.onDevice in reresolved, offline = offline || isOffline(), twinTried = cur?.provider?.lowercase() in twinTried, languageSelection = languageTrial != null)
         val why = LoadingModel.reasonFor(http?.responseCode, decoder = e.errorCode in 4000..4999)
         if (action == FailPolicy.Action.WAIT_ONLINE) {
             android.util.Log.i("Chitram", "[offline] ${cur?.provider}: ${e.errorCodeName} while offline, waiting")
@@ -566,9 +572,15 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         resolveJob = viewModelScope.launch {
             val key = OnDeviceResolver.nameFor(name) ?: OnDeviceResolver.VAPLAYER
             val rows = g.onDevice.resolveAll(key, r.type, r.id, r.season, r.episode, g.codecs, desiredAudio(), fresh = true, title = r.title)
-            val fresh = rows.find { it.id == s.id } ?: Ranking.rank(rows, desiredAudio()).firstOrNull { it.id !in tried }
+            val eligible = languageTrial?.let { AudioChoice.candidates(rows, it, tried) } ?: rows
+            val fresh = eligible.find { it.id == s.id } ?: Ranking.rank(eligible, desiredAudio()).firstOrNull { it.id !in tried }
             if (request != r) return@launch
             if (fresh == null) { failover("$reason, re-resolve failed", pos, why); return@launch }
+            if (why == LoadingModel.Reason.NO_ANSWER && FailPolicy.unchangedNetmirrorRetry(s, fresh)) {
+                android.util.Log.i("Chitram", "netmirror: unchanged CDN target after timeout; advancing instead of reattaching")
+                failover("NetMirror CDN did not respond", pos, why)
+                return@launch
+            }
             if (fresh.id != s.id) tried += s.id
             putSources(Ranking.merge(sources, rows, desiredAudio(), null))
             play(fresh, pos)
@@ -586,7 +598,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         val key = s.provider.lowercase()
         twinTried += key
         val twin = twins[key]
-        if (twin != null && twin.id !in tried) {
+        if (twin != null && twin.id !in tried && (languageTrial == null || AudioChoice.candidates(listOf(twin), languageTrial!!).isNotEmpty())) {
             android.util.Log.i("Chitram", "recover: $reason -> device twin")
             endAttempt(LoadingModel.RowState.FAILED, why)
             tried += s.id
@@ -603,7 +615,8 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         resolveJob?.cancel()
         resolveJob = viewModelScope.launch {
             val rows = g.onDevice.resolveAll(name, r.type, r.id, r.season, r.episode, g.codecs, desiredAudio(), fresh = true, title = r.title)
-            val fresh = Ranking.rank(rows, desiredAudio()).firstOrNull { it.id !in tried }
+            val eligible = languageTrial?.let { AudioChoice.candidates(rows, it, tried) } ?: rows
+            val fresh = Ranking.rank(eligible, desiredAudio()).firstOrNull { it.id !in tried }
             if (request != r) return@launch
             if (fresh == null || fresh.id in tried) { failover("$reason, device resolve failed", pos, why); return@launch }
             endAttempt(LoadingModel.RowState.FAILED, why)
@@ -627,7 +640,19 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             tried += failed.id
             report(failed, ok = false, reason = reason)
         }
-        val next = PlayPolicy.nextAlive(sources, tried, ctxLang ?: g.prefs.preferredAudio(), ctxHeight)
+        val pool = languageTrial?.let { AudioChoice.candidates(sources, it, tried) } ?: sources
+        val next = PlayPolicy.nextAlive(pool, tried, languageTrial ?: ctxLang ?: desiredAudio(), ctxHeight)
+        if (next == null && languageTrial != null) {
+            val language = languageTrial
+            val fallback = languageFallback
+            languageTrial = null
+            languageFallback = null
+            if (fallback != null) {
+                play(fallback.first, fallback.third, audioLanguage = fallback.second)
+                notice = "No playable $language stream responded. Restored previous stream."
+                return
+            }
+        }
         if (next == null) {
             phase = Phase.Failed("Every source failed. Last: $reason")
             player.stop()
@@ -657,7 +682,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                 val reason = if (alive) "switch: no frame in 20s" else "switch: no response in 8s"
                 val why = if (alive) LoadingModel.Reason.NO_PICTURE else LoadingModel.Reason.NO_ANSWER
                 android.util.Log.i("Chitram", "[switch] ${s.provider} dead: $reason")
-                when (FailPolicy.onError(s, null, refreshedOnce, s.onDevice in reresolved, offline = isOffline(), twinTried = s.provider.lowercase() in twinTried)) {
+                when (FailPolicy.onError(s, null, refreshedOnce, s.onDevice in reresolved, offline = isOffline(), twinTried = s.provider.lowercase() in twinTried, languageSelection = languageTrial != null)) {
                     FailPolicy.Action.WAIT_ONLINE -> { landed = false; goOffline() }
                     FailPolicy.Action.RERESOLVE -> reresolve(s, player.currentPosition.coerceAtLeast(0), "${s.provider}: $reason", why)
                     FailPolicy.Action.DEVICE -> toDevice(s, player.currentPosition.coerceAtLeast(0), "${s.provider}: $reason", why)
@@ -680,6 +705,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     private fun snapshotCtx(s: Source) {
         val audio = groups(C.TRACK_TYPE_AUDIO).flatMap { gr -> (0 until gr.length).filter { gr.isTrackSelected(it) }.map { gr.getTrackFormat(it) } }.firstOrNull()
         ctxLang = audio?.let { langName(it.language) } ?: s.languages.firstOrNull() ?: ctxLang
+        if (languageTrial != null && ctxLang.equals(languageTrial, true)) { languageTrial = null; languageFallback = null }
         ctxHeight = videoSize.height.takeIf { it > 0 } ?: Ranking.height(s).takeIf { it > 0 } ?: ctxHeight
     }
 
@@ -894,8 +920,27 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     }
 
     private fun putSources(list: List<Source>) {
-        sources = list
-        labels = LoadingModel.labelRows(labels, list)
+        sources = list.map { source -> discoveredAudio[source.id]?.let { source.copy(languages = it, audioLanguages = it, selectableAudio = it.size > 1) } ?: source }
+        labels = LoadingModel.labelRows(labels, sources)
+    }
+
+    private fun recordAudio(t: Tracks) {
+        if (pairedAudio != null) return
+        val source = current ?: return
+        val known = t.groups.filter { it.type == C.TRACK_TYPE_AUDIO }.flatMap { group ->
+            (0 until group.length).filter { group.isTrackSupported(it) }.mapNotNull { i ->
+                val f = group.getTrackFormat(i)
+                langName(f.language) ?: Ranking.languageLabel(f.label)
+            }
+        }.filter(AudioChoice::knownLanguage).distinctBy { it.lowercase() }
+        if (known.isEmpty()) return
+        discoveredAudio[source.id] = known
+        current = source.copy(languages = known, audioLanguages = known, selectableAudio = known.size > 1)
+        putSources(sources)
+        val wanted = languageTrial
+        if (wanted != null && known.none { it.equals(wanted, true) }) viewModelScope.launch {
+            if (current?.id == source.id && languageTrial == wanted) failover("$wanted audio missing", player.currentPosition.coerceAtLeast(0))
+        }
     }
 
     private fun label(s: Source): String = labels[s.id] ?: s.provider
@@ -952,13 +997,32 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
 
     // ---- Menus ---------------------------------------------------------------
 
-    fun serverItems(): List<MenuItem> {
-        // Web Servers menu: best picture first, numbered once across the list (U3).
-        val menu = Ranking.menuOrder(sources)
-        return menu.mapIndexed { _, s ->
-            val lang = s.languages.joinToString(", ").ifEmpty { "Unknown language" }
-            val q = Ranking.height(s).takeIf { it > 0 }?.let { "${it}p" } ?: s.quality
-            MenuItem("src:${s.id}", label(s), "$q · $lang" + (if (s.incomplete) " · more sources pending" else "") + (if (s.unsupported) " · not supported here" else ""), s.id == current?.id, s.unsupported)
+    fun serverItems(provider: String? = null): List<MenuItem> {
+        if (provider == null) return sources.groupBy { it.provider.lowercase() }.map { (_, rows) ->
+            val name = rows.first().provider
+            val languages = rows.flatMap(AudioChoice::languages).distinct().take(3).joinToString(", ")
+            MenuItem("group:$name", name, listOf("${rows.size} streams", languages).filter { it.isNotEmpty() }.joinToString(" · "), rows.any { it.id == current?.id })
+        } + if (sources.none { it.provider.equals("netmirror", true) }) listOf(MenuItem("group:NetMirror", "NetMirror", "Check streams on demand")) else emptyList()
+        return Ranking.menuOrder(sources.filter { it.provider.equals(provider, true) }).map { source ->
+            val languages = AudioChoice.languages(source).joinToString(", ").ifEmpty { "Unknown audio" }
+            val quality = Ranking.height(source).takeIf { it > 0 }?.let { "${it}p" } ?: source.quality
+            val detail = listOfNotNull(source.netmirrorCatalog, quality, languages,
+                if (source.incomplete) "More streams pending" else null,
+                if (source.unsupported) "Not supported here" else null).joinToString(" · ")
+            MenuItem("src:${source.id}", label(source), detail, source.id == current?.id, source.unsupported)
+        }
+    }
+
+    var checkingNetmirror by mutableStateOf(false); private set
+    fun checkNetmirror() {
+        val r = request ?: return
+        if (checkingNetmirror) return
+        checkingNetmirror = true
+        viewModelScope.launch {
+            try {
+                val rows = g.onDevice.resolveAll("netmirror", r.type, r.id, r.season, r.episode, g.codecs, desiredAudio(), fresh = true, title = r.title)
+                if (request == r) putSources(Ranking.merge(sources, rows, desiredAudio(), null))
+            } finally { checkingNetmirror = false }
         }
     }
 
@@ -975,7 +1039,8 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                 val name = langName(f.language) ?: f.label?.takeUnless { it.equals("audio", true) || it.isBlank() }
                     ?: current?.let { LoadingModel.langOf(it, desiredAudio()) } ?: "Default"
                 if (!names.add(name.lowercase())) continue
-                out += MenuItem("trk:$gi:$i", name, "in this stream", gr.isTrackSelected(i))
+                val count = AudioChoice.candidates(sources, name).size
+                out += MenuItem("trk:$gi:$i", name, "in this stream" + if (count > 1) " · $count streams" else "", gr.isTrackSelected(i))
             }
         }
         // Tracks not known yet: name the language that will play, not the row's first (A8).
@@ -985,15 +1050,9 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         // the audio LazyColumn throws "Key already used". Mirrors web trackChoices
         // (src:<id>:<lang>). choose() reads the id from p[1], so the :lang tail is
         // for uniqueness only. (Crash: Kubera, CastleTV-0 twice, 2026-11-21.)
-        // H13: the viewer's language from another row, under this picture.
-        val want = g.prefs.preferredAudio()
-        if (pairedAudio == null && want.lowercase() !in names) current?.let { cur ->
-            HybridPair.candidate(cur, sources, want, g.codecs, audioDecoders)?.let { a ->
-                out += MenuItem("pair:${a.id}", want, "this picture, audio from ${label(a)}")
-            }
-        }
-        for ((lang, s) in Ranking.otherSourceLanguages(sources, current?.id, names)) {
-            out += MenuItem("src:${s.id}:$lang", lang, "switches to ${s.provider} ${s.quality}")
+        for ((lang, rows) in AudioChoice.index(sources)) {
+            if (lang.lowercase() in names) continue
+            out += MenuItem("lang:$lang", lang, "${rows.size} streams · tries available servers")
         }
         return out
     }
@@ -1028,9 +1087,26 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     fun choose(key: String) {
         val p = key.split(":")
         when (p[0]) {
+            "lang" -> {
+                val language = key.removePrefix("lang:")
+                val all = AudioChoice.candidates(sources, language)
+                if (all.isEmpty()) { notice = "No playable $language stream found yet."; return }
+                if (AudioChoice.candidates(sources, language, tried).isEmpty()) all.forEach { tried.remove(it.id) }
+                val next = AudioChoice.candidates(sources, language, tried).firstOrNull() ?: return
+                languageFallback = current?.let { Triple(it, selectedAudioLanguage ?: ctxLang, player.currentPosition.coerceAtLeast(0)) }
+                languageTrial = language
+                selectedAudioLanguage = language
+                audioPickedFor = null
+                if (next.id == current?.id) {
+                    player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().clearOverridesOfType(C.TRACK_TYPE_AUDIO).setPreferredAudioLanguages(*isoFor(language)).build()
+                    pickPreferredAudio(tracks)
+                } else play(next, audioLanguage = language)
+                notice = "Trying $language on ${label(next)}…"
+            }
             // src:<id> from the video sheet, or src:<id>:<lang> from the audio
             // sheet. Provider ids carry no colon (provider-N), so p[1] is the id.
             "src" -> AudioChoice.source(key, sources)?.let { (source, language) ->
+                languageTrial = null; languageFallback = null
                 if (source.id == current?.id && language == null) return
                 if (source.id == current?.id) {
                     selectedAudioLanguage = language
@@ -1050,6 +1126,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                 notice = "${g.prefs.preferredAudio()} from ${label(a)}…"
             }
             "trk" -> {
+                languageTrial = null; languageFallback = null
                 val gi = p[1].toInt(); val ti = p[2].toInt()
                 val format = groups(C.TRACK_TYPE_AUDIO).getOrNull(gi)?.getTrackFormat(ti)
                 selectedAudioLanguage = langName(format?.language) ?: format?.label ?: selectedAudioLanguage

@@ -287,3 +287,7 @@ should import the existing design system, not create duplicate token/icon sets.
 
 This is still a proposal. No further application player UI implementation,
 deployment, commit or push was performed for this design request.
+
+## Updated player-list decision — 2026-11-21
+
+Use a compact provider list, then all discovered streams under that provider. Do not add a separate NetMirror catalog navigation level: Netflix, Prime Video and Hotstar are metadata on stream rows. The entire row is clickable, including its text and metadata. Both website and APK accumulate a bidirectional server/language index; selecting a language tries its known compatible sources and preserves alternatives as new results arrive. Catalog availability and unknown audio labels do not establish playable language support.

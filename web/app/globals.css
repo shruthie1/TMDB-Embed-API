@@ -3243,3 +3243,12 @@ html[data-tv="true"] .embed-stage .pmenu-unified{
 html[data-tv="true"] .pmenu .pmenu-item{min-height:56px}
 html[data-tv="true"] .pmenu-copy .pmenu-text{font-size:var(--text-md)}
 html[data-tv="true"] .pmenu-item:focus .pmenu-marker{color:var(--ink)}
+
+/* The loading chooser uses the same picker, without adding another player control. */
+.player-loading-menu{position:absolute;inset:0;z-index:8;background:rgb(0 0 0 / .4)}
+.player-loading-menu>.pmenu-wrap{position:static}
+.player-loading-menu>.pmenu-wrap>.pctl-pick-btn{display:none}
+.player-loading-menu .pmenu-unified{position:absolute;right:var(--space-4);bottom:var(--space-4);max-height:calc(100% - var(--space-8))}
+@media(max-width:639px){.player-loading-menu .pmenu-unified{left:0;right:0;bottom:0;width:auto;max-width:none;border-radius:var(--radius-lg) var(--radius-lg) 0 0}}
+/* Keep each selectable entry compact; the complete metadata remains accessible. */
+.pmenu-copy .pmenu-meta{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}

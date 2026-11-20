@@ -1,3 +1,4 @@
+import { languageCandidates } from './languageSources';
 import { PREFERRED_LANGUAGE } from '../backend';
 import { markDead, nextAlive } from './deadSources';
 
@@ -55,7 +56,7 @@ export function hasLife(v) {
 export function beginSourceSwitch({ target, label, at = 0, ctx = {}, streamKey = null, now = Date.now() }) {
   return {
     target, label: label || target?.provider || 'That server',
-    at, ctx: { lang: ctx.lang || null, height: ctx.height || null },
+    at, ctx: { lang: ctx.lang || null, height: ctx.height || null, ...(ctx.strictLanguage ? { strictLanguage: true, ...(ctx.fallback ? { fallback: ctx.fallback } : {}) } : {}) },
     startedAt: now, streamKey, phase: 'requested',
   };
 }
@@ -89,7 +90,7 @@ export function tickSourceSwitch(state, { streamKey, frames = false, alive = fal
  */
 export function advanceTarget(sources, dead, failed, ctx = {}) {
   if (failed) markDead(dead, { id: failed.id ?? null, provider: failed.provider ?? null });
-  return nextAlive(sources, dead, {
+  return nextAlive(ctx.strictLanguage ? languageCandidates(sources, ctx.lang).filter(s => !s.unsupported) : sources, dead, {
     lang: ctx.lang || PREFERRED_LANGUAGE,
     height: ctx.height || null,
   });

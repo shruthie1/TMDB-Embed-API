@@ -156,3 +156,11 @@ Start APK items after C4 (1.2.0) lands; web player items after C3 lands.
 ## Player modal consistency — 2026-11-21
 
 Shared website picker headers, close/Escape handling, selected rows and responsive phone/landscape/TV surfaces. Existing settings sheet retains picture and subtitle controls. Android uses consistent rows, viewport-capped side panels, selected-row scrolling and a portrait bottom sheet. Player transport, seek bar and below-player layout are preserved. APK 1.2.9 (22) built and installed on OnePlus CPH2447. Device playback and visual TV verification remain separate from build/unit verification.
+
+### Player modal follow-up — 2026-11-21
+
+APK 1.2.12 (25) corrects the phone landscape panel and routes the loading chooser into the same modal. Server navigation is a compact provider list followed by all streams for that provider. Netflix, Prime Video and Hotstar are stream metadata labels, without an extra catalog screen; legacy unidentified catalogs stay unidentified. Every list row is selectable. Catalog identity survives backend/web/device adapters. Audio discovery retains both server-to-language and language-to-all-servers mappings, including later results and observed tracks. Explicit language retries stay within confirmed candidates; generic numbered tracks remain unknown. Website and APK restore previous playback when a language trial exhausts its candidates. Catalog checks reuse existing resolvers; this does not implement a new browser-direct provider transport.
+
+One Peddi device attempt: CastleTV returned no video, Mapple s12 was busy and fallback had no audio metadata; later MultiMovies Telugu rows joined. This is not proof that every listed origin is currently playable.
+
+NetMirror timeout follow-up: after a no-answer timeout, an explicit re-resolve that returns the identical URL/headers/token advances to the next candidate instead of spending another attach timeout on that same CDN target. Renewed URLs remain eligible. This removes a duplicate wait; it does not claim the failing upstream CDN is repaired.

@@ -18,7 +18,7 @@ import Icon from '../Icon';
  */
 const ROW_MARK = { waiting: '○', checking: '◌', starting: '●', playing: '✓', skipped: '-', failed: '✕' };
 
-export function Loading({ view, title, meta, onArt = false, onClose, onRetry, onPick }) {
+export function Loading({ view, title, meta, onArt = false, onClose, onRetry, onPick, onChooseServer }) {
   const [open, setOpen] = useState(false);
   const [focusRow, setFocusRow] = useState(false);
   const rowsRef = useRef(null);
@@ -57,7 +57,7 @@ export function Loading({ view, title, meta, onArt = false, onClose, onRetry, on
           )}
           {view.showChooser && (
             <button type="button" className="ov-pill focusable" data-focus=""
-                    onClick={() => { setOpen(true); setFocusRow(true); }}>
+                    data-action="choose-server" onClick={() => { if (onChooseServer) onChooseServer(); else { setOpen(true); setFocusRow(true); } }}>
               <span>Choose a server</span>
             </button>
           )}

@@ -1,6 +1,7 @@
 'use client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Icon from './Icon';
+import { audioLanguageKey, languageSourceIndex } from '../lib/player/languageSources';
 import MenuRow from './player/MenuRow';
 import QualityMenu from './player/QualityMenu';
 import AudioMenu from './player/AudioMenu';
@@ -212,7 +213,7 @@ export default function PlayerControls({
   videoRef, hls, title, subtitle, onClose, busy = false,
   visible = true, onReveal, onHide, onMenuChange, menuOpen = null, tv = false,
   sources = [], currentSource, currentSourceId = null, onPickSource, sourcesPending = false,
-  labels = null, onCheckSources, checkingSources = false,
+  labels = null, onCheckSources, checkingSources = false, onPickLanguage, audioSources = sources,
   audioSync = null,
   subs = [], currentSub = null, onPickSub, subLoading = false,
   fit = 'cover', onCycleFit, onSetFit,
@@ -263,8 +264,16 @@ export default function PlayerControls({
     const extra = audioList
       .filter((c) => !have.has(c.language.toLowerCase()))
       .map((c) => ({ id: c.id, name: c.language, kind: c.kind }));
-    return [...audioMenu.options, ...extra];
-  }, [audioMenu.options, audioList]);
+    if (!onPickLanguage) return [...audioMenu.options, ...extra];
+    const index = languageSourceIndex(audioSources);
+    const options = new Map(audioMenu.options.map(o => [audioLanguageKey(o.name), o]));
+    for (const [key, entry] of index.byLanguage) {
+      const existing = options.get(key);
+      options.set(key, { ...existing, id: existing?.id ?? `language:${entry.language}`, name: entry.language,
+        meta: `${entry.sources.length} stream${entry.sources.length === 1 ? '' : 's'}` });
+    }
+    return [...options.values()];
+  }, [audioMenu.options, audioList, audioSources, onPickLanguage]);
   const openMenu = (next) => { setMenu(next); onMenuChange?.(Boolean(next)); };
 
   /**
@@ -584,9 +593,10 @@ export default function PlayerControls({
               stream PER language (Salaar: 13 streams = 6 languages x 2
               qualities) switches source behind the same control, so the
               viewer never has to know the difference. */}
-          <AudioMenu audioTracks={mergedAudio} currentAudio={audioMenu.current}
+          <AudioMenu allowSingleSelection={Boolean(onPickLanguage)} audioTracks={mergedAudio} currentAudio={audioMenu.current}
                      onPickAudio={(id) => {
                        openMenu(null);
+                       if (onPickLanguage) { const option = mergedAudio.find(o => o.id === id); if (option) onPickLanguage(option.name); return; }
                        // An in-file track switch is the cheap path, but the
                        // menu also lists languages from OTHER sources, whose
                        // ids are not hls track indices. pickAudio returns
