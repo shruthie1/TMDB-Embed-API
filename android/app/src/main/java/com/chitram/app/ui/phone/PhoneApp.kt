@@ -427,9 +427,14 @@ private fun PhoneDetail(nav: Nav, type: String, id: Long, rowPoster: String? = n
                     // The art starts below the status bar, so faces at the top of the
                     // backdrop are not hidden under the clock or the Back button.
                     val topInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+                    // The art sits 15% of its height lower (owner, 2026-11-20, same as
+                    // the web detail hero). The strip above is the page colour; a top
+                    // fade runs from it through 70% to clear 30% down the art, so the
+                    // edge never shows. The block height is unchanged.
+                    val drop = artH * 0.15f
                     Box(Modifier.fillMaxWidth().height(topInset + artH + 96.dp)) {
-                        Art(t.backdrop, "w780", Modifier.padding(top = topInset).fillMaxWidth().height(artH), alignment = BiasAlignment(0f, -0.85f))
-                        Box(Modifier.padding(top = topInset).fillMaxWidth().height(artH).background(Brush.verticalGradient(0f to Tok.bg.copy(alpha = 0.35f), 0.25f to Color.Transparent, 0.7f to Tok.bg.copy(alpha = 0.6f), 1f to Tok.bg)))
+                        Art(t.backdrop, "w780", Modifier.padding(top = topInset + drop).fillMaxWidth().height(artH), alignment = BiasAlignment(0f, -0.85f))
+                        Box(Modifier.padding(top = topInset + drop).fillMaxWidth().height(artH).background(Brush.verticalGradient(0f to Tok.bg, 0.06f to Tok.bg.copy(alpha = 0.7f), 0.3f to Color.Transparent, 0.7f to Tok.bg.copy(alpha = 0.6f), 1f to Tok.bg)))
                         Row(Modifier.align(Alignment.BottomStart).padding(horizontal = GUTTER), verticalAlignment = Alignment.Bottom) {
                             Box(Modifier.width(104.dp).aspectRatio(2f / 3f).clip(Tok.radiusMd).border(1.dp, Tok.border, Tok.radiusMd)) {
                                 // The title API sends the metahub small poster here; it is a cache

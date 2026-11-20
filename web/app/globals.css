@@ -3100,3 +3100,34 @@ html .pctl-scrub:focus-visible,html .sync-bar:focus-visible{outline:none}
 .skel:is(.btn,.badge){background:var(--skel-shine) 0 0/220% 100%,var(--raised);
   border-color:transparent;color:transparent;box-shadow:none;text-shadow:none;pointer-events:none}
 @media (prefers-reduced-motion:reduce){ .skel:is(.btn,.badge){background-image:none} }
+
+/* ── Detail hero: art sits lower, dark fade at the top (owner, 2026-11-20) ──
+   The image is drawn in the content box, so padding-top drops it by
+   --hero-drop; the strip above it shows the page colour. The top fade runs
+   from the page colour at the image's top edge (no seam) through 70% to
+   clear 30% lower, behind the header.
+   Padding only (the box is border-box and absolutely placed), so no layout
+   moves. The APK detail screens (PhoneApp.kt, TvApp.kt) match this. */
+.hero{--hero-drop:calc(var(--hero-height) * .14);
+  --hero-top-fade:linear-gradient(to bottom,var(--color-bg) var(--hero-drop),rgb(var(--rgb-bg) / .7) calc(var(--hero-drop) + 6%),
+    transparent calc(var(--hero-drop) + 30%))}
+@media (max-width:559px){ .hero{--hero-drop:calc(var(--detail-band) * .15)} }
+.hero-art.page-backdrop:not(.skel){
+  padding-top:var(--hero-drop);background-origin:content-box;background-repeat:no-repeat;
+}
+.hero-art::after{
+  background:
+    var(--hero-top-fade),
+    linear-gradient(to top,
+      var(--ink) 0%, var(--color-overlay-5) 12%, var(--color-overlay-3) 32%,
+      var(--color-overlay-1) 60%, transparent 82%),
+    linear-gradient(to right,
+      var(--color-overlay-4) 0%, var(--color-overlay-2) 30%, transparent 62%);
+}
+@media (max-width:639px){
+  .hero-art::after{
+    background:
+      var(--hero-top-fade),
+      var(--hero-scrim-phone);
+  }
+}
