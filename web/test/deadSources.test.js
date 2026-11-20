@@ -31,3 +31,59 @@ describe('dead sources are tracked per row', () => {
       .toBe('mapple');
   });
 });
+
+// RRR (movie/579974): providers differ in audio language for one title.
+// List order puts Hindi first, as the server sort can when both carry a
+// preferred language.
+const RRR = [
+  { id: 'A-hi-1080', provider: 'A', quality: '1080p', languages: ['Hindi'], masterUrl: 'https://a' },
+  { id: 'B-te-480', provider: 'B', quality: '480p', languages: ['Telugu'], masterUrl: 'https://b' },
+  { id: 'C-te-1080', provider: 'C', quality: '1080p', languages: ['te'], masterUrl: 'https://c' },
+  { id: 'D-none', provider: 'D', quality: '1080p', languages: [], masterUrl: 'https://d' },
+  { id: 'E-te-720', provider: 'E', quality: '720p', languages: ['Telugu'], masterUrl: 'https://e' },
+];
+
+describe('a failover keeps the spoken language', () => {
+  it('a non-manual switch from Telugu stays in Telugu, not the first alive Hindi row', () => {
+    const dead = markDead(new Set(), { id: 'E-te-720' });
+    const alt = nextAlive(RRR, dead, { lang: 'Telugu', height: 720 });
+    expect(alt.languages.map((l) => l.toLowerCase())).not.toContain('hindi');
+    expect(alt.id).toBe('B-te-480'); // 240 away beats C at 360 away
+  });
+
+  it('matches a language code against a language name', () => {
+    const dead = new Set(['E-te-720', 'B-te-480']);
+    expect(nextAlive(RRR, dead, { lang: 'Telugu', height: 1080 })?.id).toBe('C-te-1080');
+  });
+
+  it('within the language, the nearest height wins', () => {
+    expect(nextAlive(RRR, new Set(), { lang: 'Telugu', height: 1080 })?.id).toBe('C-te-1080');
+    expect(nextAlive(RRR, new Set(), { lang: 'Telugu', height: 720 })?.id).toBe('E-te-720');
+  });
+
+  it('a hybrid row whose paired audio is the language counts as same-language', () => {
+    const rows = [RRR[0], { id: 'hy', provider: 'A+B', hybrid: true, quality: '1080p',
+                           languages: ['Telugu'], masterUrl: 'https://h' }];
+    expect(nextAlive(rows, new Set(), { lang: 'Telugu', height: 1080 })?.id).toBe('hy');
+  });
+
+  it('with no Telugu row left, an undeclared row beats a known Hindi row', () => {
+    const dead = new Set(['B-te-480', 'C-te-1080', 'E-te-720']);
+    expect(nextAlive(RRR, dead, { lang: 'Telugu', height: 1080 })?.id).toBe('D-none');
+  });
+
+  it('still fails over to another language when nothing else is alive', () => {
+    const dead = new Set(['B-te-480', 'C-te-1080', 'D-none', 'E-te-720']);
+    expect(nextAlive(RRR, dead, { lang: 'Telugu' })?.id).toBe('A-hi-1080');
+  });
+
+  it('a manual language pick crosses languages: the picked language leads', () => {
+    // switchSource(src, 'Hindi') sets wantLang, so the next failover asks for Hindi.
+    const dead = markDead(new Set(), { id: 'E-te-720' });
+    expect(nextAlive(RRR, dead, { lang: 'Hindi', height: 720 })?.id).toBe('A-hi-1080');
+  });
+
+  it('with no playing language, keeps the old first-alive order', () => {
+    expect(nextAlive(RRR, new Set())?.id).toBe('A-hi-1080');
+  });
+});

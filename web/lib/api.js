@@ -176,15 +176,32 @@ export async function listSources() {
 export function reportPlayback({ mediaType, tmdbId, season = 0, episode = 0,
                                  provider, ok, reason, startupMs = 0, waitMs = 0,
                                  stallCount = 0, stallMs = 0, recoveryCount = 0,
-                                 device = null, connection = null }) {
+                                 device = null, connection = null,
+                                 mediaIdentity = null, mediaUrl = null,
+                                 audioLang = null, langOk = null }) {
   if (!provider || !tmdbId) return;
-  // NO SINK RIGHT NOW. The report endpoint lived on the resolver and 404s on
-  // the local backend, so each report was a failed POST in the network panel -
-  // and the player reports on every fatal, every codec refusal and every
-  // successful start, which is why they arrived in bursts.
+  // Sink: POST /api/playback-report on the Express backend (apiServer.js),
+  // which writes source_stats (learned ranking) and, when langOk is a
+  // boolean, audio_evidence. The server bounds every field.
   //
-  // The signature and all call sites are kept deliberately: this is the only
-  // place that knows whether a stream actually PLAYED on a real device, which
-  // no server-side validation can tell. Point it at a local collector to turn
-  // it back on; nothing else has to change.
+  // mediaUrl is the stream url the player was handed; the server reduces it to
+  // a media identity (host + path, signature dropped) and never stores it.
+  try {
+    if (typeof fetch !== 'function') return;
+    fetch('/api/playback-report', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      // keepalive: a report sent as the player tears down still leaves.
+      keepalive: true,
+      body: JSON.stringify({
+        tmdbId, type: mediaType, season, episode, provider, mediaIdentity, mediaUrl,
+        playedOk: ok === true, ok: ok === true, reason, startupMs, waitMs,
+        stallCount, stallMs, recoveryCount, audioLang,
+        langOk: typeof langOk === 'boolean' ? langOk : null,
+        device, connection,
+      }),
+    }).catch(() => {});
+  } catch {
+    // Telemetry must never break playback.
+  }
 }

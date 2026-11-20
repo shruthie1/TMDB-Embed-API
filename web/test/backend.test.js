@@ -96,10 +96,12 @@ describe('rankSources', () => {
   });
 
   // Resolution breaks ties INSIDE a tier, never across one.
-  it('within a tier the higher resolution wins', () => {
+  it('within a tier the server order is preserved (quality comes from the server score)', () => {
     const lo = { ...HD_NO_TELUGU, quality: '480p', levels: [{ height: 480 }] };
     const ranked = rankSources([toSource(lo, 0), toSource(HD_NO_TELUGU, 1)]);
-    expect(ranked[0].quality).toBe('1080p');
+    expect(ranked.map((s) => s.quality)).toEqual(['480p', '1080p']);
+    const flipped = rankSources([toSource(HD_NO_TELUGU, 0), toSource(lo, 1)]);
+    expect(flipped.map((s) => s.quality)).toEqual(['1080p', '480p']);
   });
 
   it('ranking does not mutate the array it was given', () => {

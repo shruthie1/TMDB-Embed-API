@@ -241,8 +241,9 @@ export function sourceHeight(s) {
  *   5. Anything else, best resolution first - the remaining 5 titles have no
  *      Telugu at all. Play rather than refuse.
  *
- * Resolution breaks ties WITHIN a tier, never across one. A working stream in
- * the wrong language is still a worse outcome than a smaller correct one.
+ * Within a tier the server's order stands: the server score already weights
+ * quality and learned playback outcomes. Resolution never crosses a tier. A
+ * working stream in the wrong language is still worse than a smaller correct one.
  */
 export function rankSources(sources) {
   const tier = (s) => {
@@ -264,7 +265,10 @@ export function rankSources(sources) {
     // it loses to an HLS one of the same height.
     const p = (a.progressive ? 1 : 0) - (b.progressive ? 1 : 0);
     if (p !== 0) return p;
-    return sourceHeight(b) - sourceHeight(a);
+    // Within a tier keep the server's order. The server ranks by learned
+    // playback outcomes and already weights quality, so a client re-sort by
+    // height would throw that learning away. Array sort is stable.
+    return 0;
   });
 }
 

@@ -15,7 +15,7 @@ import useStaleRefresh from '../lib/player/staleRefresh';
 import { videoChoices, videoIdOf, videoLabels } from '../lib/player/trackChoices';
 import EmbedStage from './player/EmbedStage';
 import { VA_EMBED_ID, vaEmbedChoice, shouldAutoEmbed } from '../lib/player/vaEmbed';
-import { markDead, nextAlive } from '../lib/player/deadSources';
+import { markDead, nextAlive, qualityHeight } from '../lib/player/deadSources';
 import { fatalAction } from '../lib/player/fatalPolicy';
 import useNoPictureGuard from '../lib/player/useNoPictureGuard';
 import { pairSources, listSources as listBackendSources } from '../lib/backend';
@@ -197,6 +197,10 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   // race re-extracts once on a 403 (see isExpiredReason) the next time this
   // title is resolved.
   const deadSources = useRef(new Set());
+  // What is PLAYING (language, height), read by recoverBySwitching so a
+  // failover keeps the spoken language. Filled after useHls below, because
+  // the callback is declared before `hls` exists.
+  const failoverCtxRef = useRef({ lang: null, height: null });
   // What a playback report needs, refreshed every render. Handlers below are
   // attached once per stream, so they must read this rather than close over
   // props that will be stale by the time an event fires.
@@ -204,6 +208,9 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   reportCtx.current = {
     mediaType: title.mediaType, tmdbId: title.tmdbId, season, episode,
     provider: resolve.currentSource,
+    // The server reduces this to a media identity (signature dropped), so the
+    // learned ranking can tell two files from one provider apart.
+    mediaUrl: stream?.masterUrl || null,
   };
   // One success report per stream.
   const reportedRef = useRef(false);
@@ -243,6 +250,9 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       recoveryCount: s.recoveries,
       device: playbackDevice(),
       connection: playbackConnection(),
+      // The language playing (or chosen) when the report fires. Recorded as
+      // context only: no langOk is sent, so it never becomes audio evidence.
+      audioLang: failoverCtxRef.current?.lang || null,
     };
   }, []);
 
@@ -255,7 +265,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       // dies with the tab and the same bad source is chosen again next time.
       reportPlayback({ ...reportCtx.current, ...reportMetrics(), ok: false, reason });
     }
-    const alt = nextAlive(resolve.sources, deadSources.current);
+    const alt = nextAlive(resolve.sources, deadSources.current, failoverCtxRef.current);
     if (!alt) return false;
     switchSourceRef.current?.(alt);
     return true;
@@ -389,6 +399,16 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   const hls = useHls({ videoRef, stream, onFatal, config: hlsConfig,
     preferredLanguage: wantLang, onLanguage: setWantLang,
     onHlsReady: (h) => { hlsInstance.current = h; } });
+  // Same fallback as switchSource: the viewer's pick, else the track playing
+  // (initialAudioTrack auto-picks Telugu without ever setting wantLang).
+  failoverCtxRef.current = {
+    lang: wantLang
+      || hls.audioTracks?.find((t) => t.id === hls.currentAudio)?.name
+      || null,
+    height: qualityHeight(sources?.find((s) => s.id === currentSourceId)?.quality)
+      || hls.levels?.[hls.currentLevel]?.height
+      || null,
+  };
 
   // Audio playing over a black screen raises no hls.js error (HEVC on Chrome
   // Android, The Paradise 2026-11-19). Treat it as fatal so the normal

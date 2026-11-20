@@ -24,6 +24,8 @@ export default {
       { source: '/api/capabilities',        destination: `${origin}/api/capabilities` },
       { source: '/api/providers/:path*',    destination: `${origin}/api/providers/:path*` },
       { source: '/api/status',              destination: `${origin}/api/status` },
+      // Playback outcomes from the player feed the learned ranking.
+      { source: '/api/playback-report',     destination: `${origin}/api/playback-report` },
       { source: '/castle-demux/:path*',     destination: `${origin}/castle-demux/:path*` },
       { source: '/m3u8-proxy',              destination: `${origin}/m3u8-proxy` },
       { source: '/ts-proxy',                destination: `${origin}/ts-proxy` },

@@ -14,23 +14,21 @@ const api = readFileSync(fileURLToPath(new URL('../lib/api.js', import.meta.url)
  */
 describe('reporting a playback outcome', () => {
   it('never lets telemetry break playback', () => {
-    // A report must not delay a frame or surface an error. With no sink there
-    // is nothing to throw, and the guarantee is now structural: the body does
-    // no I/O at all. If a transport comes back it must be wrapped again.
+    // A report must not delay a frame or surface an error: the POST is
+    // wrapped, its rejection swallowed, and nothing is awaited.
     const fn = api.match(/export function reportPlayback[\s\S]*?\n}/)[0];
-    expect(fn).not.toMatch(/fetch\(/);
+    expect(fn).toMatch(/\.catch\(\(\) => \{\}\)/);
+    expect(fn).toMatch(/try \{/);
+    expect(fn).not.toMatch(/await /);
   });
 
-  it('has no sink, and says so rather than posting to a dead endpoint', () => {
-    // `/api/playback-report` lived on the resolver and 404s on the local
-    // backend (measured 2026-09-22). Posting anyway put one failed request in
-    // the network panel per fatal, per codec refusal and per successful start.
-    // Checks for a REQUEST to it, not a mention of it: the removal note in the
-    // header names the endpoint on purpose, and that must stay greppable.
+  it('posts to the local sink with keepalive', () => {
+    // Since 2026-11-20 /api/playback-report is served by apiServer.js and
+    // feeds the learned ranking (utils/store.js source_stats).
     const fn = api.match(/export function reportPlayback[\s\S]*?\n}/)[0];
-    expect(fn).not.toMatch(/fetch\(/);
-    expect(fn).not.toMatch(/playback-report/);
-    expect(fn).toMatch(/NO SINK/);
+    expect(fn).toMatch(/fetch\('\/api\/playback-report'/);
+    expect(fn).toMatch(/keepalive: true/);
+    expect(fn).not.toMatch(/NO SINK/);
   });
 
   it('declines to report without a provider or title', () => {
