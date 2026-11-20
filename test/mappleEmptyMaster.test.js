@@ -4,8 +4,8 @@ const assert = require('node:assert');
 
 // Prod 2026-11-19, mapple on The Paradise (1376856): a front returned a
 // stream_url whose master body was only "#EXTM3U" (8 bytes). That row could
-// not play but was offered in the server menu. Stub fetch: s9 has an empty
-// master, s4 a real one, so the provider must skip s9 and return s4.
+// not play but was offered in the server menu. Stub fetch: s12 has an empty
+// master, s4 a real one, so the provider must skip s12 and return s4.
 function stub(masters, calls) {
     return async (url, opts = {}) => {
         const u = new URL(String(url));
@@ -44,7 +44,7 @@ const REAL = '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080\
 
 test('mapple skips a front whose master is only #EXTM3U', async (t) => {
     const calls = [];
-    const { getMappleStreams } = load(t, { s9: '#EXTM3U', s4: REAL }, calls);
+    const { getMappleStreams } = load(t, { s12: '#EXTM3U', s4: REAL }, calls);
     const rows = await getMappleStreams('1376856', 'movie');
     assert.equal(rows.length, 1);
     assert.equal(rows[0].url, 'https://cdn.example/s4/master.m3u8');
@@ -52,15 +52,15 @@ test('mapple skips a front whose master is only #EXTM3U', async (t) => {
 });
 
 test('mapple returns [] when every front has an empty master', async (t) => {
-    const { getMappleStreams } = load(t, { s9: '#EXTM3U\n', s4: '#EXTM3U' }, []);
+    const { getMappleStreams } = load(t, { s12: '#EXTM3U\n', s4: '#EXTM3U' }, []);
     assert.deepEqual(await getMappleStreams('1376856', 'movie'), []);
 });
 
 test('mapple keeps the row when the master fetch itself fails', async (t) => {
-    const { getMappleStreams } = load(t, { s9: new Error('timeout') }, []);
+    const { getMappleStreams } = load(t, { s12: new Error('timeout') }, []);
     const rows = await getMappleStreams('1376856', 'movie');
     assert.equal(rows.length, 1);
-    assert.equal(rows[0].url, 'https://cdn.example/s9/master.m3u8');
+    assert.equal(rows[0].url, 'https://cdn.example/s12/master.m3u8');
 });
 
 test('isEmptyPlaylist: media playlist with #EXTINF is not empty', () => {

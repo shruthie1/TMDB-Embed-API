@@ -36,6 +36,14 @@ test('reads language, codec and channels off the audio streams only', async () =
     ]);
 });
 
+// `und` is the muxer default, not a language. Passed through, it became
+// languages:["und"] in NetMirror, which looked labelled and skipped the
+// platform path that carries the real language list.
+test('a track tagged und is reported as untagged', async () => {
+    const tracks = await probeAudioTracks('https://cdn.test/a.mp4#und');
+    assert.deepStrictEqual(tracks, [{ language: null, codec: 'aac', channels: 2 }]);
+});
+
 test('an untagged track stays null rather than being invented into a language', async () => {
     const tracks = await probeAudioTracks('https://cdn.test/a.mp4#multi');
     const untagged = tracks.filter((t) => t.language === null);

@@ -21,13 +21,13 @@ function stub(files, calls) {
         if (u.pathname === '/api/media-session') return Promise.resolve(res({ token: 'ST' }));
         if (u.pathname === '/api/encrypt') {
             const src = JSON.parse(opts.body).data.source;
-            return Promise.resolve(res(src === 's9' ? { url: '/api/stream?src=s9' } : {}));
+            return Promise.resolve(res(src === 's12' ? { url: '/api/stream?src=s12' } : {}));
         }
         if (u.pathname === '/api/stream') {
-            return Promise.resolve(res({ data: { stream_url: 'https://cdn.example/s9/master.m3u8' } }));
+            return Promise.resolve(res({ data: { stream_url: 'https://cdn.example/s12/master.m3u8' } }));
         }
         if (u.hostname === 'cdn.example') {
-            const f = files[u.pathname.slice('/s9/'.length)];
+            const f = files[u.pathname.slice('/s12/'.length)];
             if (f === undefined) return Promise.resolve(res(null, 404, ''));
             if (f === 'HANG') {
                 // Never answers. Only the abort signal ends it.
@@ -70,11 +70,11 @@ test('a hung init segment still returns the row within the probe budget, videoCo
     const rows = await getMappleStreams('1376856', 'movie');
     const ms = Date.now() - t0;
     assert.equal(rows.length, 1);
-    assert.equal(rows[0].url, 'https://cdn.example/s9/master.m3u8');
+    assert.equal(rows[0].url, 'https://cdn.example/s12/master.m3u8');
     assert.equal(rows[0].videoCodec, null);
     assert.equal(rows[0].codecs, null);
     assert.deepEqual(rows[0].levels.map((l) => l.height), [1080]);
-    assert.ok(calls.some((c) => c.endsWith('/s9/v1080/init.mp4')), 'init segment was probed');
+    assert.ok(calls.some((c) => c.endsWith('/s12/v1080/init.mp4')), 'init segment was probed');
     // Budget is 2000ms for both probe fetches. Before the fix this was 8000ms.
     assert.ok(ms >= 1800 && ms < 3500, `took ${ms}ms`);
 });
@@ -97,7 +97,7 @@ test('the probe is skipped when the registry deadline is near', async (t) => {
     }, calls, { PROVIDER_DEADLINE_MS: '2100', MAPPLE_DEADLINE_MARGIN_MS: '2000' });
     const t0 = Date.now();
     const [row] = await getMappleStreams('1376856', 'movie');
-    assert.equal(row.url, 'https://cdn.example/s9/master.m3u8');
+    assert.equal(row.url, 'https://cdn.example/s12/master.m3u8');
     assert.equal(row.videoCodec, null);
     assert.ok(!calls.some((c) => c.includes('/v1080/')), 'probe was skipped');
     assert.ok(Date.now() - t0 < 1000);
@@ -109,7 +109,7 @@ test('a hung master past the deadline keeps the row instead of overrunning', asy
     const t0 = Date.now();
     const [row] = await getMappleStreams('1376856', 'movie');
     const ms = Date.now() - t0;
-    assert.equal(row.url, 'https://cdn.example/s9/master.m3u8');
+    assert.equal(row.url, 'https://cdn.example/s12/master.m3u8');
     assert.equal(row.videoCodec, null);
     // Master timeout is cut to the ~500ms left, not the 8000ms step timeout.
     assert.ok(ms < 1500, `took ${ms}ms`);

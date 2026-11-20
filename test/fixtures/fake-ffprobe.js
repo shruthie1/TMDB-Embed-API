@@ -7,6 +7,7 @@
 //   ...#fail      -> exit non-zero, as ffprobe does on an unreachable url
 //   ...#noaudio   -> a video-only file
 //   ...#multi     -> Telugu + Hindi + an untagged track
+//   ...#und       -> one aac track tagged `und` (the muxer default)
 //   anything else -> one eng aac track
 // Every invocation appends its argv to $FAKE_FFPROBE_LOG so a test can assert
 // how many probes actually ran, and what headers were passed.
@@ -23,7 +24,12 @@ if (url.includes('#fail')) {
     process.exit(1);
 }
 
-const streams = url.includes('#noaudio')
+const streams = url.includes('#und')
+    ? [
+        { codec_type: 'video', codec_name: 'h264', tags: { language: 'und' } },
+        { codec_type: 'audio', codec_name: 'aac', channels: 2, tags: { language: 'und' } },
+    ]
+    : url.includes('#noaudio')
     ? [{ codec_type: 'video', codec_name: 'h264' }]
     : url.includes('#multi')
         ? [

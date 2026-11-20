@@ -38,6 +38,7 @@ function stub(fronts) {
         if (u.pathname === '/api/stream') {
             const src = u.searchParams.get('src');
             const f = fronts[src];
+            if (f === 'busy') return res({ success: false, details: 'SOURCE_BUSY', failureKind: 'source_busy', retryable: true });
             const stream = (f === 'row' || f?.mode === 'row') ? `https://cdn.example/${src}/master.m3u8` : '';
             return res({ data: { stream_url: stream } });
         }
@@ -65,7 +66,7 @@ function load(t, fronts, env = {}) {
 }
 
 test('a hung first front is cut and a later front gives the row', async (t) => {
-    const { getMappleStreams } = load(t, { mapple: 'hang', s9: 'empty', s4: 'row' }, { MAPPLE_FRONT_STEP_MS: '150' });
+    const { getMappleStreams } = load(t, { mapple: 'hang', s12: 'empty', s4: 'row' }, { MAPPLE_FRONT_STEP_MS: '150' });
     const t0 = Date.now();
     const rows = await getMappleStreams('690957', 'movie');
     const ms = Date.now() - t0;
@@ -76,47 +77,49 @@ test('a hung first front is cut and a later front gives the row', async (t) => {
 });
 
 test('a front that throws does not end the sweep', async (t) => {
-    const { getMappleStreams } = load(t, { mapple: 'error', s9: 'error', s4: 'row' });
+    const { getMappleStreams } = load(t, { mapple: 'error', s12: 'error', s4: 'row' });
     const rows = await getMappleStreams('690957', 'movie');
     assert.equal(rows.length, 1);
     assert.equal(rows[0].title, 'mapple · s4');
 });
 
-test('a front that started before the sweep budget may answer after it', async (t) => {
-    // VM1 2026-11-19: 3 of 23 rows answered at 12143-12869ms. Scaled 1/10:
-    // sweep budget 1.2s, mapple answers "no stream" at 1.15s, s9 starts at
-    // 1.15s and answers its row at 1.28s. Front deadline 2.0-0.2-0.2 = 1.6s.
-    const { getMappleStreams } = load(t, {
-        mapple: { delay: 1150, mode: 'empty' },
-        s9: { delay: 130, mode: 'row' },
-    }, {
-        MAPPLE_SWEEP_BUDGET_MS: '1200',
-        PROVIDER_DEADLINE_MS: '2000',
-        MAPPLE_DEADLINE_MARGIN_MS: '200',
-        MAPPLE_FRONT_END_RESERVE_MS: '200',
-    });
-    const t0 = Date.now();
+test('a slow front with a long site timeout still gives its row', async (t) => {
+    // 2026-11-20: s25 answered at ~10.5s, s2 is given 22s by the site player.
+    // Fronts run in parallel, so a slow front is not starved by earlier ones.
+    // Scaled: every other front hangs, s2 answers its row at 300ms while the
+    // default 150ms cap would have cut it.
+    const fronts = {};
+    const { SOURCES, getMappleStreams } = load(t, fronts, { MAPPLE_FRONT_STEP_MS: '150' });
+    for (const s of SOURCES) fronts[s] = 'hang';
+    fronts.s2 = { delay: 300, mode: 'row' };
     const rows = await getMappleStreams('690957', 'movie');
-    const ms = Date.now() - t0;
     assert.equal(rows.length, 1);
-    assert.equal(rows[0].title, 'mapple · s9');
-    assert.ok(ms > 1200, `took ${ms}ms, should pass the sweep budget`);
-    assert.ok(ms < 2000, `took ${ms}ms, must stay under the registry deadline`);
+    assert.equal(rows[0].title, 'mapple · s2');
 });
 
-test('a hung started front is cut at the front deadline, and no new front starts', async (t) => {
-    // Sweep budget 200ms, front deadline 600-100-100 = 400ms, front cap 5s:
-    // the first front hangs until 400ms, then the sweep budget stops the loop.
+test('the first front with a row wins without waiting for hung fronts', async (t) => {
+    const fronts = {};
+    const { SOURCES, getMappleStreams } = load(t, fronts);
+    for (const s of SOURCES) fronts[s] = 'hang';
+    fronts.s12 = { delay: 100, mode: 'row' };
+    const t0 = Date.now();
+    const rows = await getMappleStreams('770906', 'movie');
+    const ms = Date.now() - t0;
+    assert.equal(rows[0].title, 'mapple · s12');
+    assert.ok(ms < 1000, `took ${ms}ms`);
+});
+
+test('hung fronts are cut at the front deadline', async (t) => {
+    // Front deadline 600-100-100 = 400ms, below every front cap.
     const fronts = {};
     const { SOURCES, getMappleStreams } = load(t, fronts, {
-        MAPPLE_SWEEP_BUDGET_MS: '200',
         PROVIDER_DEADLINE_MS: '600',
         MAPPLE_DEADLINE_MARGIN_MS: '100',
         MAPPLE_FRONT_END_RESERVE_MS: '100',
     });
     for (const s of SOURCES) fronts[s] = 'hang';
     const t0 = Date.now();
-    await assert.rejects(getMappleStreams('690957', 'movie'), /all 1 fronts tried failed/);
+    await assert.rejects(getMappleStreams('690957', 'movie'), new RegExp(`all ${SOURCES.length} fronts tried failed`));
     const ms = Date.now() - t0;
     assert.ok(ms >= 350 && ms < 600, `took ${ms}ms`);
 });
@@ -125,7 +128,7 @@ test('every front erroring throws so the registry records an error', async (t) =
     const fronts = {};
     const { SOURCES, getMappleStreams } = load(t, fronts);
     for (const s of SOURCES) fronts[s] = 'error';
-    await assert.rejects(getMappleStreams('690957', 'movie'), /all 26 fronts tried failed, last: fetch failed/);
+    await assert.rejects(getMappleStreams('690957', 'movie'), new RegExp(`all ${SOURCES.length} fronts tried failed, last: fetch failed`));
 });
 
 test('every front with no stream returns []', async (t) => {
@@ -141,4 +144,21 @@ test('errors mixed with no-stream fronts return []', async (t) => {
     for (const s of SOURCES) fronts[s] = 'empty';
     fronts.mapple = 'error';
     assert.deepEqual(await getMappleStreams('690957', 'movie'), []);
+});
+
+test('retryable in-band answers on every front throw, not cache an empty', async (t) => {
+    // 2026-11-20, 770906: s2/s10 SOURCE_BUSY, s4/s16/s27/s28 SOURCE_TIMEOUT,
+    // s8/s19 SOURCE_COOLDOWN - all 200s that say nothing about the title.
+    const fronts = {};
+    const { SOURCES, getMappleStreams } = load(t, fronts);
+    for (const s of SOURCES) fronts[s] = 'busy';
+    await assert.rejects(getMappleStreams('770906', 'movie'), /fronts tried failed, last: SOURCE_BUSY/);
+});
+
+test('retryable answers mixed with a not-here answer return []', async (t) => {
+    const fronts = {};
+    const { SOURCES, getMappleStreams } = load(t, fronts);
+    for (const s of SOURCES) fronts[s] = 'busy';
+    fronts.mapple = 'empty';
+    assert.deepEqual(await getMappleStreams('770906', 'movie'), []);
 });

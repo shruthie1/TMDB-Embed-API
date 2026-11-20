@@ -44,29 +44,22 @@ const PLAYBACK_INIT_PATH = process.env.MAPPLE_PLAYBACK_INIT_PATH || '/api/media-
 
 const SESSION_TTL_MS = Number(process.env.MAPPLE_SESSION_TTL_MS) || 10 * 60 * 1000;
 
-// Fronts ordered by how often they actually carried a title in the sweep, so a
-// hit usually lands in the first few and the rest are never paid for. The
-// unranked tail is still tried - it is the difference between "not available"
-// and a stream for the long tail of titles.
-const RANKED = [9, 4, 17, 2, 25, 3, 5, 6, 10, 12, 19, 1, 24];
-const UNSEEN = [7, 8, 11, 13, 14, 15, 16, 18, 20, 21, 22, 23];
-const SOURCES = ['mapple', ...[...RANKED, ...UNSEEN].map((n) => `s${n}`)];
+// The fronts mapple.fun's own server menu offers, in its order. Read from its
+// /_next/static chunk on 2026-11-20 (13 servers: id, name, category). The old
+// list (s1..s25, ranked s9, s4, s17 first) went stale: s9 and s17 are gone
+// from the menu, s9 answered UPSTREAM_UNAVAILABLE or hung past 5s, and s27/s28
+// were missing. Swept sequentially, the 12s budget ran out after mapple, s9
+// and s4, so 770906 (Salaar) gave 0 rows at 15.3s. One parallel sweep over
+// this list found it on s12 in 3.4s (total 11.0s; local, 2026-11-20).
+const SOURCES = ['s25', 'mapple', 's2', 's28', 's27', 's10', 's19', 's4', 's12', 's6', 's7', 's8', 's16'];
 
-// A whole-sweep ceiling: no new front starts after it. 25 fronts x a slow one
-// each would otherwise hold the aggregate stream request open far past the
-// point the UI has given up. A front that already started is not cut by it
-// (see FRONT_END_RESERVE_MS): on VM1 2026-11-19, 3 of 23 rows came from a
-// front that started before 12s and answered at 12143, 12491 and 12869ms.
-const SWEEP_BUDGET_MS = Number(process.env.MAPPLE_SWEEP_BUDGET_MS) || 12000;
 const STEP_TIMEOUT_MS = Number(process.env.MAPPLE_STEP_TIMEOUT_MS) || 8000;
-// Per-call cap for a front's encrypt and signed stream requests, further cut
-// to the front deadline (see FRONT_END_RESERVE_MS). Measured on VM1 2026-11-19 (fetch timer, 9 front
-// calls per sweep, 6 sweeps): the slowest call that answered was 4277ms (s9
-// signed, 690957); the slowest call on the front that gave the row was 594ms.
-// The prod log had 3 sweeps die at 16-19s on "This operation was aborted":
-// one 8s hang ate the 12s budget before s4 was reached. 5s keeps the 4.3s call
-// and leaves room for s4 after one hung front.
+// Per-call cap for a front's encrypt and signed stream requests, copied from
+// the site player's own per-source timeout (function l() in the same chunk:
+// mapple 8s, s10 12s, s2 22s, s25 24s, s28 25s, any other 5s). Every front is
+// still cut to the front deadline (see FRONT_END_RESERVE_MS).
 const FRONT_STEP_MS = Number(process.env.MAPPLE_FRONT_STEP_MS) || 5000;
+const SITE_FRONT_MS = { mapple: 8000, s10: 12000, s2: 22000, s25: 24000, s28: 25000 };
 
 // readLadder runs after a front already gave a stream, so it must never cost
 // that row. The registry drops the whole provider at PROVIDER_DEADLINE_MS
@@ -180,11 +173,18 @@ async function json(res) {
 
 async function bootstrap(mediaType, mediaId) {
     const jar = new Map();
-    await go(jar, `${BASE}/watch/${mediaType}/${mediaId}`);
-    const rt = await json(await go(jar, `${BASE}${REQUEST_TOKEN_PATH}`, {
+    const page = await go(jar, `${BASE}/watch/${mediaType}/${mediaId}`);
+    const res = await go(jar, `${BASE}${REQUEST_TOKEN_PATH}`, {
         method: 'POST', headers: { accept: 'application/json' },
-    }));
-    if (!rt?.token) throw new Error('no requestToken');
+    });
+    const body = await res.text().catch(() => '');
+    let rt = null;
+    try { rt = JSON.parse(body); } catch { /* not JSON, reported below */ }
+    // Status and body head in the error, so a failed bootstrap says why.
+    if (!rt?.token) {
+        throw new Error(`no requestToken (watch ${page.status}, session ${res.status}: `
+            + `${body.slice(0, 120).replace(/\s+/g, ' ')})`);
+    }
     return { jar, requestToken: rt.token, at: Date.now() };
 }
 
@@ -310,28 +310,29 @@ async function getMappleStreams(tmdbId, mediaType = 'movie', seasonNum = null, e
         // streamToken, so a missing one is a failed handshake, not "not here".
         if (!init?.token) throw new Error(`no streamToken for ${tmdbId}`);
 
-        // Errors are per front: one front that hangs or aborts must not end
-        // the sweep. If every front tried failed with an error and none said
-        // "not here", the provider throws so the registry records an error
+        // Errors are per front: one front that hangs or aborts must not cost
+        // another front its row. If every front failed and none said "not
+        // here", the provider throws so the registry records an error
         // (da157dd); fronts that only had no stream give [].
+        //
+        // Fronts run in parallel and the first playable row wins. mapple now
+        // times each backend out server-side and answers in-band (SOURCE_TIMEOUT
+        // at ~5s, SCRAPE_FAILED at ~11s on 2026-11-20), so a sequential sweep
+        // of 13 fronts cannot fit the 20s registry deadline.
         let failed = 0;
         let answered = 0;
         let lastError = null;
-        const sweepEnd = t0 + SWEEP_BUDGET_MS;
         const ladderEnd = t0 + REGISTRY_DEADLINE_MS - DEADLINE_MARGIN_MS;
         const frontEnd = ladderEnd - FRONT_END_RESERVE_MS;
 
-        for (const source of SOURCES) {
-            if (Date.now() > sweepEnd) {
-                console.warn(`[mapple] sweep budget hit for ${tmdbId} at ${source}`);
-                break;
-            }
-
+        const tryFront = async (source) => {
             const data = { mediaId, mediaType: type, tv_slug: '', source };
             if (base.season != null) { data.season = base.season; data.episode = base.episode; }
 
             const f0 = Date.now();
-            const stepMs = () => Math.min(FRONT_STEP_MS, STEP_TIMEOUT_MS, frontEnd - Date.now());
+            const capMs = SITE_FRONT_MS[source] || FRONT_STEP_MS;
+            const stepMs = () => Math.min(capMs, frontEnd - Date.now());
+            let out = null;
             let streamUrl = '';
             try {
                 const enc = await goJson(jar, `${BASE}/api/encrypt`, {
@@ -344,32 +345,38 @@ async function getMappleStreams(tmdbId, mediaType = 'movie', seasonNum = null, e
                     const signed = `${BASE}${enc.url}`
                         + `&requestToken=${encodeURIComponent(requestToken)}`
                         + `&token=${encodeURIComponent(init.token)}`;
-                    const out = await goJson(jar, signed, { headers: { accept: 'application/json' } }, stepMs());
+                    out = await goJson(jar, signed, { headers: { accept: 'application/json' } }, stepMs());
                     streamUrl = out?.data?.stream_url || '';
+                }
+                // A retryable in-band answer (SOURCE_BUSY, SOURCE_TIMEOUT,
+                // SOURCE_COOLDOWN, UPSTREAM_UNAVAILABLE) is a 200 that says
+                // nothing about whether the front has the title.
+                if (!streamUrl && out?.retryable === true) {
+                    throw new Error(`${out.details || out.failureKind || 'retryable'}`);
                 }
             } catch (e) {
                 failed++;
                 lastError = e;
                 console.warn(`[mapple] ${tmdbId} front ${source} failed: ${e.message} (${Date.now() - f0}ms)`);
-                continue;
+                return null;
             }
             answered++;
 
             // `playback-unavailable` is mapple's in-band "this front does not
             // have it" - a 200 with a placeholder url, not an error status.
-            if (!streamUrl || streamUrl.includes('playback-unavailable')) continue;
+            if (!streamUrl || streamUrl.includes('playback-unavailable')) return null;
 
             const { levels, empty, bytes, codecs = null, videoCodec = null } = await readLadder(streamUrl, ladderEnd);
             if (empty) {
-                console.warn(`[mapple] ${tmdbId} on ${source}: empty master (${bytes}B), trying next front`);
-                continue;
+                console.warn(`[mapple] ${tmdbId} on ${source}: empty master (${bytes}B), skipping front`);
+                return null;
             }
             const best = levels.length ? Math.max(...levels.map((l) => l.height)) : 0;
 
             console.log(`[mapple] ${tmdbId} on ${source} in ${Date.now() - t0}ms`
                 + (best ? ` (${best}p)` : '') + (videoCodec ? ` ${videoCodec}` : ''));
 
-            return [{
+            return {
                 url: streamUrl,
                 provider: 'mapple',
                 // mapple serves one video ladder with no switchable audio
@@ -383,8 +390,21 @@ async function getMappleStreams(tmdbId, mediaType = 'movie', seasonNum = null, e
                 container: 'hls',
                 headers: streamHeaders(),
                 title: source === 'mapple' ? 'mapple' : `mapple · ${source}`,
-            }];
-        }
+            };
+        };
+
+        // First row wins; the rest finish under their own timers.
+        const row = await new Promise((resolve) => {
+            let left = SOURCES.length;
+            for (const source of SOURCES) {
+                tryFront(source).catch(() => null).then((r) => {
+                    left--;
+                    if (r) resolve(r);
+                    else if (left === 0) resolve(null);
+                });
+            }
+        });
+        if (row) return [row];
 
         if (failed > 0 && answered === 0) {
             const err = new Error(`all ${failed} fronts tried failed, last: ${lastError.message}`);

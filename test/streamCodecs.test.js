@@ -69,7 +69,7 @@ test('masterCodecs reads the best variant that declares CODECS', () => {
 });
 
 test('mapple row carries codecs and videoCodec from the master', async (t) => {
-    const { getMappleStreams } = load(t, { s9: HEVC }, []);
+    const { getMappleStreams } = load(t, { s12: HEVC }, []);
     const rows = await getMappleStreams('1376856', 'movie');
     assert.equal(rows.length, 1);
     assert.equal(rows[0].codecs, 'hvc1.1.6.L150.90,mp4a.40.2');
@@ -83,7 +83,7 @@ test('mapple row carries codecs and videoCodec from the master', async (t) => {
 
 test('mapple row without CODECS says videoCodec null, not a guess', async (t) => {
     const plain = '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080\n1080.m3u8\n';
-    const { getMappleStreams } = load(t, { s9: plain }, []);
+    const { getMappleStreams } = load(t, { s12: plain }, []);
     const [row] = await getMappleStreams('1376856', 'movie');
     assert.equal(row.codecs, null);
     assert.equal(row.videoCodec, null);
@@ -99,28 +99,28 @@ const initWith = (fourcc) => Buffer.concat([Buffer.from('\0\0\0\x1cftypiso5'), B
 test('mapple reads hev1 from the init segment when the master has no CODECS', async (t) => {
     const calls = [];
     const { getMappleStreams } = load(t, {
-        s9: { 'master.m3u8': NO_CODECS, 'v1080/index.m3u8': MEDIA, 'v1080/init.mp4': initWith('hev1hvcC') },
+        s12: { 'master.m3u8': NO_CODECS, 'v1080/index.m3u8': MEDIA, 'v1080/init.mp4': initWith('hev1hvcC') },
     }, calls);
     const [row] = await getMappleStreams('1376856', 'movie');
     assert.equal(row.codecs, null);
     assert.equal(row.videoCodec, 'hevc');
     assert.equal(normaliseStream(row).videoCodec, 'hevc');
     // The top variant is the one probed.
-    assert.ok(calls.some((c) => c.endsWith('/s9/v1080/init.mp4')));
+    assert.ok(calls.some((c) => c.endsWith('/s12/v1080/init.mp4')));
 });
 
 test('mapple reads avc1 from the init segment as avc', async (t) => {
     const { getMappleStreams } = load(t, {
-        s9: { 'master.m3u8': NO_CODECS, 'v1080/index.m3u8': MEDIA, 'v1080/init.mp4': initWith('avc1avcC') },
+        s12: { 'master.m3u8': NO_CODECS, 'v1080/index.m3u8': MEDIA, 'v1080/init.mp4': initWith('avc1avcC') },
     }, []);
     const [row] = await getMappleStreams('1376856', 'movie');
     assert.equal(row.videoCodec, 'avc');
 });
 
 test('mapple keeps the row with videoCodec null when the init probe fails', async (t) => {
-    const { getMappleStreams } = load(t, { s9: { 'master.m3u8': NO_CODECS } }, []);
+    const { getMappleStreams } = load(t, { s12: { 'master.m3u8': NO_CODECS } }, []);
     const [row] = await getMappleStreams('1376856', 'movie');
-    assert.equal(row.url, 'https://cdn.example/s9/master.m3u8');
+    assert.equal(row.url, 'https://cdn.example/s12/master.m3u8');
     assert.equal(row.videoCodec, null);
     assert.deepEqual(row.levels.map((l) => l.height), [1080, 480]);
 });
