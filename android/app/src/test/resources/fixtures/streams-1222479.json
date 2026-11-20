@@ -1,0 +1,217 @@
+{
+ "success": true,
+ "tmdbId": "1222479",
+ "streams": [
+  {
+   "url": "https://tmdb-187-127-137-163.sslip.io/castle-demux/91ae69948b8e86f9501c507d/master.m3u8",
+   "provider": "CastleTV",
+   "title": "CastleTV [Hindi/Tamil/Telugu/Malayalam/Kannada] - selectable audio",
+   "quality": "720p",
+   "levels": [],
+   "languages": [
+    "Hindi",
+    "Tamil",
+    "Telugu",
+    "Malayalam",
+    "Kannada"
+   ],
+   "audio": [
+    {
+     "language": "Hindi",
+     "codec": "aac",
+     "channels": 2
+    },
+    {
+     "language": "Tamil",
+     "codec": "aac",
+     "channels": 2
+    },
+    {
+     "language": "Telugu",
+     "codec": "aac",
+     "channels": 2
+    },
+    {
+     "language": "Malayalam",
+     "codec": "aac",
+     "channels": 2
+    },
+    {
+     "language": "Kannada",
+     "codec": "aac",
+     "channels": 2
+    }
+   ],
+   "subtitles": [],
+   "size": null,
+   "container": "hls",
+   "selectableAudio": true,
+   "headers": {},
+   "codecs": null,
+   "videoCodec": null,
+   "name": "CastleTV - selectable audio [Hindi/Tamil/Telugu/Malayalam/Kannada]",
+   "language": "Hindi/Tamil/Telugu/Malayalam/Kannada",
+   "__noProxy": true
+  },
+  {
+   "url": "https://tmdb-187-127-137-163.sslip.io/m3u8-proxy?url=https%3A%2F%2Fimg1.fcxmb.com%2Fhls_mps%2F900ec5e451ea8353819b5c7b8b9637e0a7a30d4e%2F720%2Findex_266.m3u8%3FExpires%3D1795208020%26KeyName%3DSignature%26Signature%3DmD8g2xTuyDWNwaG_Xi5JDOmR_PRDdTdSefi22sPG_fFEQjtPx3dFDfpjV-Mgz4Pe9g__IAuLWNSGXXAmZpppDQ%3D%3D&headers=%7B%22User-Agent%22%3A%22Mozilla%2F5.0%20(Windows%20NT%2010.0%3B%20Win64%3B%20x64)%20AppleWebKit%2F537.36%20(KHTML%2C%20like%20Gecko)%20Chrome%2F137.0.0.0%20Safari%2F537.36%22%2C%22Accept%22%3A%22video%2Fwebm%2Cvideo%2Fogg%2Cvideo%2F*%3Bq%3D0.9%2Capplication%2Fogg%3Bq%3D0.7%2Caudio%2F*%3Bq%3D0.6%2C*%2F*%3Bq%3D0.5%22%2C%22Accept-Language%22%3A%22en-US%2Cen%3Bq%3D0.9%22%2C%22Accept-Encoding%22%3A%22identity%22%2C%22Connection%22%3A%22keep-alive%22%2C%22Sec-Fetch-Dest%22%3A%22video%22%2C%22Sec-Fetch-Mode%22%3A%22no-cors%22%2C%22Sec-Fetch-Site%22%3A%22cross-site%22%2C%22DNT%22%3A%221%22%7D",
+   "provider": "CastleTV",
+   "title": "Mirai (2025)\n720p | Unknown | Castle",
+   "quality": "720p",
+   "levels": [],
+   "languages": [
+    "Kannada",
+    "Malayalam",
+    "Telugu",
+    "Tamil",
+    "Hindi"
+   ],
+   "audio": [],
+   "subtitles": [],
+   "size": null,
+   "container": "hls",
+   "selectableAudio": false,
+   "codecs": null,
+   "videoCodec": null,
+   "name": "CastleTV | 720p [Kannada/Malayalam/Telugu/Tamil/Hindi]",
+   "language": "Kannada/Malayalam/Telugu/Tamil/Hindi",
+   "byteCheck": {
+    "ok": true
+   }
+  },
+  {
+   "url": "https://tmdb-187-127-137-163.sslip.io/m3u8-proxy?url=https%3A%2F%2Fimg1.fcxmb.com%2Fhls_mps%2F900ec5e451ea8353819b5c7b8b9637e0a7a30d4e%2F480%2Findex_266.m3u8%3FExpires%3D1795208020%26KeyName%3DSignature%26Signature%3DKUaxKTlYZ6ZezvxYU2j0KgUO83rM7545_Yfyg5AAD_CtvCSI_tu_HjcMbgp0lbcvcx9RtbE9jWNUcJokXG2kAw%3D%3D&headers=%7B%22User-Agent%22%3A%22Mozilla%2F5.0%20(Windows%20NT%2010.0%3B%20Win64%3B%20x64)%20AppleWebKit%2F537.36%20(KHTML%2C%20like%20Gecko)%20Chrome%2F137.0.0.0%20Safari%2F537.36%22%2C%22Accept%22%3A%22video%2Fwebm%2Cvideo%2Fogg%2Cvideo%2F*%3Bq%3D0.9%2Capplication%2Fogg%3Bq%3D0.7%2Caudio%2F*%3Bq%3D0.6%2C*%2F*%3Bq%3D0.5%22%2C%22Accept-Language%22%3A%22en-US%2Cen%3Bq%3D0.9%22%2C%22Accept-Encoding%22%3A%22identity%22%2C%22Connection%22%3A%22keep-alive%22%2C%22Sec-Fetch-Dest%22%3A%22video%22%2C%22Sec-Fetch-Mode%22%3A%22no-cors%22%2C%22Sec-Fetch-Site%22%3A%22cross-site%22%2C%22DNT%22%3A%221%22%7D",
+   "provider": "CastleTV",
+   "title": "Mirai (2025)\n480p | Unknown | Castle",
+   "quality": "480p",
+   "levels": [],
+   "languages": [
+    "Kannada",
+    "Malayalam",
+    "Telugu",
+    "Tamil",
+    "Hindi"
+   ],
+   "audio": [],
+   "subtitles": [],
+   "size": null,
+   "container": "hls",
+   "selectableAudio": false,
+   "codecs": null,
+   "videoCodec": null,
+   "name": "CastleTV | 480p [Kannada/Malayalam/Telugu/Tamil/Hindi]",
+   "language": "Kannada/Malayalam/Telugu/Tamil/Hindi",
+   "byteCheck": {
+    "ok": true
+   }
+  },
+  {
+   "url": "https://tmdb-187-127-137-163.sslip.io/ts-proxy?url=https%3A%2F%2Faura.surrealviews.com%2Fapi%3Fd%3DA-p20Pl-8B7f7QHEBNEXneyh_rOUwmbb3ytFxQB8i2XsNuSaqzQrnD8LWE1pV_HOIzBbW1MyCvsF6e6_QxCV31U-e4mA8h320FwssUMA6t1b8d2iPp4hqwkqw5rpw0w6PxiPE1lQs93nsTy-x1dnfp--ZTsv19Q4G4EgDHEezVkJLzL6kh1VdvF0EpjELqjvgt2bp3wx-VD5SE7FBOk%26token%3Dp2.JCt41NLVd7s7unqAN6a5FNOOQ_pSMbB_EnX3AzHzJG4LYK8ncdTiV-J4r5ZmTHVjPkMCAd0GTtFfx014RoLAPtwg1tSbi1KCdFs3Zz_7_ajDkkhyL-SRKiCIUxXP1D7lN53h73YXh3-JDdCsW2xIuNWEr3wkxqLpbnBSnw%26sp%3Dbc%26vt%3D1795208400000.aea130aca0e744e721f90d80%23.mp4&headers=%7B%22User-Agent%22%3A%22Mozilla%2F5.0%20(Macintosh%3B%20Intel%20Mac%20OS%20X%2010_15_7)%20AppleWebKit%2F537.36%20(KHTML%2C%20like%20Gecko)%20Chrome%2F142.0.0.0%20Safari%2F537.36%22%2C%22Referer%22%3A%22https%3A%2F%2Fplayer.vidqueen.st%2F%22%2C%22Origin%22%3A%22https%3A%2F%2Fplayer.vidqueen.st%22%7D",
+   "provider": "showsst",
+   "title": "showsst \u00b7 MovieBox",
+   "quality": "1080p",
+   "levels": [],
+   "languages": [],
+   "audio": [],
+   "subtitles": [],
+   "size": null,
+   "container": "mp4",
+   "selectableAudio": false,
+   "codecs": null,
+   "videoCodec": null,
+   "name": "showsst \u00b7 MovieBox"
+  },
+  {
+   "url": "https://tmdb-187-127-137-163.sslip.io/m3u8-proxy?url=https%3A%2F%2Fvercetti.org%2Fmovie%2Fpp-n3dZZ44q16E55W4E9crrkbs6R9MzILG07uce2Fc4.7G0_pq1R%2Fbigtits.m3u8&headers=%7B%22User-Agent%22%3A%22Mozilla%2F5.0%20(Windows%20NT%2010.0%3B%20Win64%3B%20x64)%20AppleWebKit%2F537.36%20(KHTML%2C%20like%20Gecko)%20Chrome%2F137.0.0.0%20Safari%2F537.36%22%2C%22Referer%22%3A%22https%3A%2F%2Fvidrock.net%2F%22%2C%22Origin%22%3A%22https%3A%2F%2Fvidrock.net%22%7D",
+   "provider": "vidrock",
+   "title": "VidRock \u00b7 Nova \u00b7 English",
+   "quality": "1080p",
+   "levels": [
+    {
+     "height": 1080,
+     "quality": "1080p",
+     "bandwidth": 5000000,
+     "codecs": null
+    },
+    {
+     "height": 720,
+     "quality": "720p",
+     "bandwidth": 3000000,
+     "codecs": null
+    },
+    {
+     "height": 360,
+     "quality": "360p",
+     "bandwidth": 800000,
+     "codecs": null
+    }
+   ],
+   "languages": [
+    "English"
+   ],
+   "audio": [],
+   "subtitles": [],
+   "size": null,
+   "container": "hls",
+   "selectableAudio": false,
+   "codecs": null,
+   "videoCodec": null,
+   "name": "VidRock | 1080p | Nova [English]",
+   "language": "English"
+  },
+  {
+   "url": "https://tmdb-187-127-137-163.sslip.io/m3u8-proxy?url=https%3A%2F%2Fparallelmisfit.xyz%2Ffile1%2FZmQwZDIwMjRiYThjNzI3ZDc5NzAwOTE4YjM4NWEwODUxNzkzOTc3MDM0MjcxMjQ4%2Fmaster.m3u8&headers=%7B%22User-Agent%22%3A%22Mozilla%2F5.0%20(Windows%20NT%2010.0%3B%20Win64%3B%20x64)%20AppleWebKit%2F537.36%20(KHTML%2C%20like%20Gecko)%20Chrome%2F137.0.0.0%20Safari%2F537.36%22%2C%22Referer%22%3A%22https%3A%2F%2Fvidrock.net%2F%22%2C%22Origin%22%3A%22https%3A%2F%2Fvidrock.net%22%7D",
+   "provider": "vidrock",
+   "title": "VidRock \u00b7 Orion \u00b7 English",
+   "quality": "1080p",
+   "levels": [
+    {
+     "height": 1080,
+     "quality": "1080p",
+     "bandwidth": 5000000,
+     "codecs": null
+    },
+    {
+     "height": 720,
+     "quality": "720p",
+     "bandwidth": 3000000,
+     "codecs": null
+    },
+    {
+     "height": 360,
+     "quality": "360p",
+     "bandwidth": 800000,
+     "codecs": null
+    }
+   ],
+   "languages": [
+    "English"
+   ],
+   "audio": [],
+   "subtitles": [],
+   "size": null,
+   "container": "hls",
+   "selectableAudio": false,
+   "codecs": null,
+   "videoCodec": null,
+   "name": "VidRock | 1080p | Orion [English]",
+   "language": "English"
+  },
+  {
+   "url": "https://tmdb-187-127-137-163.sslip.io/ts-proxy?url=https%3A%2F%2Faura.surrealviews.com%2Fapi%3Fd%3Dds1k5hBFiYSOlaeqIqrwLU0VFyZBbZukH_CEqnONoy3mzT1C7UCoTAcvx-FnE9FeQC7z8zEW-ePcZTir4Mzap5kfjFYirRZPxt2P3IHoQyncYth9H2-CSjLFQ_1sv2ISxtGY6rsy4I0dinFwtJMgB7Ky0ANHlhvrMmZvo42sXbW_p99WAayv-cS6NZWu0lA8h9lGQ56aEhwp1p6_y-Q%26token%3Dp2.JCt41NLVd7s7unqAN6a5FNOOQ_pSMbB_EnX3AzHzJG4LYK8ncdTiV-J4r5ZmTHVjPkMCAd0GTtFfx014RoLAPtwg1tSbi1KCdFs3Zz_7_ajDkkhyL-SRKiCIUxXP1D7lN53h73YXh3-JDdCsW2xIuNWEr3wkxqLpbnBSnw%26sp%3Dbc%26vt%3D1795208400000.aea130aca0e744e721f90d80%23.mp4&headers=%7B%22User-Agent%22%3A%22Mozilla%2F5.0%20(Macintosh%3B%20Intel%20Mac%20OS%20X%2010_15_7)%20AppleWebKit%2F537.36%20(KHTML%2C%20like%20Gecko)%20Chrome%2F142.0.0.0%20Safari%2F537.36%22%2C%22Referer%22%3A%22https%3A%2F%2Fplayer.vidqueen.st%2F%22%2C%22Origin%22%3A%22https%3A%2F%2Fplayer.vidqueen.st%22%7D",
+   "provider": "showsst",
+   "title": "showsst \u00b7 MovieBox",
+   "quality": "480p",
+   "levels": [],
+   "languages": [],
+   "audio": [],
+   "subtitles": [],
+   "size": null,
+   "container": "mp4",
+   "selectableAudio": false,
+   "codecs": null,
+   "videoCodec": null,
+   "name": "showsst \u00b7 MovieBox"
+  }
+ ]
+}

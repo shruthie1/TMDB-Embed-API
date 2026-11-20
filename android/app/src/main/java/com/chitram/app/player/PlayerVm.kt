@@ -8,6 +8,7 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.Uri
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
@@ -97,6 +98,22 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     /** No network: playback is paused and waits for it (U8). */
     var offline by mutableStateOf(false); private set
 
+    // ---- Loading screen (LoadingModel) ----------------------------------------
+    /** One clock for the whole start: Play, a resume or an episode change. Never reset per overlay. */
+    var playAt by mutableLongStateOf(0L); private set
+    /** False until the first frame of this start has rendered. Mid-film switches keep it true. */
+    var framed by mutableStateOf(false); private set
+    /** Rows put on screen during this start, in order (k of n tried). */
+    var attempts by mutableStateOf<List<LoadingModel.Attempt>>(emptyList()); private set
+    /** Search-phase rows: Chitram server, Mapple (on phone), VaPlayer (on phone). */
+    var checks by mutableStateOf<List<LoadingModel.Check>>(emptyList()); private set
+    /** True once the first source list exists for this resolve. */
+    var listReady by mutableStateOf(false); private set
+    private var firstListSize = 0
+    /** One stable label per row id (LoadingModel.labelRows): menus, notices and Details agree. */
+    var labels by mutableStateOf<Map<String, String>>(emptyMap()); private set
+    private var resolveStartMs = 0L
+
     val player: ExoPlayer = ExoPlayer.Builder(
         app,
         DefaultRenderersFactory(app).setEnableDecoderFallback(true),
@@ -127,8 +144,10 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     private var deviceJobs: List<Deferred<Source?>> = emptyList()
     /** On-device providers already re-resolved once for this title. */
     private val reresolved = HashSet<String>()
-    /** The preferred-language audio pick is done once per on-device source. */
+    /** The preferred-language audio pick is done once per source. */
     private var audioPickedFor: String? = null
+    /** Row the viewer picked by hand in this title (Server menu or Details); its provider pins outright. */
+    private var manualPickId: String? = null
 
     /** OpenSubtitles tracks for the current request (U1): Telugu, then English. */
     private var subs: List<OpenSubs.Track> = emptyList()
@@ -167,11 +186,12 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                 if (state == Player.STATE_READY) {
                     durationMs = player.duration.coerceAtLeast(0)
                     if (!offline) notice = ""
-                    current?.let { request?.let { r -> g.lastProvider.put(r.type, r.id, it.provider) } }
+                    current?.let { request?.let { r -> g.lastProvider.put(r.type, r.id, it.provider, manual = it.id == manualPickId) } }
                 }
                 if (state == Player.STATE_ENDED) onEnded()
             }
             override fun onVideoSizeChanged(size: VideoSize) { videoSize = size }
+            override fun onRenderedFirstFrame() { markFramed() }
             override fun onCues(cueGroup: CueGroup) { cues = cueGroup.cues.joinToString("\n") { it.text ?: "" }.trim() }
             override fun onTracksChanged(t: Tracks) { tracks = t; pickPreferredAudio(t); if (landed) current?.let { snapshotCtx(it) } }
             override fun onPlayerError(error: PlaybackException) { handleError(error) }
@@ -209,7 +229,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         if (stallSince == 0L || b > stallBuffered) { stallSince = now; stallBuffered = b; return }
         if (now - stallSince >= STALL_SWITCH_MS) {
             stallSince = 0
-            failover("${current?.provider ?: "Source"}: stalled", player.currentPosition.coerceAtLeast(0))
+            failover("${current?.provider ?: "Source"}: stalled", player.currentPosition.coerceAtLeast(0), LoadingModel.Reason.STOPPED)
         }
     }
 
@@ -220,11 +240,13 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         tried.clear()
         reresolved.clear()
         refreshedOnce = false
+        manualPickId = null
         nextUp = null
         notice = ""
         ctxLang = null
         ctxHeight = null
         requestedAt = System.currentTimeMillis()
+        resetStart()
         subs = emptyList()
         subsJob?.cancel()
         val job = viewModelScope.async { OpenSubs.fetch(g.api.client, r.imdbId, r.season, r.episode, r.runtimeMin) }
@@ -240,27 +262,47 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
      * the first ranking (all of their budget when the backend gave nothing); any
      * that finish later are merged into the list without interrupting playback.
      */
-    private fun resolve(refresh: Boolean, keepProvider: String?, startMs: Long) {
+    private fun resolve(refresh: Boolean, keepProvider: String?, startMs: Long, reuseDevice: Boolean = false) {
         val r = request ?: return
         resolveJob?.cancel()
-        lateJobs.forEach { it.cancel() }
-        deviceJobs.forEach { it.cancel() }
+        // Search-phase Try again re-asks the server only: on-device resolves keep running.
+        val keep = reuseDevice && deviceJobs.isNotEmpty()
+        if (!keep) {
+            lateJobs.forEach { it.cancel() }
+            deviceJobs.forEach { it.cancel() }
+        }
         player.stop()
         phase = Phase.Resolving
+        listReady = false
+        resolveStartMs = startMs
         status = if (refresh) "Refreshing links…" else "Getting your stream ready"
+        val t0 = System.currentTimeMillis()
+        checks = (if (keep) checks.filter { it.id != LoadingModel.CHECK_SERVER } else emptyList()) +
+            LoadingModel.Check(LoadingModel.CHECK_SERVER, "Chitram server", t0)
         resolveJob = viewModelScope.launch {
-            val pin = keepProvider ?: g.lastProvider.get(r.type, r.id)
+            // A remembered provider leads only inside the viewer's language unless it was picked by hand (A8).
+            val saved = g.lastProvider.get(r.type, r.id)
+            val pin = keepProvider ?: saved?.provider
+            val manualPin = keepProvider != null || saved?.manual == true
             val preferred = g.prefs.preferredAudio()
-            val device = g.onDevice.launch(viewModelScope, r.type, r.id, r.season, r.episode, g.codecs, preferred)
+            val device = if (keep) deviceJobs else g.onDevice.launch(viewModelScope, r.type, r.id, r.season, r.episode, g.codecs, preferred).also { d ->
+                checks = checks + LoadingModel.Check(LoadingModel.CHECK_MAPPLE, "Mapple (on phone)", t0) +
+                    LoadingModel.Check(LoadingModel.CHECK_VAPLAYER, "VaPlayer (on phone)", t0)
+                d.zip(listOf(LoadingModel.CHECK_MAPPLE, LoadingModel.CHECK_VAPLAYER)).forEach { (job, id) ->
+                    viewModelScope.launch { val got = runCatching { job.await() }.getOrNull(); endCheck(id, if (got != null) 1 else 0) }
+                }
+            }
             deviceJobs = device
             var backendError: Exception? = null
             val backend = try {
-                Ranking.fromResponse(g.api.streams(r.type, r.id, r.season, r.episode, refresh), preferred, g.codecs, pin)
+                Ranking.fromResponse(g.api.streams(r.type, r.id, r.season, r.episode, refresh), preferred, g.codecs, pin, manual = manualPin)
             } catch (e: Exception) {
-                if (e is kotlinx.coroutines.CancellationException) { device.forEach { it.cancel() }; throw e }
+                // Cancelled by a newer resolve: leave the device jobs alone (resolve() and leave() own them).
+                if (e is kotlinx.coroutines.CancellationException) throw e
                 backendError = e
                 emptyList()
             }
+            endCheck(LoadingModel.CHECK_SERVER, backend.size)
             // A playable backend row in the viewer's language starts now; on-device rows join late.
             val haveGood = backend.any { !it.unsupported && Ranking.tier(it, preferred) <= 2 }
             val graceEnd = System.currentTimeMillis() + when {
@@ -271,9 +313,11 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             val early = device.mapNotNull { d ->
                 kotlinx.coroutines.withTimeoutOrNull((graceEnd - System.currentTimeMillis()).coerceAtLeast(1)) { d.await() }
             }
-            val list = Ranking.merge(backend, early, preferred, pin)
-            sources = list
-            lateJobs = device.filter { !it.isCompleted }.map { d -> viewModelScope.launch { joinLate(r, d, preferred, pin) } }
+            val list = Ranking.merge(backend, early, preferred, pin, manualPin)
+            putSources(list)
+            if (firstListSize == 0) firstListSize = list.size
+            listReady = true
+            lateJobs = device.filter { !it.isCompleted }.map { d -> viewModelScope.launch { joinLate(r, d, preferred, pin, manualPin) } }
             if (list.isEmpty() && isOffline()) {
                 pendingResolveMs = startMs
                 goOffline()
@@ -291,15 +335,18 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private suspend fun joinLate(r: PlayRequest, d: Deferred<Source?>, preferred: String, pin: String?) {
+    private suspend fun joinLate(r: PlayRequest, d: Deferred<Source?>, preferred: String, pin: String?, manualPin: Boolean) {
         val s = d.await() ?: return
         if (request != r) return
-        sources = Ranking.merge(sources, listOf(s), preferred, pin)
+        putSources(Ranking.merge(sources, listOf(s), preferred, pin, manualPin))
         android.util.Log.i("Chitram", "on-device ${s.provider} joined late")
         if (phase is Phase.Failed) { play(s, g.progress.resumeMs(r.type, r.id, r.season, r.episode)); notice = "" }
     }
 
     fun play(s: Source, startMs: Long = player.currentPosition.coerceAtLeast(0)) {
+        // A row still open here was left by a manual pick: back to waiting, not failed.
+        endAttempt(LoadingModel.RowState.WAITING, null)
+        attempts = attempts + LoadingModel.Attempt(s.id, System.currentTimeMillis())
         current = s
         cues = ""
         videoSize = VideoSize.UNKNOWN
@@ -353,29 +400,32 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         val pos = player.currentPosition.coerceAtLeast(0)
         val cur = current
         val action = FailPolicy.onError(cur, http?.responseCode, refreshedOnce, cur?.onDevice in reresolved, offline = offline || isOffline())
+        val why = LoadingModel.reasonFor(http?.responseCode, decoder = e.errorCode in 4000..4999)
         if (action == FailPolicy.Action.WAIT_ONLINE) {
             android.util.Log.i("Chitram", "[offline] ${cur?.provider}: ${e.errorCodeName} while offline, waiting")
             goOffline()
             return
         }
         if (action == FailPolicy.Action.RERESOLVE && cur?.onDevice != null) {
-            reresolve(cur, pos, "${cur.provider}: ${e.errorCodeName}")
+            reresolve(cur, pos, "${cur.provider}: ${e.errorCodeName}", why)
             return
         }
         if (action == FailPolicy.Action.REFRESH) {
+            endAttempt(LoadingModel.RowState.FAILED, why)
             refreshedOnce = true
             tried.clear()
             resolve(refresh = true, keepProvider = current?.provider, startMs = pos)
             return
         }
-        failover("${current?.provider ?: "Source"}: ${e.errorCodeName}", pos)
+        failover("${current?.provider ?: "Source"}: ${e.errorCodeName}", pos, why)
     }
 
     /** Recover an on-device row once: resolve it again on the device and resume at `pos`. */
-    private fun reresolve(s: Source, pos: Long, reason: String) {
+    private fun reresolve(s: Source, pos: Long, reason: String, why: String) {
         val r = request ?: return
         val name = s.onDevice ?: return
         reresolved += name
+        endAttempt(LoadingModel.RowState.FAILED, why)
         android.util.Log.i("Chitram", "recover: $reason -> re-resolving ${s.provider} on device")
         notice = "Reconnecting to ${s.provider}…"
         player.stop()
@@ -384,8 +434,8 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             val key = if (name.equals("mapple", true)) com.chitram.app.resolve.OnDeviceResolver.MAPPLE else com.chitram.app.resolve.OnDeviceResolver.VAPLAYER
             val fresh = g.onDevice.resolveOne(key, r.type, r.id, r.season, r.episode, g.codecs, g.prefs.preferredAudio(), fresh = true)
             if (request != r) return@launch
-            if (fresh == null) { failover("$reason, re-resolve failed", pos); return@launch }
-            sources = Ranking.merge(sources, listOf(fresh), g.prefs.preferredAudio(), null)
+            if (fresh == null) { failover("$reason, re-resolve failed", pos, why); return@launch }
+            putSources(Ranking.merge(sources, listOf(fresh), g.prefs.preferredAudio(), null))
             play(fresh, pos)
             notice = ""
         }
@@ -396,7 +446,8 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
      * alive row in the language (and near the height) that was playing (web
      * switchFlow.advanceTarget).
      */
-    private fun failover(reason: String, pos: Long) {
+    private fun failover(reason: String, pos: Long, why: String = LoadingModel.Reason.STOPPED) {
+        endAttempt(LoadingModel.RowState.FAILED, why)
         val failed = current
         if (failed != null) {
             tried += failed.id
@@ -410,7 +461,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         }
         android.util.Log.i("Chitram", "failover: $reason -> ${next.provider} (lang ${ctxLang ?: "preferred"}, ${ctxHeight ?: "-"}p)")
         play(next, pos)
-        notice = "${failed?.provider ?: "That server"} didn't respond, playing ${next.provider}."
+        notice = LoadingModel.advanceNotice(failed?.let { label(it) } ?: "That server", label(next), skip = why == LoadingModel.Reason.UNSUPPORTED)
     }
 
     /**
@@ -430,11 +481,12 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             PlayPolicy.Switch.DEAD -> {
                 landed = true // judged; play() resets it
                 val reason = if (alive) "switch: no frame in 20s" else "switch: no response in 8s"
+                val why = if (alive) LoadingModel.Reason.NO_PICTURE else LoadingModel.Reason.NO_ANSWER
                 android.util.Log.i("Chitram", "[switch] ${s.provider} dead: $reason")
                 when (FailPolicy.onError(s, null, refreshedOnce, s.onDevice in reresolved, offline = isOffline())) {
                     FailPolicy.Action.WAIT_ONLINE -> { landed = false; goOffline() }
-                    FailPolicy.Action.RERESOLVE -> reresolve(s, player.currentPosition.coerceAtLeast(0), "${s.provider}: $reason")
-                    else -> failover("${s.provider}: $reason", player.currentPosition.coerceAtLeast(0))
+                    FailPolicy.Action.RERESOLVE -> reresolve(s, player.currentPosition.coerceAtLeast(0), "${s.provider}: $reason", why)
+                    else -> failover("${s.provider}: $reason", player.currentPosition.coerceAtLeast(0), why)
                 }
             }
             PlayPolicy.Switch.WAIT -> {}
@@ -443,6 +495,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
 
     private fun onLanded(s: Source, now: Long) {
         landed = true
+        markFramed()
         snapshotCtx(s)
         android.util.Log.i("Chitram", "[switch] ${s.provider} landed in ${now - playStartedAt}ms")
         checkRuntime()
@@ -476,7 +529,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                 runtimeDone = true
                 val reason = "runtime mismatch (${d / 60_000}m vs ${r.runtimeMin}m)"
                 android.util.Log.i("Chitram", "[runtime] ${s.provider}: $reason")
-                if (PlayPolicy.nextAlive(sources, tried + s.id, ctxLang, ctxHeight) != null) failover(reason, player.currentPosition.coerceAtLeast(0))
+                if (PlayPolicy.nextAlive(sources, tried + s.id, ctxLang, ctxHeight) != null) failover(reason, player.currentPosition.coerceAtLeast(0), LoadingModel.Reason.NOT_FOUND)
                 else report(s, ok = false, reason = reason)
             }
         }
@@ -528,12 +581,13 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Telugu first: an on-device master lists many audio renditions (mapple: 14).
-     * If the player did not land on the preferred language, select it once.
+     * Telugu first: a master lists many audio renditions (mapple: 14, castle-demux: 5).
+     * If the player did not land on the preferred language, select it once. Backend
+     * rows too (A8): the VM lists Hindi first on Castle.
      */
     private fun pickPreferredAudio(t: Tracks) {
         val s = current ?: return
-        if (s.onDevice == null || audioPickedFor == s.id) return
+        if (audioPickedFor == s.id) return
         val audio = t.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
         if (audio.isEmpty()) return
         audioPickedFor = s.id
@@ -577,7 +631,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                 if (p - basePos <= 500) { movingSince = 0; continue }
                 if (movingSince == 0L) movingSince = System.currentTimeMillis()
                 if (p - basePos >= 3000 && System.currentTimeMillis() - movingSince >= 6000) {
-                    failover("no picture", p)
+                    failover("no picture", p, LoadingModel.Reason.UNSUPPORTED)
                     return@launch
                 }
             }
@@ -633,12 +687,68 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         phase = Phase.Resolving
     }
 
+    /**
+     * Search phase: re-ask the server without refresh and keep the on-device
+     * resolves running. End card: a fresh start with a full refresh.
+     */
     fun retry() {
         val r = request ?: return
+        val plan = LoadingModel.retryPlan(failed = phase is Phase.Failed)
+        if (plan.keepDevice && phase == Phase.Resolving) {
+            resolve(refresh = plan.refresh, keepProvider = null, startMs = resolveStartMs, reuseDevice = true)
+            return
+        }
         tried.clear()
         refreshedOnce = false
-        resolve(refresh = true, keepProvider = null, startMs = g.progress.resumeMs(r.type, r.id, r.season, r.episode))
+        resetStart()
+        resolve(refresh = plan.refresh, keepProvider = null, startMs = g.progress.resumeMs(r.type, r.id, r.season, r.episode))
     }
+
+    // ---- Loading screen state ------------------------------------------------
+
+    private fun resetStart() {
+        playAt = System.currentTimeMillis()
+        framed = false
+        attempts = emptyList()
+        checks = emptyList()
+        listReady = false
+        firstListSize = 0
+        labels = emptyMap()
+    }
+
+    private fun putSources(list: List<Source>) {
+        sources = list
+        labels = LoadingModel.labelRows(labels, list)
+    }
+
+    private fun label(s: Source): String = labels[s.id] ?: s.provider
+
+    /** Close the open attempt, if any. */
+    private fun endAttempt(state: LoadingModel.RowState, reason: String?) {
+        val last = attempts.lastOrNull() ?: return
+        if (last.endedAt != null) return
+        attempts = attempts.dropLast(1) + last.copy(endedAt = System.currentTimeMillis(), state = state, reason = reason)
+    }
+
+    private fun markFramed() {
+        if (phase != Phase.Playing) return
+        endAttempt(LoadingModel.RowState.PLAYING, null)
+        framed = true
+    }
+
+    private fun endCheck(id: String, found: Int) {
+        checks = checks.map { if (it.id == id && it.endedAt == null) it.copy(endedAt = System.currentTimeMillis(), found = found) else it }
+    }
+
+    fun loadingView(now: Long): LoadingModel.View = LoadingModel.view(LoadingModel.Input(
+        now = now, playAt = playAt, title = request?.title ?: "", preferred = g.prefs.preferredAudio(),
+        sources = if (listReady || phase is Phase.Failed) sources else null, labels = labels, firstListSize = firstListSize,
+        attempts = attempts, checks = checks, framed = framed, failed = phase is Phase.Failed,
+        failMessage = (phase as? Phase.Failed)?.message ?: "",
+    ))
+
+    /** A Details row: play that source now (same path as the Server menu). */
+    fun playSource(id: String) = choose("src:$id")
 
     /**
      * Cast to TV: pauses here and returns what to hand Web Video Caster, or null
@@ -661,11 +771,10 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     fun serverItems(): List<MenuItem> {
         // Web Servers menu: best picture first, numbered once across the list (U3).
         val menu = Ranking.menuOrder(sources)
-        val labels = Ranking.labels(menu)
-        return menu.mapIndexed { i, s ->
+        return menu.mapIndexed { _, s ->
             val lang = s.languages.joinToString(", ").ifEmpty { "Unknown language" }
             val q = Ranking.height(s).takeIf { it > 0 }?.let { "${it}p" } ?: s.quality
-            MenuItem("src:${s.id}", labels[i], "$q · $lang" + if (s.unsupported) " · not supported here" else "", s.id == current?.id, s.unsupported)
+            MenuItem("src:${s.id}", label(s), "$q · $lang" + if (s.unsupported) " · not supported here" else "", s.id == current?.id, s.unsupported)
         }
     }
 
@@ -680,12 +789,13 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                 val f = gr.getTrackFormat(i)
                 // HLS renditions are often named just "Audio"; prefer a language.
                 val name = f.label?.takeUnless { it.equals("audio", true) || it.isBlank() }
-                    ?: langName(f.language) ?: current?.languages?.firstOrNull() ?: "Default"
+                    ?: langName(f.language) ?: current?.let { LoadingModel.langOf(it, g.prefs.preferredAudio()) } ?: "Default"
                 if (!names.add(name.lowercase())) continue
                 out += MenuItem("trk:$gi:$i", name, "in this stream", gr.isTrackSelected(i))
             }
         }
-        if (out.isEmpty()) current?.languages?.firstOrNull()?.let { names += it.lowercase(); out += MenuItem("cur", it, "this server", true) }
+        // Tracks not known yet: name the language that will play, not the row's first (A8).
+        if (out.isEmpty()) current?.let { LoadingModel.langOf(it, g.prefs.preferredAudio()) }?.let { names += it.lowercase(); out += MenuItem("cur", it, "this server", true) }
         for ((lang, s) in Ranking.otherSourceLanguages(sources, current?.id, names)) {
             out += MenuItem("src:${s.id}", lang, "switches to ${s.provider} ${s.quality}")
         }
@@ -725,7 +835,8 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             "src" -> sources.firstOrNull { it.id == key.removePrefix("src:") }?.let {
                 if (it.id == current?.id) return
                 // Keep `tried`: auto-advance after a failed pick must not return to a dead row (U7).
-                play(it); notice = "Switching to ${it.provider}…"
+                manualPickId = it.id
+                play(it); notice = "Switching to ${label(it)}…"
             }
             "trk" -> override(C.TRACK_TYPE_AUDIO, p[1].toInt(), p[2].toInt())
             "q" -> if (p[1] == "auto") player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().clearOverridesOfType(C.TRACK_TYPE_VIDEO).build()

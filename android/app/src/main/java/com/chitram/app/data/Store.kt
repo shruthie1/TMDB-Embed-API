@@ -206,9 +206,23 @@ class MyListStore(private val kv: KeyValue, private val now: () -> Long = System
 }
 
 /** Last provider that played each title: a preference, never a filter. */
+/**
+ * The provider that last played a title. `manual`: the viewer picked it in the
+ * Server menu or Details, so a resume keeps it even in another language (A8).
+ * Stored as "provider" (auto, also the pre-1.2.2 format) or "provider|manual".
+ */
 class LastProviderStore(private val kv: KeyValue) {
-    fun get(type: String, id: Long): String? = kv.get("lastProvider:$type:$id")
-    fun put(type: String, id: Long, provider: String) = kv.put("lastProvider:$type:$id", provider)
+    data class Pin(val provider: String, val manual: Boolean)
+
+    fun get(type: String, id: Long): Pin? {
+        val v = kv.get("lastProvider:$type:$id")?.takeIf { it.isNotEmpty() } ?: return null
+        return if (v.endsWith(MANUAL)) Pin(v.removeSuffix(MANUAL), true) else Pin(v, false)
+    }
+
+    fun put(type: String, id: Long, provider: String, manual: Boolean = false) =
+        kv.put("lastProvider:$type:$id", provider + if (manual) MANUAL else "")
+
+    private companion object { const val MANUAL = "|manual" }
 }
 
 /** How the picture fills the screen (web Player.jsx fit: contain / cover / fill). */

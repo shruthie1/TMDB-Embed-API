@@ -43,7 +43,17 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
+import com.chitram.app.player.LoadingModel
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -162,6 +172,10 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
     var fit by remember { mutableStateOf(playerPrefs.fitFor(isTv)) }
     val playFocus = remember { FocusRequester() }
     val rootFocus = remember { FocusRequester() }
+    // Loading-screen Details panel (LoadingModel rows).
+    var details by remember { mutableStateOf(false) }
+    // Before the first frame the loading screen owns the screen, also in Playing.
+    val loading = vm.phase is PlayerVm.Phase.Resolving || (vm.phase is PlayerVm.Phase.Playing && !vm.framed)
     fun poke() { lastInput = System.currentTimeMillis() }
 
     // Auto-hide the controls after 4s of no input while playing.
@@ -171,14 +185,16 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
             controls = false
         }
     }
-    LaunchedEffect(controls, menu, vm.phase) {
-        if (vm.phase !is PlayerVm.Phase.Playing) return@LaunchedEffect
+    LaunchedEffect(controls, menu, vm.phase, vm.framed) {
+        if (vm.phase !is PlayerVm.Phase.Playing || !vm.framed) return@LaunchedEffect
+        details = false
         runCatching { if (controls && menu == null) playFocus.requestFocus() else if (!controls) rootFocus.requestFocus() }
     }
     LaunchedEffect(seekHint, lastInput) { if (seekHint != 0) { delay(600); seekHint = 0 } }
 
     val back = {
         when {
+            details -> details = false
             menu != null -> menu = null
             vm.nextUp != null -> vm.dismissNext()
             controls && vm.isPlaying -> controls = false
@@ -207,7 +223,7 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
                     // Media keys go on to the system, which hands them to the
                     // MediaSession (PlayerVm). Here they only show the bar.
                     Key.MediaPlayPause, Key.MediaPlay, Key.MediaPause, Key.MediaFastForward, Key.MediaRewind -> { controls = true; false }
-                    else -> if (!controls && vm.phase is PlayerVm.Phase.Playing) {
+                    else -> if (!controls && vm.phase is PlayerVm.Phase.Playing && vm.framed) {
                         when (e.key) {
                             Key.DirectionLeft -> { vm.seekBy(-10_000); controls = true; true }
                             Key.DirectionRight -> { vm.seekBy(10_000); controls = true; true }
@@ -274,15 +290,13 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
             )
         }
 
-        when (val ph = vm.phase) {
-            is PlayerVm.Phase.Resolving -> LoadingScreen(now, vm.status.ifEmpty { "Getting your stream ready" }, isTv, onRetry = { vm.retry() }, onBack = onBack)
-            is PlayerVm.Phase.Failed -> FailedPanel(now, ph.message, isTv, onRetry = { vm.retry() }, onBack = onBack)
-            is PlayerVm.Phase.Playing -> {
-                val note = vm.notice
-                if (vm.buffering || note.isNotEmpty()) {
-                    val count = vm.sources.size
-                    CenterNote(note, sub = if (note.isNotEmpty() && count > 1 && !vm.offline) "Source ${(vm.sources.indexOf(vm.current) + 1).coerceIn(1, count)} of $count" else "")
-                }
+        if (loading || vm.phase is PlayerVm.Phase.Failed) {
+            LoadingScreen(now, vm, isTv, details, onDetails = { details = it }, onBack = onBack)
+        } else {
+            val note = vm.notice
+            if (vm.buffering || note.isNotEmpty()) {
+                val count = vm.sources.size
+                CenterNote(note, sub = if (note.isNotEmpty() && count > 1 && !vm.offline) "${vm.attempts.size.coerceAtLeast(1)} of $count tried" else "")
             }
         }
 
@@ -297,7 +311,7 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
         // A phone can still be portrait for a few frames before the forced landscape lands.
         // The control row cannot fit that width, so wait for landscape before drawing it.
         val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
-        if (controls && (isTv || landscape) && vm.phase is PlayerVm.Phase.Playing && vm.nextUp == null) {
+        if (controls && (isTv || landscape) && vm.phase is PlayerVm.Phase.Playing && vm.framed && vm.nextUp == null) {
             Controls(vm, now, isTv, playFocus, fit, onFit = { fit = fit.next(); playerPrefs.fit = fit; poke() }, onMenu = { menu = it; poke() }, onBack = onBack, poke = ::poke)
         }
 
@@ -333,28 +347,123 @@ private fun BackChip(isTv: Boolean, onBack: () -> Unit, modifier: Modifier = Mod
     PillButton("Back", modifier = modifier, icon = Glyphs.back, onClick = onBack)
 }
 
-/** Web overlays.jsx Resolving: art, one spinner, title, status, Back, and Try again after 8s. */
+/**
+ * Loading screen and end card, driven by LoadingModel (loading-ux spec, same
+ * copy as the web). Back and Details from 0s. No Try again while anything is
+ * loading. TV focus starts on Details and never jumps when a button appears.
+ */
 @Composable
-private fun LoadingScreen(r: PlayRequest, status: String, isTv: Boolean, onRetry: () -> Unit, onBack: () -> Unit) {
-    var secs by remember { mutableIntStateOf(0) }
-    LaunchedEffect(r) { secs = 0; while (true) { delay(1000); secs++ } }
+private fun LoadingScreen(r: PlayRequest, vm: PlayerVm, isTv: Boolean, details: Boolean, onDetails: (Boolean) -> Unit, onBack: () -> Unit) {
+    var tick by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) { while (true) { tick = System.currentTimeMillis(); delay(500) } }
+    val v = vm.loadingView(tick)
+    val failed = v.phase == LoadingModel.Phase.FAILED
+    val detailsFocus = remember { FocusRequester() }
+    val retryFocus = remember { FocusRequester() }
+    var focusRow by remember { mutableStateOf<String?>(null) }
+    // Initial TV focus: Details while loading; Try again on the end card (unchanged end-card behaviour).
+    LaunchedEffect(failed) { if (isTv) runCatching { if (failed) retryFocus.requestFocus() else detailsFocus.requestFocus() } }
+    var wasOpen by remember { mutableStateOf(false) }
+    LaunchedEffect(details) {
+        if (isTv && wasOpen && !details) runCatching { detailsFocus.requestFocus() }
+        wasOpen = details
+    }
     Box(Modifier.fillMaxSize()) {
         DimArt(r)
-        if (!isTv) BackChip(false, onBack, Modifier.padding(16.dp))
-        Column(Modifier.align(Alignment.Center).padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            CircularProgressIndicator(color = Tok.accent, trackColor = Tok.fill2, strokeWidth = 3.dp, modifier = Modifier.size(44.dp))
-            BasicText(r.title, style = TextStyle(color = Tok.text, fontSize = if (isTv) 26.sp else 20.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center), modifier = Modifier.padding(top = 20.dp))
-            subtitleFor(r)?.let { BasicText(it, style = TextStyle(color = Tok.textMuted, fontSize = 14.sp), modifier = Modifier.padding(top = 4.dp)) }
-            BasicText(status, style = TextStyle(color = Tok.textSecondary, fontSize = 15.sp), modifier = Modifier.padding(top = 12.dp))
-            if (secs >= 8) {
-                val f = remember { FocusRequester() }
-                LaunchedEffect(Unit) { if (isTv) runCatching { f.requestFocus() } }
-                Row(Modifier.padding(top = 20.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    PillButton("Try again", icon = Glyphs.restart, modifier = Modifier.focusRequester(f), onClick = onRetry)
-                    if (isTv) PillButton("Back", icon = Glyphs.back, onClick = onBack)
+        Row(Modifier.fillMaxSize()) {
+            Box(Modifier.weight(1f).fillMaxHeight()) {
+                if (!isTv) BackChip(false, onBack, Modifier.padding(16.dp))
+                Column(Modifier.align(Alignment.Center).padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    if (failed) BasicText("!", style = TextStyle(color = Tok.text, fontSize = 30.sp, fontWeight = FontWeight.SemiBold), modifier = Modifier.clearAndSetSemantics { })
+                    else CircularProgressIndicator(color = Tok.accent, trackColor = Tok.fill2, strokeWidth = 3.dp, modifier = Modifier.size(44.dp).clearAndSetSemantics { })
+                    BasicText(r.title, style = TextStyle(color = Tok.text, fontSize = if (isTv) 26.sp else 20.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center), modifier = Modifier.padding(top = 20.dp))
+                    subtitleFor(r)?.let { BasicText(it, style = TextStyle(color = Tok.textMuted, fontSize = 14.sp), modifier = Modifier.padding(top = 4.dp)) }
+                    // Only the headline is a live region: TalkBack hears a phase change, not a tick.
+                    BasicText(
+                        v.headline,
+                        style = TextStyle(color = Tok.text, fontSize = if (isTv) 19.sp else 16.sp, textAlign = TextAlign.Center),
+                        modifier = Modifier.padding(top = 12.dp).semantics { liveRegion = LiveRegionMode.Polite },
+                    )
+                    if (v.detail.isNotEmpty()) {
+                        val ticking = v.phase == LoadingModel.Phase.FINDING
+                        BasicText(
+                            v.detail,
+                            style = TextStyle(color = Tok.textMuted, fontSize = 14.sp, textAlign = TextAlign.Center),
+                            modifier = Modifier.padding(top = 4.dp).then(if (ticking) Modifier.clearAndSetSemantics { } else Modifier),
+                        )
+                    }
+                    Row(Modifier.padding(top = 20.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        if (isTv) PillButton("Back", icon = Glyphs.back, onClick = onBack)
+                        if (v.showChooser) PillButton("Choose a server", icon = Glyphs.server) {
+                            focusRow = v.rows.firstOrNull { it.clickable && it.state == LoadingModel.RowState.WAITING }?.id
+                            onDetails(true)
+                        }
+                        if (v.showTryAgain) PillButton("Try again", primary = failed, icon = Glyphs.restart, modifier = Modifier.focusRequester(retryFocus), onClick = { vm.retry() })
+                        PillButton(
+                            if (details) "Details ⌃" else "Details ⌄",
+                            modifier = Modifier.focusRequester(detailsFocus).semantics { stateDescription = if (details) "Expanded" else "Collapsed" },
+                        ) { focusRow = null; onDetails(!details) }
+                    }
+                }
+            }
+            if (details) LoadingDetails(v, isTv, focusRow, onPick = { onDetails(false); vm.playSource(it) }, onClose = { onDetails(false) })
+        }
+    }
+}
+
+/** Details: one row per source (or per search check), in try order. Rows that can play are focusable. */
+@Composable
+private fun LoadingDetails(v: LoadingModel.View, isTv: Boolean, focusId: String?, onPick: (String) -> Unit, onClose: () -> Unit) {
+    val first = remember { FocusRequester() }
+    val target = focusId ?: v.rows.firstOrNull { it.clickable }?.id
+    LaunchedEffect(Unit) { if (isTv && target != null) runCatching { first.requestFocus() } }
+    Column(
+        Modifier.fillMaxWidth(0.4f).fillMaxHeight().background(Tok.surface.copy(alpha = 0.94f))
+            .windowInsetsPadding(WindowInsets.displayCutout)
+            .onPreviewKeyEvent { e ->
+                if (e.type == KeyEventType.KeyDown && e.key == Key.DirectionLeft) { onClose(); true } else false
+            }
+            .padding(vertical = if (isTv) 24.dp else 12.dp),
+    ) {
+        BasicText("Sources", style = TextStyle(color = Tok.text, fontSize = if (isTv) 20.sp else 17.sp, fontWeight = FontWeight.SemiBold), modifier = Modifier.padding(horizontal = 18.dp, vertical = 6.dp))
+        LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
+            items(v.rows, key = { it.id }) { row ->
+                val src = remember { MutableInteractionSource() }
+                val focused by src.collectIsFocusedAsState()
+                val mark = when (row.state) {
+                    LoadingModel.RowState.WAITING -> "○"
+                    LoadingModel.RowState.CHECKING -> "◌"
+                    LoadingModel.RowState.STARTING -> "●"
+                    LoadingModel.RowState.PLAYING -> "✓"
+                    LoadingModel.RowState.SKIPPED -> "-"
+                    LoadingModel.RowState.FAILED -> "✕"
+                }
+                Column(
+                    Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp)
+                        .then(if (row.id == target) Modifier.focusRequester(first) else Modifier)
+                        .then(
+                            if (row.clickable) Modifier.controlFocus(focused, Tok.radiusMd, lift = false).clip(Tok.radiusMd)
+                                .background(if (focused) Focus.fill else Color.Transparent)
+                                .clickable(interactionSource = src, indication = null) { onPick(row.id) }
+                            else Modifier,
+                        )
+                        .semantics(mergeDescendants = true) {
+                            contentDescription = row.description
+                            if (row.clickable) role = Role.Button
+                        }
+                        .padding(horizontal = 10.dp, vertical = 7.dp),
+                ) {
+                    val ink = if (focused) Focus.ink else Tok.text
+                    BasicText("$mark ${row.title}", style = TextStyle(color = ink, fontSize = if (isTv) 17.sp else 14.sp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    BasicText(
+                        row.status + if (focused && isTv) " · OK to play" else "",
+                        style = TextStyle(color = if (focused) Focus.ink.copy(alpha = 0.75f) else Tok.textSecondary, fontSize = if (isTv) 14.sp else 12.sp),
+                        modifier = Modifier.padding(start = 16.dp, top = 1.dp),
+                    )
                 }
             }
         }
+        BasicText(v.footer, style = TextStyle(color = Tok.textMuted, fontSize = 12.sp), modifier = Modifier.padding(horizontal = 18.dp, vertical = 6.dp).clearAndSetSemantics { })
     }
 }
 
@@ -365,24 +474,6 @@ private fun CenterNote(text: String, sub: String) {
             CircularProgressIndicator(color = Tok.accent, trackColor = Tok.fill2, strokeWidth = 3.dp, modifier = Modifier.size(40.dp))
             if (text.isNotEmpty()) BasicText(text, style = TextStyle(color = Tok.text, fontSize = 16.sp), modifier = Modifier.padding(top = 12.dp))
             if (sub.isNotEmpty()) BasicText(sub, style = TextStyle(color = Tok.textMuted, fontSize = 13.sp), modifier = Modifier.padding(top = 4.dp))
-        }
-    }
-}
-
-@Composable
-private fun FailedPanel(r: PlayRequest, message: String, isTv: Boolean, onRetry: () -> Unit, onBack: () -> Unit) {
-    val f = remember { FocusRequester() }
-    LaunchedEffect(Unit) { runCatching { f.requestFocus() } }
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        DimArt(r)
-        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(32.dp)) {
-            BasicText("Can't play this right now", style = TextStyle(color = Tok.text, fontSize = 22.sp, fontWeight = FontWeight.SemiBold))
-            BasicText(r.title + (subtitleFor(r)?.let { " · $it" } ?: ""), style = TextStyle(color = Tok.textSecondary, fontSize = 14.sp), modifier = Modifier.padding(top = 4.dp))
-            BasicText(message, style = TextStyle(color = Tok.textMuted, fontSize = 14.sp, textAlign = TextAlign.Center), modifier = Modifier.padding(top = 8.dp, bottom = 20.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                PillButton("Try again", primary = true, icon = Glyphs.restart, modifier = Modifier.focusRequester(f), onClick = onRetry)
-                PillButton("Back", icon = Glyphs.back, onClick = onBack)
-            }
         }
     }
 }
@@ -426,7 +517,7 @@ private fun Controls(
             }
             vm.current?.let { s ->
                 // The language actually playing, not the source's first listed one.
-                val lang = vm.audioItems().firstOrNull { it.selected }?.label?.takeUnless { it == "Default" } ?: s.languages.firstOrNull()
+                val lang = vm.audioItems().firstOrNull { it.selected }?.label?.takeUnless { it == "Default" } ?: LoadingModel.langOf(s, App.instance.prefs.preferredAudio())
                 BasicText(listOfNotNull(s.provider, lang).joinToString(" · "), style = TextStyle(color = Tok.textSecondary, fontSize = m.small),
                     maxLines = 1, modifier = Modifier.background(Color.Black.copy(alpha = 0.45f), Tok.pill).border(1.dp, Tok.border, Tok.pill).padding(horizontal = 12.dp, vertical = 5.dp))
             }

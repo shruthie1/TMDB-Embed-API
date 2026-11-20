@@ -115,26 +115,33 @@ object Ranking {
         )
 
     /**
-     * Honour the remembered provider by ORDER: the best selectable-audio row stays
-     * first, then the pinned provider's rows, then the rest, unsupported last.
+     * Honour the remembered provider by ORDER, never over the viewer's language
+     * (A8): rows in the preferred language (tier 0-2) stay ahead of the rest.
+     * Inside each part the best selectable-audio row stays first, then the
+     * pinned provider's rows, then the others; unsupported last.
+     * `manual`: the viewer picked that provider by hand, so it leads outright.
      */
-    fun applyPin(sources: List<Source>, provider: String?): List<Source> {
+    fun applyPin(sources: List<Source>, provider: String?, preferred: String = "Telugu", manual: Boolean = false): List<Source> {
         if (provider.isNullOrEmpty()) return sources
-        val best = sources.firstOrNull { it.selectableAudio && !it.unsupported }
         val wanted = { s: Source -> s.provider.equals(provider, ignoreCase = true) }
-        val pinned = sources.filter { wanted(it) && it !== best && !it.unsupported }
-        val rest = sources.filter { !wanted(it) && it !== best && !it.unsupported }
+        val ok = sources.filter { !it.unsupported }
         val last = sources.filter { it.unsupported }
-        return listOfNotNull(best) + pinned + rest + last
+        if (manual) return ok.filter(wanted) + ok.filterNot(wanted) + last
+        fun part(rows: List<Source>): List<Source> {
+            val best = rows.firstOrNull { it.selectableAudio }
+            return listOfNotNull(best) + rows.filter { wanted(it) && it !== best } + rows.filter { !wanted(it) && it !== best }
+        }
+        val (inLang, other) = ok.partition { tier(it, preferred) <= 2 }
+        return part(inLang) + part(other) + last
     }
 
-    fun fromResponse(r: StreamsResponse, preferred: String, codecs: CodecSupport, pin: String? = null, extra: List<Source> = emptyList()): List<Source> =
-        merge(r.streams.mapIndexedNotNull { i, s -> toSource(s, i, codecs) }, extra, preferred, pin)
+    fun fromResponse(r: StreamsResponse, preferred: String, codecs: CodecSupport, pin: String? = null, extra: List<Source> = emptyList(), manual: Boolean = false): List<Source> =
+        merge(r.streams.mapIndexedNotNull { i, s -> toSource(s, i, codecs) }, extra, preferred, pin, manual)
 
     /** Backend rows plus on-device rows, ranked together. A row id appears once. */
-    fun merge(sources: List<Source>, extra: List<Source>, preferred: String, pin: String? = null): List<Source> {
+    fun merge(sources: List<Source>, extra: List<Source>, preferred: String, pin: String? = null, manual: Boolean = false): List<Source> {
         val ids = extra.map { it.id }.toSet()
-        return applyPin(rank(sources.filter { it.id !in ids } + extra, preferred), pin)
+        return applyPin(rank(sources.filter { it.id !in ids } + extra, preferred), pin, preferred, manual)
     }
 
     const val VAPLAYER = "VaPlayer"
