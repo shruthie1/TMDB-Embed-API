@@ -41,8 +41,16 @@ data class MappleConfig(
     val frontParallelism: Int = 3,
     /** A failed front is tried last for this long (doubling per repeat, max 10 min). */
     val frontCooldownMs: Long = 60_000,
-    /** How long a hit WITHOUT the preferred audio waits for a front that has it. */
+    /**
+     * How long a hit WITHOUT the preferred audio waits for a front that has it.
+     * Not a cut-off: while fronts are still running the hit keeps waiting, up to
+     * betterWaitMaxMs (the larger of the two wins). A fixed 2500ms accepted
+     * Kubera's Hindi-only "mapple" front before the Telugu front (s12, 9th of 13,
+     * 3 in parallel) had started.
+     */
     val betterWaitMs: Long = 2500,
+    /** Ceiling for that wait, so a title with no Telugu anywhere still plays. */
+    val betterWaitMaxMs: Long = 12000,
     val stepTimeoutMs: Long = 8000,
     val budgetMs: Long = 25000,
     val sessionTtlMs: Long = 10 * 60 * 1000L,
@@ -134,6 +142,7 @@ data class ResolveConfig(
                 frontParallelism = o.int("frontParallelism")?.coerceIn(1, 8) ?: d.frontParallelism,
                 frontCooldownMs = o.long("frontCooldownMs")?.coerceIn(0, 3_600_000) ?: d.frontCooldownMs,
                 betterWaitMs = o.long("betterWaitMs")?.coerceIn(0, 20_000) ?: d.betterWaitMs,
+                betterWaitMaxMs = o.long("betterWaitMaxMs")?.coerceIn(0, 30_000) ?: d.betterWaitMaxMs,
                 stepTimeoutMs = o.long("stepTimeoutMs")?.coerceIn(1000, 60_000) ?: d.stepTimeoutMs,
                 budgetMs = o.long("budgetMs")?.coerceIn(3000, 90_000) ?: d.budgetMs,
                 sessionTtlMs = o.long("sessionTtlMs")?.coerceIn(0, 3_600_000) ?: d.sessionTtlMs,
