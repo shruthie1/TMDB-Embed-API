@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Chitram installer</title>
+<!-- setup.sh fills APP from chitram-app.json and writes index-chitram.html. -->
+<style>
+body { background:#111; color:#eee; font:22px/1.4 sans-serif; margin:0; padding:24px 40px; }
+h1 { font-size:34px; margin:0 0 8px; }
+.app { display:flex; align-items:center; gap:20px; margin:12px 0 20px; }
+.app img { width:96px; height:96px; border-radius:12px; background:#333; }
+button { font-size:24px; padding:12px 28px; margin-right:16px; border:3px solid #555; border-radius:8px; background:#222; color:#eee; }
+button:focus { border-color:#4af; outline:none; background:#235; }
+#apis { font-family:monospace; font-size:18px; white-space:pre-wrap; background:#000; padding:12px; border-radius:8px; }
+#log { font-family:monospace; font-size:18px; white-space:pre-wrap; background:#000; padding:12px; border-radius:8px; margin-top:16px; min-height:120px; word-break:break-all; }
+.ok { color:#6d6; } .no { color:#f77; } .warn { color:#fc5; }
+#force { display:none; }
+</style>
+</head>
+<body>
+<h1>Chitram installer</h1>
+<div class="app"><img id="icon" alt=""><div><div id="name"></div><div id="url" style="font-size:16px;color:#aaa"></div></div></div>
+<div>
+  <button id="install" onclick="doInstall()">Install</button>
+  <button id="uninstall" onclick="doUninstall()">Uninstall</button>
+  <button id="verify" onclick="doVerify()">Verify</button>
+  <button id="force" onclick="doForceCreate()">Create new app list</button>
+</div>
+<h2 style="font-size:24px">TV functions on this page</h2>
+<div id="apis"></div>
+<div id="log"></div>
+<script type="text/javascript">
+var APP = __APP_JSON__;
+var APPINFO_PATH = "websdk/Appinfo.json";
+var APPINFO_MODE = 6;           // mode 6 = /APPS base, as in weinzii/vidaa-edge
+var STORE_TYPE = "store";
+
+var CHECK = ["HiUtils_createRequest", "Hisense_installApp", "Hisense_installApp_V2",
+  "Hisense_uninstallApp", "Hisense_GetCountryCode", "Hisense_GetFirmWareVersion",
+  "Hisense_GetModelName", "Hisense_GetOSVersion", "Hisense_GetBrand",
+  "Hisense_AddInsecureDomain", "Hisense_GetInsecureDomain", "omi_platform", "opera_omi"];
+
+function has(name) { try { return typeof window[name] !== "undefined" && window[name] !== null; } catch (e) { return false; } }
+function isFn(name) { try { return typeof window[name] === "function"; } catch (e) { return false; } }
+
+function text(v) {
+  if (v === undefined) return "undefined";
+  if (typeof v === "string") return v;
+  try { return JSON.stringify(v); } catch (e) { return String(v); }
+}
+function errText(e) {
+  if (!e) return String(e);
+  var s = (e.name ? e.name + ": " : "") + (e.message || String(e));
+  if (e.stack) s += "\n" + e.stack;
+  return s;
+}
+function log(msg, cls) {
+  var el = document.getElementById("log");
+  var line = document.createElement("div");
+  if (cls) line.className = cls;
+  var t = new Date();
+  line.appendChild(document.createTextNode("[" + t.toTimeString().slice(0, 8) + "] " + msg));
+  el.insertBefore(line, el.firstChild);
+}
+
+function safeCall(name) {
+  if (!isFn(name)) return "-";
+  try { return text(window[name]()); } catch (e) { return "error: " + errText(e); }
+}
+
+function showApis() {
+  var out = [];
+  for (var i = 0; i < CHECK.length; i++) {
+    var n = CHECK[i];
+    out.push((has(n) ? "YES " : "no  ") + n + "  (" + (has(n) ? typeof window[n] : "missing") + ")");
+  }
+  // Any other Hisense_/HiUtils_ globals the firmware exposes.
+  var extra = [];
+  try {
+    for (var k in window) {
+      if (/^(Hisense|HiUtils|WebSDK|hisense)/i.test(k) && CHECK.indexOf(k) < 0) extra.push(k);
+    }
+  } catch (e) { extra.push("enumerate failed: " + errText(e)); }
+  out.push("");
+  out.push("Other Hisense globals: " + (extra.length ? extra.sort().join(", ") : "none found"));
+  out.push("Firmware: " + safeCall("Hisense_GetFirmWareVersion"));
+  out.push("OS version: " + safeCall("Hisense_GetOSVersion"));
+  out.push("Model: " + safeCall("Hisense_GetModelName"));
+  out.push("Page origin: " + location.origin);
+  out.push("User agent: " + navigator.userAgent);
+  document.getElementById("apis").textContent = out.join("\n");
+}
+
+/* ---------- newer method: write websdk/Appinfo.json (weinzii/vidaa-edge) ---------- */
+
+function readRegistry() {
+  var res = HiUtils_createRequest("fileRead", { path: APPINFO_PATH, mode: APPINFO_MODE });
+  log("fileRead result: " + text(res && res.ret) + " msg length " + (res && res.msg ? String(res.msg).length : 0));
+  if (!res || !res.ret) return { ok: false, raw: res };
+  try {
+    var parsed = JSON.parse(res.msg);
+    if (!parsed || Object.prototype.toString.call(parsed.AppInfo) !== "[object Array]") return { ok: false, raw: res, why: "no AppInfo array" };
+    return { ok: true, apps: parsed };
+  } catch (e) {
+    return { ok: false, raw: res, why: "JSON parse: " + errText(e) };
+  }
+}
+
+function writeRegistry(apps) {
+  var res = HiUtils_createRequest("fileWrite", { path: APPINFO_PATH, mode: APPINFO_MODE, writedata: JSON.stringify(apps) });
+  log("fileWrite result: " + text(res), res && res.ret ? "ok" : "no");
+  return !!(res && res.ret);
+}
+
+function entry() {
+  return {
+    Id: APP.appid, AppName: APP.name, Title: APP.name,
+    URL: APP.url, StartCommand: APP.url,
+    IconURL: APP.icon, Icon_96: APP.icon, Image: APP.icon, Thumb: APP.icon,
+    Type: "Browser", InstallTime: new Date().toISOString().split("T")[0],
+    RunTimes: 0, StoreType: "custom", PreInstall: false
+  };
+}
+
+function findIdx(apps) {
+  for (var i = 0; i < apps.AppInfo.length; i++) if (apps.AppInfo[i] && apps.AppInfo[i].Id === APP.appid) return i;
+  return -1;
+}
+
+function upsert(apps) {
+  var i = findIdx(apps);
+  if (i >= 0) apps.AppInfo[i] = entry(); else apps.AppInfo.push(entry());
+  return apps;
+}
+
+function installRegistry() {
+  if (!isFn("HiUtils_createRequest")) { log("Newer method skipped: HiUtils_createRequest is missing.", "warn"); return false; }
+  log("Newer method: HiUtils_createRequest on " + APPINFO_PATH);
+  try {
+    var r = readRegistry();
+    if (!r.ok) {
+      // Never overwrite a list we could not read: it holds every installed web app.
+      log("Could not read the app list: " + text(r.raw) + (r.why ? " (" + r.why + ")" : "") +
+          ". Not writing. If the list does not exist yet, use 'Create new app list'.", "no");
+      document.getElementById("force").style.display = "inline-block";
+      return false;
+    }
+    log("App list has " + r.apps.AppInfo.length + " entries.");
+    if (!writeRegistry(upsert(r.apps))) return false;
+    var back = readRegistry();
+    var there = back.ok && findIdx(back.apps) >= 0;
+    log(there ? "Verified: Chitram is in " + APPINFO_PATH + "." : "Write said OK, but Chitram is not in the list on read-back.", there ? "ok" : "warn");
+    return there;
+  } catch (e) {
+    log("Newer method threw: " + errText(e), "no");
+    return false;
+  }
+}
+
+/* ---------- legacy method: Hisense_installApp (trialuser/vidaa-appstore) ---------- */
+
+function installLegacy() {
+  if (!isFn("Hisense_installApp")) { log("Legacy method skipped: Hisense_installApp is missing.", "warn"); return; }
+  log("Legacy method: Hisense_installApp");
+  try {
+    Hisense_installApp(APP.appid, APP.name, APP.icon, APP.icon, APP.icon, APP.url, STORE_TYPE, function (status) {
+      if (!status) { log("Hisense_installApp callback " + text(status) + ": installed.", "ok"); refreshLauncher(APP.appid); }
+      else log("Hisense_installApp callback " + text(status) + ": failed.", "no");
+    });
+  } catch (e) {
+    log("Hisense_installApp threw: " + errText(e), "no");
+  }
+}
+
+function refreshLauncher(appInfo) {
+  var msg = { type: "APPMessage", MsgType: "appControl", action: "updateAppState", source: "browser", startAppType: 2,
+    param: { event: "AllAppsUpdate", SubModuleName: "AllApps", startFrom: "", appInfo: appInfo } };
+  try {
+    if (window.omi_platform) omi_platform.sendPlatformMessage(JSON.stringify(msg));
+    else if (window.opera_omi) opera_omi.sendPlatformMessage(JSON.stringify(msg));
+    else { log("No omi_platform/opera_omi: restart the TV to see the app."); return; }
+    log("Asked the launcher to refresh its app list.");
+  } catch (e) { log("Launcher refresh threw: " + errText(e), "warn"); }
+}
+
+/* ---------- buttons ---------- */
+
+function doInstall() {
+  log("---- Install " + APP.name + " (" + APP.appid + ")");
+  if (installRegistry()) {
+    refreshLauncher(APP.appid);
+    log("Done. Restart the TV fully (unplug for 30 s). Chitram shows at the end of the app list.", "ok");
+    return;
+  }
+  installLegacy();
+  if (!isFn("HiUtils_createRequest") && !isFn("Hisense_installApp"))
+    log("No install function exists on this page. Check the page loads from https://vidaahub.com.", "no");
+}
+
+function doUninstall() {
+  log("---- Uninstall " + APP.name);
+  if (isFn("HiUtils_createRequest")) {
+    try {
+      var r = readRegistry();
+      if (r.ok && findIdx(r.apps) >= 0) {
+        r.apps.AppInfo.splice(findIdx(r.apps), 1);
+        if (writeRegistry(r.apps)) { log("Removed from " + APPINFO_PATH + ". Restart the TV.", "ok"); refreshLauncher(); return; }
+      } else log("Chitram is not in " + APPINFO_PATH + " (or the list is unreadable).", "warn");
+    } catch (e) { log("Uninstall (newer) threw: " + errText(e), "no"); }
+  }
+  if (isFn("Hisense_uninstallApp")) {
+    try {
+      Hisense_uninstallApp(APP.appid, function (status) {
+        log("Hisense_uninstallApp callback " + text(status) + (status ? ": removed." : ": failed."), status ? "ok" : "no");
+        if (status) refreshLauncher();
+      });
+    } catch (e) { log("Hisense_uninstallApp threw: " + errText(e), "no"); }
+  }
+}
+
+function doVerify() {
+  log("---- Verify");
+  if (!isFn("HiUtils_createRequest")) { log("Cannot verify: HiUtils_createRequest is missing.", "warn"); return; }
+  try {
+    var r = readRegistry();
+    if (!r.ok) { log("App list unreadable: " + text(r.raw) + (r.why ? " (" + r.why + ")" : ""), "no"); return; }
+    var i = findIdx(r.apps);
+    log(i >= 0 ? "Chitram is installed: " + text(r.apps.AppInfo[i]) : "Chitram is not in the list (" + r.apps.AppInfo.length + " entries).", i >= 0 ? "ok" : "warn");
+  } catch (e) { log("Verify threw: " + errText(e), "no"); }
+}
+
+function doForceCreate() {
+  log("---- Create new app list with only Chitram");
+  try {
+    if (writeRegistry(upsert({ AppInfo: [] }))) { refreshLauncher(APP.appid); log("Written. Restart the TV fully.", "ok"); }
+  } catch (e) { log("Create threw: " + errText(e), "no"); }
+}
+
+window.onerror = function (m, src, line, col, e) { log("Page error: " + m + " at " + line + ":" + col + (e ? "\n" + errText(e) : ""), "no"); };
+
+document.getElementById("name").textContent = APP.name + ": " + APP.text;
+document.getElementById("url").textContent = APP.url;
+document.getElementById("icon").src = APP.icon;
+showApis();
+log("Ready. Newer method " + (isFn("HiUtils_createRequest") ? "available" : "missing") +
+    ", legacy method " + (isFn("Hisense_installApp") ? "available" : "missing") + ".");
+document.getElementById("install").focus();
+</script>
+</body>
+</html>

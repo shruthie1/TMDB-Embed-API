@@ -49,8 +49,9 @@ Mac. The Mac then serves an install page that lists only Chitram.
 5. Accept the certificate warning. The certificate is the one setup made on
    your Mac.
 
-6. The page shows "Hisense_installApp is available". Select Install next to
-   Chitram. Wait for "successfully installed".
+6. The page lists which TV install functions exist (YES or no). Select
+   Install. The page tries the newer method first, then the legacy one, and
+   prints each result. Select Verify to check that Chitram is in the app list.
 
 7. Set the TV's DNS back to the old value, or back to automatic (DHCP).
 
@@ -87,16 +88,30 @@ answers only `vidaahub.com` and the two hosts the install page needs.
 - Hisense does not support this. It does not change the firmware, and
   Uninstall removes the app.
 
+## Install methods
+
+The page (`install-page.template.html`) tries two methods in order:
+
+1. Newer: `HiUtils_createRequest` reads `websdk/Appinfo.json` (mode 6), adds
+   Chitram, writes it back, and reads it again to check. This is the method from
+   [weinzii/vidaa-edge](https://github.com/weinzii/vidaa-edge) (checked at
+   `94c3134911cbd4b813eea1f88c56819c0981518b`) and
+   [NoobyGains/stremio-vidaa-tv](https://github.com/NoobyGains/stremio-vidaa-tv)
+   (checked at `9bc0a10158ee108666917007ce6c95a6dc8c7a7c`). If the list cannot
+   be read, the page does not write. It shows "Create new app list" instead,
+   which replaces the list with Chitram only.
+2. Legacy: `Hisense_installApp`, from trialuser/vidaa-appstore.
+
 ## Firmware caveats
 
-- Firmware V0000.08.53A and V0000.09.60A are reported to fail with this method.
-  Find your version under Settings > Support > System Info.
-- For newer firmware, these projects have workarounds:
-  - [NoobyGains/stremio-vidaa-tv](https://github.com/NoobyGains/stremio-vidaa-tv)
-    (checked at `9bc0a10158ee108666917007ce6c95a6dc8c7a7c`)
-  - [weinzii/vidaa-edge](https://github.com/weinzii/vidaa-edge)
-    (checked at `94c3134911cbd4b813eea1f88c56819c0981518b`)
-  Use their steps with the app details in `chitram-app.json`.
+- Find your version under Settings > Support > System Info.
+- Firmware V0000.08.53A and V0000.09.60A are reported to fail with the legacy
+  method.
+- On 09.60 and 09.61 firmware, community reports in
+  [carteakey/alvidaa](https://github.com/carteakey/alvidaa) say the newer
+  method's write fails with "client request permission check error, please
+  check appconfig" (HTTP 503). Reads still work. If the page shows that error,
+  neither method works on your TV. Open Chitram from the TV browser instead.
 
 ## Alternative tool: Docker
 
@@ -109,7 +124,9 @@ Mac gives the Docker VM's IP and not the Mac's. To use it, copy
 
 ## Files
 
-- `setup.sh`: clones the pinned tool and writes its config. It starts nothing.
+- `setup.sh`: clones the pinned tool and writes its config and install page.
+  It starts nothing.
+- `install-page.template.html`: the install page. Setup fills in the app.
 - `config.template.json`: the tool's config. Setup fills in the IPs.
 - `chitram-app.json`: the app entry (name, URL, icon).
 - `chitram-400.png`: the 400x400 icon, made from `web/public/icons/icon-512.png`.

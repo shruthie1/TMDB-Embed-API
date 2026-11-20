@@ -38,7 +38,7 @@ if [[ ! -f "$WORK/ssl/local.key" ]]; then
     -subj "/CN=vidaahub.com" -addext "subjectAltName=DNS:vidaahub.com" 2>/dev/null
 fi
 
-# config.json and an install page that lists only Chitram.
+# config.json and our install page (install-page.template.html), Chitram only.
 python3 -I - "$HERE" "$WORK" "$MAC_IP" "$AJAX_IP" "$RAW_IP" <<'PY'
 import json, re, sys
 here, work, mac, ajax, raw = sys.argv[1:6]
@@ -48,12 +48,14 @@ json.loads(cfg)                                   # must parse
 open(f"{work}/config.json", "w").write(cfg)
 
 app = json.load(open(f"{here}/chitram-app.json"))
-src = open(f"{work}/index-en.html", encoding="utf-8").read()
-new, n = re.subn(r"var apps = \[.*?\n\];", lambda m: "var apps = [\n\t" + json.dumps(app) + "\n];",
-                 src, count=1, flags=re.S)
-if n != 1 or "function installHisense" not in new:
-    sys.exit("index-en.html layout changed; check the pinned commit")
-open(f"{work}/index-chitram.html", "w", encoding="utf-8").write(new)
+for k in ("appid", "name", "url", "text", "icon"):
+    if not app.get(k):
+        sys.exit(f"chitram-app.json: missing {k}")
+page = open(f"{here}/install-page.template.html", encoding="utf-8").read()
+if page.count("__APP_JSON__") != 1:
+    sys.exit("install-page.template.html must hold __APP_JSON__ exactly once")
+page = page.replace("__APP_JSON__", json.dumps(app).replace("</", "<\\/"))
+open(f"{work}/index-chitram.html", "w", encoding="utf-8").write(page)
 print(f"config.json and index-chitram.html written (Mac IP {mac})")
 PY
 
