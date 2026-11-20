@@ -32,8 +32,13 @@ setInterval(() => {
     const active = count(httpsAgent.sockets) + count(httpAgent.sockets);
     const queued = count(httpsAgent.requests) + count(httpAgent.requests);
     const free = count(httpsAgent.freeSockets) + count(httpAgent.freeSockets);
-    if (active || queued) console.log(`[pool] active=${active} queued=${queued} free=${free}`);
+    // Only on change: a steady line every 5s was 18625 of 23201 log lines on
+    // prod 2026-11-19 and buried everything else.
+    const line = `[pool] active=${active} queued=${queued} free=${free}`;
+    if ((active || queued || lastPoolLine) && line !== lastPoolLine) console.log(line);
+    lastPoolLine = (active || queued) ? line : '';
 }, 5000).unref();
+let lastPoolLine = '';
 
 const CACHE_MAX_SIZE = 2000;
 const CACHE_EXPIRY_MS = 2 * 60 * 60 * 1000; // 2 hours
@@ -124,7 +129,7 @@ async function readBodyWithTimeout(resp, timeoutMs = BODY_STALL_MS, kind = 'arra
     let timer = null;
     const deadline = new Promise((_, reject) => {
         timer = setTimeout(() => {
-            try { resp.body?.destroy?.(); } catch { /* already gone */ }
+            discardBody(resp);
             reject(new Error(`body read exceeded ${timeoutMs}ms`));
         }, timeoutMs);
     });
@@ -147,8 +152,22 @@ async function readBodyWithTimeout(resp, timeoutMs = BODY_STALL_MS, kind = 'arra
 // up` to every new request until restart.
 //
 // An error body is small and uninteresting, so destroy rather than read it.
+//
+// Destroying resp.body alone does NOT release the socket: node-fetch v2 hands
+// out a PassThrough piped from the real response, so destroying it just
+// unpipes, the real response pauses, and the socket stays checked out until
+// the origin gives up. Measured 2026-11-20 with node-fetch 2.7.0 and a 64 MB
+// body: after body.destroy() the origin connection was still open and the
+// agent still counted it active; after aborting the request both were gone.
+// Prod showed the same shape: `[pool] active=16 queued=0 free=0` for 8+ hours
+// with no viewers (2026-11-19 00:00-08:37), cleared only by a restart.
+// So abort the request (fetchWithTimeout attaches the hook), then destroy.
 function discardBody(resp) {
-    try { resp?.body?.destroy?.(); } catch { /* already gone */ }
+    const body = resp?.body;
+    // node-fetch emits the abort as an 'error' on the body; nobody is reading.
+    try { body?.on?.('error', () => {}); } catch { /* not an emitter */ }
+    try { resp?.[ABORT]?.(); } catch { /* already settled */ }
+    try { body?.destroy?.(); } catch { /* already gone */ }
 }
 
 // Short cooldown for a host that has told us to back off.
@@ -237,6 +256,10 @@ function noteThrottle(url, status) {
     console.warn(`[throttle] ${h} returned ${status}; pausing it for ${THROTTLE_COOLDOWN_MS}ms`);
 }
 
+// The request's abort, hung on its response so a body that will not be read
+// to the end can give its socket back (see discardBody).
+const ABORT = Symbol('abortUpstream');
+
 async function fetchWithTimeout(url, options = {}, timeoutMs = BODY_TIMEOUT_MS) {
     const controller = new AbortController();
     // The deadline covers the handshake and headers only. Clearing it in a
@@ -265,6 +288,7 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = BODY_TIMEOUT_MS) 
     try {
         const resp = await fetch(url, { agent: agentFor(url), ...options, signal: controller.signal });
         clearTimeout(timer);
+        Object.defineProperty(resp, ABORT, { value: () => controller.abort() });
         return resp;
     } catch (e) {
         clearTimeout(timer);
@@ -474,7 +498,9 @@ function pipeUpstream(resp, res, label) {
         }
         // Reached only when the body never ended: an error, or a client that
         // hung up mid-stream. Both leave bytes in flight that nobody will read.
-        if (typeof body.destroy === 'function') body.destroy();
+        // discardBody aborts the request too: destroying the body alone kept
+        // the socket checked out (hls.js cancels segments on every seek).
+        discardBody(resp);
     };
     // A body that simply STOPS sending - no error, no end, no client hangup -
     // was the remaining leak: cleanup() only ran on error or close, so the
@@ -781,8 +807,12 @@ function createProxyRoutes(app) {
                             if (debug) console.log('[ts-proxy] probe body read failed', readErr.message);
                         }
                         if (debug) console.log('[ts-proxy] probe success', { contentLength });
-                    } else if (debug) {
-                        console.log('[ts-proxy] probe status', probeResp.status);
+                    } else {
+                        // A 200 here is the WHOLE file (the origin ignored
+                        // Range). Unread, it holds a pooled socket until the
+                        // origin gives up, which can be hours.
+                        discardBody(probeResp);
+                        if (debug) console.log('[ts-proxy] probe status', probeResp.status);
                     }
                 } catch (_e) { if (debug) console.log('[ts-proxy] probe failed'); }
             }
@@ -813,8 +843,9 @@ function createProxyRoutes(app) {
                                         }
                                     }
                                 }
-                            } else if (debug) {
-                                console.log('[ts-proxy] tail prefetch status', tr.status);
+                            } else {
+                                discardBody(tr);
+                                if (debug) console.log('[ts-proxy] tail prefetch status', tr.status);
                             }
                         } catch (e) { if (debug) console.log('[ts-proxy] tail prefetch error', e.message); }
                     })();
@@ -843,6 +874,8 @@ function createProxyRoutes(app) {
                     return pipeUpstream(resp, res, `ts-proxy#${reqId}`);
                 }
                 // If server ignored range (e.g., returned 200), fall through to normal logic below.
+                // That response is not used, so release its socket now.
+                discardBody(resp);
             }
 
             const cfCookie = cfCookieFor(targetUrl);
