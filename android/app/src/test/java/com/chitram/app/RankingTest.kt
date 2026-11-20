@@ -100,6 +100,22 @@ class RankingTest {
         assertEquals(listOf("Tamil", "Kannada", "Hindi"), langs)
     }
 
+    // Regression: Kubera crashed with "Key src:CastleTV-0 was already used" when
+    // the audio sheet opened. A selectable-audio source offers several languages,
+    // so keying the menu row by src:<id> alone repeats and the LazyColumn throws.
+    // audioItems() keys each cross-source language src:<id>:<lang>; assert unique.
+    @Test fun audioMenuKeysUniquePerLanguage() {
+        val s = Ranking.fromResponse(StreamsResponse(streams = listOf(
+            raw("A", "720p", listOf("Telugu")),
+            raw("CastleTV", "1080p", listOf("Telugu", "Hindi", "Tamil"), sel = true),
+        )), "Telugu", all)
+        val cur = s.first { it.provider == "A" }
+        val keys = Ranking.otherSourceLanguages(s, cur.id, setOf("Telugu"))
+            .map { (lang, src) -> "src:${src.id}:$lang" }
+        assertEquals(keys.size, keys.toSet().size)  // no duplicate LazyColumn keys
+        assertEquals(listOf("src:CastleTV-1:Hindi", "src:CastleTV-1:Tamil"), keys)
+    }
+
     @Test fun codecFamily() {
         assertEquals("hevc", MediaCodecSupport.familyOf(null, "hvc1.1.6.L93.B0,mp4a.40.2"))
         assertEquals("avc", MediaCodecSupport.familyOf(null, "avc1.640028"))
