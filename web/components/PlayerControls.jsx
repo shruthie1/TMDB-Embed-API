@@ -700,8 +700,9 @@ export default function PlayerControls({
           </div>
 
           {/* Picture fit. Next to fullscreen because they are the same
-              question - how the frame meets the screen. */}
-          {!compact && (
+              question - how the frame meets the screen. Hidden on TV: the
+              panel is already full-screen and the remote has no use for it. */}
+          {!compact && !tv && (
           <button className="icon-btn focusable" data-focus=""
                   aria-label={`Picture fit: ${fit === 'contain' ? 'whole frame'
                     : fit === 'cover' ? 'fill and crop' : 'stretch'}`}
@@ -711,6 +712,8 @@ export default function PlayerControls({
           </button>
           )}
 
+          {/* Fullscreen toggle. Hidden on TV, which already runs full-screen. */}
+          {!tv && (
           <button className="icon-btn focusable" data-focus="" aria-label="Fullscreen"
                   onClick={() => {
                     const el = v()?.parentElement;
@@ -719,6 +722,7 @@ export default function PlayerControls({
                   }}>
             <Icon name="fullscreen" size={17} />
           </button>
+          )}
         </div>
       </div>
     </div>
