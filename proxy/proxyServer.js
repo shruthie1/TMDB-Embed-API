@@ -479,6 +479,17 @@ function rewriteM3u8(content, targetUrl, baseProxyUrl, headers, ptsOffset = 0) {
 // and the browser sits on (pending) until hls.js cancels the segment. Pipe
 // through this instead so an upstream failure, or a client that walks away,
 // always tears both sides down.
+// ts-proxy cache policy. The Vercel edge in front of /ts-proxy keys its cache
+// on the URL alone and ignores Range, so a cacheable 206 for bytes 0-65535
+// was later replayed for a seek to a 500MB offset (x-vercel-cache: HIT,
+// Content-Range bytes 0-65535). The mp4 could not seek and a NetMirror switch
+// hung ~12s then aborted. Measured 2026-11-20. A partial response, or any
+// answer to a Range request, is therefore never stored by a shared cache.
+// A full non-range 200 is the same bytes for every caller and stays cacheable.
+function mediaCacheControl(req, status) {
+    return (req.headers.range || status === 206) ? 'private, no-store' : 'public, max-age=3600';
+}
+
 function pipeUpstream(resp, res, label) {
     const body = resp.body;
     if (!body) { res.end(); return; }
@@ -723,7 +734,7 @@ function createProxyRoutes(app) {
             if (cached) {
                 const ct = sniffSegmentType(inferContentType(cached.headers['content-type'], targetUrl), cached.data);
                 res.setHeader('Content-Type', ct);
-                res.setHeader('Cache-Control', 'public, max-age=3600');
+                res.setHeader('Cache-Control', mediaCacheControl(req, res.statusCode));
                 res.setHeader('Access-Control-Allow-Origin', '*');
                 res.setHeader('Accept-Ranges', 'bytes');
                 if (debug) console.log('[ts-proxy] cache hit');
@@ -748,7 +759,7 @@ function createProxyRoutes(app) {
                             res.setHeader('Accept-Ranges', 'bytes');
                             res.setHeader('Content-Length', slice.length.toString());
                             res.setHeader('Content-Range', `bytes ${startReq}-${endByte}/${tailEntry.size}`);
-                            res.setHeader('Cache-Control', 'public, max-age=3600');
+                            res.setHeader('Cache-Control', mediaCacheControl(req, res.statusCode));
                             res.setHeader('Access-Control-Allow-Origin', '*');
                             if (debug) console.log('[ts-proxy] tail serve hit', { startReq, cachedStart: tailEntry.start, cachedEnd: tailEntry.end, size: tailEntry.size });
                             return res.end(slice);
@@ -868,7 +879,7 @@ function createProxyRoutes(app) {
                     const contentRange = resp.headers.get('content-range');
                     if (contentRange) res.setHeader('Content-Range', contentRange);
                     const cl = resp.headers.get('content-length'); if (cl) res.setHeader('Content-Length', cl);
-                    res.setHeader('Cache-Control', 'public, max-age=3600');
+                    res.setHeader('Cache-Control', mediaCacheControl(req, res.statusCode));
                     res.setHeader('Access-Control-Allow-Origin', '*');
                     // Pipe first chunk then leave connection open? Simpler: end after chunk; player will request next range.
                     return pipeUpstream(resp, res, `ts-proxy#${reqId}`);
@@ -936,7 +947,7 @@ function createProxyRoutes(app) {
             const acceptRanges = resp.headers.get('accept-ranges');
             if (acceptRanges) res.setHeader('Accept-Ranges', acceptRanges); else res.setHeader('Accept-Ranges', 'bytes');
             const contentRange = resp.headers.get('content-range'); if (contentRange && !force200) res.setHeader('Content-Range', contentRange);
-            res.setHeader('Cache-Control', 'public, max-age=3600');
+            res.setHeader('Cache-Control', mediaCacheControl(req, res.statusCode));
             res.setHeader('Access-Control-Allow-Origin', '*');
             if (debug) console.log('[ts-proxy] streaming body', { status: resp.status, ct: upstreamCT, cl, contentRange: force200 ? undefined : contentRange });
             stage('piping body');
