@@ -234,6 +234,11 @@
 
 /* TV: tokens only. 10-foot viewing needs larger type and a heavier ring. */
 [data-tv="true"]{
+  /* The ring is read from across a room: 4px, further out, with a glow so it
+     still shows on a bright poster. */
+  --focus-ring:4px solid var(--color-accent);
+  --focus-offset:4px;
+  --focus-glow:0 0 0 2px rgb(var(--rgb-bg)), 0 0 24px 4px rgb(var(--rgb-accent-to) / .55);
   --header-height:64px;
   --header-pad-y:var(--space-2);
   --hero-height:70vh;

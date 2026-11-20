@@ -4,6 +4,18 @@
 
 *{box-sizing:border-box}
 html,body{margin:0;padding:0}
+/* Scrollbars match the dark UI: thin, a soft light thumb, no track. The UA
+   default was a light grey gutter that looked like a different app. Both
+   forms: scrollbar-color for Firefox and Chrome 121+, ::-webkit-scrollbar for
+   older Chromium (VIDAA's Odin is Chrome 108). TV hides them entirely, in
+   tv-compact.css. */
+html{scrollbar-color:rgb(255 255 255 / .22) transparent}
+html,*{scrollbar-width:thin}
+::-webkit-scrollbar{width:10px;height:10px;background:transparent}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:rgb(255 255 255 / .2);border-radius:999px;border:2px solid transparent;background-clip:padding-box}
+::-webkit-scrollbar-thumb:hover{background-color:rgb(255 255 255 / .34)}
+::-webkit-scrollbar-corner{background:transparent}
 body{
   background:var(--ink);
   color:var(--paper);
@@ -1501,7 +1513,10 @@ kbd{
      picture - below the floor that was meant to keep captions readable.
      10px is the smallest that stays legible at arm's length; the ceiling is
      scaled too, so Extra large can still grow past the 26px base. */
-  font-size:clamp(10px, calc(4.2cqw * var(--cue-scale)), calc(26px * var(--cue-scale)));
+  /* 2026-11-20: Medium was 26px at most, which the viewer found too small on
+     a laptop and a TV. Base 4.2cqw/26px -> 4.8cqw/32px; the presets scale
+     from it, so a saved size choice keeps its place on the ladder. */
+  font-size:clamp(10px, calc(4.8cqw * var(--cue-scale)), calc(32px * var(--cue-scale)));
   font-weight:500;
   /* A soft shadow reads on any frame without drawing a box over the film -
      same reasoning as the buffering overlay. */
@@ -1511,7 +1526,7 @@ kbd{
 /* A TV is viewed from across the room: bigger floor, and further from the edge
    so the panel's own overscan does not clip it. */
 [data-tv="true"] .cue-text span{
-  font-size:calc(clamp(26px, 1.9vw + 1.1vh, 40px) * var(--cue-scale));
+  font-size:calc(clamp(32px, 2.2vw + 1.2vh, 50px) * var(--cue-scale));
 }
 [data-tv="true"] .cue-layer{ padding:0 8% var(--space-10); }
 
@@ -2754,6 +2769,16 @@ html .person:focus-visible .person-ph,html[data-tv="true"] .person.focusable:foc
 html .tab:focus-visible .ico,
 html .search-field:has(.search-input:focus-visible){outline:var(--focus-ring);outline-offset:var(--focus-offset)}
 html .tab:focus-visible .ico{border-radius:var(--radius-sm)}
+/* TV: every D-pad stop shows the ring on plain :focus (a remote's focus is not
+   always "visible" to the UA), plus a glow so it reads at ten feet. Elements
+   that put the ring on a child (cards, cast, episodes) glow on that child. */
+html[data-tv="true"] [data-focus]:focus{outline:var(--focus-ring);outline-offset:var(--focus-offset);box-shadow:var(--focus-glow)}
+html[data-tv="true"] .card.focusable:focus,html[data-tv="true"] .ep.focusable:focus,
+html[data-tv="true"] .person.focusable:focus,html[data-tv="true"] .pctl-scrub:focus{outline:none;box-shadow:none}
+html[data-tv="true"] .card.focusable:focus .poster,html[data-tv="true"] .ep.focusable:focus .ep-still,
+html[data-tv="true"] .person.focusable:focus .person-ph{box-shadow:var(--focus-glow)}
+html[data-tv="true"] .icon-btn:focus,html[data-tv="true"] .pctl-pick-btn:focus{color:var(--paper);background:rgb(var(--rgb-white) / .14)}
+html[data-tv="true"] .pmenu-item:focus{background:rgb(var(--rgb-white) / .14);outline-offset:-4px;box-shadow:none}
 /* Menu rows sit inside a scrolling list: the ring goes inside the row so the
    list edge cannot cut it. */
 html .pmenu-item:focus-visible,html[data-tv="true"] .pmenu-item:focus{outline-offset:calc(-1 * var(--focus-offset))}

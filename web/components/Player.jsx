@@ -5,8 +5,8 @@ import { Resolving, NextUp, PlayerError } from './player/overlays';
 import TvBar from './player/TvBar';
 import Icon from './Icon';
 import { listSources, poster, reportPlayback } from '../lib/api';
-import { readOverride } from '../lib/dpad';
-import { mediaKeyAction, MEDIA_SEEK_SECS } from '../lib/tvKeys';
+import { isTv as isTvMode, readOverride } from '../lib/dpad';
+import { isVidaa, mediaKeyAction, MEDIA_SEEK_SECS, tvPlayerKey } from '../lib/tvKeys';
 import { forgetProvider, rememberProvider } from '../lib/lastProvider';
 import { abortReason } from '../lib/abortReason';
 import useAudioSync from '../lib/player/useAudioSync';
@@ -350,9 +350,21 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   // Shares readOverride with ?tv=, so both remember for the same 24h and
   // neither can strand a laptop in the 10-foot layout indefinitely. These were
   // two near-identical copies before, and only one of them expired.
+  //
+  // NOT on VIDAA. Odin's native bar is a desktop bar driven by an on-screen
+  // pointer: the remote cannot reach its buttons, which was the reported
+  // "player is built for a mouse". There our own bar, which the D-pad drives
+  // end to end, is the better default.
   const useNative = useMemo(
-    () => readOverride('chitram.native', 'native', () => onTvDevice),
+    () => readOverride('chitram.native', 'native',
+      () => onTvDevice && !isVidaa(typeof navigator === 'undefined' ? '' : navigator.userAgent)),
     [onTvDevice]);
+  /**
+   * Remote-control key model. isTv() is the same sniff as onTvDevice plus the
+   * remembered ?tv= override, so a desktop with ?tv=1 drives the player
+   * exactly as a TV does. onTvDevice alone stays the buffer-profile switch.
+   */
+  const tvRemote = useMemo(() => isTvMode(), []);
   // A hybrid stream (video from one provider, audio renditions from another)
   // needs looser gap handling: the two sides share a cut but not a segmentation,
   // so fragment boundaries drift by up to ~2s and the default 0.5s maxBufferHole
@@ -620,6 +632,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
 
   /** The player root — the element that goes fullscreen, and the cue-lift base. */
   const playerRef = useRef(null);
+  const revealControls = controls.reveal;
 
   /**
    * Rotate-to-fullscreen.
@@ -796,6 +809,31 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       if (media === 'play') { v.play().catch(() => {}); e.preventDefault(); return; }
       if (media === 'pause') { v.pause(); e.preventDefault(); return; }
 
+      /**
+       * TV remote on our own bar: one rule, in tvPlayerKey (lib/tvKeys.js).
+       * Left/Right seek and OK toggles unless focus is on a visible control;
+       * Up/Down bring the bar up with focus on Play, so the bar is always one
+       * press away and focus never starts on an invisible button.
+       */
+      if (tvRemote && !useNative) {
+        const onSlider = el?.getAttribute?.('role') === 'slider';
+        const inBar = Boolean((onControl || onSlider)
+          && playerRef.current?.querySelector('.pctl')?.contains(el));
+        const act = tvPlayerKey({ key: e.key, controlsVisible: controls.visible, focusInBar: inBar });
+        if (act) {
+          if (act === 'rewind') seekBy(v, -MEDIA_SEEK_SECS);
+          else if (act === 'forward') seekBy(v, MEDIA_SEEK_SECS);
+          else if (act === 'toggle') { v.paused ? v.play().catch(() => {}) : v.pause(); }
+          else if (act === 'enter-bar') {
+            playerRef.current?.querySelector('.pctl [data-primary]')?.focus({ preventScroll: true });
+          }
+          revealControls();
+          e.preventDefault();
+          return;
+        }
+        if (inBar) return;                    // the bar's: dpad moves, OK presses
+      }
+
       if (useNative) {
         if (onControl) return;               // let the D-pad navigate
         const step = e.shiftKey ? 60 : 10;
@@ -815,7 +853,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       // what `onControl` already tells us and is how Enter and Space are
       // handled just below. A keyboard user with focus on the picture now
       // seeks; a remote moving across the button row still navigates.
-      const navigating = onTvDevice && (controls.visible || onControl);
+      const navigating = (onTvDevice || tvRemote) && (controls.visible || onControl);
       const seek = (d) => { if (v.duration) v.currentTime =
         Math.max(0, Math.min(v.duration, v.currentTime + d)); };
 
@@ -828,7 +866,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       // viewer clicked the picture to move focus away. Enter still defers
       // everywhere, being the unambiguous "activate the focused thing" key.
       if (onControl && e.key === 'Enter') return;
-      if (onControl && onTvDevice && (e.key === ' ' || e.key === 'Spacebar')) return;
+      if (onControl && (onTvDevice || tvRemote) && (e.key === ' ' || e.key === 'Spacebar')) return;
       // Off-TV Space is the player's, so stop the browser ALSO scrolling the
       // page or re-firing the button focus was left on.
       if (onControl && (e.key === ' ' || e.key === 'Spacebar')) e.preventDefault();
@@ -873,7 +911,29 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     // turns an arrow into a focus move.
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [videoRef, onClose, menuOpen, controls.visible, useNative, onTvDevice]);
+  }, [videoRef, onClose, menuOpen, controls.visible, revealControls, useNative, onTvDevice, tvRemote]);
+
+  /**
+   * When the bar fades out, focus leaves it.
+   *
+   * Otherwise focus stays on a button nobody can see, and the next Left/Right
+   * walks the invisible row instead of seeking. With focus back on the page
+   * the next key is the "bar hidden" case in tvPlayerKey.
+   */
+  useEffect(() => {
+    if (!tvRemote || controls.visible) return;
+    const a = document.activeElement;
+    if (a && a !== document.body && playerRef.current?.querySelector('.pctl')?.contains(a)) a.blur();
+  }, [tvRemote, controls.visible]);
+
+  // Opening the player leaves focus on the page's Play button BEHIND it. On a
+  // remote that is an invisible focus; drop it so the first key is the
+  // player's.
+  useEffect(() => {
+    if (!tvRemote) return;
+    const a = document.activeElement;
+    if (a && a !== document.body && !playerRef.current?.contains(a)) a.blur();
+  }, [tvRemote]);
 
   // Feed the stall ladder real byte-level progress, so it can tell a slow
   // stream from a stuck one.
@@ -1590,6 +1650,8 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
           visible={controls.visible}
           onReveal={controls.reveal}
           onMenuChange={setMenuOpen}
+          menuOpen={menuOpen}
+          tv={tvRemote}
           sources={sources}
           currentSource={currentSource}
           currentSourceId={currentSourceId}

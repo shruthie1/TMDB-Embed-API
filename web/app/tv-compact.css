@@ -14,3 +14,60 @@
 [data-tv="true"] .home-hero-title{font-size:clamp(34px,3vw,52px)}
 [data-tv="true"] .home-hero-overview{font-size:15px;-webkit-line-clamp:2;max-width:46ch}
 [data-tv="true"] .btn{padding:var(--space-3) var(--space-5-5);font-size:16px}
+
+/* ── 10-foot targets (2026-11-20, user feedback on a Hisense VIDAA TV:
+   "cannot see what is focused, buttons too small") ───────────────────────
+   Cards keep the compact size above; CONTROLS grow. Every button, link and
+   list row a remote can land on is at least 56px tall on a 1920x1080 page,
+   and icons and labels grow with it. `html[data-tv]` so these also win over
+   prefs-modal.css, which loads after this file. */
+html[data-tv="true"] .btn,
+html[data-tv="true"] .nav-link,
+html[data-tv="true"] .detail-back,
+html[data-tv="true"] .chip,
+html[data-tv="true"] .lang-opt,
+html[data-tv="true"] .see-all,
+html[data-tv="true"] .pmenu-item,
+html[data-tv="true"] .sub-seg-btn,
+html[data-tv="true"] .sub-step,
+html[data-tv="true"] .sub-reset,
+html[data-tv="true"] .tvbar-btn{min-height:56px}
+html[data-tv="true"] .btn{font-size:20px;padding-inline:var(--space-7)}
+html[data-tv="true"] .nav-link{font-size:20px;display:inline-flex;align-items:center;padding-inline:var(--space-4)}
+html[data-tv="true"] .detail-back{min-width:56px;font-size:18px;display:inline-flex;align-items:center}
+html[data-tv="true"] .chip{font-size:18px;display:inline-flex;align-items:center}
+html[data-tv="true"] .lang-opt{font-size:20px}
+html[data-tv="true"] .icon-btn{min-width:56px;min-height:56px}
+
+/* Player bar. */
+html[data-tv="true"] .pctl .icon-btn{min-width:64px;min-height:64px;border-radius:var(--radius-md, 12px)}
+html[data-tv="true"] .pctl .icon-btn svg{width:30px;height:30px}
+html[data-tv="true"] .pctl-pick-btn{min-height:64px;font-size:18px;padding-inline:var(--space-4)}
+html[data-tv="true"] .pctl-pick-btn svg{width:26px;height:26px}
+html[data-tv="true"] .pctl-time{font-size:22px}
+html[data-tv="true"] .pctl-title b{font-size:30px}
+html[data-tv="true"] .pctl-bottom{padding:var(--space-4) var(--space-12) var(--space-8)}
+html[data-tv="true"] .pctl-top{padding-inline:var(--space-12)}
+html[data-tv="true"] .pctl-scrub{height:48px}
+html[data-tv="true"] .pctl-track{height:6px}
+html[data-tv="true"] .pctl-scrub:focus .pctl-track{height:10px;box-shadow:0 0 0 3px var(--color-accent)}
+html[data-tv="true"] .pctl-scrub:focus .pctl-knob{opacity:1;transform:translate(-50%,-50%) scale(1.6)}
+html[data-tv="true"] .pctl-vol{display:none}
+html[data-tv="true"] .pmenu{min-width:340px}
+html[data-tv="true"] .pmenu-pick{max-height:min(60vh,560px)}
+html[data-tv="true"] .pmenu-item{font-size:20px;padding:var(--space-3) var(--space-5)}
+html[data-tv="true"] .pmenu-label,html[data-tv="true"] .sub-set-k{font-size:18px}
+html[data-tv="true"] .pmenu-sheet{min-width:460px;max-height:min(70vh,760px)}
+html[data-tv="true"] .sub-seg-btn,html[data-tv="true"] .sub-step,html[data-tv="true"] .sub-reset{font-size:18px;padding-inline:var(--space-4)}
+
+/* ── Scrollbars ──
+   A TV has no pointer to drag a scrollbar with, and the default grey bar read
+   as a glitch along every rail and the page edge. Hidden everywhere; the
+   D-pad scrolls the focused element into view (lib/dpad.js). */
+html[data-tv="true"],html[data-tv="true"] *{scrollbar-width:none}
+html[data-tv="true"] ::-webkit-scrollbar{display:none;width:0;height:0}
+/* A list row must not scale on focus: it grew past the list edge and the ring
+   was cut at the sides. The fill and ring mark it. */
+html[data-tv="true"] .pmenu-item:focus,html[data-tv="true"] .sub-seg-btn:focus{transform:none}
+html[data-tv="true"] .pctl-row .pctl-pick-btn .pctl-pick-badge{font-size:18px;max-width:14ch}
+html[data-tv="true"] .pctl-row .pctl-pick-btn svg{width:26px;height:26px}

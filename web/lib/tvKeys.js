@@ -70,3 +70,30 @@ export function exitApp(w = typeof window === 'undefined' ? null : window) {
   if (typeof w.Hisense_Exit === 'function') { w.Hisense_Exit(); return; }
   w.close();
 }
+
+/**
+ * What a remote key does in the player when the D-pad is in charge (TV mode,
+ * our own control bar).
+ *
+ * The model is the one every TV app uses:
+ * - Focus in the visible bar: the key belongs to the bar. Arrows move between
+ *   controls (lib/dpad.js) and OK presses the focused one. Returns null.
+ * - Otherwise (bar hidden, or nothing in it focused): Left/Right seek 10s,
+ *   OK toggles play/pause, Up/Down bring the bar up with focus on Play.
+ *
+ * `focusInBar` only counts while the bar is showing. Focus left on a control
+ * that has faded out is not a place the viewer can see, so treating it as
+ * "in the bar" made Left/Right walk invisible buttons instead of seeking.
+ *
+ * @returns {'rewind'|'forward'|'toggle'|'enter-bar'|null}
+ */
+export function tvPlayerKey({ key, controlsVisible, focusInBar }) {
+  if (focusInBar && controlsVisible) return null;
+  switch (key) {
+    case 'ArrowLeft': return 'rewind';
+    case 'ArrowRight': return 'forward';
+    case 'ArrowUp': case 'ArrowDown': return 'enter-bar';
+    case 'Enter': case ' ': case 'Spacebar': return 'toggle';
+    default: return null;
+  }
+}

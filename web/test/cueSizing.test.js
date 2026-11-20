@@ -78,10 +78,11 @@ describe('caption sizing follows the picture', () => {
     }
   });
 
-  it('keeps the sizes already signed off at desktop widths', () => {
-    // This fix must not restyle the wide case, only the narrow one.
-    expect(px(fontExpr(), picture(1512))).toBe(26);
-    expect(px(fontExpr(), picture(1000))).toBe(26);
+  it('keeps the sizes signed off at desktop widths', () => {
+    // 26px until 2026-11-20, raised to 32px on the viewer's report that the
+    // default was too small on a laptop and a TV.
+    expect(px(fontExpr(), picture(1512))).toBe(32);
+    expect(px(fontExpr(), picture(1000))).toBe(32);
   });
 
   it('stays legible at the smallest picture', () => {
@@ -132,12 +133,12 @@ describe('the size presets', () => {
   });
 
   it('leaves the desktop default where it was signed off', () => {
-    expect(at(1512, 1)).toBe(26);
+    expect(at(1512, 1)).toBe(32);
   });
 
   it('still lets Extra large grow past the base ceiling', () => {
     // The ceiling is scaled too, so the largest preset is not pinned at 26px.
-    expect(at(1512, 1.6)).toBeGreaterThan(26);
+    expect(at(1512, 1.6)).toBeGreaterThan(32);
   });
 });
 

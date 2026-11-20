@@ -21,9 +21,12 @@ const FOCUSABLE = '[data-focus]';
  * invisible focus is indistinguishable from a dead remote.
  */
 function reachable(el) {
-  if (el.offsetParent === null) return false;
-  if (el.hasAttribute('disabled') || el.getAttribute('aria-hidden') === 'true') return false;
   const cs = getComputedStyle(el);
+  // offsetParent is ALSO null for a position:fixed element, which the player
+  // is. Treating that as hidden dropped the player out of the dialog scope, so
+  // the D-pad walked the title page behind the film.
+  if (el.offsetParent === null && cs.position !== 'fixed') return false;
+  if (el.hasAttribute('disabled') || el.getAttribute('aria-hidden') === 'true') return false;
   if (cs.visibility === 'hidden' || cs.pointerEvents === 'none') return false;
   // A faded-out ancestor makes this unusable even though the element itself
   // reports opacity 1.
@@ -51,11 +54,25 @@ function nearest(from, dir, candidates) {
       dir === 'right' ? dx > 8 : dir === 'left' ? dx < -8 :
       dir === 'down' ? dy > 8 : dy < -8;
     if (!forward) continue;
+    // Left/Right stay on the same line: the target must share some of the
+    // source's height. Without this, Right from the last header link jumped
+    // to a poster half a screen down that sat off-screen to the right.
+    if ((dir === 'left' || dir === 'right')
+        && !(b.r.top < a.r.bottom && b.r.bottom > a.r.top)) continue;
     // Along-axis distance dominates; cross-axis drift is penalised heavily so
     // Down doesn't jump diagonally across the screen.
-    const along = Math.abs(dir === 'left' || dir === 'right' ? dx : dy);
-    const cross = Math.abs(dir === 'left' || dir === 'right' ? dy : dx);
-    const score = along + cross * 3;
+    const horiz = dir === 'left' || dir === 'right';
+    const along = Math.abs(horiz ? dx : dy);
+    // Cross drift is the GAP between the two boxes on the other axis, not the
+    // distance between centres: a full-width list row straight below a small
+    // button is directly below it. Centre distance only breaks ties. Measured
+    // centre-to-centre, Up from a size button in the settings sheet jumped
+    // over the subtitle rows to the sheet's close button.
+    const gap = horiz
+      ? Math.max(0, b.r.top - a.r.bottom, a.r.top - b.r.bottom)
+      : Math.max(0, b.r.left - a.r.right, a.r.left - b.r.right);
+    const centre = Math.abs(horiz ? dy : dx);
+    const score = along + gap * 3 + centre * 0.1;
     if (score < bestScore) { bestScore = score; best = el; }
   }
   return best;
@@ -73,6 +90,8 @@ export function initDpad() {
   const groupOf = (el) => el?.closest('[data-rail], [data-focus-group]') || null;
 
   const onKey = (e) => {
+    // A handler that ran first (the player, a slider) already used this key.
+    if (e.defaultPrevented) return;
     const dir =
       e.key === 'ArrowRight' ? 'right' : e.key === 'ArrowLeft' ? 'left' :
       e.key === 'ArrowDown' ? 'down' : e.key === 'ArrowUp' ? 'up' : null;
@@ -82,8 +101,13 @@ export function initDpad() {
     // SELECT too: arrows change the selected option, and stealing them means
     // the sort control cannot be changed from a remote at all. Shortcuts.jsx
     // already exempted SELECT; these two disagreed.
-    if (active && (/^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName)
-                   || active.isContentEditable)) return;
+    // A one-line text field has no use for Up/Down, and keeping them made the
+    // search box a trap on a remote: no key could leave it for the results.
+    const lineField = active?.tagName === 'INPUT'
+      && /^(text|search|email|url|tel|)$/.test(active.getAttribute('type') || '');
+    const fieldOwnsKey = lineField ? (dir === 'left' || dir === 'right')
+      : (active && (/^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName) || active.isContentEditable));
+    if (fieldOwnsKey) return;
 
     /**
      * A focused SLIDER owns left/right - that is what a slider is for.
@@ -126,33 +150,47 @@ export function initDpad() {
      */
     const dialogs = [...document.querySelectorAll('[role="dialog"][aria-modal="true"]')]
       .filter(reachable);
-    const scope = dialogs.length ? dialogs[dialogs.length - 1] : document;
+    // An open menu (the player's settings sheet, a picker list) holds focus
+    // until it is closed with Back or a pick. Walking out of it left the list
+    // open over the film with focus somewhere behind it.
+    const menu = active?.closest?.('[role="menu"]');
+    const scope = menu && reachable(menu) ? menu
+      : dialogs.length ? dialogs[dialogs.length - 1] : document;
     const all = [...scope.querySelectorAll(FOCUSABLE)].filter(reachable);
     if (all.length === 0) return;
 
     if (!active || !active.matches?.(FOCUSABLE)) {
-      all[0].focus();
+      // Nothing focused yet (a page just opened): start on the page's main
+      // action when one is on screen, else the first visible control. The
+      // first element in the DOM is the logo, which is never what OK means.
+      const onScreen = all.filter((el) => {
+        const r = el.getBoundingClientRect();
+        return r.top >= 0 && r.bottom <= window.innerHeight;
+      });
+      const first = onScreen.find((el) => el.matches('.btn.primary')) || onScreen[0] || all[0];
+      first.focus();
       e.preventDefault();
       return;
     }
 
-    let next = null;
     const group = groupOf(active);
 
-    // Moving vertically: prefer the remembered element in the target group.
-    if (dir === 'down' || dir === 'up') {
-      const groups = [...scope.querySelectorAll('[data-rail], [data-focus-group]')]
-        .filter(reachable);
-      const idx = groups.indexOf(group);
-      const target = idx >= 0 ? groups[dir === 'down' ? idx + 1 : idx - 1] : null;
-      if (target) {
-        const remembered = memory.get(target);
-        next = (remembered && target.contains(remembered) && reachable(remembered))
-          ? remembered
-          : nearest(active, dir, [...target.querySelectorAll(FOCUSABLE)]);
-      }
+    /**
+     * Direction is decided by geometry alone.
+     *
+     * It used to jump to the NEXT GROUP in DOM order on Up/Down, which skipped
+     * anything not inside a group: on a title page Down from "Go back" went
+     * straight past the Play button to the cast row. Groups now only supply
+     * memory - arriving in a rail you were in before puts you back on the
+     * card you left.
+     */
+    let next = nearest(active, dir, all);
+    if (next && (dir === 'down' || dir === 'up')) {
+      const target = groupOf(next);
+      const remembered = target && target !== group ? memory.get(target) : null;
+      if (remembered && remembered !== next && target.contains(remembered)
+          && reachable(remembered)) next = remembered;
     }
-    if (!next) next = nearest(active, dir, all);
 
     if (next) {
       // Remember where we were BEFORE moving, so coming back restores it.

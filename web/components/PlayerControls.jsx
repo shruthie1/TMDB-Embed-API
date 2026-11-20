@@ -12,6 +12,9 @@ import { SIZES } from '../lib/subtitles';
 // How long the settings sheet stays open with no interaction. Short, because
 // it covers the picture; any action inside it restarts the clock.
 const SHEET_IDLE_MS = 3000;
+// A remote is slower than a pointer: reading a row and pressing Down took
+// longer than 3s, and the sheet closed under the viewer's thumb.
+const SHEET_IDLE_TV_MS = 10000;
 
 const fmt = (s) => {
   if (!Number.isFinite(s)) return '0:00';
@@ -138,7 +141,7 @@ function SettingsSheet({ subs, currentSub, onPickSub, subLoading, subPrefs, onSu
 
 export default function PlayerControls({
   videoRef, hls, title, subtitle, onClose, busy = false,
-  visible = true, onReveal, onMenuChange,
+  visible = true, onReveal, onMenuChange, menuOpen = null, tv = false,
   sources = [], currentSource, currentSourceId = null, onPickSource, sourcesPending = false,
   audioSync = null,
   subs = [], currentSub = null, onPickSub, subLoading = false,
@@ -188,6 +191,45 @@ export default function PlayerControls({
   const openMenu = (next) => { setMenu(next); onMenuChange?.(Boolean(next)); };
 
   /**
+   * The player's Back closes a menu by clearing ITS flag (Player.jsx owns the
+   * key). This component owns which menu is open, so without following that
+   * flag the sheet stayed on screen after Back, and the next Back left the
+   * film with the sheet still drawn.
+   */
+  useEffect(() => {
+    if (menuOpen === false && menu) setMenu(null);
+  }, [menuOpen, menu]);
+
+  /**
+   * Focus follows the menu on a remote.
+   *
+   * Opening: focus moves to the selected row (else the first), so OK on the
+   * gear lands IN the list rather than leaving the viewer to find it.
+   * Closing: the row that had focus is unmounted, which drops focus on the
+   * body - lost. It goes back to the button that opened the menu.
+   */
+  const opener = useRef(null);
+  const rootRef = useRef(null);
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    if (menu) {
+      if (!tv) return;
+      const list = root.querySelector('[role="menu"]');
+      if (!list || list.contains(document.activeElement)) return;
+      const target = list.querySelector('.pmenu-item.on[data-focus]')
+        || list.querySelector('[data-focus]:not(.icon-btn)')
+        || list.querySelector('[data-focus]');
+      target?.focus({ preventScroll: true });
+      return;
+    }
+    const a = document.activeElement;
+    const lost = !a || a === document.body || !a.isConnected;
+    if (lost && opener.current?.isConnected) opener.current.focus({ preventScroll: true });
+    opener.current = null;
+  }, [menu, tv]);
+
+  /**
    * The settings sheet closes itself after a few idle seconds.
    *
    * It used to stay open indefinitely, which left it covering the picture
@@ -201,8 +243,8 @@ export default function PlayerControls({
     sheetTimer.current = setTimeout(() => {
       setMenu(null);
       onMenuChange?.(false);
-    }, SHEET_IDLE_MS);
-  }, [onMenuChange]);
+    }, tv ? SHEET_IDLE_TV_MS : SHEET_IDLE_MS);
+  }, [onMenuChange, tv]);
 
   useEffect(() => {
     if (!menu) { clearTimeout(sheetTimer.current); return; }
@@ -303,7 +345,11 @@ export default function PlayerControls({
       ArrowRight: step, ArrowLeft: -step,
       PageUp: 60, PageDown: -60,
     };
-    if (e.key in map) {
+    if (e.key === 'Enter') {
+      // OK on the seek bar: a remote has no other key here, and doing nothing
+      // read as a dead button.
+      el.paused ? el.play().catch(() => {}) : el.pause();
+    } else if (e.key in map) {
       el.currentTime = Math.max(0, Math.min(el.duration, el.currentTime + map[e.key]));
     } else if (e.key === 'Home') { el.currentTime = 0; }
     else if (e.key === 'End') { el.currentTime = el.duration; }
@@ -437,6 +483,12 @@ export default function PlayerControls({
 
   return (
     <div className={`pctl ${visible || scrubbing ? 'show' : ''}`} data-focus-group=""
+         ref={rootRef}
+         onFocusCapture={(e) => {
+           // Remember the control a menu was opened from, so closing it can
+           // put focus back there (see the focus effect above).
+           if (!e.target.closest?.('[role="menu"]')) opener.current = e.target;
+         }}
          onClick={() => openMenu(null)}>
       <div className="pctl-top">
         <div className="pctl-title">
@@ -492,7 +544,7 @@ export default function PlayerControls({
         </div>
 
         <div className="pctl-row">
-          <button className="icon-btn focusable" data-focus="" aria-label={state.playing ? 'Pause' : 'Play'} onClick={toggle}>
+          <button className="icon-btn focusable" data-focus="" data-primary="" aria-label={state.playing ? 'Pause' : 'Play'} onClick={toggle}>
             <Icon name={state.playing ? 'pause' : 'play'} size={17} />
           </button>
           {/* On a phone these are replaced by double-tap on the video, which
