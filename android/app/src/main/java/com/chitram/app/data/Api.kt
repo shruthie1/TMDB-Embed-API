@@ -57,13 +57,45 @@ class HttpException(val code: Int) : IOException("HTTP $code")
  * land in a cache. Catalog calls go through `catalogClient`, which adds `httpCache`
  * and a 1 h policy. Streams always use `client` with no-store.
  */
-class Api(val client: OkHttpClient, private val base: String = BASE, httpCache: Cache? = null) {
+class Api(
+    val client: OkHttpClient,
+    private val base: String = BASE,
+    httpCache: Cache? = null,
+    /** /api/streams goes straight to the VM, so a Vercel fault and a VM fault look different. */
+    private val vmBase: String = VM,
+    private val vm: VmHealth? = null,
+    private val streamsCallTimeoutMs: Long = STREAMS_CALL_TIMEOUT_MS,
+) {
+    /** False while the VM breaker is open (paused after failures): no VM call would go out. */
+    val vmUp: Boolean get() = vm?.allow() != false
+
+    /** The VM breaker is open: no call went out. */
+    class VmDown(detail: String) : IOException(detail)
+
+    /** 3s connect: a dead host fails fast. The VM's own provider deadline is 20s. */
+    private val vmClient: OkHttpClient by lazy {
+        client.newBuilder()
+            .connectTimeout(VM_CONNECT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            .readTimeout(streamsCallTimeoutMs, TimeUnit.MILLISECONDS)
+            .callTimeout(streamsCallTimeoutMs, TimeUnit.MILLISECONDS)
+            .build()
+    }
+    private val statusClient: OkHttpClient by lazy {
+        client.newBuilder().connectTimeout(VM_CONNECT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            .callTimeout(VM_CONNECT_TIMEOUT_MS, TimeUnit.MILLISECONDS).build()
+    }
+
     internal val catalogClient: OkHttpClient =
         if (httpCache == null) client
         else client.newBuilder().cache(httpCache).addNetworkInterceptor(CatalogCachePolicy).build()
 
     companion object {
         const val BASE = "https://chtrm2.vercel.app"
+        /** The VM origin (Vercel rewrites /api/streams here). */
+        const val VM = "https://tmdb-187-127-137-163.sslip.io"
+        const val VM_CONNECT_TIMEOUT_MS = 3_000L
+        /** Was readTimeout 120s + callTimeout 125s with 2 retries. */
+        const val STREAMS_CALL_TIMEOUT_MS = 22_000L
         const val IMG = "https://image.tmdb.org/t/p"
         val json = Json { ignoreUnknownKeys = true; coerceInputValues = true; explicitNulls = false; isLenient = true }
 
@@ -124,8 +156,6 @@ class Api(val client: OkHttpClient, private val base: String = BASE, httpCache: 
             path.startsWith("http") -> path
             else -> "$IMG/$size$path"
         }
-
-        private val RETRY_DELAYS_MS = longArrayOf(800, 2500)
     }
 
     /** Request for `path`. Non-catalog paths (streams) carry no-store. */
@@ -133,13 +163,11 @@ class Api(val client: OkHttpClient, private val base: String = BASE, httpCache: 
         .apply { if (!isCatalogPath(path)) cacheControl(CacheControl.Builder().noStore().noCache().build()) }
         .build()
 
-    private suspend fun get(path: String, streamsTimeout: Boolean = false): String {
-        val c = when {
-            streamsTimeout -> client.newBuilder().readTimeout(120, TimeUnit.SECONDS).callTimeout(125, TimeUnit.SECONDS).build()
-            isCatalogPath(path) -> catalogClient
-            else -> client
-        }
-        val call = c.newCall(request(path))
+    private suspend fun get(path: String): String =
+        call(if (isCatalogPath(path)) catalogClient else client, request(path))
+
+    private suspend fun call(c: OkHttpClient, req: Request): String {
+        val call = c.newCall(req)
         return withContext(Dispatchers.IO) {
             suspendCancellableCoroutine { cont ->
                 cont.invokeOnCancellation { call.cancel() }
@@ -181,10 +209,6 @@ class Api(val client: OkHttpClient, private val base: String = BASE, httpCache: 
     suspend fun season(id: Long, season: Int): List<Episode> =
         getJson("/api/season/$id/$season", SeasonResponse.serializer()).episodes
 
-    /**
-     * /api/streams/:kind/:id. Retries a dropped connection or 5xx/429 twice
-     * (800ms, 2.5s) like web/lib/backend.js; never a 4xx.
-     */
     /** Short-fused client for telemetry: the VM may be down, and a report must never hang. */
     private val reportClient: OkHttpClient by lazy {
         client.newBuilder().connectTimeout(3, TimeUnit.SECONDS).callTimeout(REPORT_TIMEOUT_S, TimeUnit.SECONDS).build()
@@ -218,18 +242,36 @@ class Api(val client: OkHttpClient, private val base: String = BASE, httpCache: 
             if (refresh) add("refresh=1")
         }.joinToString("&")
         val path = "/api/streams/$kind/$id${if (qs.isNotEmpty()) "?$qs" else ""}"
-        var attempt = 0
+        val h = vm
+        if (h != null && !h.allow()) throw VmDown("VM paused for ${(h.openUntil - System.currentTimeMillis()) / 1000}s")
+        if (h != null && h.halfOpen && !vmAnswers()) {
+            h.onFailure()
+            throw VmDown("VM status probe failed")
+        }
+        var retried = false
         while (true) {
             try {
-                return json.decodeFromString(StreamsResponse.serializer(), get(path, streamsTimeout = true))
+                val body = call(vmClient, noStore(vmBase + path))
+                h?.onSuccess()
+                return json.decodeFromString(StreamsResponse.serializer(), body)
             } catch (e: IOException) {
-                // Our own timeout is not retried: the backend already spent its budget.
-                val retryable = if (e is HttpException) e.code >= 500 || e.code == 429 else e !is java.io.InterruptedIOException
-                if (!retryable || attempt >= RETRY_DELAYS_MS.size) throw e
-                delay(RETRY_DELAYS_MS[attempt++])
+                // A 4xx is an answer: the VM is up.
+                if (e is HttpException && e.code < 500) { h?.onSuccess(); throw e }
+                // One retry, only for a reset connection, only while the breaker is closed.
+                val reset = e !is HttpException && (e.message?.contains("reset", true) == true || e.message?.contains("unexpected end of stream", true) == true)
+                if (reset && !retried && h?.halfOpen != true) { retried = true; continue }
+                h?.onFailure()
+                android.util.Log.i("Chitram", "[vm] streams failed: ${e.javaClass.simpleName} ${e.message}")
+                throw e
             }
         }
     }
+
+    /** Half-open probe: GET /api/status on the VM, 3s. */
+    private suspend fun vmAnswers(): Boolean = try { call(statusClient, noStore("$vmBase/api/status")); true } catch (e: IOException) { false }
+
+    private fun noStore(url: String): Request =
+        Request.Builder().url(url).cacheControl(CacheControl.Builder().noStore().noCache().build()).build()
 }
 
 /**

@@ -9,8 +9,10 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
- * mapple and vaplayer, resolved from the device's own (residential) IP. Every
- * other provider stays on the backend. Each resolve is bounded by its config
+ * mapple, vaplayer, CastleTV and MultiMovies, resolved from the device's own
+ * (residential) IP. Castle runs on every start (it is the Telugu workhorse and
+ * must not depend on the VM); MultiMovies only when the VM is down or failed.
+ * Every other provider stays on the backend. Each resolve is bounded by its config
  * budget and never throws: a failure is a missing row, so the player simply has
  * one source fewer and moves on.
  */
@@ -21,6 +23,10 @@ class OnDeviceResolver(
     private val vaplayer: VaplayerResolver,
     /** imdb id for a title; default asks /api/title/:type/:id/full (cached 1 h). */
     private val imdbFor: suspend (type: String, id: Long) -> String? = { t, i -> api?.titleFull(if (t == "tv") "tv" else "movie", i)?.imdbId },
+    /** Search title and year for Castle; default asks /api/title/:type/:id/full (cached 1 h). */
+    private val titleFor: suspend (type: String, id: Long) -> Pair<String, Int?>? = { t, i -> api?.titleFull(if (t == "tv") "tv" else "movie", i)?.let { it.title to it.year } },
+    private val castle: CastleResolver? = null,
+    private val multimovies: MultiMoviesResolver? = null,
     private val now: () -> Long = System::currentTimeMillis,
 ) {
 
@@ -35,16 +41,18 @@ class OnDeviceResolver(
 
     internal fun isOpen(name: String): Boolean = (breakers[name]?.openUntil ?: 0L) > now()
 
-    fun launch(scope: CoroutineScope, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, preferred: String = "Telugu"): List<Deferred<Source?>> = listOf(
-        scope.async { resolveOne(MAPPLE, type, id, season, episode, codecs, preferred, fresh = false) },
-        scope.async { resolveOne(VAPLAYER, type, id, season, episode, codecs, preferred, fresh = false) },
-    )
+    /** The providers [launch] starts, in its order. MultiMovies only when the VM is not expected to answer. */
+    fun names(vmDown: Boolean): List<String> =
+        listOf(MAPPLE, VAPLAYER) + listOfNotNull(CASTLE.takeIf { castle != null }, MULTIMOVIES.takeIf { vmDown && multimovies != null })
+
+    fun launch(scope: CoroutineScope, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, preferred: String = "Telugu", title: String? = null, vmDown: Boolean = false): List<Deferred<Source?>> =
+        names(vmDown).map { n -> scope.async { resolveOne(n, type, id, season, episode, codecs, preferred, fresh = false, title = title) } }
 
     /**
      * One provider, bounded by its budget, never throws. `fresh` = recovery after a
      * playback error: a new mapple session, a new vaplayer token for the current IP.
      */
-    suspend fun resolveOne(name: String, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, preferred: String = "Telugu", fresh: Boolean = false): Source? {
+    suspend fun resolveOne(name: String, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, preferred: String = "Telugu", fresh: Boolean = false, title: String? = null): Source? {
         if (!fresh && isOpen(name)) {
             android.util.Log.i("Chitram", "on-device $name: skipped, breaker open")
             return null
@@ -60,6 +68,27 @@ class OnDeviceResolver(
                         mapple.resolve(cfg, type, id, season, episode, preferred, fresh).also { timedOut = false }
                     }
                     if (timedOut) throw StepException(name, 0, "budget ${cfg.budgetMs}ms spent")
+                    r
+                }
+                CASTLE -> {
+                    val c = castle ?: return@guarded null
+                    var timedOut = true
+                    val r = withTimeoutOrNull(CASTLE_BUDGET_MS) {
+                        // The catalog title (with year) when it answers quickly; else the title on screen.
+                        val t = withTimeoutOrNull(TITLE_WAIT_MS) { runCatching { titleFor(type, id) }.getOrNull() }
+                            ?.takeIf { it.first.isNotBlank() } ?: title?.let { it to null }
+                        val out = if (t == null) null else c.resolve(type, t.first, t.second, season, episode, preferred)
+                        timedOut = false
+                        out
+                    }
+                    if (timedOut) throw StepException(name, 0, "budget ${CASTLE_BUDGET_MS}ms spent")
+                    r
+                }
+                MULTIMOVIES -> {
+                    val m = multimovies ?: return@guarded null
+                    var timedOut = true
+                    val r = withTimeoutOrNull(MULTIMOVIES_BUDGET_MS) { m.resolve(type, id, season, episode).also { timedOut = false } }
+                    if (timedOut) throw StepException(name, 0, "budget ${MULTIMOVIES_BUDGET_MS}ms spent")
                     r
                 }
                 else -> {
@@ -105,6 +134,20 @@ class OnDeviceResolver(
     companion object {
         const val MAPPLE = "mapple"
         const val VAPLAYER = "vaplayer"
+        const val CASTLE = "castletv"
+        const val MULTIMOVIES = "multimovies"
+        const val CASTLE_BUDGET_MS = 25_000L
+        const val MULTIMOVIES_BUDGET_MS = 15_000L
+        private const val TITLE_WAIT_MS = 4_000L
+
+        /** OnDeviceResolver name for a row's provider or onDevice value, or null when the device cannot resolve it. */
+        fun nameFor(provider: String?): String? = when (provider?.lowercase()) {
+            MAPPLE -> MAPPLE
+            VAPLAYER -> VAPLAYER
+            CASTLE -> CASTLE
+            MULTIMOVIES -> MULTIMOVIES
+            else -> null
+        }
         const val BREAKER_FAILS = 3
         const val BREAKER_OPEN_MS = 5 * 60 * 1000L
         const val BREAKER_MAX_MS = 30 * 60 * 1000L
@@ -122,7 +165,7 @@ class OnDeviceResolver(
                 // From the master's EXT-X-MEDIA renditions, in master order: the
                 // language ranking needs them (never drop a language tag).
                 languages = Hls.languages(r.audio),
-                selectableAudio = r.audio.size > 1,
+                selectableAudio = r.audio.size > 1 && !r.muxed,
                 hybrid = false,
                 subtitles = emptyList(),
                 videoCodec = null,

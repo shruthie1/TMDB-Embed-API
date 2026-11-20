@@ -44,7 +44,9 @@ class HttpCacheTest {
         }
         server.start()
         val dir = Files.createTempDirectory("chitram-http").toFile()
-        api = Api(Api.buildClient(), server.url("").toString().trimEnd('/'), Api.httpCache(dir))
+        val base = server.url("").toString().trimEnd('/')
+        // /api/streams goes to the VM origin (1.2.3): point both at the mock.
+        api = Api(Api.buildClient(), base, Api.httpCache(dir), vmBase = base)
     }
 
     @After fun stop() { server.shutdown() }

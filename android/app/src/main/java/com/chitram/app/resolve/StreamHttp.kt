@@ -21,6 +21,8 @@ data class Resolved(
     val audio: List<AudioTrack>,
     val levels: List<Level>,
     val codecs: String?,
+    /** Several languages in one TS file (CastleTV muxed): not selectable in the player, swapped by TsAudioSwap. */
+    val muxed: Boolean = false,
 )
 
 /**

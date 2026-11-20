@@ -45,7 +45,7 @@ class App : Application(), ImageLoaderFactory {
         super.onCreate()
         instance = this
         val kv = PrefsKeyValue(this)
-        api = Api(Api.buildClient(), httpCache = Api.httpCache(cacheDir))
+        api = Api(Api.buildClient(), httpCache = Api.httpCache(cacheDir), vm = com.chitram.app.data.VmHealth(kv))
         prefs = LanguagePrefs(kv)
         progress = ProgressStore(kv)
         myList = MyListStore(kv)
@@ -61,6 +61,8 @@ class App : Application(), ImageLoaderFactory {
             api, resolveConfig,
             MappleResolver(api.client, hosts, kv),
             VaplayerResolver(api.client, hosts) { runCatching { assets.open("va.wasm").use { it.readBytes() } }.getOrNull() },
+            castle = com.chitram.app.resolve.CastleResolver(api.client),
+            multimovies = com.chitram.app.resolve.MultiMoviesResolver(api.client),
         )
         appScope.launch { resolveConfig.get() }
     }
