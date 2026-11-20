@@ -4,9 +4,6 @@ import android.app.Activity
 import android.os.Build
 import android.view.WindowManager
 import androidx.compose.foundation.layout.requiredSize
-import androidx.compose.material.icons.filled.AspectRatio
-import androidx.compose.material.icons.filled.Crop
-import androidx.compose.material.icons.filled.FitScreen
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Shape
@@ -48,19 +45,6 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.text.BasicText
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Dns
-import androidx.compose.material.icons.filled.Forward10
-import androidx.compose.material.icons.filled.GraphicEq
-import androidx.compose.material.icons.filled.HighQuality
-import androidx.compose.material.icons.filled.Pause
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Replay10
-import androidx.compose.material.icons.filled.SkipNext
-import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
@@ -95,6 +79,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -282,7 +267,7 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
             BasicText(
                 vm.cues,
                 style = TextStyle(color = Color.White, fontSize = if (isTv) 24.sp else 18.sp, textAlign = TextAlign.Center),
-                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = if (controls) 150.dp else 40.dp, start = 48.dp, end = 48.dp)
+                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = if (controls) (if (isTv) 170.dp else 130.dp) else 40.dp, start = 48.dp, end = 48.dp)
                     .background(Color.Black.copy(alpha = 0.55f), Tok.radiusMd).padding(horizontal = 12.dp, vertical = 4.dp),
             )
         }
@@ -302,7 +287,7 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
         if (seekHint != 0) {
             Box(Modifier.fillMaxSize(), contentAlignment = if (seekHint < 0) Alignment.CenterStart else Alignment.CenterEnd) {
                 Box(Modifier.padding(horizontal = 72.dp).size(72.dp).background(Color.Black.copy(alpha = 0.45f), Tok.pill), contentAlignment = Alignment.Center) {
-                    Icon(if (seekHint < 0) Icons.Filled.Replay10 else Icons.Filled.Forward10, contentDescription = null, tint = Color.White, modifier = Modifier.size(36.dp))
+                    Glyph(if (seekHint < 0) Glyphs.seekBack else Glyphs.seekFwd, contentDescription = null, tint = Color.White, size = 36.dp, numeral = "10")
                 }
             }
         }
@@ -343,7 +328,7 @@ private fun DimArt(r: PlayRequest) {
 
 @Composable
 private fun BackChip(isTv: Boolean, onBack: () -> Unit, modifier: Modifier = Modifier) {
-    CtlButton(Icons.AutoMirrored.Filled.ArrowBack, "Back", showLabel = true, isTv = isTv, modifier = modifier, onClick = onBack)
+    PillButton("Back", modifier = modifier, icon = Glyphs.back, onClick = onBack)
 }
 
 /** Web overlays.jsx Resolving: art, one spinner, title, status, Back, and Try again after 8s. */
@@ -363,8 +348,8 @@ private fun LoadingScreen(r: PlayRequest, status: String, isTv: Boolean, onRetry
                 val f = remember { FocusRequester() }
                 LaunchedEffect(Unit) { if (isTv) runCatching { f.requestFocus() } }
                 Row(Modifier.padding(top = 20.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    PillButton("Try again", icon = Icons.Filled.Refresh, modifier = Modifier.focusRequester(f), onClick = onRetry)
-                    if (isTv) PillButton("Back", icon = Icons.AutoMirrored.Filled.ArrowBack, onClick = onBack)
+                    PillButton("Try again", icon = Glyphs.restart, modifier = Modifier.focusRequester(f), onClick = onRetry)
+                    if (isTv) PillButton("Back", icon = Glyphs.back, onClick = onBack)
                 }
             }
         }
@@ -393,108 +378,144 @@ private fun FailedPanel(r: PlayRequest, message: String, isTv: Boolean, onRetry:
             BasicText(r.title + (subtitleFor(r)?.let { " · $it" } ?: ""), style = TextStyle(color = Tok.textSecondary, fontSize = 14.sp), modifier = Modifier.padding(top = 4.dp))
             BasicText(message, style = TextStyle(color = Tok.textMuted, fontSize = 14.sp, textAlign = TextAlign.Center), modifier = Modifier.padding(top = 8.dp, bottom = 20.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                PillButton("Try again", primary = true, icon = Icons.Filled.Refresh, modifier = Modifier.focusRequester(f), onClick = onRetry)
-                PillButton("Back", icon = Icons.AutoMirrored.Filled.ArrowBack, onClick = onBack)
+                PillButton("Try again", primary = true, icon = Glyphs.restart, modifier = Modifier.focusRequester(f), onClick = onRetry)
+                PillButton("Back", icon = Glyphs.back, onClick = onBack)
             }
         }
     }
 }
 
+/**
+ * Control layout, after the web desktop player (PlayerControls.jsx) and the
+ * MX Player convention:
+ * - top: back, title and episode, source chip on the right;
+ * - bottom: one seek line with the time on its left and the length on its
+ *   right, then a row with play and the 10 s skips on the left and the
+ *   secondary actions (next, server, audio, quality, subtitles, fit) on the
+ *   right. No centre play: double-tap owns the middle of the picture.
+ * Phone and TV share the structure; TV only scales the targets up.
+ */
 @Composable
 private fun Controls(
     vm: PlayerVm, r: PlayRequest, isTv: Boolean, playFocus: FocusRequester,
     fit: VideoFit, onFit: () -> Unit,
     onMenu: (Menu) -> Unit, onBack: () -> Unit, poke: () -> Unit,
 ) {
-    val side = if (isTv) 48.dp else 20.dp
+    val m = CtlMetrics.of(isTv)
     val next = vm.nextEpisode
+    // Buttons carry their own padding round the glyph, so the row starts that
+    // much further out: glyph edges then line up with the time text.
+    val inset = m.side - (m.target - m.glyph) / 2
     // Full screen, same bounds as the video. No display-cutout padding: in
     // landscape a phone's camera cutout sits on one short edge, so that inset
     // pushed every control in from that side only (about 48dp on a Pixel 6,
     // more on OnePlus) while the other side kept 20dp. The punch hole sits at
     // mid-height, clear of the top and bottom rows.
     Box(Modifier.fillMaxSize()) {
-        // Top: back, title, episode and source.
         Row(
-            Modifier.fillMaxWidth().background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.75f), Color.Transparent)))
-                .padding(start = if (isTv) side else 8.dp, end = side, top = if (isTv) 28.dp else 8.dp, bottom = 28.dp),
+            Modifier.fillMaxWidth().background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.7f), Color.Transparent)))
+                .padding(start = if (isTv) m.side else inset, end = m.side, top = if (isTv) 24.dp else 6.dp, bottom = 32.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            if (!isTv) CtlButton(Icons.AutoMirrored.Filled.ArrowBack, "Back", showLabel = false, isTv = false, onClick = onBack)
-            Column(Modifier.weight(1f).padding(start = if (isTv) 0.dp else 4.dp)) {
-                BasicText(r.title, style = TextStyle(color = Tok.text, fontSize = if (isTv) 24.sp else 18.sp, fontWeight = FontWeight.SemiBold), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                subtitleFor(r)?.let { BasicText(it, style = TextStyle(color = Tok.textSecondary, fontSize = 14.sp), maxLines = 1, overflow = TextOverflow.Ellipsis) }
+            if (!isTv) CtlButton(Glyphs.back, "Back", m, onClick = onBack)
+            Column(Modifier.weight(1f).padding(start = if (isTv) 0.dp else 4.dp, end = 12.dp)) {
+                BasicText(r.title, style = TextStyle(color = Tok.text, fontSize = m.title, fontWeight = FontWeight.SemiBold), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                subtitleFor(r)?.let { BasicText(it, style = TextStyle(color = Tok.textSecondary, fontSize = m.small), maxLines = 1, overflow = TextOverflow.Ellipsis) }
             }
             vm.current?.let { s ->
                 // The language actually playing, not the source's first listed one.
                 val lang = vm.audioItems().firstOrNull { it.selected }?.label?.takeUnless { it == "Default" } ?: s.languages.firstOrNull()
-                BasicText(listOfNotNull(s.provider, lang).joinToString(" · "), style = TextStyle(color = Tok.textSecondary, fontSize = 13.sp),
-                    modifier = Modifier.background(Tok.fill2, Tok.pill).padding(horizontal = 12.dp, vertical = 5.dp))
+                BasicText(listOfNotNull(s.provider, lang).joinToString(" · "), style = TextStyle(color = Tok.textSecondary, fontSize = m.small),
+                    maxLines = 1, modifier = Modifier.background(Color.Black.copy(alpha = 0.45f), Tok.pill).border(1.dp, Tok.border, Tok.pill).padding(horizontal = 12.dp, vertical = 5.dp))
             }
         }
 
-        // Phone: large centre controls, as in most Android players.
-        // Hidden while the centre status card shows, so the two never overlap.
-        if (!isTv && !vm.buffering && vm.notice.isEmpty()) {
-            Row(Modifier.align(Alignment.Center), horizontalArrangement = Arrangement.spacedBy(40.dp), verticalAlignment = Alignment.CenterVertically) {
-                RoundIcon(Icons.Filled.Replay10, "Back 10 seconds", 56.dp) { vm.seekBy(-10_000); poke() }
-                RoundIcon(if (vm.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow, if (vm.isPlaying) "Pause" else "Play", 76.dp, filled = true) { vm.togglePlay(); poke() }
-                RoundIcon(Icons.Filled.Forward10, "Forward 10 seconds", 56.dp) { vm.seekBy(10_000); poke() }
-            }
-        }
-
-        // Bottom: seek bar, time, buttons.
         Column(
             Modifier.align(Alignment.BottomCenter).fillMaxWidth()
-                .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.85f))))
-                .padding(start = side, end = side, top = 24.dp, bottom = if (isTv) 28.dp else 12.dp),
+                .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.45f), Color.Black.copy(alpha = 0.85f))))
+                .padding(top = 36.dp, bottom = if (isTv) 24.dp else 6.dp),
         ) {
-            SeekBar(vm, isTv, poke)
-            Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                BasicText(fmtTime(vm.positionMs) + "  /  " + (if (vm.durationMs > 0) fmtTime(vm.durationMs) else "--:--"),
-                    style = TextStyle(color = Tok.textSecondary, fontSize = 13.sp))
-                Spacer(Modifier.weight(1f))
-                if (vm.durationMs > 0) BasicText("-" + fmtTime(vm.durationMs - vm.positionMs), style = TextStyle(color = Tok.textMuted, fontSize = 13.sp))
-            }
-            Spacer(Modifier.height(if (isTv) 14.dp else 6.dp))
-            BoxWithConstraints(Modifier.fillMaxWidth()) {
-            // Narrow screens drop the menu labels so every control keeps its full size.
-            val labels = maxWidth >= if (isTv) 880.dp else 600.dp
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(if (isTv) 10.dp else 4.dp)) {
-                if (isTv) {
-                    CtlButton(Icons.Filled.Replay10, "-10s", showLabel = false, isTv = true) { vm.seekBy(-10_000); poke() }
-                    CtlButton(if (vm.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow, if (vm.isPlaying) "Pause" else "Play", showLabel = false, isTv = true, primary = true, modifier = Modifier.focusRequester(playFocus)) { vm.togglePlay(); poke() }
-                    CtlButton(Icons.Filled.Forward10, "+10s", showLabel = false, isTv = true) { vm.seekBy(10_000); poke() }
-                }
-                if (next != null) CtlButton(Icons.Filled.SkipNext, "Next episode", showLabel = true, isTv = isTv,
-                    modifier = if (!isTv) Modifier.focusRequester(playFocus) else Modifier) { vm.start(next) }
-                Spacer(Modifier.weight(1f))
-                CtlButton(Icons.Filled.Dns, "Server", showLabel = labels, isTv = isTv, modifier = if (!isTv && next == null) Modifier.focusRequester(playFocus) else Modifier) { onMenu(Menu.Server) }
-                CtlButton(Icons.Filled.GraphicEq, "Audio", showLabel = labels, isTv = isTv) { onMenu(Menu.Audio) }
-                CtlButton(Icons.Filled.HighQuality, "Quality", showLabel = labels, isTv = isTv) { onMenu(Menu.Quality) }
-                CtlButton(Icons.Filled.Subtitles, "Subtitles", showLabel = labels, isTv = isTv) { onMenu(Menu.Subtitles) }
-                // Picture fit: one press cycles Fit, Fill, Stretch; the label names the current mode.
-                CtlButton(
-                    when (fit) { VideoFit.Fit -> Icons.Filled.FitScreen; VideoFit.Fill -> Icons.Filled.Crop; VideoFit.Stretch -> Icons.Filled.AspectRatio },
-                    fit.label, showLabel = true, isTv = isTv, onClick = onFit,
+            // Time | seek line | length. Tap the length for time remaining.
+            var remaining by remember { mutableStateOf(false) }
+            Row(Modifier.fillMaxWidth().padding(horizontal = m.side), verticalAlignment = Alignment.CenterVertically) {
+                val tw = Modifier.width(m.timeWidth)
+                BasicText(fmtTime(vm.positionMs), style = TextStyle(color = Tok.text, fontSize = m.time, fontWeight = FontWeight.Medium), modifier = tw)
+                Box(Modifier.weight(1f).padding(horizontal = 12.dp)) { SeekBar(vm, isTv, poke) }
+                BasicText(
+                    when { vm.durationMs <= 0 -> "--:--"; remaining -> "-" + fmtTime(vm.durationMs - vm.positionMs); else -> fmtTime(vm.durationMs) },
+                    style = TextStyle(color = Tok.text, fontSize = m.time, fontWeight = FontWeight.Medium, textAlign = TextAlign.End),
+                    modifier = tw.then(if (isTv) Modifier else Modifier.clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { remaining = !remaining; poke() }),
                 )
             }
+            BoxWithConstraints(Modifier.fillMaxWidth().padding(start = inset, end = inset, top = if (isTv) 10.dp else 0.dp)) {
+                // Labels only where all of them fit at full size; icons always do.
+                // Measured need: about 840dp on TV and 700dp on a phone, plus
+                // about 100dp more when the Next episode pill is in the row.
+                val labels = maxWidth >= (if (isTv) 750.dp else 700.dp) + (if (next != null) 100.dp else 0.dp)
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(m.gap)) {
+                    CtlButton(if (vm.isPlaying) Glyphs.pause else Glyphs.play, if (vm.isPlaying) "Pause" else "Play", m, primary = true,
+                        modifier = Modifier.focusRequester(playFocus)) { vm.togglePlay(); poke() }
+                    CtlButton(Glyphs.seekBack, "Back 10 seconds", m, numeral = "10") { vm.seekBy(-10_000); poke() }
+                    CtlButton(Glyphs.seekFwd, "Forward 10 seconds", m, numeral = "10") { vm.seekBy(10_000); poke() }
+                    Spacer(Modifier.weight(1f))
+                    if (next != null) CtlButton(Glyphs.next, "Next episode", m, label = "Next") { vm.start(next) }
+                    CtlButton(Glyphs.server, "Server", m, label = if (labels) "Server" else null) { onMenu(Menu.Server) }
+                    CtlButton(Glyphs.audio, "Audio", m, label = if (labels) "Audio" else null) { onMenu(Menu.Audio) }
+                    CtlButton(Glyphs.quality, "Quality", m, label = if (labels) "Quality" else null) { onMenu(Menu.Quality) }
+                    CtlButton(Glyphs.subtitles, "Subtitles", m, label = if (labels) "Subtitles" else null) { onMenu(Menu.Subtitles) }
+                    // Picture fit: one press cycles Fit, Fill, Stretch; the label names the current mode.
+                    // Phone only (owner, 1.1.3): a TV is already full screen and the remote has no use for it.
+                    if (!isTv) CtlButton(
+                        when (fit) { VideoFit.Fit -> Glyphs.fitContain; VideoFit.Fill -> Glyphs.fitCover; VideoFit.Stretch -> Glyphs.fitFill },
+                        "Picture: ${fit.label}", m, label = fit.label, onClick = onFit,
+                    )
+                }
             }
         }
     }
 }
 
-/** Progress with buffered range and a knob. Touch: tap or drag to seek; the seek happens on release. */
+/** Sizes per form factor. Phone targets are 48dp (touch floor); TV targets 60dp. */
+private class CtlMetrics(
+    val side: Dp, val target: Dp, val primary: Dp, val glyph: Dp, val primaryGlyph: Dp, val gap: Dp,
+    val title: TextUnit, val small: TextUnit, val time: TextUnit, val label: TextUnit, val timeWidth: Dp,
+) {
+    companion object {
+        private val phone = CtlMetrics(20.dp, 48.dp, 52.dp, 24.dp, 28.dp, 4.dp, 17.sp, 13.sp, 13.sp, 13.sp, 58.dp)
+        private val tv = CtlMetrics(48.dp, 60.dp, 64.dp, 28.dp, 32.dp, 12.dp, 26.sp, 16.sp, 17.sp, 17.sp, 84.dp)
+        fun of(isTv: Boolean) = if (isTv) tv else phone
+    }
+}
+
+/**
+ * Progress with buffered range and a knob. Touch: tap or drag to seek; the
+ * seek happens on release. TV: the line takes focus (Up from the buttons) and
+ * Left/Right then seek 10 s. Focus shows as a thicker line and a bigger knob,
+ * no outline round the bar.
+ */
 @Composable
 private fun SeekBar(vm: PlayerVm, isTv: Boolean, poke: () -> Unit) {
     val dur = vm.durationMs
     var drag by remember { mutableStateOf<Float?>(null) }
+    val src = remember { MutableInteractionSource() }
+    val focused by src.collectIsFocusedAsState()
     val frac = drag ?: if (dur > 0) (vm.positionMs.toFloat() / dur).coerceIn(0f, 1f) else 0f
     val buf = if (dur > 0) (vm.bufferedMs.toFloat() / dur).coerceIn(0f, 1f) else 0f
     BoxWithConstraints(
-        Modifier.fillMaxWidth().height(if (isTv) 20.dp else 28.dp)
+        Modifier.fillMaxWidth().height(if (isTv) 28.dp else 32.dp)
             .then(
-                if (isTv || dur <= 0) Modifier else Modifier
+                if (isTv) Modifier
+                    .onPreviewKeyEvent { e ->
+                        if (!focused || e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                        when (e.key) {
+                            Key.DirectionLeft -> { vm.seekBy(-10_000); poke(); true }
+                            Key.DirectionRight -> { vm.seekBy(10_000); poke(); true }
+                            else -> false
+                        }
+                    }
+                    .focusable(interactionSource = src)
+                else if (dur <= 0) Modifier
+                else Modifier
                     .pointerInput(dur) {
                         detectTapGestures { o -> poke(); vm.seekTo((o.x / size.width * dur).toLong()) }
                     }
@@ -510,55 +531,51 @@ private fun SeekBar(vm: PlayerVm, isTv: Boolean, poke: () -> Unit) {
         contentAlignment = Alignment.CenterStart,
     ) {
         val w = maxWidth
-        Box(Modifier.fillMaxWidth().height(4.dp).clip(Tok.pill).background(Tok.fill2)) {
-            Box(Modifier.fillMaxHeight().fillMaxWidth(buf).background(Tok.fill3))
-            Box(Modifier.fillMaxHeight().fillMaxWidth(frac).background(Tok.accent))
+        val active = drag != null || focused
+        // Web .pctl-track: a thin white line on a faint track, buffered in between.
+        val line = when { focused -> 8.dp; isTv -> 5.dp; drag != null -> 5.dp; else -> 3.dp }
+        Box(Modifier.fillMaxWidth().height(line).clip(Tok.pill).background(Color.White.copy(alpha = 0.2f))) {
+            Box(Modifier.fillMaxHeight().fillMaxWidth(buf).background(Color.White.copy(alpha = 0.34f)))
+            Box(Modifier.fillMaxHeight().fillMaxWidth(frac).background(Color.White))
         }
-        val knob = if (drag != null) 18.dp else 12.dp
-        Box(Modifier.offset(x = (w - knob) * frac).size(knob).background(Tok.accent, Tok.pill))
-    }
-}
-
-@Composable
-private fun RoundIcon(icon: ImageVector, label: String, size: Dp, filled: Boolean = false, onClick: () -> Unit) {
-    Box(
-        Modifier.size(size).clip(Tok.pill).background(if (filled) Color.White.copy(alpha = 0.92f) else Color.Black.copy(alpha = 0.35f))
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Icon(icon, contentDescription = label, tint = if (filled) Tok.bg else Color.White, modifier = Modifier.size(size * 0.55f))
+        val knob = when { focused -> 26.dp; active -> 18.dp; isTv -> 16.dp; else -> 14.dp }
+        Box(Modifier.offset(x = (w - knob) * frac).size(knob).shadow(3.dp, Tok.pill).background(Color.White, Tok.pill))
     }
 }
 
 /**
- * Icon control. On TV it always reads as a button with a focus ring; with
- * `showLabel` it carries a text label too.
+ * A player control: a round icon target, or a pill with a label. Focus is the
+ * app's one control focus (white fill, dark ink, shadow, lift; see Focus).
  */
 @Composable
 private fun CtlButton(
-    icon: ImageVector, label: String, showLabel: Boolean, isTv: Boolean,
-    modifier: Modifier = Modifier, primary: Boolean = false, onClick: () -> Unit,
+    icon: ImageVector, description: String, m: CtlMetrics,
+    modifier: Modifier = Modifier, label: String? = null, primary: Boolean = false, numeral: String? = null, onClick: () -> Unit,
 ) {
     val src = remember { MutableInteractionSource() }
     val focused by src.collectIsFocusedAsState()
     val bg = when {
         focused -> Focus.fill
         primary -> Focus.primaryFill
-        isTv -> Tok.fill2
         else -> Color.Transparent
     }
-    val fg = if (focused) Focus.ink else Tok.text
+    val fg = if (focused) Focus.ink else Color.White
+    val h = if (primary) m.primary else m.target
+    val shape = Tok.pill
     Row(
         modifier
-            .controlFocus(focused, Tok.pill)
-            .clip(Tok.pill)
+            .height(h)
+            .then(if (label == null) Modifier.width(h) else Modifier)
+            .controlFocus(focused, shape)
+            .clip(shape)
             .background(bg)
             .clickable(interactionSource = src, indication = null, onClick = onClick)
-            .padding(horizontal = if (showLabel) 12.dp else 10.dp, vertical = if (isTv) 9.dp else 8.dp),
+            .padding(horizontal = if (label == null) 0.dp else 12.dp),
         verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center,
     ) {
-        Icon(icon, contentDescription = label, tint = fg, modifier = Modifier.size(if (isTv) 24.dp else 22.dp))
-        if (showLabel) BasicText(label, style = TextStyle(color = fg, fontSize = if (isTv) 15.sp else 13.sp, fontWeight = FontWeight.Medium), modifier = Modifier.padding(start = 6.dp))
+        Glyph(icon, contentDescription = description, tint = fg, size = if (primary) m.primaryGlyph else m.glyph, numeral = numeral)
+        if (label != null) BasicText(label, style = TextStyle(color = fg, fontSize = m.label, fontWeight = FontWeight.Medium), maxLines = 1, modifier = Modifier.padding(start = 8.dp))
     }
 }
 
@@ -577,7 +594,7 @@ private fun NextUpCard(next: PlayRequest, isTv: Boolean, onPlay: () -> Unit, onD
             BasicText("Next episode", style = TextStyle(color = Tok.textMuted, fontSize = 13.sp))
             BasicText(subtitleFor(next) ?: next.title, style = TextStyle(color = Tok.text, fontSize = 17.sp, fontWeight = FontWeight.SemiBold), modifier = Modifier.padding(top = 4.dp, bottom = 14.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                PillButton("Play next · ${left}s", primary = true, icon = Icons.Filled.PlayArrow, modifier = Modifier.focusRequester(f), onClick = onPlay)
+                PillButton("Play next · ${left}s", primary = true, icon = Glyphs.play, modifier = Modifier.focusRequester(f), onClick = onPlay)
                 PillButton("Not now", onClick = onDismiss)
             }
         }
@@ -589,11 +606,13 @@ private fun NextUpCard(next: PlayRequest, isTv: Boolean, onPlay: () -> Unit, onD
 fun PillButton(text: String, modifier: Modifier = Modifier, primary: Boolean = false, icon: ImageVector? = null, onClick: () -> Unit) {
     val src = remember { MutableInteractionSource() }
     val focused by src.collectIsFocusedAsState()
-    val bg = if (focused) Focus.fill else if (primary) Focus.primaryFill else Tok.fill2
-    val fg = if (focused) Focus.ink else Tok.text
+    val bg = if (focused) Focus.fill else if (primary) Focus.primaryButton else Tok.fill2
+    val fg = if (focused || primary) Focus.ink else Tok.text
     Row(
         modifier
-            .controlFocus(focused, Tok.pill)
+            // Ring space is always reserved so focus never shifts the layout.
+            .then(if (primary && !focused) Modifier.padding(Focus.ringOffset + Focus.ringWidth) else Modifier)
+            .controlFocus(focused, Tok.pill, ring = primary)
             .clip(Tok.pill)
             .background(bg)
             .clickable(interactionSource = src, indication = null, onClick = onClick)
@@ -630,7 +649,7 @@ private fun MenuPanel(title: String, items: List<MenuItem>, isTv: Boolean, onClo
                     Row(
                         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp)
                             .then(if (i == start) Modifier.focusRequester(first) else Modifier)
-                            .controlFocus(focused, Tok.radiusMd)
+                            .controlFocus(focused, Tok.radiusMd, lift = false)
                             .clip(Tok.radiusMd)
                             .background(if (focused) Focus.fill else Color.Transparent)
                             .clickable(interactionSource = src, indication = null) { onPick(item.key) }
@@ -641,14 +660,10 @@ private fun MenuPanel(title: String, items: List<MenuItem>, isTv: Boolean, onClo
                             BasicText(item.label, style = TextStyle(color = if (focused) Focus.ink else if (item.dim) Tok.textDim else Tok.text, fontSize = if (isTv) 18.sp else 16.sp))
                             if (item.detail.isNotEmpty()) BasicText(item.detail, style = TextStyle(color = if (focused) Focus.ink.copy(alpha = 0.7f) else Tok.textMuted, fontSize = if (isTv) 14.sp else 12.sp), maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
-                        if (item.selected) Icon(Icons.Filled.Check, contentDescription = "Selected", tint = if (focused) Focus.ink else Tok.accent, modifier = Modifier.size(20.dp))
+                        if (item.selected) Icon(Glyphs.check, contentDescription = "Selected", tint = if (focused) Focus.ink else Color.White, modifier = Modifier.size(20.dp))
                     }
                 }
             }
         }
     }
 }
-
-/** Player half of the one focus style (see Focus): the soft shadow under a focused control. */
-private fun Modifier.controlFocus(focused: Boolean, shape: Shape): Modifier =
-    if (focused) shadow(Focus.shadowElevation, shape, clip = false, ambientColor = Focus.shadow, spotColor = Focus.shadow) else this

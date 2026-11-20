@@ -110,6 +110,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.chitram.app.App
+import com.chitram.app.ui.common.prefetchArt
 import com.chitram.app.data.BrowseFilters
 import com.chitram.app.data.BrowseOptions
 import com.chitram.app.data.Credit
@@ -140,7 +141,7 @@ private val CARD_W = 112.dp
 fun PhoneApp(nav: Nav) {
     MaterialTheme(
         colorScheme = darkColorScheme(
-            primary = Tok.accent, onPrimary = Tok.bg, background = Tok.bg, onBackground = Tok.text,
+            primary = Color.White, onPrimary = Tok.bg, background = Tok.bg, onBackground = Tok.text,
             surface = Tok.bg, onSurface = Tok.text, surfaceVariant = Tok.surface, onSurfaceVariant = Tok.textMuted,
             secondaryContainer = Tok.fill2, onSecondaryContainer = Tok.text, outline = Tok.border,
             surfaceContainerLow = Tok.surfaceSolid, surfaceContainer = Tok.surfaceSolid,
@@ -175,8 +176,10 @@ fun PhoneApp(nav: Nav) {
                         }
                         NavigationBarItem(
                             selected = on, onClick = { if (!on) nav.tab(tab.screen) },
-                            icon = { Icon(if (on) tab.on else tab.off, contentDescription = tab.label) }, label = { Text(tab.label, fontSize = 12.sp) },
-                            colors = NavigationBarItemDefaults.colors(selectedIconColor = Tok.bg, indicatorColor = Tok.accent, unselectedIconColor = Tok.textMuted, unselectedTextColor = Tok.textMuted, selectedTextColor = Tok.text),
+                            icon = { Icon(if (on) tab.on else tab.off, contentDescription = tab.label) }, label = { Text(tab.label, fontSize = 11.sp, lineHeight = 13.sp, maxLines = 1, softWrap = false) },
+                            // Web .tab.on: white icon and label, no coloured pill. White is
+                            // the one selection colour, as on chips and TV focus.
+                            colors = NavigationBarItemDefaults.colors(selectedIconColor = Color.White, indicatorColor = Color.Transparent, unselectedIconColor = Tok.textMuted, unselectedTextColor = Tok.textMuted, selectedTextColor = Color.White),
                         )
                     }
                 }
@@ -189,7 +192,7 @@ fun PhoneApp(nav: Nav) {
                     Screen.MyList -> PhoneMyList(nav)
                     is Screen.Browse -> PhoneBrowse(nav, top.initial)
                     is Screen.Langs -> PhoneLangs(top.firstRun) { if (top.firstRun) nav.replaceAll(Screen.Home) else nav.pop() }
-                    is Screen.Detail -> PhoneDetail(nav, top.type, top.id)
+                    is Screen.Detail -> PhoneDetail(nav, top.type, top.id, top.poster)
                     is Screen.Person -> PhonePerson(nav, top.id, top.name)
                     is Screen.Player -> Unit
                 }
@@ -200,7 +203,14 @@ fun PhoneApp(nav: Nav) {
 
 private data class Tab(val screen: Screen, val label: String, val on: ImageVector, val off: ImageVector)
 
-private fun Nav.open(t: Title) = push(Screen.Detail(t.mediaType, t.tmdbId))
+private fun Nav.open(t: Title) {
+    // The detail header shows the poster (w342) and backdrop (w780) only after
+    // the title API answers, which takes seconds. Fetch both now, at the same
+    // URLs, so they are cache hits by then. A title opened from the hero has
+    // only its backdrop cached, which is why the small poster used to lag.
+    prefetchArt(App.instance, t.poster to "w342", t.backdrop to "w780")
+    push(Screen.Detail(t.mediaType, t.tmdbId, t.poster))
+}
 
 // ---- Home -------------------------------------------------------------------
 
@@ -324,7 +334,7 @@ private fun PhoneRow(row: HomeRow, nav: Nav, onRetry: () -> Unit) {
         if (row.error) {
             Row(Modifier.padding(horizontal = GUTTER), verticalAlignment = Alignment.CenterVertically) {
                 Text("Couldn't load this section.", color = Tok.textMuted, fontSize = 14.sp)
-                TextButton(onClick = onRetry) { Text("Retry", color = Tok.accent) }
+                TextButton(onClick = onRetry) { Text("Retry", color = Color.White) }
             }
             return@Column
         }
@@ -385,7 +395,7 @@ private fun BackButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun PhoneDetail(nav: Nav, type: String, id: Long) {
+private fun PhoneDetail(nav: Nav, type: String, id: Long, rowPoster: String? = null) {
     val vm: DetailVm = viewModel(key = "detail-$type-$id")
     LaunchedEffect(type, id) { vm.load(type, id) }
     var toast by remember { mutableStateOf<String?>(null) }
@@ -399,7 +409,7 @@ private fun PhoneDetail(nav: Nav, type: String, id: Long) {
                 if (vm.error == null) CircularProgressIndicator(color = Tok.accent, strokeWidth = 3.dp)
                 else {
                     Text(vm.error!!, color = Tok.textMuted)
-                    TextButton(onClick = { vm.retry() }) { Text("Try again", color = Tok.accent) }
+                    TextButton(onClick = { vm.retry() }) { Text("Try again", color = Color.White) }
                 }
             }
         } else LazyColumn(state = detailList, contentPadding = PaddingValues(bottom = 32.dp)) {
@@ -412,7 +422,11 @@ private fun PhoneDetail(nav: Nav, type: String, id: Long) {
                         Box(Modifier.fillMaxWidth().height(artH).background(Brush.verticalGradient(0f to Tok.bg.copy(alpha = 0.35f), 0.25f to Color.Transparent, 0.7f to Tok.bg.copy(alpha = 0.6f), 1f to Tok.bg)))
                         Row(Modifier.align(Alignment.BottomStart).padding(horizontal = GUTTER), verticalAlignment = Alignment.Bottom) {
                             Box(Modifier.width(104.dp).aspectRatio(2f / 3f).clip(Tok.radiusMd).border(1.dp, Tok.border, Tok.radiusMd)) {
-                                Art(t.poster, "w342", Modifier.fillMaxSize())
+                                // The title API sends the metahub small poster here; it is a cache
+                                // miss at open time (measured 0.6-0.8 s). The row's TMDB w342 path
+                                // is already in Coil's cache, so it shows at once; metahub is the
+                                // fallback, and the only source when the opener had no poster.
+                                Art(rowPoster ?: t.poster, "w342", Modifier.fillMaxSize(), fallback = t.poster.takeIf { rowPoster != null })
                             }
                             Column(Modifier.padding(start = 14.dp).weight(1f)) {
                                 Text(t.title, fontSize = 24.sp, lineHeight = 28.sp, fontWeight = FontWeight.Bold, color = Tok.text, maxLines = 3, overflow = TextOverflow.Ellipsis)
@@ -498,11 +512,20 @@ private fun PhoneDetail(nav: Nav, type: String, id: Long) {
                 }
             }
             item(key = "facts") {
-                Column(Modifier.padding(start = GUTTER, end = GUTTER, top = 24.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Fact("Genres", t.genres.joinToString(" · "))
-                    Fact("Director", t.director.joinToString(", "))
-                    Fact("Writers", t.writers.joinToString(", "))
-                    Fact("Country", t.country.joinToString(", "))
+                // Two facts per row, label over value; a long value wraps inside its cell.
+                val facts = listOf(
+                    "Genres" to t.genres.joinToString(" · "),
+                    "Director" to t.director.joinToString(", "),
+                    "Writers" to t.writers.joinToString(", "),
+                    "Country" to t.country.joinToString(", "),
+                ).filter { it.second.isNotBlank() }
+                Column(Modifier.padding(start = GUTTER, end = GUTTER, top = 24.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    facts.chunked(2).forEach { pair ->
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                            pair.forEach { (k, v) -> Box(Modifier.weight(1f)) { Fact(k, v) } }
+                            if (pair.size == 1) Spacer(Modifier.weight(1f))
+                        }
+                    }
                 }
             }
             item(key = "navpad") { Spacer(Modifier.windowInsetsBottomHeight(WindowInsets.navigationBars)) }
@@ -809,7 +832,9 @@ private fun PhoneMyList(nav: Nav) {
 @Composable
 private fun PhoneLangs(firstRun: Boolean, onDone: () -> Unit) {
     val prefs = App.instance.prefs
-    val chosen = remember { mutableStateListOf<String>().apply { if (!firstRun) addAll(prefs.langs()) } }
+    // First run opens with Telugu chosen and ready to save: it is the library's
+    // standing default, so a first-time viewer lands on it without hunting.
+    val chosen = remember { mutableStateListOf<String>().apply { if (firstRun) add("te") else addAll(prefs.langs()) } }
     Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(24.dp), verticalArrangement = Arrangement.Center) {
         Text("Your languages", fontSize = 26.sp, fontWeight = FontWeight.Bold, color = Tok.text)
         Text("Pick the languages you watch. Rows and search rank these first.", color = Tok.textMuted, modifier = Modifier.padding(top = 6.dp, bottom = 20.dp))

@@ -1,14 +1,21 @@
 package com.chitram.app.ui.common
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -58,20 +65,51 @@ object Focus {
     val fill = Color.White
     val ink = Tok.bg
     val ringWidth = 3.dp
-    val shadow = Color.Black.copy(alpha = 0.6f)
+    /** Web --focus-glow on TV: 0 12px 32px black at .55. */
+    val shadow = Color.Black.copy(alpha = 0.55f)
     val shadowElevation = 14.dp
-    const val pictureScale = 1.07f
-    const val controlScale = 1.05f
-    /** A primary control (Play, Done) when not focused: brighter than the rest, never white. */
+    /** Web --focus-scale: every focusable lifts by the same 4%; list rows do not scale. */
+    const val pictureScale = 1.04f
+    const val controlScale = 1.04f
+    /** The player's play disc when not focused: brighter than the other icons, never white. */
     val primaryFill = Color.White.copy(alpha = 0.3f)
+    /**
+     * A primary button (Play, Resume, Done, Try again), as web .btn.primary:
+     * white fill and dark ink at rest; focus adds the 3dp white ring, 3dp out.
+     */
+    val primaryButton = Color.White
+    val ringOffset = 3.dp
     /** Selected but not focused (filter chip, season, rail item): quiet. */
     val selectedFill = Color.White.copy(alpha = 0.18f)
 }
 
-/** Image with a solid placeholder; no crossfade (cheap on the Fire TV). */
+/**
+ * The control half of the focus style for plain Compose controls (player
+ * buttons, menu rows, pills). The caller paints Focus.fill / Focus.ink; this
+ * adds the shared shadow and, unless `lift` is off for list rows, the scale.
+ * TV-material surfaces take the same Focus values through their own params.
+ */
+fun Modifier.controlFocus(focused: Boolean, shape: Shape, lift: Boolean = true, ring: Boolean = false): Modifier =
+    if (!focused) this
+    else this.graphicsLayer { if (lift) { scaleX = Focus.controlScale; scaleY = Focus.controlScale } }
+        .shadow(Focus.shadowElevation, shape, clip = false, ambientColor = Focus.shadow, spotColor = Focus.shadow)
+        .then(if (ring) Modifier.border(Focus.ringWidth, Focus.ring, shape).padding(Focus.ringOffset + Focus.ringWidth) else Modifier)
+
+/** Warm Coil's memory and disk caches for these (path, TMDB size) pairs. */
+fun prefetchArt(ctx: android.content.Context, vararg art: Pair<String?, String>) {
+    val loader = coil.Coil.imageLoader(ctx)
+    for ((path, size) in art) Api.image(path, size)?.let { loader.enqueue(ImageRequest.Builder(ctx).data(it).build()) }
+}
+
+/**
+ * Image with a solid placeholder; no crossfade (cheap on the Fire TV).
+ * `fallback`: a second path tried if the first fails to load, so a dead
+ * source shows the other poster rather than an empty box.
+ */
 @Composable
-fun Art(path: String?, size: String, modifier: Modifier = Modifier, contentDescription: String? = null, alignment: androidx.compose.ui.Alignment = androidx.compose.ui.Alignment.Center) {
-    val url = Api.image(path, size)
+fun Art(path: String?, size: String, modifier: Modifier = Modifier, contentDescription: String? = null, alignment: androidx.compose.ui.Alignment = androidx.compose.ui.Alignment.Center, fallback: String? = null) {
+    var failed by androidx.compose.runtime.remember(path) { androidx.compose.runtime.mutableStateOf(false) }
+    val url = Api.image(if (failed && fallback != null) fallback else path, size)
     Box(modifier.background(Tok.surfaceSolid)) {
         if (url != null) {
             AsyncImage(
@@ -80,6 +118,7 @@ fun Art(path: String?, size: String, modifier: Modifier = Modifier, contentDescr
                 contentScale = ContentScale.Crop,
                 alignment = alignment,
                 modifier = Modifier.fillMaxSize(),
+                onError = { if (fallback != null && !failed) failed = true },
             )
         }
     }
@@ -90,7 +129,8 @@ sealed interface Screen {
     data object Search : Screen
     data object MyList : Screen
     data class Langs(val firstRun: Boolean) : Screen
-    data class Detail(val type: String, val id: Long) : Screen
+    /** `poster`: the TMDB path the opener already shows, reused so the header is a cache hit. */
+    data class Detail(val type: String, val id: Long, val poster: String? = null) : Screen
     data class Person(val id: Long, val name: String = "") : Screen
     /** Browse with filters; `initial` comes from a row's "See all". */
     data class Browse(val initial: com.chitram.app.data.BrowseFilters = com.chitram.app.data.BrowseFilters()) : Screen

@@ -410,11 +410,13 @@ private fun TvButton(text: String, primary: Boolean, modifier: Modifier = Modifi
         // Focus: white fill, dark ink, lift and shadow. Only focus is white.
         scale = ButtonDefaults.scale(focusedScale = Focus.controlScale),
         colors = ButtonDefaults.colors(
-            containerColor = if (primary) Focus.primaryFill else Tok.fill2,
-            contentColor = Tok.text,
+            containerColor = if (primary) Focus.primaryButton else Tok.fill2,
+            contentColor = if (primary) Focus.ink else Tok.text,
             focusedContainerColor = Focus.fill,
             focusedContentColor = Focus.ink,
         ),
+        // Web .btn.primary:focus keeps its white fill and adds the ring, 3dp out.
+        border = if (primary) ButtonDefaults.border(focusedBorder = Border(BorderStroke(Focus.ringWidth, Focus.ring), inset = Focus.ringOffset, shape = Tok.pill)) else ButtonDefaults.border(),
         glow = ButtonDefaults.glow(focusedGlow = focusGlow),
     ) {
         if (icon != null) Icon(icon, null, Modifier.padding(end = 8.dp).size(22.dp), tint = LocalContentColor.current)
@@ -775,7 +777,9 @@ private fun TvGrid(nav: Nav, title: String, titles: List<Title>, empty: String) 
 @Composable
 private fun TvLangs(firstRun: Boolean, onDone: () -> Unit) {
     val prefs = App.instance.prefs
-    val chosen = remember { mutableStateListOf<String>().apply { if (!firstRun) addAll(prefs.langs()) } }
+    // First run opens with Telugu chosen and ready to save: it is the library's
+    // standing default, so a first-time viewer lands on it without hunting.
+    val chosen = remember { mutableStateListOf<String>().apply { if (firstRun) add("te") else addAll(prefs.langs()) } }
     val first = remember { FocusRequester() }
     LaunchedEffect(Unit) { runCatching { first.requestFocus() } }
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -891,7 +895,7 @@ private fun RailButton(d: RailDest, selected: Boolean, open: Boolean, modifier: 
         scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
         colors = ClickableSurfaceDefaults.colors(
             containerColor = Color.Transparent,
-            contentColor = if (selected) Tok.text else Tok.textMuted,
+            contentColor = if (selected) Color.White else Tok.textMuted,
             focusedContainerColor = Focus.fill,
             focusedContentColor = Focus.ink,
         ),
@@ -899,8 +903,9 @@ private fun RailButton(d: RailDest, selected: Boolean, open: Boolean, modifier: 
         interactionSource = src,
     ) {
         Box(Modifier.fillMaxSize()) {
-            // Current destination: a short accent bar, like the web's active tab.
-            if (selected && !focused) Box(Modifier.align(Alignment.CenterStart).width(3.dp).height(22.dp).background(Tok.accent, Tok.pill))
+            // Current destination: a short white bar and white text, like the
+            // web's active tab. White is the only focus and selection colour.
+            if (selected && !focused) Box(Modifier.align(Alignment.CenterStart).width(3.dp).height(22.dp).background(Color.White, Tok.pill))
             Row(Modifier.fillMaxSize().padding(start = 15.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(d.icon, contentDescription = d.label, tint = LocalContentColor.current, modifier = Modifier.size(26.dp))
                 if (open) Text(d.label, fontSize = 20.sp, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium, maxLines = 1, modifier = Modifier.padding(start = 18.dp))
