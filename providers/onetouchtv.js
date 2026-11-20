@@ -4,6 +4,7 @@ const { getEpisodesPerSeason } = require('../utils/cinemetaEpisodes');
 const { findBestMatch } = require('../utils/titleMatch');
 const { tmdbTitleToImdbId } = require('../utils/tmdbTitleToImdb');
 const { searchSpellings } = require('../utils/titleMatch');
+const urlExpiry = require('../lib/urlExpiry');
 
 const MAIN_URL = 'https://api3.devcorp.me';
 const AES_KEY = Buffer.from('im72charPasswordofdInitVectorStm', 'utf8');
@@ -22,6 +23,37 @@ const FETCH_RETRY_DELAY_MS = 400;
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
 const cache = new Map();
+
+// Last good answer per title. api3.devcorp.me answers 200 for a title, then
+// 404 on the same detail/episode URL minutes later (prod audit 2026-11-20).
+// That 404 is the API, not the stream: the rows it gave are still playable
+// until their own URL expires. So a 404 serves the last good rows (a hit, no
+// breaker miss), and only a title with no good answer yet is asked again once.
+const LAST_GOOD_TTL_MS = 30 * 60 * 1000;
+const LAST_GOOD_MAX = 500;
+const lastGood = new Map();
+const timing = { notFoundRetryMs: 1000 };
+
+function lastGoodKey(tmdbId, mediaType, season, episode) {
+    return `${mediaType}:${tmdbId}:${season ?? ''}:${episode ?? ''}`;
+}
+
+function getLastGood(key) {
+    const entry = lastGood.get(key);
+    if (!entry) return null;
+    if (Date.now() > entry.until || urlExpiry.anyStreamExpired(entry.streams)) {
+        lastGood.delete(key);
+        return null;
+    }
+    return entry.streams;
+}
+
+function setLastGood(key, streams) {
+    if (!Array.isArray(streams) || streams.length === 0) return;
+    lastGood.delete(key);
+    if (lastGood.size >= LAST_GOOD_MAX) lastGood.delete(lastGood.keys().next().value);
+    lastGood.set(key, { streams, until: Date.now() + urlExpiry.cappedTtlMs(LAST_GOOD_TTL_MS, streams) });
+}
 
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
@@ -199,7 +231,30 @@ async function resolveAbsoluteEpisode(imdbId, season, episode) {
     return offset + episode;
 }
 
+// Search swallows its own 404 (a spelling miss), so a 404 that reaches here
+// came from detail or episode, after a search hit.
 async function getOnetouchtvStreams(tmdbId, mediaType = 'movie', seasonNum = null, episodeNum = null) {
+    const key = lastGoodKey(tmdbId, mediaType, seasonNum, episodeNum);
+    try {
+        const streams = await resolveStreams(tmdbId, mediaType, seasonNum, episodeNum);
+        setLastGood(key, streams);
+        return streams;
+    } catch (err) {
+        if (!err || err.status !== 404) throw err;
+        const prev = getLastGood(key);
+        if (prev) {
+            console.log(`[OneTouchTV] last-good served for ${key} after HTTP 404 (${prev.length} rows)`);
+            return prev.map((s) => ({ ...s }));
+        }
+        console.log(`[OneTouchTV] HTTP 404 for ${key}, no last-good; retrying once in ${timing.notFoundRetryMs}ms`);
+        await sleep(timing.notFoundRetryMs);
+        const streams = await resolveStreams(tmdbId, mediaType, seasonNum, episodeNum);
+        setLastGood(key, streams);
+        return streams;
+    }
+}
+
+async function resolveStreams(tmdbId, mediaType, seasonNum, episodeNum) {
     console.log(`[OneTouchTV] Fetching streams for TMDB ID: ${tmdbId}, Type: ${mediaType}`);
 
     try {
@@ -371,4 +426,4 @@ async function getOnetouchtvStreams(tmdbId, mediaType = 'movie', seasonNum = nul
     }
 }
 
-module.exports = { getOnetouchtvStreams, STREAM_HEADERS, _internal: { isRetryable, cache } };
+module.exports = { getOnetouchtvStreams, STREAM_HEADERS, _internal: { isRetryable, cache, lastGood, timing } };

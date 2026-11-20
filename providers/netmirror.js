@@ -529,6 +529,24 @@ async function masterMatchesTitle(masterUrl, wantedId, referer) {
     }
 }
 
+// newtv answers a lookup the catalogue does not have with an HTML "Page Not
+// Found" page (or a 404), not JSON. Prod audit 2026-11-20: response.json()
+// threw on it for primevideo/hotstar/disney, the throw became upstreamError,
+// and the whole NetMirror answer (Netflix rows included) went uncached as a
+// partial, so the title was asked again: 11 errors + 6 partials a day. That
+// page means "no rows here", so it returns null. Anything else that is not
+// JSON (a 5xx, a challenge page) still throws: that is an unknown, not an empty.
+const PAGE_NOT_FOUND_RE = /page\s+not\s+found/i;
+async function readNewTvJson(response) {
+    const text = await response.text();
+    try {
+        return JSON.parse(text);
+    } catch (err) {
+        if (response.status === 404 || PAGE_NOT_FOUND_RE.test(text)) return null;
+        throw new Error(`HTTP ${response.status}: ${err.message}`);
+    }
+}
+
 async function fetchPlatform(platform, title, type, season, episode) {
     try {
         const config = PLATFORM_MAP[platform];
@@ -545,7 +563,11 @@ async function fetchPlatform(platform, title, type, season, episode) {
                 `${api}/newtv/search.php?s=${encodeURIComponent(query)}`,
                 { headers: newTvHeaders(config.ott), signal: AbortSignal.timeout(15000) }
             );
-            const searchData = await searchResponse.json();
+            const searchData = await readNewTvJson(searchResponse);
+            if (searchData === null) {
+                console.log(`[NetMirror] ${platform} catalogue: page not found for "${query}" - no rows`);
+                return [];
+            }
             noteNewTvOk();
             const results = searchData.searchResult || [];
             if (results.length) lastSeen = results;
@@ -588,7 +610,11 @@ async function resolveMatch(api, config, platform, match, title, type, season, e
             `${api}/newtv/post.php?id=${encodeURIComponent(first.id)}`,
             { headers: newTvHeaders(config.ott, { Lastep: '', Usertoken: '' }), signal: AbortSignal.timeout(15000) }
         );
-        const postData = await postResponse.json();
+        const postData = await readNewTvJson(postResponse);
+        if (postData === null) {
+            console.log(`[NetMirror] ${platform} post: page not found for id ${first.id} - no rows`);
+            return [];
+        }
 
         let targetId = first.id;
         if (type === 'series') {
@@ -606,7 +632,11 @@ async function resolveMatch(api, config, platform, match, title, type, season, e
             `${api}/newtv/player.php?id=${encodeURIComponent(targetId)}`,
             { headers: newTvHeaders(config.ott, { Usertoken: '' }), signal: AbortSignal.timeout(15000) }
         );
-        const player = await playerResponse.json();
+        const player = await readNewTvJson(playerResponse);
+        if (player === null) {
+            console.log(`[NetMirror] ${platform} player: page not found for id ${targetId} - no rows`);
+            return [];
+        }
         if (player.status && player.status !== 'ok') {
             console.log(`[NetMirror] ${platform} player status: ${player.status} — accepting if link present`);
         }

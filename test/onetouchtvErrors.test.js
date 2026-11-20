@@ -45,7 +45,7 @@ function route(handlers) {
         return typeof h === 'function' ? h() : h;
     };
 }
-beforeEach(() => { calls = {}; _internal.cache.clear(); });
+beforeEach(() => { calls = {}; _internal.cache.clear(); _internal.lastGood.clear(); _internal.timing.notFoundRetryMs = 0; });
 
 test('a full hit still returns streams', async () => {
     route({ search: ok(SEARCH_HIT), detail: ok(DETAIL), episode: ok(EPISODE) });
@@ -53,16 +53,18 @@ test('a full hit still returns streams', async () => {
     assert.equal(out.length, 1);
 });
 
-test('episode 404 after a search hit rejects, and is not retried', async () => {
+// With no last-good answer, a 404 is asked again exactly once (after a
+// short delay), not three times by the fetch retry loop.
+test('episode 404 after a search hit rejects after one title-level retry', async () => {
     route({ search: ok(SEARCH_HIT), detail: ok(DETAIL), episode: fail(404) });
     await assert.rejects(getOnetouchtvStreams(1, 'movie'), /HTTP 404/);
-    assert.equal(calls.episode, 1, '4xx must not be retried');
+    assert.equal(calls.episode, 2, 'one try + one 404 retry, no fetch-loop retries');
 });
 
 test('detail 404 after a search hit rejects', async () => {
     route({ search: ok(SEARCH_HIT), detail: fail(404), episode: ok(EPISODE) });
     await assert.rejects(getOnetouchtvStreams(1, 'movie'), /HTTP 404/);
-    assert.equal(calls.detail, 1);
+    assert.equal(calls.detail, 2, 'one try + one 404 retry');
 });
 
 test('search with no match is a real empty, not an error', async () => {
