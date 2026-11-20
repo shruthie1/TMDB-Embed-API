@@ -21,6 +21,9 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
@@ -98,6 +101,9 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.chitram.app.player.MenuItem
 import com.chitram.app.player.PlayRequest
@@ -121,6 +127,8 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
     DisposableEffect(Unit) {
         view.keepScreenOn = true
         val window = activity?.window
+        // Edge to edge, explicitly: the player must never sit inside the bar insets.
+        window?.let { WindowCompat.setDecorFitsSystemWindows(it, false) }
         val ctl = window?.let { WindowCompat.getInsetsController(it, view) }
         ctl?.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         ctl?.hide(WindowInsetsCompat.Type.systemBars())
@@ -143,6 +151,20 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
         }
     }
 
+    // Hide the bars again on every resume. Some phones (OxygenOS among them)
+    // bring the status and gesture bars back after the shade, a call or an
+    // app switch, and they then stay on top of the picture.
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    DisposableEffect(lifecycle) {
+        val obs = LifecycleEventObserver { _, e ->
+            if (e == Lifecycle.Event.ON_RESUME) activity?.window?.let {
+                WindowCompat.getInsetsController(it, view).hide(WindowInsetsCompat.Type.systemBars())
+            }
+        }
+        lifecycle.addObserver(obs)
+        onDispose { lifecycle.removeObserver(obs) }
+    }
+
     // What is on screen now: the request, or the episode the player rolled on to.
     val now = vm.request ?: req
     var controls by remember { mutableStateOf(true) }
@@ -150,7 +172,7 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
     var lastInput by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var seekHint by remember { mutableIntStateOf(0) } // -1 back, 1 forward, for the double-tap badge
     val playerPrefs = App.instance.playerPrefs
-    var fit by remember { mutableStateOf(playerPrefs.fit) }
+    var fit by remember { mutableStateOf(playerPrefs.fitFor(isTv)) }
     val playFocus = remember { FocusRequester() }
     val rootFocus = remember { FocusRequester() }
     fun poke() { lastInput = System.currentTimeMillis() }
@@ -213,6 +235,18 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
             .then(
                 if (isTv) Modifier.clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { poke(); controls = !controls }
                 else Modifier.pointerInput(Unit) {
+                    // Pinch out fills the screen, pinch in shows the whole picture.
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false)
+                        var zoom = 1f
+                        do {
+                            val ev = awaitPointerEvent()
+                            if (ev.changes.count { it.pressed } >= 2) zoom *= ev.calculateZoom()
+                        } while (ev.changes.any { it.pressed })
+                        val pick = when { zoom > 1.15f -> VideoFit.Fill; zoom < 0.87f -> VideoFit.Fit; else -> null }
+                        if (pick != null && pick != fit) { fit = pick; playerPrefs.fit = pick; poke() }
+                    }
+                }.pointerInput(Unit) {
                     detectTapGestures(
                         onTap = { poke(); if (menu != null) menu = null else controls = !controls },
                         onDoubleTap = { o ->
@@ -319,7 +353,7 @@ private fun LoadingScreen(r: PlayRequest, status: String, isTv: Boolean, onRetry
     LaunchedEffect(r) { secs = 0; while (true) { delay(1000); secs++ } }
     Box(Modifier.fillMaxSize()) {
         DimArt(r)
-        if (!isTv) BackChip(false, onBack, Modifier.windowInsetsPadding(WindowInsets.displayCutout).padding(16.dp))
+        if (!isTv) BackChip(false, onBack, Modifier.padding(16.dp))
         Column(Modifier.align(Alignment.Center).padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             CircularProgressIndicator(color = Tok.accent, trackColor = Tok.fill2, strokeWidth = 3.dp, modifier = Modifier.size(44.dp))
             BasicText(r.title, style = TextStyle(color = Tok.text, fontSize = if (isTv) 26.sp else 20.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center), modifier = Modifier.padding(top = 20.dp))
@@ -374,7 +408,12 @@ private fun Controls(
 ) {
     val side = if (isTv) 48.dp else 20.dp
     val next = vm.nextEpisode
-    Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.displayCutout)) {
+    // Full screen, same bounds as the video. No display-cutout padding: in
+    // landscape a phone's camera cutout sits on one short edge, so that inset
+    // pushed every control in from that side only (about 48dp on a Pixel 6,
+    // more on OnePlus) while the other side kept 20dp. The punch hole sits at
+    // mid-height, clear of the top and bottom rows.
+    Box(Modifier.fillMaxSize()) {
         // Top: back, title, episode and source.
         Row(
             Modifier.fillMaxWidth().background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.75f), Color.Transparent)))

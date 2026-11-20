@@ -20,14 +20,18 @@ class StoreTest {
     @Test fun playerFitCyclesAndPersists() {
         val kv = MemoryKeyValue()
         val p = PlayerPrefs(kv)
-        assertEquals(VideoFit.Fit, p.fit) // default: whole picture
+        assertEquals(null, p.fit) // nothing chosen yet
+        assertEquals(VideoFit.Fill, p.fitFor(isTv = false)) // phone: fill the 20:9 panel
+        assertEquals(VideoFit.Fit, p.fitFor(isTv = true)) // TV: whole picture
         assertEquals(VideoFit.Fill, VideoFit.Fit.next())
         assertEquals(VideoFit.Stretch, VideoFit.Fill.next())
         assertEquals(VideoFit.Fit, VideoFit.Stretch.next())
         p.fit = VideoFit.Fill
         assertEquals(VideoFit.Fill, PlayerPrefs(kv).fit) // survives a new session
+        p.fit = VideoFit.Fit
+        assertEquals(VideoFit.Fit, PlayerPrefs(kv).fitFor(isTv = false)) // a choice beats the phone default
         kv.put(PlayerPrefs.FIT, "bogus")
-        assertEquals(VideoFit.Fit, PlayerPrefs(kv).fit)
+        assertEquals(VideoFit.Fill, PlayerPrefs(kv).fitFor(isTv = false))
     }
 
     @Test fun languagePrefs() {

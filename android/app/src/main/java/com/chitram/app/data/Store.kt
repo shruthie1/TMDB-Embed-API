@@ -220,14 +220,22 @@ enum class VideoFit(val label: String) {
     fun next(): VideoFit = entries[(ordinal + 1) % entries.size]
 
     companion object {
-        fun parse(s: String?): VideoFit = entries.firstOrNull { it.name == s } ?: Fit
+        fun parse(s: String?): VideoFit? = entries.firstOrNull { it.name == s }
     }
 }
 
 /** Player choices kept across sessions. */
 class PlayerPrefs(private val kv: KeyValue) {
     companion object { const val FIT = "player:fit" }
-    var fit: VideoFit
+    /** The viewer's last choice, or null before they pick one. */
+    var fit: VideoFit?
         get() = VideoFit.parse(kv.get(FIT))
-        set(v) = kv.put(FIT, v.name)
+        set(v) = kv.put(FIT, v?.name)
+
+    /**
+     * Phones default to Fill: a 16:9 film on a 20:9 phone otherwise leaves a
+     * black band down each side, which reads as "not full screen". TVs are
+     * 16:9, so Fit shows the whole picture there with no bars.
+     */
+    fun fitFor(isTv: Boolean): VideoFit = fit ?: if (isTv) VideoFit.Fit else VideoFit.Fill
 }
