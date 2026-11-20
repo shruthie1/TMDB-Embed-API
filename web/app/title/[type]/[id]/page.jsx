@@ -2,6 +2,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { fetchTitle, fetchTitleFull, poster } from '../../../../lib/api';
+import { posterSources } from '../../../../lib/posterSources';
 import Player from '../../../../components/Player';
 import ErrorBoundary from '../../../../components/ErrorBoundary';
 import CastRow, { CastRowSkeleton } from '../../../../components/CastRow';
@@ -20,17 +21,24 @@ function runtime(min) {
   return h ? `${h}h ${min % 60}m` : `${min}m`;
 }
 
-// Detail poster. Same w342 URL as the row card, so a click from a row is a
-// cache hit. fetchpriority puts it ahead of the rows below the fold; the
-// shimmer covers the wait when the poster comes from the slower metahub host.
-function HeroPoster({ src }) {
+// fetchpriority puts the poster ahead of the rows below the fold; the shimmer
+// covers the wait so the box is never a flat dark tile.
+function HeroPoster({ title }) {
+  // Chosen once per poster: the cache check must not flip mid-load.
+  const [sources] = useState(() => posterSources(title));
+  const [n, setN] = useState(0);
   const [loading, setLoading] = useState(true);
+  const src = sources[n];
   // A cached image can finish before React attaches onLoad.
   const ref = useCallback(img => { if (img?.complete && img.naturalWidth) setLoading(false); }, []);
+  // Last source failed too: drop the img so no broken-image icon shows.
+  const onError = () => { setN(n + 1); if (n + 1 >= sources.length) setLoading(false); };
   return (
     <div className={`hero-poster enter${loading ? ' loading' : ''}`}>
-      <img ref={ref} src={src} alt="" width="342" height="513" decoding="async"
-           fetchpriority="high" onLoad={() => setLoading(false)} onError={() => setLoading(false)} />
+      {src && (
+        <img key={src} ref={ref} src={src} alt="" width="342" height="513" decoding="async"
+             fetchpriority="high" onLoad={() => setLoading(false)} onError={onError} />
+      )}
     </div>
   );
 }
@@ -146,7 +154,7 @@ export default function TitlePage() {
                     style={{ '--bg-lg': `url(${bg})`, '--bg-sm': `url(${poster(t.backdrop, 'w780')})` }} />}
         <div className="hero-inner">
           {pos && (
-            <HeroPoster key={pos} src={pos} />
+            <HeroPoster key={pos} title={t} />
           )}
           <div className="hero-text">
             <h1 className="detail-title">{t.title}</h1>

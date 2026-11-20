@@ -1684,6 +1684,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
           busy={busy}
           visible={controls.visible}
           onReveal={controls.reveal}
+          onHide={controls.hide}
           onMenuChange={setMenuOpen}
           menuOpen={menuOpen}
           tv={tvRemote}
@@ -1715,7 +1716,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
           subs={subtitles.subs}
           currentSub={subtitles.currentSub}
           subLoading={subtitles.subLoading}
-          fit={fit} onCycleFit={cycleFit}
+          fit={fit} onCycleFit={cycleFit} onSetFit={applyFit}
           onPickSub={subtitles.setCurrentSub}
           subPrefs={subtitles.prefs}
           onSubPrefs={subtitles.updatePrefs}

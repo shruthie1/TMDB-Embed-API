@@ -5,7 +5,11 @@
    globals.css. Desktop and phone sizes are unchanged. */
 [data-tv="true"]{ --gap:var(--space-4); }
 [data-tv="true"] .rail{gap:var(--space-4)}
-[data-tv="true"] .rail > *{flex-basis:clamp(150px,11.4vw,230px)}
+[data-tv="true"]{--tv-card-w:clamp(150px,11.4vw,230px)}
+[data-tv="true"] .rail > *{flex-basis:var(--tv-card-w)}
+/* Browse and search grids use the home-row poster width. The 280px minimum
+   in globals.css gave four huge posters on a narrow TV window. */
+html[data-tv="true"] .grid-titles{grid-template-columns:repeat(auto-fill,minmax(var(--tv-card-w),1fr))}
 [data-tv="true"] .card-title{font-size:15px}
 [data-tv="true"] .card-meta{font-size:13px}
 [data-tv="true"] .row-label{font-size:16px;margin-bottom:var(--space-3)}
@@ -136,4 +140,7 @@ html[data-tv="true"] .search-field .icon-btn svg{width:28px;height:28px}
 html[data-tv="true"] .search-summary,html[data-tv="true"] .result-count{font-size:20px}
 html[data-tv="true"] .sort-select{font-size:21px;min-height:56px;padding-inline:var(--space-4) var(--space-8)}
 html[data-tv="true"] .sort-caret{width:18px;height:18px}
+/* The focused sort control grows 9% and gains a ring; 14px was not enough
+   room, so its ring ran into the title count. */
+html[data-tv="true"] .fbar-right{gap:var(--space-8)}
 html[data-tv="true"] .clear-all{font-size:20px;min-height:56px}

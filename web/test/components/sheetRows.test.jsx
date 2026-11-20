@@ -234,3 +234,30 @@ describe('settings sheet rows are clickable across their whole width', () => {
     expect(seen).toBeGreaterThan(3);
   });
 });
+
+describe('picture fit in the settings sheet', () => {
+  const rows = (c) => [...c.querySelectorAll('.pmenu-sheet [role="menuitemradio"]')]
+    .map(b => b.textContent.trim());
+
+  it('lists Fit whole, Fill screen and Stretch on a phone, current one ticked', () => {
+    isCompact = true;
+    const onSetFit = vi.fn();
+    const { container, unmount } = openSheet({ fit: 'cover', onSetFit });
+    const r = rows(container);
+    expect(r).toEqual(expect.arrayContaining(['Fit whole', 'Fill screen', 'Stretch']));
+    const on = [...container.querySelectorAll('.pmenu-sheet [aria-checked="true"]')].map(b => b.textContent.trim());
+    expect(on).toContain('Fill screen');
+    const stretch = [...container.querySelectorAll('.pmenu-sheet [role="menuitemradio"]')]
+      .find(b => b.textContent.trim() === 'Stretch');
+    fireEvent.click(stretch);
+    expect(onSetFit).toHaveBeenCalledWith('fill');
+    unmount(); isCompact = false;
+  });
+
+  it('stays out of the desktop sheet, where the row has the fit icon', () => {
+    const { container, unmount } = openSheet({ fit: 'contain', onSetFit: () => {} });
+    expect(rows(container)).not.toContain('Stretch');
+    expect(container.querySelector('[aria-label^="Picture fit"]')).not.toBeNull();
+    unmount();
+  });
+});

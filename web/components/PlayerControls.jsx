@@ -28,6 +28,19 @@ const fmt = (s) => {
 // sheet and the standalone quality/audio menus share one implementation.
 const Row = MenuRow;
 
+/** Remote scrub: ms after the last key before the seek happens. */
+export const SCRUB_SETTLE_MS = 700;
+/**
+ * Seconds one remote scrub step moves, by how many steps this scrub has
+ * taken. A tap moves 10s; holding the key speeds up to 2 minutes a step.
+ */
+export function scrubStep(n) {
+  if (n <= 3) return 10;
+  if (n <= 8) return 30;
+  if (n <= 16) return 60;
+  return 120;
+}
+
 export function sourceMeta(source) {
   const bits = [source.best];
   // Languages FIRST: on a multi-language Indian release the provider often
@@ -63,8 +76,10 @@ export function sourceMeta(source) {
  * list moved out to its own "Servers" control on 2026-09-22, so this sheet no
  * longer duplicates it.
  */
+const FITS = [['contain', 'Fit whole'], ['cover', 'Fill screen'], ['fill', 'Stretch']];
+
 function SettingsSheet({ subs, currentSub, onPickSub, subLoading, subPrefs, onSubPrefs,
-                          onClose, picks }) {
+                          onClose, picks, fit, onSetFit }) {
   return (
     <>
       <div className="pmenu-sheet-head">
@@ -84,6 +99,19 @@ function SettingsSheet({ subs, currentSub, onPickSub, subLoading, subPrefs, onSu
       {/* Phones: quality, server and audio live here, as rows that open their
           list in place, so the control row keeps one settings button. */}
       {picks && <div className="pmenu-group sheet-picks">{picks}</div>}
+
+      {/* Phones: picture fit. The row drops the fit icon in compact mode to keep
+          five buttons, so the choice lives here, named, with the current one
+          ticked. Same labels as the TV bar. */}
+      {onSetFit && (
+        <div className="pmenu-group">
+          <p className="pmenu-label">Picture</p>
+          {FITS.map(([mode, label]) => (
+            <Row key={mode} label={label} selected={fit === mode}
+                 onClick={() => onSetFit(mode)} />
+          ))}
+        </div>
+      )}
 
       {subs.length > 0 && (
         <div className="pmenu-group">
@@ -141,11 +169,11 @@ function SettingsSheet({ subs, currentSub, onPickSub, subLoading, subPrefs, onSu
 
 export default function PlayerControls({
   videoRef, hls, title, subtitle, onClose, busy = false,
-  visible = true, onReveal, onMenuChange, menuOpen = null, tv = false,
+  visible = true, onReveal, onHide, onMenuChange, menuOpen = null, tv = false,
   sources = [], currentSource, currentSourceId = null, onPickSource, sourcesPending = false,
   audioSync = null,
   subs = [], currentSub = null, onPickSub, subLoading = false,
-  fit = 'contain', onCycleFit,
+  fit = 'contain', onCycleFit, onSetFit,
   subPrefs = { scale: 1, offsetMs: 0 }, onSubPrefs,
   levels = [], currentLevel = -1, autoLevel, onPickLevel,
   audioTracks = [], currentAudio, onPickAudio, onPickPair,
@@ -340,10 +368,67 @@ export default function PlayerControls({
     el.addEventListener('pointercancel', up);
   };
 
+  /**
+   * Remote scrub on a TV, the model every TV player uses:
+   * - Left/Right move a preview marker, not the video. A held key repeats and
+   *   the step grows the longer it is held (scrubStep).
+   * - The seek happens once, on release: 700ms after the last key, on OK, or
+   *   when focus leaves the bar. Playback then resumes.
+   * - Down goes to Play. The first Up hides the bar; an Up after the bar was
+   *   brought back goes on up to Close.
+   */
+  const preview = useRef(null);          // { t, n } while a remote scrub is open
+  const commitTimer = useRef(null);
+  const upHid = useRef(false);
+  useEffect(() => () => clearTimeout(commitTimer.current), []);
+
+  const commitScrub = () => {
+    clearTimeout(commitTimer.current);
+    const p = preview.current;
+    const el = v();
+    preview.current = null;
+    if (!p || !el?.duration) return;
+    el.currentTime = p.t;
+    setDrag(null);
+    setScrubbing(false);
+    el.play().catch(() => {});
+    onReveal?.();
+  };
+
   /** Keyboard seeking, which the range input used to provide for free. */
   const onScrubKey = (e) => {
     const el = v();
     if (!el?.duration) return;
+    if (tv) {
+      if (e.key === 'ArrowDown') {
+        if (preview.current) commitScrub();
+        upHid.current = false;
+        scrubRef.current?.closest('.pctl')?.querySelector('[data-primary]')?.focus({ preventScroll: true });
+      } else if (e.key === 'ArrowUp') {
+        if (preview.current) commitScrub();
+        if (upHid.current) { upHid.current = false; return; }   // lib/dpad.js moves on to Close
+        upHid.current = true;
+        scrubRef.current?.blur();
+        onHide?.();
+      } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        clearTimeout(commitTimer.current);
+        upHid.current = false;
+        const p = preview.current ?? { t: el.currentTime, n: 0 };
+        p.n += 1;
+        const d = scrubStep(p.n) * (e.key === 'ArrowRight' ? 1 : -1);
+        p.t = Math.max(0, Math.min(el.duration - 1, p.t + d));
+        preview.current = p;
+        setScrubbing(true);
+        setDrag((p.t / el.duration) * 100);
+        onReveal?.();
+      } else if (e.key === 'Enter') {
+        if (preview.current) commitScrub();
+        else el.paused ? el.play().catch(() => {}) : el.pause();
+      } else return;
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
     const step = e.shiftKey ? 60 : 5;
     const map = {
       ArrowRight: step, ArrowLeft: -step,
@@ -360,6 +445,15 @@ export default function PlayerControls({
     else return;
     e.preventDefault();
     e.stopPropagation();
+  };
+
+  // Release settles the scrub: the seek waits until the key has been up for
+  // a moment, so tapping Right three times is one seek, not three.
+  const onScrubKeyUp = (e) => {
+    if (!tv || !preview.current) return;
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    clearTimeout(commitTimer.current);
+    commitTimer.current = setTimeout(commitScrub, SCRUB_SETTLE_MS);
   };
 
   const nudge = (d) => { const el = v(); if (el?.duration) el.currentTime = Math.max(0, Math.min(el.duration, el.currentTime + d)); };
@@ -539,7 +633,8 @@ export default function PlayerControls({
              aria-valuenow={Math.round(drag ?? pct)}
              aria-valuetext={fmt(((drag ?? pct) / 100) * (state.dur || 0))}
              onPointerDown={onScrubDown}
-             onKeyDown={onScrubKey}>
+             onKeyDown={onScrubKey} onKeyUp={onScrubKeyUp}
+             onBlur={() => { if (preview.current) commitScrub(); }}>
           <div className="pctl-track">
             <span className="pctl-buf" style={{ width: `${bufPct}%` }} />
             <span className="pctl-played" style={{ width: `${drag ?? pct}%` }} />
@@ -598,6 +693,7 @@ export default function PlayerControls({
                   subPrefs={subPrefs} onSubPrefs={onSubPrefs}
                   onClose={() => openMenu(null)}
                   picks={compact ? picks : null}
+                  fit={fit} onSetFit={compact ? onSetFit : null}
                 />
               </div>
             )}
