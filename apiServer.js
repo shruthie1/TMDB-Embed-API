@@ -350,6 +350,55 @@ const providerHitCache = createTtlCache({
 const providerEmptyCache = createTtlCache({
   ttlMs: Number(process.env.PROVIDER_EMPTY_TTL_MS) || 3 * 60 * 1000, maxEntries: 5000 });
 
+// One upstream call per provider+title at a time. Without this, a second
+// request for a title that arrived while the first was still fetching (the
+// title-page warm-up then Play, a reload, the web's own NetMirror call after
+// playback starts, or the follow-up for a partial answer) started the same
+// provider again: two NetMirror probes in seconds, and NetMirror throttles per
+// IP. Joiners get the same outcome; only the caller that started the fetch
+// records it in the breaker and the caches.
+const providerInflight = new Map();
+function fetchProviderShared(prov, ck, ctx, { titleIsResolvable, titleKey }) {
+  const running = providerInflight.get(ck);
+  if (running) return running;
+  const name = prov.name;
+  const p = (async () => {
+    // Yield first so the map entry below exists before the finally can run,
+    // even if prov.fetch throws synchronously.
+    await null;
+    metrics.providerCalls[name] = (metrics.providerCalls[name]||0)+1;
+    const t0 = Date.now();
+    try {
+      console.log(`[api] invoking provider ${name} for tmdbId=${ctx.tmdbId}`);
+      const r = await prov.fetch(ctx);
+      if (r && r.timedOut) {
+        recordProviderOutcome(name, 'timeout', Date.now()-t0, 0);
+        return { outcome: 'timeout', ms: null, streams: [] };
+      }
+      const ms = Date.now()-t0;
+      const n = Array.isArray(r) ? r.length : 0;
+      recordProviderOutcome(name, n > 0 ? 'hit' : 'empty', ms, n, titleIsResolvable, titleKey);
+      if (n > 0) providerHitCache.set(ck, r);
+      else if (titleIsResolvable) providerEmptyCache.set(ck, true);
+      console.log(`[api] provider ${name} returned ${n} streams`);
+      return { outcome: n > 0 ? 'hit' : 'empty', ms, streams: Array.isArray(r) ? r : [] };
+    } catch (e) {
+      console.error(`[api] provider ${name} failed:`, e.message);
+      // Never cached in providerEmptyCache: an error says the provider is
+      // down right now, not that the title is missing. titleKey keeps one
+      // title's repeated failures from tripping the breaker for all titles.
+      recordProviderOutcome(name, 'error', Date.now()-t0, 0, titleIsResolvable, titleKey);
+      const h = metrics.providerHealth[name];
+      if (h) h.lastErr = String(e.message || e).slice(0, 200);
+      return { outcome: 'error', ms: null, streams: [], error: String(e && e.message || e).slice(0, 200) };
+    } finally {
+      providerInflight.delete(ck);
+    }
+  })();
+  providerInflight.set(ck, p);
+  return p;
+}
+
 // How long a browser may reuse an /api/streams response. Short enough that a
 // title's streams stay fresh and signed URLs stay valid, long enough to absorb
 // reloads and back-navigation during normal browsing.
@@ -590,44 +639,16 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
         if (hit) { providerTimings[name] = 0; return hit; }
         if (providerEmptyCache.has(ck)) { providerTimings[name] = 0; return []; }
       }
-      if (!bypassBreaker && breakerOpen(name)) {
+      if (!bypassBreaker && !providerInflight.has(ck) && breakerOpen(name)) {
         providerTimings[name] = null;
         skippedByBreaker.push(name);
         return [];
       }
-      metrics.providerCalls[name] = (metrics.providerCalls[name]||0)+1;
-      // `t0` must outlive the try: the catch below reports elapsed time, and a
-      // block-scoped const there threw ReferenceError instead, replacing the real
-      // provider error with a bogus one.
-      const t0 = Date.now();
-      try {
-        console.log(`[api] invoking provider ${name} for tmdbId=${tmdbId}`);
-        const r = await prov.fetch({ tmdbId, type, season, episode, imdbId, filters:{ } });
-        if (r && r.timedOut) {
-          providerTimings[name] = null;
-          recordProviderOutcome(name, 'timeout', Date.now()-t0, 0);
-          return [];
-        }
-        providerTimings[name] = Date.now()-t0;
-        const n = Array.isArray(r) ? r.length : 0;
-        recordProviderOutcome(name, n > 0 ? 'hit' : 'empty', providerTimings[name], n, titleIsResolvable,
-          titleKey);
-        if (n > 0) providerHitCache.set(ck, r);
-        else if (titleIsResolvable) providerEmptyCache.set(ck, true);
-        console.log(`[api] provider ${name} returned ${n} streams`);
-        return Array.isArray(r) ? r : [];
-      } catch (e) {
-        console.error(`[api] provider ${name} failed:`, e.message);
-        providerTimings[name] = null;
-        erroredProviders.push(name);
-        // Never cached in providerEmptyCache: an error says the provider is
-        // down right now, not that the title is missing. titleKey keeps one
-        // title's repeated failures from tripping the breaker for all titles.
-        recordProviderOutcome(name, 'error', Date.now()-t0, 0, titleIsResolvable, titleKey);
-        const h = metrics.providerHealth[name];
-        if (h) h.lastErr = String(e.message || e).slice(0, 200);
-        return [];
-      }
+      const o = await fetchProviderShared(prov, ck,
+        { tmdbId, type, season, episode, imdbId, filters:{ } }, { titleIsResolvable, titleKey });
+      providerTimings[name] = o.ms;
+      if (o.outcome === 'error') erroredProviders.push(name);
+      return o.streams;
     };
 
     const serverUrlEarly = publicBase(req);
@@ -679,12 +700,17 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
     // the rest of the early answer.
     let foundPreferred;
     const preferredFound = new Promise((r) => { foundPreferred = r; });
-    if (PRIMARY_LIST.length) {
+    // ?full=1 is the web's follow-up to a partial answer: it waits for every
+    // provider (each still capped by the registry deadline). The providers the
+    // first answer left running are joined in flight, not started again.
+    const wantFull = req.query.full === '1';
+    const primary = (name) => wantFull || isPrimary(name);
+    if (PRIMARY_LIST.length && !wantFull) {
       if (gateHolds || hasPreferred(castleStreams)) foundPreferred(true);
       for (const x of tasks) x.p.then((r) => { if (hasPreferred(r)) foundPreferred(true); });
     }
     const answeredEarly = await Promise.race([
-      Promise.all(tasks.filter((x) => isPrimary(x.name)).map((x) => x.p)).then(() => false),
+      Promise.all(tasks.filter((x) => primary(x.name)).map((x) => x.p)).then(() => false),
       preferredFound,
     ]);
     const LATE = Symbol('late');
@@ -693,7 +719,7 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
       grace = setTimeout(() => r(LATE), answeredEarly ? FIRST_ANSWER_GRACE_MS : SECONDARY_GRACE_MS);
     });
     let results = await Promise.all(tasks.map((x) =>
-      (isPrimary(x.name) && !answeredEarly) ? x.p : Promise.race([x.p, graceOver])));
+      (primary(x.name) && !answeredEarly) ? x.p : Promise.race([x.p, graceOver])));
     clearTimeout(grace);
     const late = tasks.filter((x, i) => results[i] === LATE);
     results = results.map((r) => (r === LATE ? [] : r));
@@ -811,8 +837,10 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
     // A provider that threw is down right now, not missing the title. The
     // browser must not keep this answer either (HTTP cache or the web app's
     // sessionStorage), or a short upstream blip hides that server for minutes.
-    if (erroredProviders.length) {
-      payload.providerErrors = [...erroredProviders];
+    if (erroredProviders.length) payload.providerErrors = [...erroredProviders];
+    // A partial answer is missing a provider that is still running; any HTTP
+    // cache that kept it (max-age=300) would hide that provider for 5 min.
+    if (erroredProviders.length || late.length) {
       res.set('Cache-Control', 'no-store');
     } else {
       res.set('Cache-Control', `private, max-age=${STREAMS_CACHE_SECONDS}`);
@@ -841,15 +869,29 @@ app.get('/api/streams/:provider/:type/:tmdbId', async (req,res) => {
   }
   try {
     metrics.streamRequests++;
-    metrics.providerCalls[prov.name] = (metrics.providerCalls[prov.name]||0)+1;
     const tmdbType = type === 'movie' ? 'movie' : 'tv';
     const imdbId = await resolveImdbId(tmdbType, tmdbId); if (imdbId) metrics.tmdbToImdbLookups++;
     const t0 = Date.now();
+    // Shares the aggregate route's per-provider cache and in-flight call. The
+    // web asks /api/streams/netmirror/... after every playback start; that
+    // used to be a fresh NetMirror fetch each time even when the aggregate had
+    // just fetched it (prod 2026-11-18..20: 43 NetMirror fetches, 21 from the
+    // aggregate), and NetMirror throttles per IP.
+    const titleKey = `${type}:${tmdbId}:${season ?? ''}:${episode ?? ''}`;
+    const ck = `${prov.name}|${titleKey}`;
+    const refresh = req.query.refresh === '1';
+    let raw = refresh ? undefined : providerHitCache.get(ck);
     // A provider failure keeps this route's old contract (200, count 0) and
     // says why in providerError, instead of a 500.
     let providerError = null;
-    let streams = await prov.fetch({ tmdbId, type, season, episode, imdbId, filters:{} })
-      .catch((e) => { providerError = String(e && e.message || e).slice(0, 200); return []; });
+    if (!raw && !refresh && providerEmptyCache.has(ck)) raw = [];
+    if (!raw) {
+      const o = await fetchProviderShared(prov, ck, { tmdbId, type, season, episode, imdbId, filters:{} },
+        { titleIsResolvable: Boolean(imdbId), titleKey });
+      if (o.outcome === 'error') providerError = o.error;
+      raw = o.streams;
+    }
+    let streams = raw;
     const providerTimings = { [prov.name]: Date.now()-t0 };
     streams = applyFilters(streams, prov.name, config.minQualities, config.excludeCodecs);
     metrics.streamsReturned += streams.length;
