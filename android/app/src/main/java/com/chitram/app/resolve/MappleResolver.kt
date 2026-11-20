@@ -55,31 +55,47 @@ class MappleResolver(
     private val mutex = Mutex()
     @Volatile private var session: Session? = null
 
-    private class Session(
-        val base: String,
-        val jar: Jar,
-        val requestToken: String,
-        val at: Long,
-        val failedFronts: MutableSet<String> = java.util.Collections.synchronizedSet(HashSet()),
-    )
+    private class Session(val base: String, val jar: Jar, val requestToken: String, val at: Long)
 
-    /** null: no front has this title. Throws when the chain itself failed. */
-    suspend fun resolve(cfg: MappleConfig, type: String, tmdbId: Long, season: Int = 0, episode: Int = 0): Resolved? {
+    /**
+     * Per-front health, kept across sessions. A front that errors or times out
+     * cools down (frontCooldownMs, doubling per consecutive failure, max 10 min)
+     * and is tried LAST while cooling, never dropped: one slow answer must not
+     * hide the only front that has the title. Any answer resets it.
+     */
+    private class FrontHealth(var fails: Int = 0, var coolUntil: Long = 0)
+    private val health = java.util.concurrent.ConcurrentHashMap<String, FrontHealth>()
+
+    /**
+     * null: no front has this title. Throws when the chain itself failed.
+     * `fresh` forces a new session (used to recover a row that failed in playback).
+     * `preferred` is the audio language a front must carry to win at once.
+     */
+    suspend fun resolve(
+        cfg: MappleConfig, type: String, tmdbId: Long, season: Int = 0, episode: Int = 0,
+        preferred: String = "Telugu", fresh: Boolean = false,
+    ): Resolved? {
         val mediaType = if (type == "tv" || type == "series") "tv" else "movie"
         val id = tmdbId.toString()
         val http = base.newBuilder().callTimeout(cfg.stepTimeoutMs, TimeUnit.MILLISECONDS).build()
-        var s = session(cfg, http, mediaType, id, fresh = false)
-        val token = try {
-            mediaSession(cfg, http, s, mediaType, id, season, episode)
+        try {
+            var s = session(cfg, http, mediaType, id, fresh)
+            val token = try {
+                mediaSession(cfg, http, s, mediaType, id, season, episode)
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                // A reused session may have expired on their side: one fresh retry.
+                if (now() - s.at < 2000) throw e
+                android.util.Log.i("Chitram", "mapple: session stale (${e.message}), re-bootstrapping")
+                s = session(cfg, http, mediaType, id, fresh = true)
+                mediaSession(cfg, http, s, mediaType, id, season, episode)
+            }
+            return sweep(cfg, s, token, mediaType, id, season, episode, preferred)
         } catch (e: Exception) {
-            if (e is kotlinx.coroutines.CancellationException) throw e
-            // A reused session may have expired on their side: one fresh retry.
-            if (now() - s.at < 2000) throw e
-            android.util.Log.i("Chitram", "mapple: session stale (${e.message}), re-bootstrapping")
-            s = session(cfg, http, mediaType, id, fresh = true)
-            mediaSession(cfg, http, s, mediaType, id, season, episode)
+            // A failed chain says nothing good about the session: next resolve starts clean.
+            if (e !is kotlinx.coroutines.CancellationException) session = null
+            throw e
         }
-        return sweep(cfg, s, token, mediaType, id, season, episode)
     }
 
     private suspend fun session(cfg: MappleConfig, http: OkHttpClient, type: String, id: String, fresh: Boolean): Session = mutex.withLock {
@@ -137,21 +153,37 @@ class MappleResolver(
 
     private class Hit(val front: String, val url: String, val master: Master)
 
+    private fun noteFail(cfg: MappleConfig, front: String) {
+        val h = health.getOrPut(front) { FrontHealth() }
+        synchronized(h) {
+            h.fails++
+            val cool = (cfg.frontCooldownMs shl (h.fails - 1).coerceAtMost(4)).coerceAtMost(MAX_COOL_MS)
+            h.coolUntil = now() + cool
+        }
+    }
+
+    /** Fronts cooling down right now (test and log seam). */
+    internal fun coolingFronts(): Set<String> = health.filter { it.value.coolUntil > now() }.keys
+
     /**
      * Fronts in order: the last one that worked first, then the configured list,
-     * minus fronts that failed this session. Up to `frontParallelism` run at once
-     * (the site times each one out server-side at ~5s, so 13 in a row would not
-     * fit the budget); the first playable answer wins and the rest are cancelled.
+     * with cooling-down fronts moved to the end. Up to `frontParallelism` run at
+     * once. A playable master that carries the preferred audio language wins at
+     * once; one without it (s25 gave Salaar with no audio list, s12 gave five
+     * languages, Telugu first) is held for `betterWaitMs` while the other fronts
+     * finish, so the Telugu one is not lost to whichever answered first.
      */
-    private suspend fun sweep(cfg: MappleConfig, s: Session, token: String, type: String, id: String, season: Int, episode: Int): Resolved? {
+    private suspend fun sweep(cfg: MappleConfig, s: Session, token: String, type: String, id: String, season: Int, episode: Int, preferred: String): Resolved? {
         val last = kv.get(KEY_FRONT)?.takeIf { it in cfg.fronts }
-        val order = (listOfNotNull(last) + cfg.fronts).distinct().filter { it !in s.failedFronts }
-        if (order.isEmpty()) {
-            s.failedFronts.clear() // every front failed earlier: give them one more chance next time
-            throw StepException("mapple fronts", 0, "all fronts failed this session")
-        }
+        val all = (listOfNotNull(last) + cfg.fronts).distinct()
+        val t = now()
+        val (ready, cooling) = all.partition { (health[it]?.coolUntil ?: 0L) <= t }
+        val order = ready + cooling
+        if (cooling.isNotEmpty()) android.util.Log.i("Chitram", "mapple: cooling fronts tried last: $cooling")
         val answered = java.util.concurrent.atomic.AtomicInteger()
         val failed = java.util.concurrent.atomic.AtomicInteger()
+        val fallback = java.util.concurrent.atomic.AtomicReference<Hit?>(null)
+        fun wanted(m: Master) = Hls.languages(m.audio).any { it.equals(preferred, ignoreCase = true) }
         val hit: Hit? = coroutineScope {
             val sem = Semaphore(cfg.frontParallelism.coerceAtLeast(1))
             val done = CompletableDeferred<Hit?>()
@@ -167,17 +199,24 @@ class MappleResolver(
                             if (e is kotlinx.coroutines.CancellationException && !done.isCompleted) throw e
                             if (e !is kotlinx.coroutines.CancellationException) {
                                 failed.incrementAndGet()
-                                s.failedFronts += front
+                                noteFail(cfg, front)
                                 android.util.Log.i("Chitram", "mapple: front $front failed: ${e.message}")
                             }
                             return@withPermit
                         }
                         answered.incrementAndGet()
-                        if (r is FrontResult.Found) done.complete(Hit(front, r.url, r.master))
+                        health.remove(front)
+                        if (r !is FrontResult.Found) return@withPermit
+                        val h = Hit(front, r.url, r.master)
+                        if (wanted(r.master)) done.complete(h)
+                        else if (fallback.compareAndSet(null, h)) {
+                            android.util.Log.i("Chitram", "mapple: $front has it without $preferred audio, waiting ${cfg.betterWaitMs}ms for a better front")
+                            launch { kotlinx.coroutines.delay(cfg.betterWaitMs); done.complete(fallback.get()) }
+                        }
                     }
                 }
             }
-            launch { jobs.joinAll(); done.complete(null) }
+            launch { jobs.joinAll(); done.complete(fallback.get()) }
             val h = done.await()
             coroutineContext.job.children.forEach { it.cancel() }
             h
@@ -187,7 +226,8 @@ class MappleResolver(
             android.util.Log.i("Chitram", "mapple: no front has $type/$id")
             return null
         }
-        kv.put(KEY_FRONT, hit.front)
+        // Remember a front that carried the preferred language; a language-less one only if nothing better is known.
+        if (wanted(hit.master) || kv.get(KEY_FRONT) == null) kv.put(KEY_FRONT, hit.front)
         android.util.Log.i("Chitram", "mapple: $type/$id on ${hit.front}, ${hit.master.audio.size} audio tracks")
         return Resolved(
             provider = NAME,
@@ -254,6 +294,7 @@ class MappleResolver(
     companion object {
         const val NAME = "mapple"
         const val KEY_FRONT = "resolve.mapple.front"
+        private const val MAX_COOL_MS = 10 * 60 * 1000L
         private val JSON = "application/json".toMediaType()
         private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 

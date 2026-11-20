@@ -109,6 +109,8 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     /** On-device resolves still running after the first source started; they join late. */
     private var lateJobs: List<Job> = emptyList()
     private var deviceJobs: List<Deferred<Source?>> = emptyList()
+    /** On-device providers already re-resolved once for this title. */
+    private val reresolved = HashSet<String>()
     /** The preferred-language audio pick is done once per on-device source. */
     private var audioPickedFor: String? = null
 
@@ -168,6 +170,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         saveProgress()
         request = r
         tried.clear()
+        reresolved.clear()
         refreshedOnce = false
         nextUp = null
         notice = ""
@@ -191,7 +194,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         resolveJob = viewModelScope.launch {
             val pin = keepProvider ?: g.lastProvider.get(r.type, r.id)
             val preferred = g.prefs.preferredAudio()
-            val device = g.onDevice.launch(viewModelScope, r.type, r.id, r.season, r.episode, g.codecs)
+            val device = g.onDevice.launch(viewModelScope, r.type, r.id, r.season, r.episode, g.codecs, preferred)
             deviceJobs = device
             var backendError: Exception? = null
             val backend = try {
@@ -201,7 +204,13 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                 backendError = e
                 emptyList()
             }
-            val graceEnd = System.currentTimeMillis() + if (backend.isEmpty()) DEVICE_WAIT_MS else DEVICE_GRACE_MS
+            // A playable backend row in the viewer's language starts now; on-device rows join late.
+            val haveGood = backend.any { !it.unsupported && Ranking.tier(it, preferred) <= 2 }
+            val graceEnd = System.currentTimeMillis() + when {
+                backend.isEmpty() -> DEVICE_WAIT_MS
+                haveGood -> 0L
+                else -> DEVICE_GRACE_MS
+            }
             val early = device.mapNotNull { d ->
                 kotlinx.coroutines.withTimeoutOrNull((graceEnd - System.currentTimeMillis()).coerceAtLeast(1)) { d.await() }
             }
@@ -265,13 +274,39 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     private fun handleError(e: PlaybackException) {
         val http = generateSequence<Throwable>(e) { it.cause }.filterIsInstance<HttpDataSource.InvalidResponseCodeException>().firstOrNull()
         val pos = player.currentPosition.coerceAtLeast(0)
-        if (FailPolicy.onError(current, http?.responseCode, refreshedOnce) == FailPolicy.Action.REFRESH) {
+        val cur = current
+        val action = FailPolicy.onError(cur, http?.responseCode, refreshedOnce, cur?.onDevice in reresolved)
+        if (action == FailPolicy.Action.RERESOLVE && cur?.onDevice != null) {
+            reresolve(cur, pos, "${cur.provider}: ${e.errorCodeName}")
+            return
+        }
+        if (action == FailPolicy.Action.REFRESH) {
             refreshedOnce = true
             tried.clear()
             resolve(refresh = true, keepProvider = current?.provider, startMs = pos)
             return
         }
         failover("${current?.provider ?: "Source"}: ${e.errorCodeName}", pos)
+    }
+
+    /** Recover an on-device row once: resolve it again on the device and resume at `pos`. */
+    private fun reresolve(s: Source, pos: Long, reason: String) {
+        val r = request ?: return
+        val name = s.onDevice ?: return
+        reresolved += name
+        android.util.Log.i("Chitram", "recover: $reason -> re-resolving ${s.provider} on device")
+        notice = "Reconnecting to ${s.provider}…"
+        player.stop()
+        resolveJob?.cancel()
+        resolveJob = viewModelScope.launch {
+            val key = if (name.equals("mapple", true)) com.chitram.app.resolve.OnDeviceResolver.MAPPLE else com.chitram.app.resolve.OnDeviceResolver.VAPLAYER
+            val fresh = g.onDevice.resolveOne(key, r.type, r.id, r.season, r.episode, g.codecs, g.prefs.preferredAudio(), fresh = true)
+            if (request != r) return@launch
+            if (fresh == null) { failover("$reason, re-resolve failed", pos); return@launch }
+            sources = Ranking.merge(sources, listOf(fresh), g.prefs.preferredAudio(), null)
+            play(fresh, pos)
+            notice = ""
+        }
     }
 
     private fun failover(reason: String, pos: Long) {

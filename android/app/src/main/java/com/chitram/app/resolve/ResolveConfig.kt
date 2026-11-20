@@ -36,8 +36,13 @@ data class MappleConfig(
     val fronts: List<String> = listOf("s25", "mapple", "s2", "s28", "s27", "s10", "s19", "s4", "s12", "s6", "s7", "s8", "s16"),
     /** The site player's own per-front timeouts; other fronts get defaultFrontTimeoutMs. */
     val frontTimeoutMs: Map<String, Long> = mapOf("mapple" to 8000L, "s10" to 12000L, "s2" to 22000L, "s25" to 24000L, "s28" to 25000L),
-    val defaultFrontTimeoutMs: Long = 5000,
+    /** 8s: s12 took 3.5s on a Mac and more on a phone; 5s cut it off (2026-11-20). */
+    val defaultFrontTimeoutMs: Long = 8000,
     val frontParallelism: Int = 3,
+    /** A failed front is tried last for this long (doubling per repeat, max 10 min). */
+    val frontCooldownMs: Long = 60_000,
+    /** How long a hit WITHOUT the preferred audio waits for a front that has it. */
+    val betterWaitMs: Long = 2500,
     val stepTimeoutMs: Long = 8000,
     val budgetMs: Long = 25000,
     val sessionTtlMs: Long = 10 * 60 * 1000L,
@@ -111,6 +116,8 @@ data class ResolveConfig(
                 } ?: d.frontTimeoutMs,
                 defaultFrontTimeoutMs = o.long("defaultFrontTimeoutMs")?.coerceIn(500, 60_000) ?: d.defaultFrontTimeoutMs,
                 frontParallelism = o.int("frontParallelism")?.coerceIn(1, 8) ?: d.frontParallelism,
+                frontCooldownMs = o.long("frontCooldownMs")?.coerceIn(0, 3_600_000) ?: d.frontCooldownMs,
+                betterWaitMs = o.long("betterWaitMs")?.coerceIn(0, 20_000) ?: d.betterWaitMs,
                 stepTimeoutMs = o.long("stepTimeoutMs")?.coerceIn(1000, 60_000) ?: d.stepTimeoutMs,
                 budgetMs = o.long("budgetMs")?.coerceIn(3000, 90_000) ?: d.budgetMs,
                 sessionTtlMs = o.long("sessionTtlMs")?.coerceIn(0, 3_600_000) ?: d.sessionTtlMs,

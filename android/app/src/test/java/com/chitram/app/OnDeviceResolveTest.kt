@@ -86,12 +86,19 @@ class OnDeviceResolveTest {
     """.trimIndent()
 
     /** Behaves like mapple.fun: cookie, token, PoW, per-front answers, Referer-gated master. */
-    private fun mappleSite(frontDelayMs: Map<String, Long> = emptyMap(), hasOn: Set<String> = setOf("s12")) = serve { r ->
+    private val masterBare = """
+        #EXTM3U
+        #EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,CODECS="avc1.640028,mp4a.40.2"
+        v/1080.m3u8
+    """.trimIndent()
+
+    private fun mappleSite(frontDelayMs: Map<String, Long> = emptyMap(), hasOn: Set<String> = setOf("s12"), bare: Set<String> = emptySet(), sessionOk: () -> Boolean = { true }) = serve { r ->
         val path = r.requestUrl!!.encodedPath
         when {
             path.startsWith("/watch/") -> MockResponse().addHeader("Set-Cookie", "_mapple_site=c1; Path=/; HttpOnly").setBody("<html/>")
             path == "/api/ui/session" ->
-                if (r.getHeader("Cookie")?.contains("_mapple_site=c1") == true) json("""{"token":"RT"}""") else json("""{"error":"no cookie"}""")
+                if (!sessionOk()) MockResponse().setResponseCode(503)
+                else if (r.getHeader("Cookie")?.contains("_mapple_site=c1") == true) json("""{"token":"RT"}""") else json("""{"error":"no cookie"}""")
             path == "/api/media-session" -> {
                 val b = bodyJson(r)
                 val pow = b["pow"] as? JsonObject
@@ -122,7 +129,8 @@ class OnDeviceResolveTest {
                 resp
             }
             path.startsWith("/m/") ->
-                if (r.getHeader("Referer") == "$base/" && r.getHeader("Origin") == base) MockResponse().setBody(masterTe)
+                if (r.getHeader("Origin").let { it == base || it == "https://mapple.test" } && r.getHeader("Referer") == r.getHeader("Origin") + "/")
+                    MockResponse().setBody(if (path.split('/')[2] in bare) masterBare else masterTe)
                 else MockResponse().setResponseCode(404).setBody("""{"error":"Not found"}""")
             else -> MockResponse().setResponseCode(404)
         }
@@ -164,6 +172,95 @@ class OnDeviceResolveTest {
         val r = MappleResolver(client, HostBook(kv), kv).resolve(cfg, "movie", 1)!!
         assertEquals("$base/m/s12/master.m3u8", r.url)
         assertTrue("took ${System.currentTimeMillis() - t0}ms", System.currentTimeMillis() - t0 < 2500)
+    }
+
+    @Test fun mappleCoolingFrontIsTriedLastNotDropped() = runBlocking {
+        // s25 answers SOURCE_TIMEOUT. It cools down, but must still be tried (last).
+        mappleSite(hasOn = setOf("s12"))
+        var clock = 1_000_000L
+        val kv = MemoryKeyValue()
+        val m = MappleResolver(client, HostBook(kv), kv) { clock }
+        assertNotNull(m.resolve(mappleCfg("s25", "s12"), "movie", 1))
+        assertEquals(setOf("s25"), m.coolingFronts())
+
+        // Only s25 configured: cooling, yet still asked (an error, not a silent skip).
+        kv.put(MappleResolver.KEY_FRONT, null)
+        seen.clear()
+        try { m.resolve(mappleCfg("s25"), "movie", 1); fail("all fronts errored: must throw") } catch (e: com.chitram.app.resolve.StepException) {}
+        assertEquals(1, seen.count { it.requestUrl!!.encodedPath == "/api/encrypt" })
+
+        // Cooling order: s25 after s4 although s25 is listed first.
+        seen.clear()
+        m.resolve(mappleCfg("s25", "s4"), "movie", 2)
+        val order = seen.filter { it.requestUrl!!.encodedPath == "/api/encrypt" }.map { bodyJson(it)["data"]!!.jsonObject["source"]!!.jsonPrimitive.content }
+        assertEquals(listOf("s4", "s25"), order)
+
+        // Cooldown expires: back in configured order.
+        clock += 11 * 60 * 1000L
+        assertTrue(m.coolingFronts().isEmpty())
+    }
+
+    @Test fun mappleTeluguFrontBeatsFasterNoAudioFront() = runBlocking {
+        // s4 answers first with no audio list; s12 answers 600 ms later with Telugu.
+        mappleSite(hasOn = setOf("s4", "s12"), bare = setOf("s4"), frontDelayMs = mapOf("s12" to 600L))
+        val kv = MemoryKeyValue()
+        val cfg = MappleConfig(bases = listOf(base), fronts = listOf("s4", "s12"), frontParallelism = 2, betterWaitMs = 2500)
+        val r = MappleResolver(client, HostBook(kv), kv).resolve(cfg, "movie", 1)!!
+        assertEquals("$base/m/s12/master.m3u8", r.url)
+        assertEquals("Telugu", r.audio.first().label)
+        assertEquals("s12", kv.get(MappleResolver.KEY_FRONT))
+
+        // No Telugu front at all: the no-audio front still plays after betterWaitMs.
+        mappleSite(hasOn = setOf("s4"), bare = setOf("s4"))
+        val kv2 = MemoryKeyValue()
+        val cfg2 = cfg.copy(fronts = listOf("s4", "mapple"), betterWaitMs = 300)
+        val t0 = System.currentTimeMillis()
+        val r2 = MappleResolver(client, HostBook(kv2), kv2).resolve(cfg2, "movie", 1)!!
+        assertEquals("$base/m/s4/master.m3u8", r2.url)
+        assertTrue("took ${System.currentTimeMillis() - t0}ms", System.currentTimeMillis() - t0 < 3000)
+    }
+
+    @Test fun breakerOpensAfterThreeFailuresAndFreshBypassesIt() = runBlocking {
+        var sessionUp = false
+        mappleSite(sessionOk = { sessionUp })
+        // Config bases must be https, so point https://mapple.test at the mock server.
+        val local = server.url("/")
+        val routed = client.newBuilder().addInterceptor { ch ->
+            val u = ch.request().url
+            ch.proceed(if (u.host == "mapple.test") ch.request().newBuilder().url(u.newBuilder().scheme("http").host(local.host).port(local.port).build()).build() else ch.request())
+        }.build()
+        val inner = server.dispatcher
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse =
+                if (request.requestUrl!!.encodedPath == ResolveConfigStore.PATH)
+                    json("""{"mapple":{"bases":["https://mapple.test"],"fronts":["s12"],"frontParallelism":1}}""")
+                else inner.dispatch(request)
+        }
+        var clock = 1_000_000L
+        val kv = MemoryKeyValue()
+        val hosts = HostBook(kv)
+        val store = ResolveConfigStore(routed, base + ResolveConfigStore.PATH, kv) { clock }
+        assertEquals(listOf("https://mapple.test"), store.get().mapple.bases)
+        val od = OnDeviceResolver(null, store, MappleResolver(routed, hosts, kv) { clock }, VaplayerResolver(routed, hosts) { null }, { _, _ -> null }) { clock }
+
+        repeat(3) { assertNull(od.resolveOne(OnDeviceResolver.MAPPLE, "movie", 1, 0, 0, noCodecs)) }
+        assertTrue(od.isOpen(OnDeviceResolver.MAPPLE))
+        seen.clear()
+        assertNull(od.resolveOne(OnDeviceResolver.MAPPLE, "movie", 1, 0, 0, noCodecs))
+        assertTrue("breaker open: no request", seen.none { it.requestUrl!!.encodedPath != ResolveConfigStore.PATH })
+
+        // The site recovers. A fresh (recovery) resolve ignores the breaker and closes it.
+        sessionUp = true
+        assertNotNull(od.resolveOne(OnDeviceResolver.MAPPLE, "movie", 1, 0, 0, noCodecs, fresh = true))
+        assertFalse(od.isOpen(OnDeviceResolver.MAPPLE))
+    }
+
+    @Test fun configParsesRecoveryKnobsAndClampsThem() {
+        val c = ResolveConfig.parse("""{"mapple":{"frontCooldownMs":120000,"betterWaitMs":99999999,"defaultFrontTimeoutMs":"bad"}}""")
+        assertEquals(120_000L, c.mapple.frontCooldownMs)
+        assertEquals(20_000L, c.mapple.betterWaitMs) // clamped
+        assertEquals(MappleConfig().defaultFrontTimeoutMs, c.mapple.defaultFrontTimeoutMs) // bad type: default
+        assertEquals(8000L, MappleConfig().defaultFrontTimeoutMs)
     }
 
     @Test fun mappleNoFrontHasItIsNullNotError() = runBlocking {
@@ -333,7 +430,7 @@ class OnDeviceResolveTest {
             hosts.remember("mapple", base, listOf("https://mapple.invalid"))
             hosts.remember("VaPlayer", vaBase, listOf("https://vaplayer.invalid"))
             kv.put(MappleResolver.KEY_FRONT, "s12")
-            val od = OnDeviceResolver(null, store, MappleResolver(client, hosts, kv), VaplayerResolver(client, hosts) { null }) { _, _ -> "tt0816692" }
+            val od = OnDeviceResolver(null, store, MappleResolver(client, hosts, kv), VaplayerResolver(client, hosts) { null }, imdbFor = { _, _ -> "tt0816692" })
             val t0 = System.currentTimeMillis()
             val rows = od.launch(this, "movie", 770906, 0, 0, noCodecs).map { it.await() }
             assertTrue(System.currentTimeMillis() - t0 < 10_000)
@@ -376,7 +473,8 @@ class OnDeviceResolveTest {
     @Test fun failPolicyNeverRefreshesOnDeviceRows() {
         val va = src("VaPlayer", emptyList(), onDevice = "VaPlayer")
         val backend = src("castle", listOf("Telugu"))
-        assertEquals(FailPolicy.Action.FAILOVER, FailPolicy.onError(va, 403, refreshedOnce = false))
+        assertEquals(FailPolicy.Action.RERESOLVE, FailPolicy.onError(va, 403, refreshedOnce = false))
+        assertEquals(FailPolicy.Action.FAILOVER, FailPolicy.onError(va, 403, refreshedOnce = false, deviceRetried = true))
         assertEquals(FailPolicy.Action.REFRESH, FailPolicy.onError(backend, 403, refreshedOnce = false))
         assertEquals(FailPolicy.Action.FAILOVER, FailPolicy.onError(backend, 403, refreshedOnce = true))
         assertEquals(FailPolicy.Action.FAILOVER, FailPolicy.onError(backend, 500, refreshedOnce = false))

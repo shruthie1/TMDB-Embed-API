@@ -60,7 +60,11 @@ class Api(val client: OkHttpClient, private val base: String = BASE, httpCache: 
         fun buildClient(): OkHttpClient = OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
+            .eventListenerFactory { SlowCallLog() }
             .build()
+
+        /** Calls slower than this are logged with their DNS / connect split ("slow http" in logcat). */
+        const val SLOW_CALL_MS = 1500L
 
         fun httpCache(cacheDir: File): Cache = Cache(File(cacheDir, "http"), HTTP_CACHE_BYTES)
 
@@ -164,5 +168,32 @@ class Api(val client: OkHttpClient, private val base: String = BASE, httpCache: 
                 delay(RETRY_DELAYS_MS[attempt++])
             }
         }
+    }
+}
+
+/**
+ * Logs one line per slow call: host, path, total, DNS and connect time. A home
+ * DNS that sinkholes a host shows up here as a long dns or connect split.
+ */
+internal class SlowCallLog : okhttp3.EventListener() {
+    private var t0 = 0L
+    private var dnsAt = 0L
+    private var dnsMs = -1L
+    private var connAt = 0L
+    private var connMs = -1L
+    override fun callStart(call: okhttp3.Call) { t0 = System.nanoTime() }
+    override fun dnsStart(call: okhttp3.Call, domainName: String) { dnsAt = System.nanoTime() }
+    override fun dnsEnd(call: okhttp3.Call, domainName: String, inetAddressList: List<java.net.InetAddress>) { dnsMs = (System.nanoTime() - dnsAt) / 1_000_000 }
+    override fun connectStart(call: okhttp3.Call, inetSocketAddress: java.net.InetSocketAddress, proxy: java.net.Proxy) { connAt = System.nanoTime() }
+    override fun connectEnd(call: okhttp3.Call, inetSocketAddress: java.net.InetSocketAddress, proxy: java.net.Proxy, protocol: okhttp3.Protocol?) { connMs = (System.nanoTime() - connAt) / 1_000_000 }
+    override fun callEnd(call: okhttp3.Call) = done(call, "ok")
+    override fun callFailed(call: okhttp3.Call, ioe: IOException) = done(call, "failed ${ioe.javaClass.simpleName}")
+    private fun done(call: okhttp3.Call, how: String) {
+        val ms = (System.nanoTime() - t0) / 1_000_000
+        if (ms < Api.SLOW_CALL_MS) return
+        val u = call.request().url
+        // Video segments are long by nature: log them only when the network setup itself was slow.
+        if (!u.encodedPath.startsWith("/api/") && how == "ok" && dnsMs < 1000 && connMs < 1000) return
+        android.util.Log.i("Chitram", "slow http: ${u.host}${u.encodedPath.take(60)} $how in ${ms}ms (dns ${dnsMs}ms, connect ${connMs}ms)")
     }
 }
