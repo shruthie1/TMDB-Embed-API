@@ -10,6 +10,7 @@ const { createCipheriv } = require('crypto');
 // clean [] as "no streams" for minutes; it never caches a failure.
 
 process.env.NETMIRROR_PLATFORM_GAP_MS = '1';
+process.env.NETMIRROR_BUDGET_CALLS = '1000';
 process.env.NETMIRROR_API_BASE = 'https://nm.test';
 process.env.NEWTV_DOMAINS = 'https://disc.test';
 
@@ -21,6 +22,8 @@ require.cache[tmdbId].exports = {
     resolveImdbId: async () => 'tt1',
 };
 const fresh = (rel) => {
+    // NetMirror's guard (N7) is process-wide: each test starts from a clean one.
+    if (rel === 'netmirror') require('../utils/netmirrorGuard').guard.reset();
     delete require.cache[require.resolve(`../providers/${rel}`)];
     return require(`../providers/${rel}`);
 };
@@ -120,7 +123,7 @@ test('netmirror: placeholder master (throttle) is still rejected AND reported as
         master: DECOY,
     });
     const { getNetmirrorStreams } = fresh('netmirror');
-    await assert.rejects(getNetmirrorStreams('5002', 'movie'), /placeholder/);
+    await assert.rejects(getNetmirrorStreams('5002', 'movie'), /placeholder|throttled/);
 });
 
 test('netmirror: Netflix ok with nothing + no title match on newtv is a clean empty', async (t) => {

@@ -1,5 +1,5 @@
 'use strict';
-const { test } = require('node:test');
+const { test, beforeEach } = require('node:test');
 const assert = require('node:assert');
 const path = require('path');
 
@@ -10,6 +10,7 @@ const path = require('path');
 // prod VM got `403 Page Not Found` from every search, which was cached as
 // "no rows" (N1). disney asked the same `hs` catalogue twice (N4).
 process.env.NETMIRROR_PLATFORM_GAP_MS = '1';
+process.env.NETMIRROR_BUDGET_CALLS = '1000';
 function stub(rel, exports) {
     const id = require.resolve(path.join(__dirname, '..', rel));
     require.cache[id] = { id, filename: id, loaded: true, exports };
@@ -21,6 +22,10 @@ stub('lib/media/mp4AudioProbe.js', {
 });
 
 const { getNetmirrorStreams } = require('../providers/netmirror');
+
+// N7: the NetMirror guard is process-wide; each test starts from a clean one.
+const { guard } = require('../utils/netmirrorGuard');
+beforeEach(() => guard.reset());
 
 const resp = (status, text) => ({
     ok: status >= 200 && status < 300, status,
@@ -116,15 +121,17 @@ test('an unlabelled mp4 reuses the Netflix search and post for the catalogue row
     }
 });
 
-test('a 403 Page Not Found search is a failure that triggers base rediscovery, not "no rows"', async () => {
+test('a 403 Page Not Found search blocks newtv (N7): the rest are not asked, rows kept', async () => {
     route({ blocked: ['pv', 'hs'] });
     const out = await getNetmirrorStreams(801690, 'movie');
-    assert.match(String(out.upstreamError), /403/, 'reported as an upstream failure');
     assert.ok(out.find((s) => s.url === 'https://cdn.example/nf/1080.mp4'), 'Netflix rows kept');
-    assert.equal(calls.checknewtv, 0, 'base still cached from the earlier lookups');
+    assert.ok(out.find((s) => s.url === 'https://cdn.example/hls/nf/master.m3u8'), 'nf catalogue row kept');
+    assert.deepEqual(calls.search, ['nf', 'pv'], 'hs is not asked after the pv refusal');
+    assert.ok(guard.newtvBlockedMs() > 0);
 
-    // pv and hs failed twice in a row: the next lookup asks checknewtv again.
+    // The next lookup sends no newtv request at all.
     route({ blocked: ['pv', 'hs'] });
     await getNetmirrorStreams(801691, 'movie').catch(() => {});
-    assert.equal(calls.checknewtv, 1, 'rediscovered the newtv base once');
+    assert.deepEqual(calls.search, []);
+    assert.equal(calls.checknewtv, 0);
 });

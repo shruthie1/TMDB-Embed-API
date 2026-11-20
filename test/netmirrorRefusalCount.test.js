@@ -1,5 +1,5 @@
 'use strict';
-const { test } = require('node:test');
+const { test, beforeEach } = require('node:test');
 const assert = require('node:assert');
 const path = require('path');
 
@@ -8,6 +8,7 @@ const path = require('path');
 // refusal, so the newtv base was rediscovered after ONE real failure. Only a
 // real request counts.
 process.env.NETMIRROR_PLATFORM_GAP_MS = '1';
+process.env.NETMIRROR_BUDGET_CALLS = '1000';
 function stub(rel, exports) {
     const id = require.resolve(path.join(__dirname, '..', rel));
     require.cache[id] = { id, filename: id, loaded: true, exports };
@@ -16,6 +17,10 @@ stub('utils/tmdb.js', { getDetails: async () => ({ title: 'Radhe Shyam', release
 stub('lib/media/mp4AudioProbe.js', { probeAudioTracks: async () => [{ language: null, codec: 'aac', channels: 2 }] });
 
 const { getNetmirrorStreams } = require('../providers/netmirror');
+
+// N7: the NetMirror guard is process-wide; each test starts from a clean one.
+const { guard } = require('../utils/netmirrorGuard');
+beforeEach(() => guard.reset());
 
 const resp = (status, text) => ({
     ok: status >= 200 && status < 300, status,
@@ -46,9 +51,9 @@ test('a memoised refusal is not counted a second time', async () => {
     } finally {
         console.log = orig;
     }
-    // 3 real refused searches (nf once, memo replays the nf catalogue, pv, hs).
-    assert.equal(calls.search, 3);
-    // nf(1) pv(2 -> rediscover) hs(1): one rediscovery, two checknewtv.
-    assert.equal(logs.filter((l) => /rediscovering on next resolve/.test(l)).length, 1);
-    assert.equal(calls.checknewtv, 2);
+    // N7: the first refusal blocks newtv, so it is the only one: no second
+    // count, no rediscovery, one checknewtv.
+    assert.equal(calls.search, 1);
+    assert.equal(logs.filter((l) => /rediscovering on next resolve/.test(l)).length, 0);
+    assert.equal(calls.checknewtv, 1);
 });

@@ -1,5 +1,5 @@
 'use strict';
-const { test } = require('node:test');
+const { test, beforeEach } = require('node:test');
 const assert = require('node:assert');
 const path = require('path');
 
@@ -9,6 +9,7 @@ const path = require('path');
 // and cached; it is now an upstream failure that counts toward rediscovering
 // the newtv base. Netflix rows are still returned with it.
 process.env.NETMIRROR_PLATFORM_GAP_MS = '1';
+process.env.NETMIRROR_BUDGET_CALLS = '1000';
 function stub(rel, exports) {
     const id = require.resolve(path.join(__dirname, '..', rel));
     require.cache[id] = { id, filename: id, loaded: true, exports };
@@ -18,6 +19,10 @@ stub('utils/tmdb.js', { getDetails: async () => ({ title: 'Test Film', release_d
 stub('lib/media/mp4AudioProbe.js', { probeAudioTracks: async () => [] });
 
 const { getNetmirrorStreams } = require('../providers/netmirror');
+
+// N7: the NetMirror guard is process-wide; each test starts from a clean one.
+const { guard } = require('../utils/netmirrorGuard');
+beforeEach(() => guard.reset());
 
 const PAGE_NOT_FOUND = '<!DOCTYPE html><html><head><title>Page Not Found</title></head><body><h1>Page Not Found</h1></body></html>';
 const json = (body) => ({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body), arrayBuffer: async () => new ArrayBuffer(0), headers: new Map() });
@@ -42,14 +47,15 @@ function route(newtvSearch) {
     };
 }
 
-test('a catalogue answering Page Not Found is a failure; Netflix rows kept and backed off', async () => {
+test('a catalogue answering Page Not Found blocks newtv; Netflix rows kept and cached', async () => {
     route(() => html(200, PAGE_NOT_FOUND));
     const out = await getNetmirrorStreams(5001, 'movie');
-    assert.match(String(out.upstreamError), /refused \(Page Not Found\)/, 'Page Not Found is a refusal');
+    // N7: a refusal is an IP block, not "no rows" and not a blip: newtv is
+    // not asked again for 6h, and the reachable rows are the answer.
+    assert.ok(guard.newtvBlockedMs() > 0, 'newtv blocked');
+    assert.equal(out.upstreamError, undefined);
     assert.deepEqual(out.map((s) => s.url), ['https://cdn.example/nf/1080.mp4']);
-    // 3 = netflix-lang's nf search (the nf catalogue reuses its memoised
-    // refusal) + primevideo + hotstar. disney is gone (same hs catalogue).
-    assert.equal(calls.search, 3, 'each catalogue asked once');
+    assert.equal(calls.search, 1, 'one refused search, not one per catalogue');
 
     // Backed off for 90s with the Netflix rows: no upstream request.
     const before = { ...calls };

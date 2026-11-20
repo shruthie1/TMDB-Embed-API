@@ -91,7 +91,52 @@ async function nmFetch(url, options = {}, fetchImpl = fetch) {
     throw lastErr;
 }
 
-const streamCache = new Map();
+// N7: every NetMirror call asks utils/netmirrorGuard first (cool-down, newtv
+// block, call budget), and every good answer is kept there while it is valid.
+// The old in-memory streamCache lives in the guard now, so it survives a
+// restart too.
+const { guard } = require('../utils/netmirrorGuard');
+const { urlExpiresAt, earliestStreamExpiry } = require('../lib/urlExpiry');
+
+const GATE_REASON = {
+    NM_BUDGET: 'netmirror-budget',
+    NM_THROTTLED: 'netmirror-throttled',
+    NEWTV_BLOCKED: 'netmirror-newtv-blocked',
+};
+function gateError(code) {
+    const e = new Error(GATE_REASON[code]);
+    e.code = code;
+    e.gate = true;
+    return e;
+}
+
+// Why the next newtv call would not be sent, or null. Order matters: a block
+// or a cool-down must not spend a budget token.
+function newtvSkipCode() {
+    if (guard.newtvBlockedMs()) return 'NEWTV_BLOCKED';
+    if (guard.coolingMs()) return 'NM_THROTTLED';
+    if (guard.tokens() < 1) return 'NM_BUDGET';
+    return null;
+}
+
+// Every newtv request (checknewtv, search, post, player, episodes) goes
+// through here. Never waits for a token: an empty bucket skips at once so the
+// /api/streams answer is never held up by the budget.
+async function newtvFetch(url, options) {
+    const skip = newtvSkipCode();
+    if (skip) throw gateError(skip);
+    if (!guard.take()) throw gateError('NM_BUDGET');
+    let kind = 'newtv';
+    try { kind = new URL(url).pathname.split('/').pop() || kind; } catch { /* keep */ }
+    console.log(`[netmirror] call newtv ${kind} tokens-left=${guard.tokens()}`);
+    const response = await nmFetch(url, options);
+    if (response.status === 429) {
+        guard.throttleOpen('http-429');
+        throw gateError('NM_THROTTLED');
+    }
+    return response;
+}
+
 const inflight = new Map();
 let resolvedApiUrl = '';
 // The newtv api base used to be cached for the life of the process, so a
@@ -105,7 +150,7 @@ let newTvFailures = 0;
 
 // `err` marked memoReplay is a refusal already counted on its real request.
 function noteNewTvFailure(err) {
-    if (!resolvedApiUrl || (err && err.memoReplay)) return;
+    if (!resolvedApiUrl || (err && (err.memoReplay || err.gate))) return;
     newTvFailures += 1;
     if (newTvFailures >= NEWTV_MAX_FAILURES) {
         console.log(`[NetMirror] newtv api ${resolvedApiUrl} failed ${newTvFailures}x - rediscovering on next resolve`);
@@ -225,7 +270,7 @@ async function resolveNewTvApi() {
 
     for (const domain of domains) {
         try {
-            const response = await nmFetch(`${domain}/checknewtv.php`, {
+            const response = await newtvFetch(`${domain}/checknewtv.php`, {
                 headers: { ...newTvHeaders('nf') },
                 signal: AbortSignal.timeout(10000)
             });
@@ -235,8 +280,11 @@ async function resolveNewTvApi() {
                 resolvedApiAt = Date.now();
                 return resolvedApiUrl;
             }
-        } catch {
-            // Try the next rotating discovery domain.
+        } catch (err) {
+            // A gate (block, cool-down, budget) stops discovery: walking the
+            // other domains would spend more of the same budget.
+            if (err && err.gate) throw err;
+            // Otherwise try the next rotating discovery domain.
         }
     }
     throw new Error('NetMirror NewTV API discovery failed');
@@ -260,10 +308,15 @@ async function fetchNetflix(tmdbId, type, title, season, episode) {
         // the one this call started with, and the Referer and caption URLs below
         // must match whichever host actually answered.
         let base = apiBase();
+        let throttled = false;
         const data = await withMirror(async (candidate) => {
+            // The mirrors are one origin: after a 429 (or any open cool-down)
+            // the rest are not asked.
+            if (guard.coolingMs()) { throttled = true; return null; }
             const url = type === 'series'
                 ? `${candidate}/api/embed-tmdb/${tmdbId}?type=tv&se=${season}&ep=${episode}`
                 : `${candidate}/api/embed-tmdb/${tmdbId}`;
+            console.log('[netmirror] call embed-tmdb');
             const response = await nmFetch(url, {
                 headers: {
                     Accept: 'application/json, text/plain, */*',
@@ -273,6 +326,11 @@ async function fetchNetflix(tmdbId, type, title, season, episode) {
                 },
                 signal: AbortSignal.timeout(20000)
             });
+            if (response.status === 429) {
+                guard.throttleOpen('http-429');
+                throttled = true;
+                return null;
+            }
             if (!response.ok) { lastStatus = response.status; return null; } // null = try the next mirror
             const body = await response.json();
             if (body.ok !== true) { answeredNo = true; return null; }
@@ -280,6 +338,7 @@ async function fetchNetflix(tmdbId, type, title, season, episode) {
             return body;
         });
         if (!data) {
+            if (throttled) return failure(GATE_REASON.NM_THROTTLED);
             if (answeredNo) return [];
             return failure(`netflix: every mirror failed (last HTTP ${lastStatus})`);
         }
@@ -389,7 +448,7 @@ async function getEpisodes(api, showId, postData, config) {
 
     if (postData.nextPageShow === 1 && selectedSeasonId) {
         try {
-            const response = await nmFetch(
+            const response = await newtvFetch(
                 `${api}/newtv/episodes.php?id=${encodeURIComponent(selectedSeasonId)}&page=2`,
                 { headers: newTvHeaders(config.ott), signal: AbortSignal.timeout(15000) }
             );
@@ -525,7 +584,11 @@ async function masterMatchesTitle(masterUrl, wantedId, referer, seen) {
         if (!videoIds.size) return true;
 
         const want = String(wantedId);
-        if (videoIds.has(want)) return true;
+        if (videoIds.has(want)) {
+            // Proof of a real master: this is what closes a cool-down.
+            if (seen) seen.real = true;
+            return true;
+        }
         console.log(`[NetMirror] master for ${want} serves video from ${[...videoIds].join(',')}`);
         return false;
     } catch {
@@ -576,7 +639,13 @@ async function readNewTvJson(response) {
     try {
         return JSON.parse(text);
     } catch (err) {
-        if (PAGE_NOT_FOUND_RE.test(text)) throw new Error(`HTTP ${response.status}: newtv refused (Page Not Found)`);
+        if (PAGE_NOT_FOUND_RE.test(text)) {
+            // N7: an IP block, not a blip. Stop asking newtv for 6h (one
+            // re-probe after), instead of three refused searches per lookup.
+            console.log(`[NetMirror] HTTP ${response.status}: newtv refused (Page Not Found)`);
+            guard.newtvBlock('page-not-found');
+            throw gateError('NEWTV_BLOCKED');
+        }
         if (response.status === 404) return null;
         throw new Error(`HTTP ${response.status}: ${err.message}`);
     }
@@ -587,17 +656,56 @@ async function readNewTvJson(response) {
 // the same two URLs; the memo makes the second ask free, so resolving the
 // Netflix catalogue costs one player.php more, not three requests. A refusal
 // is memoised too: the same URL will not answer 1.2s later in the same lookup.
-async function newTvJson(memo, url, ott, extra) {
-    const key = `${ott} ${url}`;
+//
+// N7: answers are also kept across lookups and restarts (utils/netmirrorGuard).
+// A catalogue's search match and its post.php (languages, runtime, seasons)
+// change on the scale of days, so they are reused for 7 days; "no rows" is
+// kept 30 min. The key leaves out the newtv base, which rotates, and the base
+// is only resolved (checknewtv) when a request must really be sent.
+const NEWTV_LONG_TTL_MS = Number(process.env.NETMIRROR_META_TTL_MS) || 7 * 24 * 60 * 60 * 1000;
+const NEWTV_EMPTY_TTL_MS = 30 * 60 * 1000;
+const POST_FIELDS = ['type', 'year', 'main_id', 'runtime', 'lang', 'episodes', 'season',
+    'nextPageShow', 'nextPageSeason'];
+
+function trimNewTv(pathQuery, data) {
+    if (!data || typeof data !== 'object') return data;
+    if (pathQuery.startsWith('/newtv/search.php')) {
+        return { searchResult: (data.searchResult || []).map((r) => r && { id: r.id, t: r.t || r.title }) };
+    }
+    if (pathQuery.startsWith('/newtv/post.php')) {
+        const out = {};
+        for (const f of POST_FIELDS) if (data[f] !== undefined) out[f] = data[f];
+        return out;
+    }
+    return data;
+}
+
+function newTvTtl(pathQuery, data) {
+    if (data === null) return NEWTV_EMPTY_TTL_MS;
+    if (pathQuery.startsWith('/newtv/search.php')) {
+        return (data.searchResult || []).length ? NEWTV_LONG_TTL_MS : NEWTV_EMPTY_TTL_MS;
+    }
+    return NEWTV_LONG_TTL_MS;
+}
+
+async function newTvJson(memo, ott, pathQuery, extra) {
+    const key = `nt|${ott}|${pathQuery}`;
     if (memo && memo.has(key)) {
         const hit = memo.get(key);
         if (hit.error) { hit.error.memoReplay = true; throw hit.error; }
         return hit.data;
     }
+    const kept = guard.cacheGet(key);
+    if (kept !== undefined) {
+        if (memo) memo.set(key, { data: kept });
+        return kept;
+    }
     try {
-        const data = await readNewTvJson(await nmFetch(url,
-            { headers: newTvHeaders(ott, extra), signal: AbortSignal.timeout(15000) }));
+        const api = await resolveNewTvApi();
+        const data = trimNewTv(pathQuery, await readNewTvJson(await newtvFetch(`${api}${pathQuery}`,
+            { headers: newTvHeaders(ott, extra), signal: AbortSignal.timeout(15000) })));
         if (memo) memo.set(key, { data });
+        guard.cacheSet(key, data, newTvTtl(pathQuery, data));
         return data;
     } catch (error) {
         if (memo) memo.set(key, { error });
@@ -605,10 +713,17 @@ async function newTvJson(memo, url, ott, extra) {
     }
 }
 
+// What a gate stop means for one catalogue: a newtv block is a lasting known
+// state (no error, the reachable answer is complete); a cool-down or an empty
+// budget is "unknown right now".
+function gateOutcome(error) {
+    if (error.code === 'NEWTV_BLOCKED') return Object.assign([], { newtvBlocked: true });
+    return failure(error.message);
+}
+
 async function fetchPlatform(platform, title, type, season, episode, memo) {
     try {
         const config = PLATFORM_MAP[platform];
-        const api = await resolveNewTvApi();
         let matches = [];
         let lastSeen = [];
         // NetMirror's search matches on punctuation too, while TMDB titles carry
@@ -617,8 +732,8 @@ async function fetchPlatform(platform, title, type, season, episode, memo) {
         // to spaces return the real entries. Try the TMDB spelling first, then
         // progressively looser ones, and stop at the first query that matches.
         for (const query of searchSpellings(title)) {
-            const searchData = await newTvJson(memo,
-                `${api}/newtv/search.php?s=${encodeURIComponent(query)}`, config.ott);
+            const searchData = await newTvJson(memo, config.ott,
+                `/newtv/search.php?s=${encodeURIComponent(query)}`);
             if (searchData === null) {
                 console.log(`[NetMirror] ${platform} catalogue: page not found for "${query}" - no rows`);
                 return [];
@@ -640,13 +755,17 @@ async function fetchPlatform(platform, title, type, season, episode, memo) {
         const out = [];
         let err = null;
         for (const match of matches.slice(0, MAX_LANGUAGE_ROWS)) {
-            const rows = await resolveMatch(api, config, platform, match, title, type, season, episode, memo);
+            const rows = await resolveMatch(config, platform, match, title, type, season, episode, memo);
             if (rows.upstreamError) err = rows.upstreamError;
+            if (rows.newtvBlocked) return Object.assign(out, { newtvBlocked: true });
             out.push(...rows);
+            // A throttle seen on this row: the other rows would be throttled too.
+            if (err === GATE_REASON.NM_THROTTLED || err === GATE_REASON.NM_BUDGET) break;
         }
         return err ? failure(err, out) : out;
     } catch (error) {
         console.log(`[NetMirror] ${platform} failed: ${error.message}`);
+        if (error.gate) return gateOutcome(error);
         noteNewTvFailure(error);
         return failure(`${platform}: ${error.message}`);
     }
@@ -657,12 +776,80 @@ async function fetchPlatform(platform, title, type, season, episode, memo) {
 // this is capped rather than unbounded.
 const MAX_LANGUAGE_ROWS = Number(process.env.NETMIRROR_MAX_LANG_ROWS) || 4;
 
-async function resolveMatch(api, config, platform, match, title, type, season, episode, memo) {
+// player.php + the master check for one catalogue id. Returns
+// { video_link, referer, audio, real } or a failure()/[] array.
+//
+// Throttle signals (N7), each opening the NetMirror-wide cool-down:
+//   - the master serves the shared clip (masterMatchesTitle false; CLAUDE.md
+//     rule 4: still rejected, never served);
+//   - "status":"otp" with no link, or with a master nothing proved real.
+// A master proven real closes the cool-down and resets its doubling.
+async function resolvePlayer(config, platform, targetId, title, postLangs) {
+    const api = await resolveNewTvApi();
+    const playerResponse = await newtvFetch(
+        `${api}/newtv/player.php?id=${encodeURIComponent(targetId)}`,
+        { headers: newTvHeaders(config.ott, { Usertoken: '' }), signal: AbortSignal.timeout(15000) }
+    );
+    const player = await readNewTvJson(playerResponse);
+    if (player === null) {
+        console.log(`[NetMirror] ${platform} player: page not found for id ${targetId} - no rows`);
+        return [];
+    }
+    const otp = player.status === 'otp';
+    if (player.status && player.status !== 'ok') {
+        console.log(`[NetMirror] ${platform} player status: ${player.status} — accepting if link present`);
+    }
+    if (!player.video_link) {
+        if (otp) {
+            guard.throttleOpen('otp');
+            return failure(GATE_REASON.NM_THROTTLED);
+        }
+        return [];
+    }
+    const referer = player.referer || api;
+
+    // Reject the decoy master.
+    //
+    // NetMirror answers for titles it does not really carry by returning a
+    // master whose AUDIO renditions belong to the requested title but whose
+    // VIDEO rungs all point at a shared placeholder file. Measured on
+    // movie/256040: the master is .../hls/hs/1000074338.m3u8, its audio is
+    // files/1000074338/a/{0,1,2} and every one of its 1080p/720p/480p video
+    // rungs is files/220884 - the same placeholder this file's comment at
+    // pickSearchMatches already records as appearing under unrelated films.
+    // It fetches with HTTP 200 and real video/mp2t segments, so nothing
+    // downstream can tell it is the wrong film; the picture simply is not
+    // the title, and the player's startup fallback bounces straight back to
+    // another provider. Catch it here, where the id is known.
+    const master = {};
+    if (!(await masterMatchesTitle(player.video_link, targetId, referer, master))) {
+        // Still rejected (CLAUDE.md rule 4), but reported as a throttle:
+        // the title IS there, so this must not be cached as "no streams".
+        console.log(`[NetMirror] ${platform} returned a placeholder master for "${title}" — rejecting`);
+        guard.throttleOpen('clip');
+        return failure(GATE_REASON.NM_THROTTLED);
+    }
+    if (master.real) guard.throttleClose('real-master');
+    else if (otp) guard.throttleOpen('otp');
+
+    // Declare audio only when the master was read and really lists
+    // renditions. An unread master (fetch failed open) claims nothing.
+    const audio = audioFromMaster(master.body, postLangs);
+    if (audio.length) {
+        console.log(`[NetMirror] ${platform} master lists ${audio.length} audio rendition(s):`
+            + ` ${audio.map((a) => a.language || '?').join('/')} - selectable`);
+    } else if (master.body !== undefined) {
+        console.log(`[NetMirror] ${platform} master lists no audio renditions - not selectable`);
+    }
+    return { video_link: player.video_link, referer, audio, real: Boolean(master.real) };
+}
+
+async function resolveMatch(config, platform, match, title, type, season, episode, memo) {
     const first = match.item;
     try {
 
-        const postData = await newTvJson(memo,
-            `${api}/newtv/post.php?id=${encodeURIComponent(first.id)}`, config.ott, { Lastep: '', Usertoken: '' });
+        const postData = await newTvJson(memo, config.ott,
+            `/newtv/post.php?id=${encodeURIComponent(first.id)}`, { Lastep: '', Usertoken: '' });
         if (postData === null) {
             console.log(`[NetMirror] ${platform} post: page not found for id ${first.id} - no rows`);
             return [];
@@ -670,7 +857,7 @@ async function resolveMatch(api, config, platform, match, title, type, season, e
 
         let targetId = first.id;
         if (type === 'series') {
-            const episodes = await getEpisodes(api, first.id, postData, config);
+            const episodes = await getEpisodes(await resolveNewTvApi(), first.id, postData, config);
             const target = episodes.find((item) => item.s === season && item.ep === episode);
             if (!target) return [];
             targetId = target.id;
@@ -680,19 +867,6 @@ async function resolveMatch(api, config, platform, match, title, type, season, e
             targetId = postData.main_id || first.id;
         }
 
-        const playerResponse = await nmFetch(
-            `${api}/newtv/player.php?id=${encodeURIComponent(targetId)}`,
-            { headers: newTvHeaders(config.ott, { Usertoken: '' }), signal: AbortSignal.timeout(15000) }
-        );
-        const player = await readNewTvJson(playerResponse);
-        if (player === null) {
-            console.log(`[NetMirror] ${platform} player: page not found for id ${targetId} - no rows`);
-            return [];
-        }
-        if (player.status && player.status !== 'ok') {
-            console.log(`[NetMirror] ${platform} player status: ${player.status} — accepting if link present`);
-        }
-        if (!player.video_link) return [];
         const label = platform === 'primevideo'
             ? 'Prime Video'
             : platform.charAt(0).toUpperCase() + platform.slice(1);
@@ -710,52 +884,41 @@ async function resolveMatch(api, config, platform, match, title, type, season, e
         // Carry `language` as a field too so callers do not have to parse it.
         const langTag = languages.length ? ` [${languages.join('/')}]` : '';
 
-        // Reject the decoy master.
-        //
-        // NetMirror answers for titles it does not really carry by returning a
-        // master whose AUDIO renditions belong to the requested title but whose
-        // VIDEO rungs all point at a shared placeholder file. Measured on
-        // movie/256040: the master is .../hls/hs/1000074338.m3u8, its audio is
-        // files/1000074338/a/{0,1,2} and every one of its 1080p/720p/480p video
-        // rungs is files/220884 - the same placeholder this file's comment at
-        // pickSearchMatches already records as appearing under unrelated films.
-        // It fetches with HTTP 200 and real video/mp2t segments, so nothing
-        // downstream can tell it is the wrong film; the picture simply is not
-        // the title, and the player's startup fallback bounces straight back to
-        // another provider. Catch it here, where the id is known.
-        const master = {};
-        if (!(await masterMatchesTitle(player.video_link, targetId, player.referer || api, master))) {
-            // Still rejected (CLAUDE.md rule 4), but reported as a throttle:
-            // the title IS there, so this must not be cached as "no streams".
-            console.log(`[NetMirror] ${platform} returned a placeholder master for "${title}" — rejecting`);
-            return failure(`${platform}: throttled (placeholder master)`);
+        // N7: a player link whose master was already proven real is reused
+        // until the link expires (its stated expiry, else 25 min): no
+        // player.php and no master fetch.
+        const playerKey = `nt|${config.ott}|player|${targetId}`;
+        let resolved = guard.cacheGet(playerKey);
+        if (resolved) {
+            console.log(`[netmirror] cache-hit player ${platform} ${targetId}`);
+        } else {
+            resolved = await resolvePlayer(config, platform, targetId, title, postLangs);
+            if (resolved.upstreamError || !resolved.video_link) return Array.isArray(resolved) ? resolved : [];
+            if (resolved.real) {
+                const exp = urlExpiresAt(resolved.video_link, guard.now());
+                const ttl = exp ? exp - guard.now() - 60 * 1000 : STREAM_CACHE_TTL;
+                guard.cacheSet(playerKey, { video_link: resolved.video_link, referer: resolved.referer,
+                    audio: resolved.audio }, ttl);
+            }
         }
-
-        // Declare audio only when the master was read and really lists
-        // renditions. An unread master (fetch failed open) claims nothing.
-        const audio = audioFromMaster(master.body, postLangs);
-        if (audio.length) {
-            console.log(`[NetMirror] ${platform} master lists ${audio.length} audio rendition(s):`
-                + ` ${audio.map((a) => a.language || '?').join('/')} - selectable`);
-        } else if (master.body !== undefined) {
-            console.log(`[NetMirror] ${platform} master lists no audio renditions - not selectable`);
-        }
+        const audio = resolved.audio || [];
 
         return [{
             name: `NetMirror${langTag} | ${label}`,
             title: `${title}\nAuto`,
-            url: player.video_link,
+            url: resolved.video_link,
             quality: 'Auto',
             provider: 'NetMirror',
             ...(languages.length ? { language: languages.join('/') } : {}),
             ...(audio.length ? { audio, selectableAudio: true } : {}),
             headers: {
-                Referer: player.referer || api,
+                Referer: resolved.referer,
                 'User-Agent': nextUA()
             }
         }];
     } catch (error) {
         console.log(`[NetMirror] ${platform} failed: ${error.message}`);
+        if (error.gate) return gateOutcome(error);
         noteNewTvFailure(error);
         return failure(`${platform}: ${error.message}`);
     }
@@ -778,10 +941,9 @@ async function resolveMatch(api, config, platform, match, title, type, season, e
 async function netflixLanguageFromPost(title, type, year, memo) {
     try {
         const ott = PLATFORM_MAP.netflix.ott;
-        const api = await resolveNewTvApi();
         const query = searchSpellings(title)[0] || title;
-        const searchData = await newTvJson(memo,
-            `${api}/newtv/search.php?s=${encodeURIComponent(query)}`, ott);
+        const searchData = await newTvJson(memo, ott,
+            `/newtv/search.php?s=${encodeURIComponent(query)}`);
         if (searchData === null) return null;
         noteNewTvOk();
         const match = pickSearchMatches(searchData.searchResult || [], title)[0];
@@ -789,8 +951,8 @@ async function netflixLanguageFromPost(title, type, year, memo) {
             console.log(`[NetMirror] netflix-lang no catalogue match for "${title}"`);
             return null;
         }
-        const post = await newTvJson(memo,
-            `${api}/newtv/post.php?id=${encodeURIComponent(match.item.id)}`, ott, { Lastep: '', Usertoken: '' });
+        const post = await newTvJson(memo, ott,
+            `/newtv/post.php?id=${encodeURIComponent(match.item.id)}`, { Lastep: '', Usertoken: '' });
         if (post === null) return null;
         if (type === 'movie' && (post.type === 't' || (post.episodes || []).filter(Boolean).length)) {
             console.log(`[NetMirror] netflix-lang "${title}" matched a series entry - skipped`);
@@ -936,6 +1098,14 @@ function hdOnly(streams, forceHd) {
     return hd.length ? hd : streams;
 }
 
+// How long a set of rows stays good: 25 min, or less when a url states an
+// earlier expiry (a minute of margin).
+function rowsTtl(streams) {
+    const exp = earliestStreamExpiry(streams, guard.now());
+    const left = exp ? exp - guard.now() - 60 * 1000 : STREAM_CACHE_TTL;
+    return Math.max(0, Math.min(STREAM_CACHE_TTL, left));
+}
+
 async function getNetmirrorStreams(tmdbId, mediaType = 'movie', seasonNum = null, episodeNum = null) {
     console.log(`[NetMirror] Fetching streams for TMDB ID: ${tmdbId}, Type: ${mediaType}`);
 
@@ -952,8 +1122,10 @@ async function getNetmirrorStreams(tmdbId, mediaType = 'movie', seasonNum = null
         }
 
         const key = `${tmdbId}:${type}:${season || 0}:${episode || 0}`;
-        const cached = streamCache.get(key);
-        if (cached && cached.expiresAt > Date.now()) {
+        const rowsKey = `rows|${key}`;
+        const goodKey = `good|${key}`;
+        const cached = guard.cacheGet(rowsKey);
+        if (cached) {
             if (cached.error && !cached.streams.length) {
                 // Not via the catch below: that would re-arm the backoff on
                 // every request and never let NetMirror be asked again.
@@ -964,6 +1136,17 @@ async function getNetmirrorStreams(tmdbId, mediaType = 'movie', seasonNum = null
         }
         const running = inflight.get(key);
         if (running) return running;
+
+        // N7: inside a cool-down NetMirror gets zero calls of any kind. The
+        // last good rows for this title are served while their urls are valid.
+        const cooling = guard.coolingMs();
+        if (cooling) {
+            const good = guard.cacheGet(goodKey);
+            console.log(`[netmirror] throttle-skip tmdbId=${tmdbId} left=${Math.round(cooling / 1000)}s`
+                + ` cached-rows=${good ? good.length : 0}`);
+            if (good && good.length) return failure(GATE_REASON.NM_THROTTLED, hdOnly(good, true));
+            return Promise.reject(new Error(GATE_REASON.NM_THROTTLED));
+        }
 
         const request = (async () => {
             const direct = await fetchNetflix(tmdbId, type, title, season, episode);
@@ -1038,13 +1221,28 @@ async function getNetmirrorStreams(tmdbId, mediaType = 'movie', seasonNum = null
             // audio mp4, the nf catalogue gives the HLS master with its
             // EXT-X-MEDIA audio. Both rows stay: the mp4 is a picture-quality
             // choice, the master is the language choice.
+            //
+            // N7: a newtv block, a cool-down or an empty budget stops the loop
+            // before the next catalogue, with no gap sleep and no request.
             let asked = askedNetflix ? 1 : 0;
+            let newtvBlocked = false;
             for (const platform of PLATFORM_ORDER) {
+                const skip = newtvSkipCode();
+                if (skip) {
+                    console.log(`[netmirror] skip-catalogues from=${platform} reason=${GATE_REASON[skip]}`);
+                    if (skip === 'NEWTV_BLOCKED') newtvBlocked = true;
+                    else upstreamError = GATE_REASON[skip];
+                    break;
+                }
                 if (asked++) await sleep(PLATFORM_GAP_MS);
                 const found = await fetchPlatform(platform, title, type, season, episode, memo);
+                if (found.newtvBlocked) newtvBlocked = true;
                 if (found.upstreamError) upstreamError = found.upstreamError;
                 if (found.length) collected.push(...found);
             }
+            // A block is known and lasting: with rows, what the VM can reach is
+            // the answer. With none, it is unknown, not "no streams".
+            if (newtvBlocked && !collected.length && !upstreamError) upstreamError = GATE_REASON.NEWTV_BLOCKED;
             // Check the CDN BEFORE caching. The 429 comes from the file host,
             // not the API, so without this a throttled url is stored as a good
             // stream for 25 minutes and fails later in the player instead.
@@ -1066,7 +1264,7 @@ async function getNetmirrorStreams(tmdbId, mediaType = 'movie', seasonNum = null
                 ttl = throttled ? Math.min(CDN_COOLDOWN_MS, EMPTY_CACHE_TTL) : EMPTY_CACHE_TTL;
                 why = ` (upstream failed: ${upstreamError} - retrying in ${Math.round(ttl / 1000)}s)`;
             } else if (streams.length) {
-                ttl = STREAM_CACHE_TTL;
+                ttl = rowsTtl(streams);
             } else if (throttled) {
                 ttl = Math.min(CDN_COOLDOWN_MS, EMPTY_CACHE_TTL);
                 why = ` (CDN throttled - retrying in ${Math.round(ttl / 1000)}s)`;
@@ -1074,8 +1272,19 @@ async function getNetmirrorStreams(tmdbId, mediaType = 'movie', seasonNum = null
                 ttl = EMPTY_CACHE_TTL;
                 why = ` (empty - backing off ${Math.round(EMPTY_CACHE_TTL / 1000)}s)`;
             }
-            streamCache.set(key, { streams, expiresAt: Date.now() + ttl, error: upstreamError });
+            guard.cacheSet(rowsKey, { streams, error: upstreamError }, ttl);
+            // The last good rows, for a later cool-down or empty budget. A
+            // partial answer replaces them only when it is not smaller.
+            const good = guard.cacheGet(goodKey);
+            if (streams.length && (!upstreamError || !good || streams.length >= good.length)) {
+                guard.cacheSet(goodKey, streams, rowsTtl(streams));
+            }
             console.log(`[NetMirror] ${tmdbId} streams ready: ${streams.length}${why || ''}`);
+            const gated = upstreamError === GATE_REASON.NM_BUDGET || upstreamError === GATE_REASON.NM_THROTTLED;
+            if (gated && good && good.length > streams.length) {
+                console.log(`[netmirror] serve-cached tmdbId=${tmdbId} rows=${good.length} reason=${upstreamError}`);
+                return failure(upstreamError, hdOnly(good, true));
+            }
             if (upstreamError && !streams.length) throw new Error(upstreamError);
             return upstreamError ? failure(upstreamError, [...streams]) : streams;
         })().finally(() => inflight.delete(key));
@@ -1089,7 +1298,7 @@ async function getNetmirrorStreams(tmdbId, mediaType = 'movie', seasonNum = null
         console.error(`[NetMirror] Error: ${err.message} - backing off ${Math.round(EMPTY_CACHE_TTL / 1000)}s`);
         try {
             const k = `${tmdbId}:${type}:${seasonNum || 0}:${episodeNum || 0}`;
-            streamCache.set(k, { streams: [], expiresAt: Date.now() + EMPTY_CACHE_TTL, error: err.message });
+            guard.cacheSet(`rows|${k}`, { streams: [], error: err.message }, EMPTY_CACHE_TTL);
         } catch (_) { /* key build is best effort */ }
         throw err; // unknown, not "no streams"
     }

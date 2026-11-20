@@ -1,5 +1,5 @@
 'use strict';
-const { test } = require('node:test');
+const { test, beforeEach } = require('node:test');
 const assert = require('node:assert');
 const path = require('path');
 
@@ -7,6 +7,7 @@ const path = require('path');
 // one audio track tagged `und`, so it shipped languages:[] and lost to a
 // truncated labelled Castle file. Netflix's post.php names the language.
 process.env.NETMIRROR_PLATFORM_GAP_MS = '1';
+process.env.NETMIRROR_BUDGET_CALLS = '1000';
 function stub(rel, exports) {
     const id = require.resolve(path.join(__dirname, '..', rel));
     require.cache[id] = { id, filename: id, loaded: true, exports };
@@ -18,6 +19,10 @@ stub('lib/media/mp4AudioProbe.js', {
 });
 
 const { getNetmirrorStreams } = require('../providers/netmirror');
+
+// N7: the NetMirror guard is process-wide; each test starts from a clean one.
+const { guard } = require('../utils/netmirrorGuard');
+beforeEach(() => guard.reset());
 const { getStore, mediaIdentityOf } = require('../utils/store');
 
 const json = (body) => ({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body), arrayBuffer: async () => new ArrayBuffer(0), headers: new Map() });

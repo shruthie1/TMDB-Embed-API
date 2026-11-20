@@ -241,6 +241,7 @@ test('H4: a multi-track first row that already has Telugu costs one probe only',
 
 // ---------- H5 ----------
 process.env.NETMIRROR_PLATFORM_GAP_MS = '1';
+process.env.NETMIRROR_BUDGET_CALLS = '1000';
 process.env.NETMIRROR_API_BASE = 'https://nm.test';
 process.env.NEWTV_DOMAINS = 'https://disc.test';
 const tmdbPath = require.resolve(path.join(__dirname, '..', 'utils/tmdb.js'));
@@ -254,6 +255,7 @@ function freshNetmirror(t) {
     resolveImdbId: async () => 'tt1',
   };
   t.after(() => { require.cache[tmdbPath].exports = saved; global.fetch = realFetch; });
+  require('../utils/netmirrorGuard').guard.reset(); // N7 guard is process-wide
   delete require.cache[require.resolve('../providers/netmirror')];
   return require('../providers/netmirror');
 }
