@@ -233,9 +233,9 @@ class PlayerPrefs(private val kv: KeyValue) {
         set(v) = kv.put(FIT, v?.name)
 
     /**
-     * Phones default to Fill: a 16:9 film on a 20:9 phone otherwise leaves a
-     * black band down each side, which reads as "not full screen". TVs are
-     * 16:9, so Fit shows the whole picture there with no bars.
+     * Phones and TVs default to Fill: the picture opens filling the screen
+     * (crop to fill). A stored choice from the phone Fit control still wins.
      */
-    fun fitFor(isTv: Boolean): VideoFit = fit ?: if (isTv) VideoFit.Fit else VideoFit.Fill
+    @Suppress("UNUSED_PARAMETER")
+    fun fitFor(isTv: Boolean): VideoFit = fit ?: VideoFit.Fill
 }

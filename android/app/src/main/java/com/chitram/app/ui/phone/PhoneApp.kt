@@ -1,5 +1,6 @@
 package com.chitram.app.ui.phone
 
+import android.content.res.Configuration
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -105,6 +106,7 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -416,7 +418,11 @@ private fun PhoneDetail(nav: Nav, type: String, id: Long, rowPoster: String? = n
             item(key = "art") {
                 // Backdrop runs under the status bar; poster and title sit on its fade.
                 BoxWithConstraints(Modifier.fillMaxWidth()) {
-                    val artH = maxWidth * 9f / 16f + 40.dp
+                    // Landscape: a 16:9 backdrop of the full width is taller than the screen,
+                    // so cap it to 45% of screen height; title and Play then show without scrolling.
+                    val cfg = LocalConfiguration.current
+                    val wideArtH = maxWidth * 9f / 16f + 40.dp
+                    val artH = if (cfg.orientation == Configuration.ORIENTATION_LANDSCAPE) wideArtH.coerceAtMost(cfg.screenHeightDp.dp * 0.45f) else wideArtH
                     Box(Modifier.fillMaxWidth().height(artH + 96.dp)) {
                         Art(t.backdrop, "w780", Modifier.fillMaxWidth().height(artH), alignment = BiasAlignment(0f, -0.6f))
                         Box(Modifier.fillMaxWidth().height(artH).background(Brush.verticalGradient(0f to Tok.bg.copy(alpha = 0.35f), 0.25f to Color.Transparent, 0.7f to Tok.bg.copy(alpha = 0.6f), 1f to Tok.bg)))

@@ -22,7 +22,7 @@ class StoreTest {
         val p = PlayerPrefs(kv)
         assertEquals(null, p.fit) // nothing chosen yet
         assertEquals(VideoFit.Fill, p.fitFor(isTv = false)) // phone: fill the 20:9 panel
-        assertEquals(VideoFit.Fit, p.fitFor(isTv = true)) // TV: whole picture
+        assertEquals(VideoFit.Fill, p.fitFor(isTv = true)) // TV: fill too
         assertEquals(VideoFit.Fill, VideoFit.Fit.next())
         assertEquals(VideoFit.Stretch, VideoFit.Fill.next())
         assertEquals(VideoFit.Fit, VideoFit.Stretch.next())
