@@ -39,7 +39,10 @@ test('a probe answered with a full 200 body is released, not left holding a sock
     await new Promise((r) => proxy.once('listening', r));
     try {
         const target = `http://127.0.0.1:${origin.address().port}/film.mp4`;
-        const r = await fetch(`http://127.0.0.1:${proxy.address().port}/ts-proxy?url=${encodeURIComponent(target)}&tailPrefetch=0`);
+        // noSynth=1 keeps this on the HEAD + bytes=0-0 probe path. Without it a
+        // no-Range .mp4 now goes straight to the bounded open window, and this
+        // origin streams without end to any Range under backpressure.
+        const r = await fetch(`http://127.0.0.1:${proxy.address().port}/ts-proxy?url=${encodeURIComponent(target)}&tailPrefetch=0&noSynth=1`);
         await r.arrayBuffer();
         await sleep(500);
         assert.equal(open.size, 0, 'the probe response is still open on the origin');

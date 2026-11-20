@@ -386,6 +386,9 @@ function extractOriginalUrl(proxyUrl) {
 // `ptsOffset` routes SEGMENTS through /pts-rebase instead of /ts-proxy, so a
 // hybrid's borrowed audio can be shifted onto the video provider's timeline.
 // Zero (the normal case) leaves every url exactly as before.
+// `seg=1` marks every key, init and segment url emitted from a playlist.
+// /ts-proxy never clamps those to the open window: a segment can have any
+// extension (or none) and exceed 4MB, and hls.js does not resume a partial one.
 function rewriteM3u8(content, targetUrl, baseProxyUrl, headers, ptsOffset = 0) {
     const segRoute = ptsOffset ? 'pts-rebase' : 'ts-proxy';
     const segExtra = ptsOffset ? `&pts=${ptsOffset}` : '';
@@ -405,7 +408,7 @@ function rewriteM3u8(content, targetUrl, baseProxyUrl, headers, ptsOffset = 0) {
             if (line.startsWith('#EXT-X-KEY:')) {
                 const regex = /https?:\/\/[^""\s]+/g; const keyUrl = regex.exec(line)?.[0];
                 if (keyUrl) {
-                    const proxyUrl = `${baseProxyUrl}/ts-proxy?url=${encodeURIComponent(keyUrl)}&headers=${encodeURIComponent(JSON.stringify(headers))}`;
+                    const proxyUrl = `${baseProxyUrl}/ts-proxy?url=${encodeURIComponent(keyUrl)}&headers=${encodeURIComponent(JSON.stringify(headers))}&seg=1`;
                     out.push(line.replace(keyUrl, proxyUrl));
                     if (!isCacheDisabled()) prefetchSegment(keyUrl, headers);
                 } else out.push(line);
@@ -417,7 +420,7 @@ function rewriteM3u8(content, targetUrl, baseProxyUrl, headers, ptsOffset = 0) {
                 if (uriMatch) {
                     try {
                         const initUrl = new URL(uriMatch[1], targetUrl).href;
-                        const proxyUrl = `${baseProxyUrl}/ts-proxy?url=${encodeURIComponent(initUrl)}&headers=${encodeURIComponent(JSON.stringify(headers))}`;
+                        const proxyUrl = `${baseProxyUrl}/ts-proxy?url=${encodeURIComponent(initUrl)}&headers=${encodeURIComponent(JSON.stringify(headers))}&seg=1`;
                         out.push(line.replace(uriMatch[1], proxyUrl));
                     } catch { out.push(line); }
                 } else out.push(line);
@@ -451,7 +454,7 @@ function rewriteM3u8(content, targetUrl, baseProxyUrl, headers, ptsOffset = 0) {
                     // /m3u8-proxy (404) - which is why a proxied stream still
                     // would not play.
                     segmentUrls.push(abs);
-                    out.push(`${baseProxyUrl}/${segRoute}?url=${encodeURIComponent(abs)}&headers=${encodeURIComponent(JSON.stringify(headers))}${segExtra}`);
+                    out.push(`${baseProxyUrl}/${segRoute}?url=${encodeURIComponent(abs)}&headers=${encodeURIComponent(JSON.stringify(headers))}${segExtra}&seg=1`);
                 }
             } catch { out.push(line); }
         } else out.push(line);
@@ -669,8 +672,21 @@ function createProxyRoutes(app) {
         let appliedClamp = false;
         let effectiveRange = range;
         if (range) headers.Range = range;
+        // An HLS segment, playlist or key is small and fetched whole. Anything
+        // else is a progressive media body (NetMirror serves a whole .mp4).
+        const looksLikeHlsSegment = /\.(ts|jpg|jpeg|png|js|m4s|aac)(\?|$)/i.test(String(targetUrl));
+        const looksLikeSmallHlsFile = looksLikeHlsSegment || /\.(m3u8|key|vtt|srt)(\?|$)/i.test(String(targetUrl));
+        // A no-Range request for a progressive body gets the same bounded first
+        // window as bytes=0-. Unclamped, it pulled the whole NetMirror mp4
+        // (hundreds of MB) through Node: the client aborted after ~12s with
+        // 100-550MB sent, and pm2 restarted the API at 876687360 bytes against
+        // its 524288000 limit, five times on 2026-11-20. The 206 + Content-Range
+        // makes the player continue with range requests.
+        // A url emitted from a playlist (seg=1) is always fetched whole.
+        const fromPlaylist = req.query.seg === '1';
+        const noRangeProgressive = !range && !fromPlaylist && !looksLikeSmallHlsFile && !noSynth;
         // Clamp first open-ended bytes=0- request to a bounded span (once per TTL) to avoid gigantic initial 206
-        if (range && /^bytes=0-\s*$/i.test(range) && !force200) {
+        if ((noRangeProgressive || (range && /^bytes=0-\s*$/i.test(range))) && !force200) {
             const now = Date.now();
             // Progressive growth supersedes single-shot clamp if enabled
             if (progressiveOpen) {
@@ -777,7 +793,6 @@ function createProxyRoutes(app) {
             // upstream calls for 105 segment requests, 2.6x per segment, which
             // is what floods the network tab and the socket pool. Skip them for
             // anything served out of a playlist and just stream the bytes.
-            const looksLikeHlsSegment = /\.(ts|jpg|jpeg|png|js|m4s|aac)(\?|$)/i.test(String(targetUrl));
             let contentLength = null;
             let upstreamAcceptRanges = null;
             if (!effectiveRange && !looksLikeHlsSegment) {
