@@ -90,6 +90,7 @@ describe('timeout -> auto-advance', () => {
   });
 
   it('says what happened in one line', () => {
-    expect(advanceNotice('VaPlayer', 'B')).toBe("VaPlayer didn't respond, playing B.");
+    expect(advanceNotice('VaPlayer', 'B')).toBe('VaPlayer is slow. Trying B.');
+    expect(advanceNotice('VaPlayer', 'B', true)).toBe("VaPlayer won't play on this device. Trying B.");
   });
 });

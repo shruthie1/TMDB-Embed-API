@@ -566,7 +566,11 @@ main{padding:0 var(--space-5) var(--space-24)}
 
 /* Transient player notice — e.g. switching to the relay after a CDN 403. */
 .toast{
-  position:absolute;left:50%;bottom:88px;transform:translateX(-50%);
+  /* Centred by margins, not a horizontal transform: the fade-in keyframe animates
+     transform and its end state (none) replaced the centring, so the toast
+     started at 50% and was clipped past the right edge at 412px. */
+  position:absolute;left:0;right:0;bottom:88px;margin-inline:auto;
+  width:max-content;max-width:calc(100% - 32px);box-sizing:border-box;text-align:center;
   background:var(--color-overlay-5);border:1px solid var(--color-border);
   padding:var(--space-2) var(--space-4);font-size:13px;color:var(--paper-2);
   animation:fade-in .3s var(--ease) both;backdrop-filter:blur(8px);
@@ -1729,6 +1733,16 @@ kbd{
   .pctl-time{ margin-left:auto;font-size:11.5px;white-space:nowrap }
   .pctl-picks{ flex:0 0 auto }
   .pctl-row .icon-btn{ min-width:38px;min-height:38px }
+  /* 44px hit area, same 38px look: the target reaches 3px past each edge
+     (into the 4px row gap; a neighbour overlaps by 2px at most). */
+  .pctl-row .icon-btn{ position:relative }
+  .pctl-row .icon-btn::after{ content:"";position:absolute;inset:-3px }
+}
+/* Server and Audio in the row cost 84px. Measured at 360px the row needed
+   383px, so under 400px Mute steps aside: the phone's own volume buttons do
+   this, the same reason the slider is hidden. */
+@media (max-width:399px){
+  .pctl-mute{ display:none }
   /* Two extra buttons do not fit WITH their labels at 350px. The glyph stays
      (quality and audio are still one tap) and the value moves inside the menu,
      where the selected row already carries a check. */
@@ -3155,3 +3169,37 @@ html .pctl-scrub:focus-visible,html .sync-bar:focus-visible{outline:none}
       var(--hero-scrim-phone);
   }
 }
+
+/* The loading screen now stays up after a stream attaches (until the first
+   frame), so it must sit over the control bar (.pctl is z-index 4). */
+.overlay.ov-screen.ov-resolving{z-index:6}
+/* The bar under it is inert until then; hide it so it does not ghost through. */
+.pctl[inert]{visibility:hidden}
+
+/* ── Loading screen: Details rows (loading-ux spec) ─────────────────────────
+   One row per source in try order. Rows are buttons: a waiting or failed
+   row plays that source. The list scrolls inside the card. */
+.ov-load-detail{margin:var(--space-1) 0 0;color:var(--paper-2);font-size:13px;font-variant-numeric:tabular-nums}
+.ov-pill-quiet{background:transparent;border:1px solid var(--color-border)}
+.ov-load-panel{width:min(420px,86vw);margin-top:var(--space-4);text-align:left}
+.ov-load-rows{list-style:none;margin:0;padding:0;max-height:45vh;overflow:auto;
+  border-top:1px solid var(--color-border)}
+.ov-load-row{display:flex;align-items:baseline;gap:var(--space-2);width:100%;
+  padding:var(--space-2) var(--space-1);background:none;border:0;border-bottom:1px solid var(--color-border);
+  color:var(--paper-2);font:inherit;font-size:12.5px;text-align:left;cursor:default}
+.ov-load-row.focusable{cursor:pointer}
+.ov-load-row.focusable:hover{background:rgb(255 255 255 / .06)}
+.ov-load-row:focus-visible,.ov-load-row.focusable:focus{outline:2px solid var(--color-accent);outline-offset:-2px;transform:none}
+.ov-load-mark{flex:none;width:1.2em;color:var(--mid)}
+.ov-load-title{flex:1;min-width:0;color:var(--paper)}
+.ov-load-state{flex:none;color:rgb(255 255 255 / .72);font-variant-numeric:tabular-nums}
+.ov-load-row.is-starting .ov-load-mark,.ov-load-row.is-checking .ov-load-mark{color:var(--paper)}
+.ov-load-row.is-playing .ov-load-mark{color:var(--color-success)}
+.ov-load-row.is-failed .ov-load-title,.ov-load-row.is-skipped .ov-load-title{color:var(--paper-2)}
+.ov-load-footer{margin:var(--space-2) 0 0;color:rgb(255 255 255 / .72);font-size:12px;font-variant-numeric:tabular-nums}
+@media (max-width:479px){
+  .ov-load-row{flex-wrap:wrap}
+  .ov-load-state{flex-basis:100%;padding-left:calc(1.2em + var(--space-2))}
+}
+[data-tv="true"] .ov-load-row{font-size:16px;padding:var(--space-2-5) var(--space-1)}
+[data-tv="true"] .ov-load-panel{width:min(560px,60vw)}

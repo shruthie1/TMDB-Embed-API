@@ -257,3 +257,24 @@ describe('useResolve — the rest of a partial answer', () => {
     expect(api.sourcesPending).toBe(false);
   });
 });
+
+describe('useResolve — row ids stay put while the list grows', () => {
+  // toSource mints ids by index in each answer, so the ?full=1 list re-numbers
+  // rows the first answer already had. Taking the new id moved the playing row
+  // off currentSourceId and let two rows share one id (loading-ux finding 5).
+  it('onMore keeps the id of a row it already has and never duplicates an id', () => {
+    const api = harness({ mediaType: 'movie', tmdbId: 78 });
+    const c0 = { id: 'CastleTV-0', provider: 'CastleTV', masterUrl: 'https://cdn/c0.m3u8', quality: '1080p', variants: [] };
+    const c1 = { id: 'CastleTV-1', provider: 'CastleTV', masterUrl: 'https://cdn/c1.m3u8', quality: '720p', variants: [] };
+    act(() => emit.fn.onDone({ ...c0, sources: [c0, c1] }));
+    // The full list puts a new CastleTV row first: indexes shift.
+    const n = { id: 'CastleTV-0', provider: 'CastleTV', masterUrl: 'https://cdn/new.m3u8', quality: '1080p', variants: [] };
+    act(() => emit.fn.onMore([n, { ...c0, id: 'CastleTV-1' }, { ...c1, id: 'CastleTV-2' }]));
+    const byUrl = Object.fromEntries(api.sources.map((s) => [s.masterUrl, s.id]));
+    expect(byUrl['https://cdn/c0.m3u8']).toBe('CastleTV-0');
+    expect(byUrl['https://cdn/c1.m3u8']).toBe('CastleTV-1');
+    const ids = api.sources.map((s) => s.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(api.currentSourceId).toBe('CastleTV-0');
+  });
+});

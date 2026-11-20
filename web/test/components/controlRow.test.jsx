@@ -34,23 +34,43 @@ const count = (c, sel) => c.querySelectorAll(sel).length;
 afterEach(() => { cleanup(); isCompact = false; });
 
 describe('player control row', () => {
-  it('phone: one row of at most five buttons, pickers inside the settings sheet', () => {
+  it('phone: Server and Audio sit in the row; Quality stays in the settings sheet (U9)', () => {
     isCompact = true;
     const { container } = mount();
     expect(count(container, '.pctl-row')).toBe(1);
-    expect(rowButtons(container).length).toBeLessThanOrEqual(5);
+    // play, mute, Server, Audio, Settings, fullscreen
+    expect(rowButtons(container).length).toBeLessThanOrEqual(6);
+    expect(container.querySelector('.pctl-row > .pmenu-wrap > [aria-label^="Server"]')).not.toBeNull();
+    expect(container.querySelector('.pctl-row > .pmenu-wrap > [aria-label^="Audio"]')).not.toBeNull();
     expect(count(container, '[title="Video quality"]')).toBe(0);   // folded away
     expect(container.querySelector('[aria-label^="Picture fit"]')).toBeNull();
     fireEvent.click(container.querySelector('.pctl-row [aria-label="Settings"]'));
     const sheet = container.querySelector('.pmenu-sheet');
     expect(sheet).not.toBeNull();
-    expect(count(container, '[title="Video quality"]')).toBe(1);
     expect(sheet.querySelectorAll('[title="Video quality"]').length).toBe(1);
-    expect(sheet.querySelectorAll('[aria-label^="Server"]').length).toBe(1);
-    expect(sheet.querySelectorAll('[aria-label^="Audio"]').length).toBe(1);
+    expect(sheet.querySelectorAll('[aria-label^="Server"]').length).toBe(0);
+    expect(sheet.querySelectorAll('[aria-label^="Audio"]').length).toBe(0);
   });
 
-  it('phone: opening a picker keeps the sheet open, and closing it returns to the sheet', () => {
+  it('phone: Telugu audio is one tap away, the same depth as desktop, TV and the APK', () => {
+    isCompact = true;
+    const { container } = mount();
+    fireEvent.click(container.querySelector('.pctl-row > .pmenu-wrap > [aria-label^="Audio"]'));
+    const list = container.querySelector('.pmenu-pick');
+    expect(list).not.toBeNull();
+    expect(list.querySelector('.pmenu-label').textContent).toBe('Audio');
+    expect(list.textContent).toMatch('Telugu');
+    expect(container.querySelector('.pmenu-sheet')).toBeNull();
+  });
+
+  it('phone: Server opens its own list in one tap, labelled Server', () => {
+    isCompact = true;
+    const { container } = mount();
+    fireEvent.click(container.querySelector('.pctl-row > .pmenu-wrap > [aria-label^="Server"]'));
+    expect(container.querySelector('.pmenu-pick .pmenu-label').textContent).toBe('Server');
+  });
+
+  it('phone: opening Quality keeps the sheet open, and closing it returns to the sheet', () => {
     isCompact = true;
     const { container } = mount();
     fireEvent.click(container.querySelector('.pctl-row [aria-label="Settings"]'));
@@ -59,6 +79,25 @@ describe('player control row', () => {
     fireEvent.click(container.querySelector('[title="Video quality"]'));
     expect(container.querySelector('.pmenu-sheet')).not.toBeNull();
     expect(container.querySelector('.pmenu-sheet .pmenu-pick')).toBeNull();
+  });
+
+  it('phone: row buttons get a 44px hit area without changing the 38px look', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { resolve } = await import('node:path');
+    const css = readFileSync(resolve(process.cwd(), 'app/globals.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+    const phone = css.slice(css.indexOf('@media (max-width:559px){', css.indexOf('.pctl-pick-btn{')));
+    expect(phone).toMatch(/\.pctl-row \.icon-btn\{ min-width:38px;min-height:38px \}/);
+    expect(phone).toMatch(/\.pctl-row \.icon-btn::after\{[^}]*inset:-3px/);
+  });
+
+  it('phone under 400px: Mute steps aside so the row with Server and Audio fits 360px', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { resolve } = await import('node:path');
+    const css = readFileSync(resolve(process.cwd(), 'app/globals.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(css).toMatch(/@media \(max-width:399px\)\{\s*\.pctl-mute\{ display:none \}/);
+    isCompact = true;
+    const { container } = mount();
+    expect(container.querySelector('.pctl-row > .pctl-mute')).not.toBeNull();
   });
 
   it('desktop: one row, every picker rendered once, quality and server use different glyphs', () => {

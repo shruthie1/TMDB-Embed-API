@@ -108,3 +108,29 @@ describe('partial answer follow-up', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('search-phase Try again (loading-ux spec, section 3)', () => {
+  // Player.jsx search-phase Try again is resolve.load(false): the old caller
+  // is unsubscribed but the running /api/streams request is NOT aborted, and
+  // the re-ask joins it instead of starting a slower refresh resolve.
+  it('a non-refresh re-ask joins the running request: one fetch, no abort, no refresh', async () => {
+    let release;
+    let signal = null;
+    const fetchMock = vi.fn((url, opts) => {
+      signal = opts?.signal || null;
+      return new Promise((r) => { release = () => r(res(body([CASTLE]))); });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const cancelFirst = resolveLive('movie', 601, { onDone: () => {}, onFail: () => {} });
+    await tick();
+    cancelFirst();
+    const again = run(601);
+    await tick();
+    expect(signal?.aborted ?? false).toBe(false);
+    release();
+    const out = await again;
+    expect(out.ok?.masterUrl).toBe(CASTLE.url);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).not.toMatch(/refresh/);
+  });
+});

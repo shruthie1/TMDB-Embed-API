@@ -212,6 +212,7 @@ export default function PlayerControls({
   videoRef, hls, title, subtitle, onClose, busy = false,
   visible = true, onReveal, onHide, onMenuChange, menuOpen = null, tv = false,
   sources = [], currentSource, currentSourceId = null, onPickSource, sourcesPending = false,
+  labels = null,
   audioSync = null,
   subs = [], currentSub = null, onPickSub, subLoading = false,
   fit = 'cover', onCycleFit, onSetFit,
@@ -220,6 +221,9 @@ export default function PlayerControls({
   audioTracks = [], currentAudio, onPickAudio, onPickPair,
   embed = null, onPickEmbed,
   cast = null,
+  // True while the loading screen covers the bar (before the first frame):
+  // nothing behind it can take focus or a tap.
+  covered = false,
 }) {
   const [state, setState] = useState({ playing: false, t: 0, dur: 0, buffered: 0, muted: false, vol: 1 });
   // Which picker is open. Visibility itself is owned by the player
@@ -236,7 +240,10 @@ export default function PlayerControls({
   // Picture and language as two independent lists, so the viewer is not asked
   // to read "showsst+CastleTV" and work out which half is which.
   // See web/lib/player/trackChoices.js.
-  const videoList = useMemo(() => videoChoices(sources), [sources]);
+  // Row names come from the player's one stable label map (Player.jsx
+  // rowLabels), so the menu, the server chip and the advance toast agree.
+  const videoList = useMemo(() => videoChoices(sources)
+    .map((c) => (labels?.[c.id] ? { ...c, label: labels[c.id] } : c)), [sources, labels]);
   // The Servers rows: our sources, then the VaPlayer embed LAST when the
   // title has one (lib/player/vaEmbed.js).
   const serverList = useMemo(
@@ -534,12 +541,13 @@ export default function PlayerControls({
     setTimeout(() => setTapHint(null), 520);
   };
 
-  // Quality, server and audio. In the row on wider screens; on phones they
-  // move into the settings sheet (see SettingsSheet), so the row keeps at most
-  // five buttons. `back` is where closing one of them returns to.
+  // Quality, server and audio. In the row on wider screens. On phones Server
+  // and Audio stay in the row too (glyph only), so Telugu audio is one tap
+  // away as on desktop, TV and the APK (audit U9); Quality moves into the
+  // settings sheet. `back` is where closing Quality returns to.
   const back = compact ? 'all' : null;
-  const sheetOpen = menu === 'all' || (compact && ['quality', 'video', 'audio'].includes(menu));
-  const picks = (
+  const sheetOpen = menu === 'all' || (compact && menu === 'quality');
+  const qualityPick = (
     <>
           {/* Quality and audio, each its own control showing its current value.
               They sit left of the gear because they are reached far more often
@@ -553,7 +561,10 @@ export default function PlayerControls({
                        onPickLevel={(i) => { openMenu(null); onPickLevel?.(i); }}
                        open={menu === 'quality'} onTouch={touchSheet}
                        onToggle={() => openMenu(menu === 'quality' ? back : 'quality')} />
-
+    </>
+  );
+  const serverAudioPicks = (
+    <>
           {/* Picture, as its own control. Answers "whose video"; AudioMenu
               answers "which language". Two lists rather than one list of
               fused combinations - see web/lib/player/trackChoices.js. */}
@@ -565,7 +576,7 @@ export default function PlayerControls({
                        else if (c?.source) onPickSource?.(c.source);
                      }}
                      open={menu === 'video'} onTouch={touchSheet}
-                     onToggle={() => openMenu(menu === 'video' ? back : 'video')} />
+                     onToggle={() => openMenu(menu === 'video' ? null : 'video')} />
 
           {/* One Audio button regardless of how the provider ships languages.
               A multi-track file switches in place; a provider that ships one
@@ -613,7 +624,7 @@ export default function PlayerControls({
                      }}
                      sync={audioSync}
                      open={menu === 'audio'} onTouch={touchSheet}
-                     onToggle={() => openMenu(menu === 'audio' ? back : 'audio')} />
+                     onToggle={() => openMenu(menu === 'audio' ? null : 'audio')} />
 
     </>
   );
@@ -623,7 +634,7 @@ export default function PlayerControls({
 
   return (
     <div className={`pctl ${visible || scrubbing ? 'show' : ''}`} data-focus-group=""
-         ref={rootRef}
+         ref={rootRef} inert={covered ? '' : undefined}
          onFocusCapture={(e) => {
            // Remember the control a menu was opened from, so closing it can
            // put focus back there (see the focus effect above).
@@ -702,7 +713,7 @@ export default function PlayerControls({
             </>
           )}
 
-          <button className="icon-btn focusable" data-focus="" aria-label={state.muted ? 'Unmute' : 'Mute'}
+          <button className="icon-btn pctl-mute focusable" data-focus="" aria-label={state.muted ? 'Unmute' : 'Mute'}
                   onClick={() => { const el = v(); if (el) el.muted = !el.muted; }}>
             <Icon name={state.muted || state.vol === 0 ? 'mute' : 'volume'} size={17} />
           </button>
@@ -714,7 +725,8 @@ export default function PlayerControls({
 
           <span className="pctl-spacer" />
 
-          {!compact && picks}
+          {!compact && qualityPick}
+          {serverAudioPicks}
 
           <div className="pmenu-wrap pctl-picks">
             <button className="icon-btn focusable" data-focus="" aria-label="Settings"
@@ -735,7 +747,7 @@ export default function PlayerControls({
                   subLoading={subLoading}
                   subPrefs={subPrefs} onSubPrefs={onSubPrefs}
                   onClose={() => openMenu(null)}
-                  picks={compact ? picks : null}
+                  picks={compact ? qualityPick : null}
                   fit={fit} onSetFit={compact ? onSetFit : null}
                 />
               </div>

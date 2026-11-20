@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Icon from '../Icon';
 
 /**
@@ -7,99 +7,90 @@ import Icon from '../Icon';
  * the error state. Presentational only - they hold no playback state.
  */
 /**
- * What each provider is doing, right now.
+ * The loading screen, from the first press of Play to the first frame
+ * (loading-ux spec; the APK draws the same view from LoadingModel.kt).
  *
- * The log is a scrolling history; this is the current state at a glance. It
- * exists because "Opening vidking" could sit unchanged for twelve seconds
- * while that provider was merely QUEUED behind other work - a viewer reads
- * that as a stuck player. Showing queued / opening / found / failed per
- * provider makes the wait legible instead of mysterious.
+ * Drawn from `view` (lib/player/loadingModel.js), so it holds no timing rules
+ * of its own: no Try again while anything is still loading, a calm "Choose a
+ * server" from 30s with a list, Try again at 30s only when no list arrived.
+ * Only the headline is in the polite live region, so a screen reader hears a
+ * phase change, not every tick of the seconds.
  */
-function ProviderTrack({ providers }) {
-  if (!providers.length) return null;
-  const LABEL = { queued: 'queued', opening: 'opening', validating: 'validating', ok: 'ready', failed: 'no stream' };
-  return (
-    <ul className="ov-track" aria-label="Provider progress">
-      {providers.map(p => (
-        <li key={p.name} className={`ov-track-row is-${p.state}`}>
-          <span className="ov-track-dot" aria-hidden="true" />
-          <span className="ov-track-name">{p.name}</span>
-          <span className="ov-track-state">
-            {LABEL[p.state]}
-            {/* Position in the queue is the one number that explains a wait.
-                Without it "queued" is just another word for "stuck".
-                Held in its own span because the state word is uppercased and
-                the figures must not be - "1.5S" and "2 AHEAD" read badly. */}
-            {p.state === 'queued' && p.queued > 0 && (
-              <span className="ov-track-num"> · {p.queued} ahead</span>
-            )}
-            {p.state === 'ok' && p.ms > 0 && (
-              <span className="ov-track-num"> · {(p.ms / 1000).toFixed(1)}s</span>
-            )}
-          </span>
-        </li>
-      ))}
-    </ul>
-  );
-}
+const ROW_MARK = { waiting: '○', checking: '◌', starting: '●', playing: '✓', skipped: '-', failed: '✕' };
 
-/** One short status line, the same copy as the Android app. Internal words
- *  (stage, failed providers) stay in Details. */
-function statusLine(refreshing) {
-  return refreshing ? 'Refreshing links…' : 'Getting your stream ready';
-}
-
-/**
- * Loading screen while a stream is resolved, matching the Android app: the
- * backdrop at 35% under a dark gradient (Player.jsx, globals.css), a cyan ring
- * spinner, the title, the episode line, one status line. Try again appears
- * after 8s; on TV a Back pill sits beside it (the top-left Back is desktop and
- * phone). The provider track and log stay available under Details.
- */
-export function Resolving({ stage, title, meta, elapsed = 0, log = [], providers = [], onArt = false,
-                            refreshing = false, onClose, onRetry }) {
-  const secs = Math.floor(elapsed / 1000);
-  const total = providers.length;
-  const status = statusLine(refreshing);
+export function Loading({ view, title, meta, onArt = false, onClose, onRetry, onPick }) {
+  const [open, setOpen] = useState(false);
+  const [focusRow, setFocusRow] = useState(false);
+  const rowsRef = useRef(null);
+  const detailsRef = useRef(null);
+  // TV: focus starts on Details (OK opens it) and never jumps later.
+  useEffect(() => {
+    if (document.documentElement.dataset.tv === 'true') detailsRef.current?.focus();
+  }, []);
+  useEffect(() => {
+    if (!open || !focusRow) return;
+    setFocusRow(false);
+    const btns = [...(rowsRef.current?.querySelectorAll('button[data-row]') || [])];
+    const first = btns.find((b) => b.dataset.state === 'waiting' && b.getAttribute('aria-disabled') !== 'true')
+      || btns.find((b) => b.getAttribute('aria-disabled') !== 'true');
+    first?.focus();
+  }, [open, focusRow]);
+  if (!view) return null;
   return (
-    <div className={`overlay ov-screen ov-resolving${onArt ? ' on-art' : ''}`} data-stage={stage}>
+    <div className={`overlay ov-screen ov-resolving${onArt ? ' on-art' : ''}`} data-phase={view.phase}>
       {onClose && (
         <button type="button" className="ov-back focusable" data-focus="" onClick={onClose} aria-label="Back">
           <Icon name="back" size={18} /><span>Back</span>
         </button>
       )}
-      <div className="ov-card" role="status" aria-live="polite">
-        <div className="ov-spinner" role="progressbar" aria-label={status} aria-valuetext={status} />
+      <div className="ov-card">
+        <div className="ov-spinner" aria-hidden="true" />
         <p className="ov-name">{title}</p>
         {meta && <p className="ov-meta">{meta}</p>}
-        <p className="ov-status">{status}</p>
-        {secs >= 8 && (onRetry || onClose) && (
-          <div className="ov-actions" data-focus-group="">
-            {onRetry && (
-              <button type="button" className="ov-pill focusable" data-focus="" onClick={onRetry}>
-                <Icon name="restart" size={18} /><span>Try again</span>
-              </button>
-            )}
-            {onClose && (
-              <button type="button" className="ov-pill ov-pill-tv focusable" data-focus="" onClick={onClose}>
-                <Icon name="back" size={18} /><span>Back</span>
-              </button>
-            )}
-          </div>
-        )}
-        {(total > 0 || log.length > 0) && (
-          <details className="ov-details">
-            <summary className="focusable" data-focus="">Details</summary>
-            <ProviderTrack providers={providers} />
-            {/* Older lines dim toward the top, via --age (see globals.css). */}
-            <ul className="ov-log">
-              {log.map((l, i) => (
-                <li key={l.id} className="ov-log-line" style={{ '--age': log.length - 1 - i }}>{l.line}</li>
-              ))}
-            </ul>
-            <p className="ov-hint dim ov-elapsed">{secs}s elapsed</p>
-          </details>
-        )}
+        <p className="ov-status" role="status" aria-live="polite" aria-atomic="true">{view.headline}</p>
+        {view.detail && <p className="ov-load-detail">{view.detail}</p>}
+        <div className="ov-actions" data-focus-group="">
+          {view.showTryAgain && onRetry && (
+            <button type="button" className="ov-pill focusable" data-focus="" onClick={onRetry}>
+              <Icon name="restart" size={18} /><span>Try again</span>
+            </button>
+          )}
+          {view.showChooser && (
+            <button type="button" className="ov-pill focusable" data-focus=""
+                    onClick={() => { setOpen(true); setFocusRow(true); }}>
+              <span>Choose a server</span>
+            </button>
+          )}
+          {onClose && (
+            <button type="button" className="ov-pill ov-pill-tv focusable" data-focus="" onClick={onClose}>
+              <Icon name="back" size={18} /><span>Back</span>
+            </button>
+          )}
+          <button type="button" className="ov-pill ov-pill-quiet focusable" data-focus=""
+                  ref={detailsRef} aria-expanded={open} aria-controls="load-rows"
+                  onClick={() => setOpen((o) => !o)}>
+            <span>Details</span><span aria-hidden="true">{open ? '⌃' : '⌄'}</span>
+          </button>
+        </div>
+        <div className="ov-load-panel" id="load-rows" hidden={!open} ref={rowsRef}>
+          <ul className="ov-load-rows">
+            {view.rows.map((r) => (
+              <li key={r.id}>
+                <button type="button" data-row={r.id} data-state={r.state}
+                        className={`ov-load-row is-${r.state}${r.clickable ? ' focusable' : ''}`}
+                        data-focus={r.clickable ? '' : undefined}
+                        aria-label={r.description}
+                        aria-disabled={r.clickable ? undefined : 'true'}
+                        onClick={r.clickable ? () => onPick?.(r.id) : undefined}>
+                  <span className="ov-load-mark" aria-hidden="true">{ROW_MARK[r.state] || '○'}</span>
+                  <span className="ov-load-title">{r.title}</span>
+                  <span className="ov-load-state">{r.status}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+          <p className="ov-load-footer">{view.footer}</p>
+        </div>
       </div>
     </div>
   );
@@ -203,8 +194,10 @@ export function EmbedFallback({ embeds, onClose }) {
   );
 }
 
-export function PlayerError({ error, embeds, onClose, onRetry }) {
-  const more = error.detail || error.tried?.length > 0;
+export function PlayerError({ error, embeds, onClose, onRetry, headline = null, detail = null }) {
+  // With sources tried, the card says how many (loading-ux end card); the
+  // player's own message moves under Details.
+  const more = error.detail || error.tried?.length > 0 || Boolean(detail);
   return (
     <div className="overlay ov-screen">
       <button type="button" className="ov-back focusable" data-focus="" onClick={onClose} aria-label="Back">
@@ -212,8 +205,8 @@ export function PlayerError({ error, embeds, onClose, onRetry }) {
       </button>
       <div className="ov-card ov-card-error" role="alert">
         <span className="ov-error-icon" aria-hidden="true">!</span>
-        <p className="ov-name">Couldn’t start playback</p>
-        <p className="ov-status">{error.message}</p>
+        <p className="ov-name">{headline || 'Couldn’t start playback'}</p>
+        <p className="ov-status">{detail || error.message}</p>
         <div className="ov-actions" data-focus-group="">
           <button className="btn primary focusable" data-focus="" onClick={onRetry}>Retry</button>
           <button className="btn focusable" data-focus="" onClick={onClose}>Back</button>
@@ -223,6 +216,7 @@ export function PlayerError({ error, embeds, onClose, onRetry }) {
         {more && (
           <details className="ov-details">
             <summary className="focusable" data-focus="">Details</summary>
+            {detail && error.message && <p className="ov-hint dim">{error.message}</p>}
             {error.detail && <p className="ov-hint dim">{error.detail}</p>}
             {error.tried?.length > 0 && <p className="ov-hint dim">Tried: {error.tried.join(', ')}</p>}
           </details>

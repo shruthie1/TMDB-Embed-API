@@ -1,7 +1,7 @@
 'use client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import PlayerControls from './PlayerControls';
-import { Resolving, NextUp, PlayerError } from './player/overlays';
+import { Loading, NextUp, PlayerError } from './player/overlays';
 import TvBar from './player/TvBar';
 import Icon from './Icon';
 import { listSources, poster, reportPlayback } from '../lib/api';
@@ -12,7 +12,10 @@ import { abortReason } from '../lib/abortReason';
 import useAudioSync from '../lib/player/useAudioSync';
 import useSwitchGuard from '../lib/player/useSwitchGuard';
 import useStaleRefresh from '../lib/player/staleRefresh';
-import { videoChoices, videoIdOf, videoLabels } from '../lib/player/trackChoices';
+import { videoChoices, videoIdOf } from '../lib/player/trackChoices';
+import {
+  CHECK_SERVER, Reason, RowState, labelRows, loadingView, reasonFromText,
+} from '../lib/player/loadingModel';
 import EmbedStage from './player/EmbedStage';
 import useFocusTrap from './useFocusTrap';
 import { VA_EMBED_ID, vaEmbedChoice, shouldAutoEmbed } from '../lib/player/vaEmbed';
@@ -20,7 +23,7 @@ import { markDead, nextAlive, qualityHeight } from '../lib/player/deadSources';
 import { fatalAction } from '../lib/player/fatalPolicy';
 import { runtimeVerdict } from '../lib/player/runtimeCheck';
 import {
-  SWITCH_TICK_MS, advanceNotice, advanceTarget, beginSourceSwitch, hasLife, tickSourceSwitch,
+  SWITCH_HARD_MS, SWITCH_TICK_MS, advanceNotice, advanceTarget, beginSourceSwitch, hasLife, tickSourceSwitch,
 } from '../lib/player/switchFlow';
 import { createWarmScheduler } from '../lib/player/warmSources';
 import useNoPictureGuard from '../lib/player/useNoPictureGuard';
@@ -78,7 +81,6 @@ function seekBy(video, d) {
 export default function Player({ title, startAt = 0, season = 0, episode = 0,
                                  epTitle = null, onClose, onNext }) {
   const videoRef = useRef(null);
-  const [elapsed, setElapsed] = useState(0);
   /**
    * A transient message over the picture.
    *
@@ -118,8 +120,8 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   const resolve = useResolve({
     mediaType: title.mediaType, tmdbId: title.tmdbId, season, episode,
   });
-  const { stream, sources, currentSource, currentSourceId, sourcesPending, log, stage, error,
-          providers, mergeSources } = resolve;
+  const { stream, sources, currentSource, currentSourceId, sourcesPending, error,
+          mergeSources } = resolve;
   const online = useNetworkStatus();
 
   const isTv = title.mediaType === 'tv' && episode > 0;
@@ -179,14 +181,68 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   const menuSources = useMemo(
     () => (failedUrls.size ? sources.filter((s) => !failedUrls.has(s.masterUrl)) : sources),
     [sources, failedUrls]);
-  // The label a viewer sees for a row: the same "CastleTV 2" the Servers menu
-  // shows, so the notice names the row they picked. Numbered over the list
-  // the menus show, so a toast and the menu agree.
-  const rowLabel = useCallback((id, fallback, rows = menuSources) => {
-    const list = videoChoices(rows);
-    const at = list.findIndex((c) => c.id === videoIdOf(id, rows));
-    return at >= 0 ? videoLabels(list)[at] : (fallback || 'That server');
-  }, [menuSources]);
+  // The label a viewer sees for a row ("CastleTV 2"). ONE map per title,
+  // over the full list with failed rows included (loadingModel labelRows), so
+  // a name never changes during a start: the overlay, the advance toast, the
+  // server chip and the Servers menu all read it. It used to be re-numbered
+  // over the menu list, which drops failed rows, so one moment showed
+  // "Switching to CastleTV 4" beside "playing CastleTV 3" (loading-ux finding 4).
+  const titleKey = `${title.mediaType}:${title.tmdbId}:${season}:${episode}`;
+  const rowLabelsRef = useRef({ key: null, map: {} });
+  const rowLabels = useMemo(() => {
+    const prev = rowLabelsRef.current.key === titleKey ? rowLabelsRef.current.map : {};
+    const map = labelRows(prev, videoChoices(sources).map((c) => c.source));
+    rowLabelsRef.current = { key: titleKey, map };
+    return map;
+  }, [sources, titleKey]);
+  const rowLabel = useCallback((id, fallback) => {
+    const vid = videoIdOf(id, sources);
+    return (vid != null && rowLabels[vid]) || fallback || 'That server';
+  }, [rowLabels, sources]);
+
+  /*
+   * The loading screen's clock and attempts (lib/player/loadingModel.js).
+   * One clock from Play (or an episode change) to the first frame, never
+   * reset per overlay. Each source put on screen is one attempt; `k` in
+   * "k of n tried" is their count, so it only goes up.
+   */
+  const playAtRef = useRef(Date.now());
+  const searchAtRef = useRef(playAtRef.current);
+  const firstListSizeRef = useRef(0);
+  const [framedOnce, setFramedOnce] = useState(false);
+  const framedOnceRef = useRef(false);
+  const [attempts, setAttempts] = useState([]);
+  const attemptsRef = useRef([]);
+  // Why the open attempt is about to end, set where the failure is known
+  // (onFatal) and read where the next attempt begins.
+  const pendingReasonRef = useRef(null);
+  const [loadNow, setLoadNow] = useState(() => Date.now());
+  const putAttempts = useCallback((next) => { attemptsRef.current = next; setAttempts(next); }, []);
+  const closeAttempt = useCallback((reason, state = RowState.FAILED) => {
+    const list = attemptsRef.current;
+    const last = list[list.length - 1];
+    if (!last || last.endedAt != null) return;
+    putAttempts([...list.slice(0, -1), { ...last, endedAt: Date.now(), state,
+      reason: state === RowState.PLAYING ? null : (reason || Reason.STOPPED) }]);
+  }, [putAttempts]);
+  const beginAttempt = useCallback((id) => {
+    if (id == null) return;
+    const last = attemptsRef.current[attemptsRef.current.length - 1];
+    if (last && last.endedAt == null && last.id === id) return;
+    if (last && last.endedAt == null) closeAttempt(pendingReasonRef.current);
+    pendingReasonRef.current = null;
+    putAttempts([...attemptsRef.current,
+      { id, startedAt: Date.now(), endedAt: null, state: RowState.STARTING, reason: null }]);
+  }, [closeAttempt, putAttempts]);
+  useEffect(() => {
+    playAtRef.current = Date.now();
+    searchAtRef.current = playAtRef.current;
+    firstListSizeRef.current = 0;
+    framedOnceRef.current = false;
+    setFramedOnce(false);
+    pendingReasonRef.current = null;
+    putAttempts([]);
+  }, [titleKey, putAttempts]);
 
   /**
    * Recover from a dead stream without going back to the network.
@@ -283,6 +339,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   }, []);
 
   const recoverBySwitching = useCallback((reason = 'switch') => {
+    closeAttempt(pendingReasonRef.current || reasonFromText(reason));
     if (resolve.currentSource) {
       markDead(deadSources.current,
         { id: resolve.currentSourceId, provider: resolve.currentSource });
@@ -294,8 +351,8 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     const alt = nextAlive(resolve.sources, deadSources.current, failoverCtxRef.current);
     if (!alt) return false;
     switchSourceRef.current?.(alt);
-    return true;
-  }, [resolve, reportMetrics, title.mediaType, title.tmdbId, season, episode]);
+    return alt;
+  }, [resolve, reportMetrics, closeAttempt, title.mediaType, title.tmdbId, season, episode]);
   recoverBySwitchingRef.current = recoverBySwitching;
 
   const rejectRuntimeMismatch = useCallback(() => {
@@ -339,6 +396,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     // A server switch in flight that failed outright: drop that server and
     // move on to the next alive one (same language first), as the timeout does.
     const fa = fatalAction(data);
+    pendingReasonRef.current = reasonFromText(fa.kind);
     if (fa.failover && failSwitchRef.current?.(fa.reason || fa.kind)) return;
     if (switchGuard.fail()) return;
     // A 403/410 means the signed url went stale. Another provider's url is
@@ -359,10 +417,14 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     // marks this source dead and reports why, so the list cannot loop.
     // Only with nothing left does the viewer see an error.
     const who = currentSourceRef.current || 'This server';
-    if (recoverBySwitching(action.reason)) {
-      setNotice(action.kind === 'novideo'
-        ? `${who} shows no picture on this device. Switched to the next server.`
-        : `${who} failed. Switched to the next server.`);
+    const whoLabel = rowLabel(currentSourceIdRef.current, who);
+    const alt = recoverBySwitching(action.reason);
+    if (alt) {
+      // Before the first frame the loading card already says this.
+      if (framedOnceRef.current) {
+        setNotice(advanceNotice(whoLabel, rowLabel(alt.id, alt.provider),
+          action.kind === 'novideo' || action.kind === 'codecs'));
+      }
       return;
     }
     // (recoverBySwitching already reported this source's failure.)
@@ -371,7 +433,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     resolve.setError({ message: action.kind === 'unreachable'
       ? `${who} is not responding, and no other server is left. Try again in a moment.`
       : action.message });
-  }, [resolve, recoverBySwitching, switchGuard, staleRefresh, setNotice]);
+  }, [resolve, recoverBySwitching, switchGuard, staleRefresh, setNotice, rowLabel]);
 
   // Declared before useHls, which captures it in onHlsReady.
   const hlsInstance = useRef(null);
@@ -1048,14 +1110,21 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     return () => { try { h.off('hlsFragLoading', note); h.off('hlsFragBuffered', note); } catch {} };
   }, [hls.hlsRef, recovery, stream]);
 
-  // Elapsed counter drives the resolving narration. A number that MOVES is
-  // the difference between "working" and "frozen".
+  // The loading screen's seconds tick until the first frame of this start.
   useEffect(() => {
-    if (stream || error) return;
-    const t0 = Date.now();
-    const id = setInterval(() => setElapsed(Date.now() - t0), 250);
+    if (framedOnce || error) return undefined;
+    setLoadNow(Date.now());
+    const id = setInterval(() => setLoadNow(Date.now()), 500);
     return () => clearInterval(id);
-  }, [stream, error]);
+  }, [framedOnce, error]);
+
+  // Every stream put on screen is an attempt (the first answer, a failover,
+  // a pick). A pair id counts as its video row.
+  useEffect(() => {
+    if (!stream) return;
+    const id = currentSourceIdRef.current;
+    beginAttempt(videoIdOf(id, sourceListRef.current) ?? id);
+  }, [stream, beginAttempt]);
 
   // Seek to the resume point once the media is ready. A pending source switch
   // wins over the initial position.
@@ -1112,6 +1181,8 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       }
       setStarted(true);
       startedRef.current = true;
+      closeAttempt(null, RowState.PLAYING);
+      if (!framedOnceRef.current) { framedOnceRef.current = true; setFramedOnce(true); }
       playedStreamRef.current = stream;
       setPlaying(true);
       confirmPlayback();
@@ -1123,7 +1194,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       ['play', 'pause'].forEach(e => v.removeEventListener(e, sync));
       v.removeEventListener('playing', onPlaying);
     };
-  }, [stream, reportMetrics, rejectRuntimeMismatch, confirmPlayback]);
+  }, [stream, reportMetrics, rejectRuntimeMismatch, confirmPlayback, closeAttempt]);
 
   // A new stream means a new wait: clear the flag so the loader shows again
   // for a source switch, which is a fresh load however long the last one ran.
@@ -1410,6 +1481,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     clearInterval(srcTick.current);
     warm.stop();
     srcSwitch.current = beginSourceSwitch({ target: src, label, at, ctx, streamKey: streamRef.current });
+    beginAttempt(src?.id);
     setSourceLocked(true);
     setSwitching(`Switching to ${label}…`);
     srcTick.current = setInterval(() => {
@@ -1420,17 +1492,21 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       });
       if (r.verdict === 'wait') { srcSwitch.current = r.state; return; }
       if (r.verdict === 'landed') { endSourceSwitch(); switchGuard.landed(); return; }
-      failSwitchRef.current?.('switch timeout');
+      // What the viewer reads: nothing at all in 8s, or something but no
+      // frame by the 20s cap (the verdicts themselves are switchFlow's).
+      const took = Date.now() - (srcSwitch.current?.startedAt ?? Date.now());
+      failSwitchRef.current?.('switch timeout', took >= SWITCH_HARD_MS ? Reason.NO_PICTURE : Reason.NO_ANSWER);
     }, SWITCH_TICK_MS);
-  }, [warm, endSourceSwitch, switchGuard, videoRef]);
+  }, [warm, endSourceSwitch, switchGuard, videoRef, beginAttempt]);
   useEffect(() => () => clearInterval(srcTick.current), []);
 
   // The server being switched to failed (timeout or a fatal error). Mark it
   // dead, take it out of the menus, and play the next alive row in the
   // language that was playing at the click. Returns true when it handled it.
-  failSwitchRef.current = (reason) => {
+  failSwitchRef.current = (reason, uiReason = null) => {
     const m = srcSwitch.current;
     if (!m) return false;
+    closeAttempt(uiReason || pendingReasonRef.current || reasonFromText(reason));
     endSourceSwitch();
     // Advancing replaces the old "go back" revert for a server pick.
     switchGuard.landed();
@@ -1444,8 +1520,11 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       resolve.setError({ message: `${m.label} didn't respond, and no other server is left. Try again in a moment.` });
       return true;
     }
-    setNotice(advanceNotice(m.label, rowLabel(alt.id, alt.provider,
-      menuSources.filter((s) => s.masterUrl !== failed.masterUrl))));
+    // Before the first frame the loading card already names both servers.
+    if (framedOnceRef.current) {
+      setNotice(advanceNotice(m.label, rowLabel(alt.id, alt.provider),
+        attemptsRef.current[attemptsRef.current.length - 1]?.reason === Reason.UNSUPPORTED));
+    }
     switchSourceRef.current?.(alt, null, { at: m.at, ctx: m.ctx });
     return true;
   };
@@ -1787,11 +1866,51 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     }
   }, [recovery.stallStage, switching]);
 
+  // The loading screen's view (lib/player/loadingModel.js). The list counts
+  // as ready once the first answer is in; rows that arrive later are
+  // "more found", not a bigger n.
+  const listReady = sources.length > 0;
+  if (listReady && !firstListSizeRef.current) firstListSizeRef.current = sources.length;
+  const loadView = useMemo(() => loadingView({
+    now: loadNow, playAt: playAtRef.current, title: title.title,
+    sources: listReady ? sources : null, labels: rowLabels,
+    firstListSize: firstListSizeRef.current, attempts,
+    // One request answers the whole search, so one honest row.
+    checks: [{ id: CHECK_SERVER, label: 'Chitram server', startedAt: searchAtRef.current, endedAt: null }],
+    framed: framedOnce, failed: Boolean(error),
+  }), [loadNow, title.title, listReady, sources, rowLabels, attempts, framedOnce, error]);
+  // Search-phase Try again (only offered at 30s with no list): ask again
+  // WITHOUT the refresh path. A non-refresh ask joins the /api/streams
+  // request still running (lib/backend.js fetchStreamsShared) rather than
+  // aborting it for a slower refresh resolve.
+  const retrySearch = useCallback(() => {
+    searchAtRef.current = Date.now();
+    resolve.load(false);
+  }, [resolve]);
+  // The end card's Retry is a fresh start: new clock, new attempts.
+  const retryAll = useCallback(() => {
+    playAtRef.current = Date.now();
+    searchAtRef.current = playAtRef.current;
+    firstListSizeRef.current = 0;
+    pendingReasonRef.current = null;
+    putAttempts([]);
+    resolve.load(true);
+  }, [resolve, putAttempts]);
+  // A row picked in Details plays at once, like the Servers menu. Before the
+  // first frame there is nothing to go back to, so it bypasses the guard and
+  // ends a switch still being judged.
+  const pickFromLoading = useCallback((id) => {
+    const src = sources.find((s) => s.id === id);
+    if (!src) return;
+    if (srcSwitch.current) endSourceSwitch();
+    switchSource(src);
+  }, [sources, endSourceSwitch, switchSource]);
+
   return (
     <div className="player" ref={playerRef} role="dialog" aria-modal="true"
          aria-label={`Playing ${title.title}`}
          data-switching={sourceLocked ? 'true' : undefined}>
-      {!stream && !error && title.backdrop && (
+      {!framedOnce && !error && title.backdrop && (
         <div className="player-art"
              style={{ backgroundImage: `url(${poster(title.backdrop, 'w1280')})` }}
              aria-hidden="true" />
@@ -1878,6 +1997,8 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
           menuOpen={menuOpen}
           tv={tvRemote}
           sources={menuSources}
+          labels={rowLabels}
+          covered={!framedOnce}
           currentSource={currentSource}
           currentSourceId={currentSourceId}
           sourcesPending={sourcesPending}
@@ -1912,13 +2033,15 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
         />
       )}
 
-      {busy && stream && !error && (
+      {busy && stream && !error && framedOnce && (
         <div className={`pbuffering${statusMessage ? ' has-msg' : ''}`} role="status" aria-live="polite">
           <div className="pspinner" />
           {statusMessage && <span className="pbuffer-text">{statusMessage}</span>}
-          {statusMessage && sources.length > 1 && sources.findIndex(s => s.id === currentSourceId) >= 0 && (
+          {/* Attempts, not the list index: it only goes up, and rows that
+              arrive later do not grow n (loading-ux finding 5). */}
+          {statusMessage && sources.length > 1 && attempts.length > 0 && (
             <span className="pbuffer-count">
-              Source {sources.findIndex(s => s.id === currentSourceId) + 1} of {sources.length}
+              {attempts.length} of {firstListSizeRef.current || sources.length} tried
             </span>
           )}
           {/* Screen readers get the state even when it is visually SILENT.
@@ -1965,11 +2088,13 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
         </div>
       )}
 
-      {!stream && !error && !embedOn && (
-        <Resolving stage={stage} title={title.title}
-          meta={isTv ? `S${season} E${episode}${epTitle ? ` · ${epTitle}` : ''}` : null} elapsed={elapsed} log={log}
-          providers={providers} onArt={Boolean(title.backdrop)} refreshing={resolve.refreshing}
-          onClose={onClose} onRetry={() => resolve.load(true)} />
+      {/* From Play to the first frame: the search AND an attached stream
+          with no picture yet. Mid-film switches keep .pbuffering above. */}
+      {!framedOnce && !error && !embedOn && (
+        <Loading view={loadView} title={title.title}
+          meta={isTv ? `S${season} E${episode}${epTitle ? ` · ${epTitle}` : ''}` : null}
+          onArt={Boolean(title.backdrop)}
+          onClose={onClose} onRetry={retrySearch} onPick={pickFromLoading} />
       )}
       {notice && !error && (
         <div className="toast" role="status" key={notice.id}>{notice.text}</div>
@@ -1981,7 +2106,8 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       )}
       {error && !embedOn && (
         <PlayerError error={error} embeds={embeds}
-          onRetry={() => resolve.load(true)} onClose={onClose} />
+          headline={loadView.headline} detail={attempts.length ? loadView.detail : null}
+          onRetry={retryAll} onClose={onClose} />
       )}
       {ep.ended && ep.nextEp && !error && (
         <NextUp ep={ep.nextEp}

@@ -256,12 +256,21 @@ export function useResolve({ mediaType, tmdbId, season = 0, episode = 0 }) {
       onMore: (more) => {
         setSources(prev => {
           const merged = [...prev];
+          // toSource mints ids by index in EACH answer, so the full list
+          // re-numbers rows we already hold. A known row keeps its id (it may
+          // be playing: currentSourceId points at it), and a new row never
+          // takes an id another row already has.
+          const taken = new Set(merged.map(m => m.id));
           for (const src of more) {
             const at = merged.findIndex(m => sameSource(m, src));
             const entry = { ...src, best: bestLabel(src.variants, null),
               audioTracks: src.audioTracks ?? [], codecs: src.codecs ?? null };
-            if (at === -1) merged.push(entry);
-            else merged[at] = { ...merged[at], ...entry };
+            if (at === -1) {
+              let id = entry.id;
+              for (let n = 2; id != null && taken.has(id); n++) id = `${src.id}~${n}`;
+              taken.add(id);
+              merged.push({ ...entry, id });
+            } else merged[at] = { ...merged[at], ...entry, id: merged[at].id ?? entry.id };
           }
           return merged;
         });

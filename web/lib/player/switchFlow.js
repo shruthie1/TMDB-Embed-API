@@ -95,6 +95,6 @@ export function advanceTarget(sources, dead, failed, ctx = {}) {
   });
 }
 
-export function advanceNotice(from, to) {
-  return `${from || 'That server'} didn't respond, playing ${to || 'the next server'}.`;
-}
+// The advance copy lives in loadingModel.js, shared with the APK's
+// LoadingModel.kt: "{from} is slow. Trying {to}."
+export { advanceNotice } from './loadingModel';
