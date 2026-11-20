@@ -158,6 +158,11 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     private val twinTried = HashSet<String>()
     /** On-device providers already re-resolved once for this title. */
     private val reresolved = HashSet<String>()
+    /** H13: the Telugu row merged under the playing picture, or null. */
+    var pairedAudio by mutableStateOf<Source?>(null); private set
+    private var pairApplied = false
+    private val audioDecoders: Set<String>? by lazy { HybridPair.deviceAudioDecoders() }
+
     /** The preferred-language audio pick is done once per source. */
     private var audioPickedFor: String? = null
     /** Row the viewer picked by hand in this title (Server menu or Details); its provider pins outright. */
@@ -209,7 +214,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             override fun onVideoSizeChanged(size: VideoSize) { videoSize = size }
             override fun onRenderedFirstFrame() { markFramed() }
             override fun onCues(cueGroup: CueGroup) { cues = cueGroup.cues.joinToString("\n") { it.text ?: "" }.trim() }
-            override fun onTracksChanged(t: Tracks) { tracks = t; pickPreferredAudio(t); if (landed) current?.let { snapshotCtx(it) } }
+            override fun onTracksChanged(t: Tracks) { tracks = t; if (pairedAudio != null) applyPair(t) else pickPreferredAudio(t); if (landed) current?.let { snapshotCtx(it) } }
             override fun onPlayerError(error: PlaybackException) { handleError(error) }
         })
         viewModelScope.launch {
@@ -426,7 +431,10 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         if (phase is Phase.Failed) { play(s, g.progress.resumeMs(r.type, r.id, r.season, r.episode)); notice = "" }
     }
 
-    fun play(s: Source, startMs: Long = player.currentPosition.coerceAtLeast(0)) {
+    /** `pairAudio` (H13): merge that row's Telugu audio under this row's picture. */
+    fun play(s: Source, startMs: Long = player.currentPosition.coerceAtLeast(0), pairAudio: Source? = null) {
+        pairedAudio = pairAudio
+        pairApplied = false
         // A row still open here was left by a manual pick: back to waiting, not failed.
         endAttempt(LoadingModel.RowState.WAITING, null)
         attempts = attempts + LoadingModel.Attempt(s.id, System.currentTimeMillis())
@@ -459,18 +467,14 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             .setPreferredAudioLanguages(*isoFor(g.prefs.preferredAudio()))
             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
             .build()
-        val swap = if (TsAudioSwap.wanted(s)) TsAudioSwap(g.prefs.preferredAudio()) else null
-        if (s.onDevice != null || swap != null) {
-            // Provider Referer/Origin on every request; vaplayer's token on every segment.
-            // Caption files go out plain: the provider headers and vaplayer token are for the stream only.
-            // A muxed CastleTV row (VM or device) gets the TS audio swap: the player keeps only the first AAC PID.
-            val streamClient = StreamInterceptor.client(g.api.client, s.headers, s.segmentToken)
-                .let { c -> if (swap == null) c else c.newBuilder().addInterceptor(swap).build() }
-            if (swap != null) android.util.Log.i("Chitram", "[tsaudio] ${s.provider}: swapping in ${g.prefs.preferredAudio()} from ${s.languages.joinToString("/")}")
-            val http = OkHttpDataSource.Factory(okhttp3.Call.Factory { req ->
-                if (subs.any { it.url == req.url.toString() }) g.api.client.newCall(req) else streamClient.newCall(req)
-            })
-            player.setMediaSource(DefaultMediaSourceFactory(http).createMediaSource(item), startMs)
+        if (pairAudio != null) {
+            // H13: picture first, Telugu second. Each half keeps its own headers, token and swap.
+            val audioItem = MediaItem.Builder().setUri(pairAudio.url)
+                .apply { if (!pairAudio.progressive) setMimeType(MimeTypes.APPLICATION_M3U8) }.build()
+            android.util.Log.i("Chitram", "[hybrid] ${s.provider} video + ${pairAudio.provider} ${g.prefs.preferredAudio()} audio, offset ${HybridPair.OFFSET_US}us")
+            player.setMediaSource(HybridPair.merge(sourceFor(s, item), sourceFor(pairAudio, audioItem)), startMs)
+        } else if (s.onDevice != null || TsAudioSwap.wanted(s)) {
+            player.setMediaSource(sourceFor(s, item), startMs)
         } else {
             player.setMediaItem(item, startMs)
         }
@@ -481,8 +485,44 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         startNoPictureGuard(s)
     }
 
+    /**
+     * Provider Referer/Origin on every request; vaplayer's token on every segment.
+     * Caption files go out plain: the provider headers and vaplayer token are for the stream only.
+     * A muxed CastleTV row (VM or device) gets the TS audio swap: the player keeps only the first AAC PID.
+     */
+    private fun sourceFor(s: Source, item: MediaItem): androidx.media3.exoplayer.source.MediaSource {
+        val swap = if (TsAudioSwap.wanted(s)) TsAudioSwap(g.prefs.preferredAudio()) else null
+        if (s.onDevice == null && swap == null) return DefaultMediaSourceFactory(OkHttpDataSource.Factory(g.api.client)).createMediaSource(item)
+        val streamClient = StreamInterceptor.client(g.api.client, s.headers, s.segmentToken)
+            .let { c -> if (swap == null) c else c.newBuilder().addInterceptor(swap).build() }
+        if (swap != null) android.util.Log.i("Chitram", "[tsaudio] ${s.provider}: swapping in ${g.prefs.preferredAudio()} from ${s.languages.joinToString("/")}")
+        val http = OkHttpDataSource.Factory(okhttp3.Call.Factory { req ->
+            if (subs.any { it.url == req.url.toString() }) g.api.client.newCall(req) else streamClient.newCall(req)
+        })
+        return DefaultMediaSourceFactory(http).createMediaSource(item)
+    }
+
+    /** H13: once both halves have tracks, pin the picture's video and the Telugu audio. */
+    private fun applyPair(t: Tracks) {
+        val a = pairedAudio ?: return
+        if (pairApplied) return
+        val (v, au) = HybridPair.overrides(t, isoFor(g.prefs.preferredAudio()).toList()) ?: return
+        pairApplied = true
+        audioPickedFor = current?.id
+        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+            .setOverrideForType(v).setOverrideForType(au).build()
+        android.util.Log.i("Chitram", "[hybrid] picked video ${v.mediaTrackGroup.id} and audio ${au.mediaTrackGroup.id} from ${a.provider}")
+    }
+
     /** Fatal error policy (web/lib/player/fatalPolicy.js): stale link refreshes once, else next source. */
     private fun handleError(e: PlaybackException) {
+        pairedAudio?.let { a ->
+            // A failed pair falls back to the Telugu row on its own: never lose the Telugu audio.
+            android.util.Log.w("Chitram", "[hybrid] pair failed (${e.errorCodeName}), playing ${a.provider} alone")
+            notice = "Playing ${label(a)} for ${g.prefs.preferredAudio()}…"
+            play(a, player.currentPosition.coerceAtLeast(0))
+            return
+        }
         val http = generateSequence<Throwable>(e) { it.cause }.filterIsInstance<HttpDataSource.InvalidResponseCodeException>().firstOrNull()
         val pos = player.currentPosition.coerceAtLeast(0)
         val cur = current
@@ -887,7 +927,8 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
      * when nothing is playing. WVC takes no start position, so the TV starts at 0.
      */
     suspend fun castSpec(): WvcCast.Spec? {
-        val s = current ?: return null
+        // A pair is merged on the phone only; the TV gets the Telugu row itself.
+        val s = pairedAudio ?: current ?: return null
         val r = request ?: return null
         player.pause()
         saveProgress()
@@ -939,6 +980,13 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         // the audio LazyColumn throws "Key already used". Mirrors web trackChoices
         // (src:<id>:<lang>). choose() reads the id from p[1], so the :lang tail is
         // for uniqueness only. (Crash: Kubera, CastleTV-0 twice, 2026-11-21.)
+        // H13: the viewer's language from another row, under this picture.
+        val want = g.prefs.preferredAudio()
+        if (pairedAudio == null && want.lowercase() !in names) current?.let { cur ->
+            HybridPair.candidate(cur, sources, want, g.codecs, audioDecoders)?.let { a ->
+                out += MenuItem("pair:${a.id}", want, "this picture, audio from ${label(a)}")
+            }
+        }
         for ((lang, s) in Ranking.otherSourceLanguages(sources, current?.id, names)) {
             out += MenuItem("src:${s.id}:$lang", lang, "switches to ${s.provider} ${s.quality}")
         }
@@ -982,6 +1030,11 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                 // Keep `tried`: auto-advance after a failed pick must not return to a dead row (U7).
                 manualPickId = it.id
                 play(it); notice = "Switching to ${label(it)}…"
+            }
+            "pair" -> sources.firstOrNull { it.id == p[1] }?.let { a ->
+                val v = current ?: return
+                play(v, player.currentPosition.coerceAtLeast(0), pairAudio = a)
+                notice = "${g.prefs.preferredAudio()} from ${label(a)}…"
             }
             "trk" -> override(C.TRACK_TYPE_AUDIO, p[1].toInt(), p[2].toInt())
             "q" -> if (p[1] == "auto") player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().clearOverridesOfType(C.TRACK_TYPE_VIDEO).build()
