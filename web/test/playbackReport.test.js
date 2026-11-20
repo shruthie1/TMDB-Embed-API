@@ -110,7 +110,24 @@ describe('when the player reports', () => {
     // The media listeners are attached once per stream. Closing over props
     // would capture the values from that render and report the wrong provider.
     expect(player).toMatch(/reportCtx\.current = \{/);
+    // The success report lives in confirmPlayback (deferred until the runtime
+    // check can run); onPlaying hands off to it.
     const onPlaying = player.match(/const onPlaying = \(\) => \{[\s\S]*?\n    \};/)[0];
-    expect(onPlaying).toMatch(/reportCtx\.current/);
+    expect(onPlaying).toMatch(/confirmPlayback\(\)/);
+    const confirm = player.match(/const confirmPlayback = useCallback[\s\S]*?\n  \}, \[/)[0];
+    expect(confirm).toMatch(/reportCtx\.current/);
+  });
+
+  it('never confirms a play while the runtime check cannot run', () => {
+    // Krack 784572: a truncated file confirmed before runtimeMin loaded
+    // ranked first forever. ok:true is sent only from confirmPlayback, and
+    // only on an 'ok' runtime verdict; the duration/poll check retries it.
+    const onPlaying = player.match(/const onPlaying = \(\) => \{[\s\S]*?\n    \};/)[0];
+    expect(onPlaying).not.toMatch(/ok: true/);
+    const confirm = player.match(/const confirmPlayback = useCallback[\s\S]*?\n  \}, \[/)[0];
+    expect(confirm).toMatch(/runtimeVerdict\(title\.runtimeMin, videoRef\.current\?\.duration\) !== 'ok'\) return false/);
+    expect(confirm).toMatch(/ok: true/);
+    expect(player.match(/ok: true/g)).toHaveLength(1);
+    expect(player).toMatch(/const check = \(\) => \{ if \(!rejectRuntimeMismatch\(\)\) confirmPlayback\(\); \};/);
   });
 });

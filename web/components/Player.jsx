@@ -17,6 +17,7 @@ import EmbedStage from './player/EmbedStage';
 import { VA_EMBED_ID, vaEmbedChoice, shouldAutoEmbed } from '../lib/player/vaEmbed';
 import { markDead, nextAlive, qualityHeight } from '../lib/player/deadSources';
 import { fatalAction } from '../lib/player/fatalPolicy';
+import { runtimeVerdict } from '../lib/player/runtimeCheck';
 import useNoPictureGuard from '../lib/player/useNoPictureGuard';
 import { pairSources, listSources as listBackendSources } from '../lib/backend';
 import {
@@ -220,6 +221,10 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   // Keep this per stream so a bad provider is rejected before `playing` can
   // record it as a successful playback.
   const runtimeMismatchRef = useRef(false);
+  // Metrics captured at the first frame. The success report can be deferred
+  // until the runtime check can run, but startupMs must stay the first-frame
+  // time: it feeds cachedStartupMaxMs and the learned ranking.
+  const firstFrameMetricsRef = useRef(null);
   // Held in a ref of its own because reportMetrics is a useCallback([]) that
   // several handlers close over. Reading `resolve` directly there would capture
   // the first render's object and quietly go stale if the hook ever returns a
@@ -275,8 +280,8 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   const rejectRuntimeMismatch = useCallback(() => {
     const expected = Number(title.runtimeMin);
     const actual = Number(videoRef.current?.duration) / 60;
-    if (!expected || !Number.isFinite(actual) || actual <= 0
-        || actual >= expected * 0.82 || runtimeMismatchRef.current) return false;
+    if (runtimeMismatchRef.current
+        || runtimeVerdict(expected, videoRef.current?.duration) !== 'mismatch') return false;
     runtimeMismatchRef.current = true;
     const reason = `runtime mismatch (${Math.round(actual)}m vs ${Math.round(expected)}m)`;
     reportPlayback({ ...reportCtx.current, ...reportMetrics(), ok: false, reason });
@@ -286,6 +291,21 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     if (!recoverBySwitching(reason)) resolve.load(true);
     return true;
   }, [title.runtimeMin, recoverBySwitching, reportMetrics, resolve]);
+
+  // Confirm the stream as good, once per stream, and only when the runtime
+  // check has passed. While runtimeMin or the duration is unknown nothing is
+  // sent: the durationchange/poll effect below calls this again when the
+  // check can run. A truncated file confirmed early ranked first forever.
+  const confirmPlayback = useCallback(() => {
+    if (reportedRef.current || runtimeMismatchRef.current || !startedRef.current) return false;
+    if (runtimeVerdict(title.runtimeMin, videoRef.current?.duration) !== 'ok') return false;
+    reportedRef.current = true;
+    const c = reportCtx.current;
+    rememberProvider(c.mediaType, c.tmdbId, c.provider, c.season, c.episode);
+    reportPlayback({ ...c, ...(firstFrameMetricsRef.current || reportMetrics()),
+      provider: c.provider, ok: true });
+    return true;
+  }, [title.runtimeMin, reportMetrics]);
 
   const onFatal = useCallback((data, hls) => {
     // A viewer's own pick failed: put back what they were watching instead of
@@ -1061,14 +1081,12 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       // render and never see it change.
       if (!reportedRef.current) {
         if (rejectRuntimeMismatch()) return;
-        reportedRef.current = true;
-        const c = reportCtx.current;
-        rememberProvider(c.mediaType, c.tmdbId, c.provider, c.season, c.episode);
-        reportPlayback({ ...c, ...reportMetrics(), provider: c.provider, ok: true });
+        if (!firstFrameMetricsRef.current) firstFrameMetricsRef.current = reportMetrics();
       }
       setStarted(true);
       startedRef.current = true;
       setPlaying(true);
+      confirmPlayback();
     };
     ['play', 'pause'].forEach(e => v.addEventListener(e, sync));
     v.addEventListener('playing', onPlaying);
@@ -1077,7 +1095,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       ['play', 'pause'].forEach(e => v.removeEventListener(e, sync));
       v.removeEventListener('playing', onPlaying);
     };
-  }, [stream, reportMetrics, rejectRuntimeMismatch]);
+  }, [stream, reportMetrics, rejectRuntimeMismatch, confirmPlayback]);
 
   // A new stream means a new wait: clear the flag so the loader shows again
   // for a source switch, which is a fresh load however long the last one ran.
@@ -1089,6 +1107,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     // the one we abandoned kept its failure.
     reportedRef.current = false;
     runtimeMismatchRef.current = false;
+    firstFrameMetricsRef.current = null;
     streamStartedAt.current = stream ? Date.now() : null;
     playbackStats.current = { count: 0, totalMs: 0, activeSince: null, recoveries: 0 };
   }, [stream]);
@@ -1099,7 +1118,10 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   useEffect(() => {
     const v = videoRef.current;
     if (!v || !stream) return;
-    const check = () => { rejectRuntimeMismatch(); };
+    // Also sends the deferred success report once the check can pass
+    // (runtimeMin loaded later re-runs this effect).
+    const check = () => { if (!rejectRuntimeMismatch()) confirmPlayback(); };
+    check();
     v.addEventListener('loadedmetadata', check);
     v.addEventListener('durationchange', check);
     // Some hls.js/CDN combinations expose duration only after the first
@@ -1113,7 +1135,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       v.removeEventListener('loadedmetadata', check);
       v.removeEventListener('durationchange', check);
     };
-  }, [stream, rejectRuntimeMismatch]);
+  }, [stream, rejectRuntimeMismatch, confirmPlayback]);
 
   // A new title/episode is a new startup session. Source replacements within
   // the same title deliberately keep the one-fallback guard armed.

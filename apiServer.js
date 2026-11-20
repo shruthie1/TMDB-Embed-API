@@ -600,7 +600,8 @@ function effectiveQuality(stream) {
 // resolver/index.js). Language stays the primary key; learning only reorders
 // within it and sinks proven-bad rows. Nothing is ever dropped.
 //
-//   1. play_fails >= 2 sinks (it failed again after a success cleared it)
+//   1. play_fails >= 2 sinks (it failed again after a success cleared it);
+//      a "runtime mismatch" failure sinks and unconfirms on the first report
 //   2. browser-confirmed (played_ok_at) before unconfirmed
 //   3. score = 1.5*quality + speed + 1.5*startup, each in [0, 1]
 //        quality = min(height, 2160) / 2160
@@ -634,10 +635,15 @@ function learnedFacts(s, idx, ewmaCache) {
   // client that does not send mediaIdentity reports against).
   const st = idx ? (idx.get(`${provider}|${mediaIdentityOf(s && s.url)}`) || idx.get(`${provider}|`) || null) : null;
   if (!ewmaCache.has(provider)) ewmaCache.set(provider, latencyEwma(provider));
+  // A runtime mismatch is proof on the first report: a truncated or wrong
+  // file never changes length, so it sinks and loses any earlier
+  // confirmation at once (Krack 784572: 102.5m Castle Telugu vs 154m).
+  const runtimeBad = Boolean(st && st.play_fails > 0
+    && /^runtime mismatch/i.test(String(st.play_fail_reason || '')));
   const startup = st && st.played_ok_at && !st.play_fails ? st.startup_ms : null;
   return {
-    sink: st && st.play_fails >= 2 ? 1 : 0,
-    unconfirmed: st && st.played_ok_at ? 0 : 1,
+    sink: st && (st.play_fails >= 2 || runtimeBad) ? 1 : 0,
+    unconfirmed: st && st.played_ok_at && !runtimeBad ? 0 : 1,
     score: 1.5 * (Math.min(heightOf(effectiveQuality(s)), 2160) / 2160)
       + unit(ewmaCache.get(provider)) + 1.5 * unit(startup),
   };

@@ -1,4 +1,5 @@
 const { getDetails } = require('../utils/tmdb');
+const { getStore, mediaIdentityOf } = require('../utils/store');
 const {
     normalizeTitle: normaliseTitle,
     looseTitle: loosenTitle,
@@ -696,6 +697,84 @@ async function resolveMatch(api, config, platform, match, title, type, season, e
     }
 }
 
+// The language of an UNLABELLED Netflix embed-tmdb file, read from Netflix's
+// own catalogue entry (search.php -> post.php, never player.php).
+//
+// embed-tmdb ships the full-length mp4 with its one audio track tagged `und`,
+// which mp4AudioProbe drops, so a real Telugu file reached the ranking with
+// languages:[] and lost to a truncated labelled one (Krack 784572: 9033s
+// Netflix mp4 vs a 102.5min Castle Telugu file). post.php's `lang` list names
+// the title's audio. Exactly one language is a label; several is a guess, so
+// nothing is returned.
+//
+// Rate limits (CLAUDE.md #5): ONE search (first spelling only) and ONE
+// post.php, no retry, no loop. The caller runs it only for unlabelled rows,
+// and the evidence it writes labels the file on later probes, so it does not
+// repeat for the same file.
+async function netflixLanguageFromPost(title, type, year) {
+    try {
+        const ott = PLATFORM_MAP.netflix.ott;
+        const api = await resolveNewTvApi();
+        const query = searchSpellings(title)[0] || title;
+        const searchData = await readNewTvJson(await nmFetch(
+            `${api}/newtv/search.php?s=${encodeURIComponent(query)}`,
+            { headers: newTvHeaders(ott), signal: AbortSignal.timeout(15000) }
+        ));
+        if (searchData === null) return null;
+        noteNewTvOk();
+        const match = pickSearchMatches(searchData.searchResult || [], title)[0];
+        if (!match) {
+            console.log(`[NetMirror] netflix-lang no catalogue match for "${title}"`);
+            return null;
+        }
+        const post = await readNewTvJson(await nmFetch(
+            `${api}/newtv/post.php?id=${encodeURIComponent(match.item.id)}`,
+            { headers: newTvHeaders(ott, { Lastep: '', Usertoken: '' }), signal: AbortSignal.timeout(15000) }
+        ));
+        if (post === null) return null;
+        if (type === 'movie' && (post.type === 't' || (post.episodes || []).filter(Boolean).length)) {
+            console.log(`[NetMirror] netflix-lang "${title}" matched a series entry - skipped`);
+            return null;
+        }
+        const postYear = Number(String(post.year || '').slice(0, 4));
+        if (year && postYear > 1900 && Math.abs(postYear - year) > 1) {
+            console.log(`[NetMirror] netflix-lang "${title}" year ${postYear} vs ${year} - skipped`);
+            return null;
+        }
+        const langs = [...new Set((Array.isArray(post.lang) ? post.lang : [])
+            .map((entry) => entry && String(entry.l || '').trim()).filter(Boolean))];
+        if (langs.length !== 1) {
+            console.log(`[NetMirror] netflix-lang "${title}" lists ${langs.length} languages - not guessing`);
+            return null;
+        }
+        return langs[0];
+    } catch (error) {
+        console.log(`[NetMirror] netflix-lang failed: ${error.message}`);
+        return null;
+    }
+}
+
+// Label unlabelled Netflix rows with `lang` and store it as provider evidence
+// on each file's media identity. mp4AudioProbe's applyEvidence then relabels
+// the single `und` track on every later probe of the same file.
+function labelNetflixRows(rows, lang, ctx) {
+    const seen = new Set();
+    return rows.map((row) => {
+        if (!row || row.language || (row.languages || []).length) return row;
+        const identity = mediaIdentityOf(row.url);
+        if (identity && !seen.has(identity)) {
+            seen.add(identity);
+            try {
+                getStore().putAudioEvidence({ ...ctx, provider: 'netmirror', mediaIdentity: identity,
+                    source: 'provider', lang });
+            } catch (e) { console.warn(`[NetMirror] netflix-lang evidence write failed: ${e.message}`); }
+        }
+        const audio = Array.isArray(row.audio) && row.audio.length === 1 && !row.audio[0].language
+            ? [{ ...row.audio[0], language: lang }] : row.audio;
+        return { ...row, languages: [lang], ...(audio ? { audio } : {}) };
+    });
+}
+
 // A stream url that the CDN is currently throttling.
 //
 // THE PROBLEM THIS SOLVES (measured 2026-09-23): the 429 does not come from
@@ -833,7 +912,7 @@ async function getNetmirrorStreams(tmdbId, mediaType = 'movie', seasonNum = null
             // a three request chain (search -> post -> player), so a title
             // found on the first fallback still cost six more requests against
             // a provider that rate limits per IP. Stop at the first hit.
-            const collected = [...direct];
+            let collected = [...direct];
             // The early exit above used to be `if (!collected.length)`, which
             // skipped the platform path entirely whenever the /api/embed-tmdb
             // call returned anything. That was wrong: the two paths return
@@ -869,10 +948,25 @@ async function getNetmirrorStreams(tmdbId, mediaType = 'movie', seasonNum = null
             // Sequential with a gap keeps every row AND stays gentle. The gap is
             // the whole rate-limit budget: raise NETMIRROR_PLATFORM_GAP_MS if
             // the provider starts timing out.
-            const haveLanguages = collected.some(
+            const labelled = (rows) => rows.some(
                 (stream) => stream && (stream.language || (stream.languages || []).length));
+            // Unlabelled Netflix rows: ask Netflix's own post.php for the
+            // language before the other catalogues (one search + one post).
+            let askedNetflix = false;
+            if (collected.length && !labelled(collected)) {
+                askedNetflix = true;
+                const year = Number(String((details && (details.release_date || details.first_air_date)) || '')
+                    .slice(0, 4)) || null;
+                const lang = await netflixLanguageFromPost(title, type, year);
+                if (lang) {
+                    console.log(`[NetMirror] netflix-lang ${tmdbId} labelled ${lang} from post.php`);
+                    collected = labelNetflixRows(collected, lang,
+                        { tmdbId, type: mediaType === 'tv' ? 'tv' : 'movie', season, episode });
+                }
+            }
+            const haveLanguages = labelled(collected);
             if (!haveLanguages) {
-                let asked = 0;
+                let asked = askedNetflix ? 1 : 0;
                 for (const platform of PLATFORM_ORDER) {
                     // netflix already ran as `direct` (the embed-tmdb path).
                     if (platform === 'netflix') continue;

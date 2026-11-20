@@ -47,7 +47,10 @@ test('a catalogue answering Page Not Found keeps the Netflix rows, no error, cac
     const out = await getNetmirrorStreams(5001, 'movie');
     assert.equal(out.upstreamError, undefined, 'Page Not Found is not an upstream error');
     assert.deepEqual(out.map((s) => s.url), ['https://cdn.example/nf/1080.mp4']);
-    assert.equal(calls.search, 3, 'primevideo, hotstar and disney each asked once');
+    // 4 = one Netflix search for the unlabelled row's language (post.php
+    // recovery, providers/netmirror.js netflixLanguageFromPost) + primevideo,
+    // hotstar and disney each asked once.
+    assert.equal(calls.search, 4, 'netflix-lang once, then each catalogue once');
 
     // Cached as a full answer: the next call makes no upstream request.
     const before = { ...calls };

@@ -130,3 +130,33 @@ test('browser confirmation never lifts a Hindi row above Telugu', async () => {
     const { providers } = await order(id);
     assert.strictEqual(providers[2], 'OneTouchTV', 'both Telugu rows sank, still above Hindi');
 });
+
+test('one runtime-mismatch report sinks a confirmed row inside the Telugu group', async () => {
+    // Krack 784572: a truncated Castle Telugu file (102.5m vs 154m) was
+    // confirmed before runtimeMin loaded and ranked first on every visit.
+    const id = 7003;
+    const before = await order(id);
+    const top = before.providers[0];
+    const other = before.providers[1];
+    await report({ tmdbId: id, type: 'movie', provider: top, playedOk: true, startupMs: 500 });
+    let after = await order(id);
+    assert.deepStrictEqual(after.providers, [top, other, 'OneTouchTV'], 'confirmed row leads');
+
+    await report({ tmdbId: id, type: 'movie', provider: top, playedOk: false,
+        reason: 'runtime mismatch (103m vs 154m)' });
+    after = await order(id);
+    assert.deepStrictEqual(after.providers, [other, top, 'OneTouchTV'],
+        'sinks on the first report, still above Hindi');
+    assert.strictEqual(after.count, 3, 'nothing dropped');
+});
+
+test('one ordinary failure on a confirmed row does not sink it', async () => {
+    const id = 7004;
+    const before = await order(id);
+    const top = before.providers[0];
+    const other = before.providers[1];
+    await report({ tmdbId: id, type: 'movie', provider: other, playedOk: true, startupMs: 500 });
+    await report({ tmdbId: id, type: 'movie', provider: other, playedOk: false, reason: 'stall' });
+    const after = await order(id);
+    assert.deepStrictEqual(after.providers, [other, top, 'OneTouchTV']);
+});
