@@ -29,5 +29,7 @@
   "enableStreamflixProvider": false,
   "enableVaplayerProvider": true,
   "enableMappleProvider": true,
-  "enableShowsstProvider": false
+  "enableShowsstProvider": false,
+  "enableMultimoviesProvider": true,
+  "enableVidrockProvider": true
 }

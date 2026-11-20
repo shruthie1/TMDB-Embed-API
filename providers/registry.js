@@ -24,6 +24,8 @@ const providerFunctionMap = {
   'zxcstreams.js': 'getZxcstreamsStreams',
   'showsst.js': 'getShowsstStreams',
   'mapple.js': 'getMappleStreams',
+  'multimovies.js': 'getMultimoviesStreams',
+  'vidrock.js': 'getVidrockStreams',
 };
 
 // Per-request cookie context.
