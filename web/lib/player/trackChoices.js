@@ -89,7 +89,10 @@ export function audioChoices(sources = [], videoSourceId = null, inFileTracks = 
     const langs = Array.isArray(s.languages) ? s.languages.filter(Boolean) : [];
     // A multi-language source with real renditions can give up any ONE of its
     // languages. A single-language source gives up only its own.
-    const offered = s.selectableAudio ? langs : langs.slice(0, 1);
+    // Offer the master's real audio renditions when the backend sends them:
+    // NetMirror's post.php list can name languages the master does not carry.
+    const real = Array.isArray(s.audio) ? s.audio.map((a) => a && a.language).filter(Boolean) : [];
+    const offered = s.selectableAudio ? (real.length ? real : langs) : langs.slice(0, 1);
     for (const lang of offered) {
       const key = String(lang).toLowerCase();
       if (seen.has(key)) continue;

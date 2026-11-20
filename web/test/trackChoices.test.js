@@ -128,3 +128,23 @@ describe('videoIdOf and videoLabels', async () => {
       .toEqual(['A 1', 'B', 'A 2']);
   });
 });
+
+describe('audioChoices uses real renditions over post.php languages', () => {
+  it('offers only the languages the master really carries', () => {
+    const nm = {
+      id: 'NetMirror-1', provider: 'NetMirror', quality: '720p', masterUrl: 'http://x/nm/master.m3u8',
+      levels: [{ height: 720 }], languages: ['Hindi', 'Telugu', 'Tamil'],
+      audio: [{ language: 'Telugu' }, { language: 'Hindi' }],
+      selectableAudio: true, progressive: false,
+    };
+    const labels = audioChoices([SHOWSST, nm], SHOWSST.id).map((c) => c.id);
+    expect(labels).toContain('src:NetMirror-1:Telugu');
+    expect(labels).toContain('src:NetMirror-1:Hindi');
+    expect(labels).not.toContain('src:NetMirror-1:Tamil');
+  });
+  it('falls back to languages when no audio list is sent', () => {
+    const labels = audioChoices([SHOWSST, CASTLE_MULTI], SHOWSST.id).map((c) => c.id);
+    expect(labels).toContain('src:CastleTV-0:Telugu');
+    expect(labels).toContain('src:CastleTV-0:Tamil');
+  });
+});
