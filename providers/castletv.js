@@ -2,7 +2,12 @@ const { createDecipheriv } = require('crypto');
 const { getDetails } = require('../utils/tmdb');
 const { searchSpellings, findTitleMatch } = require('../utils/titleMatch');
 
+const upstream = require('../utils/upstreamBase');
+
+// Seed only; castleBase() is the live host (utils/upstreamBase.js).
 const CASTLE_BASE = 'https://api.hlowb.com';
+const UPSTREAM = { name: 'castletv', seed: CASTLE_BASE };
+function castleBase() { return upstream.getBase('castletv', CASTLE_BASE); }
 const PKG = 'com.external.castle';
 const CHANNEL = 'IndiaA';
 const CLIENT = '1';
@@ -12,8 +17,7 @@ const API_HEADERS = {
     'User-Agent': 'okhttp/4.9.3',
     'Accept': 'application/json',
     'Accept-Language': 'en-US,en;q=0.9',
-    'Connection': 'Keep-Alive',
-    'Referer': CASTLE_BASE
+    'Connection': 'Keep-Alive'
 };
 
 const PLAYBACK_HEADERS = {
@@ -57,7 +61,7 @@ function decryptCastle(cipherText, securityKey) {
 async function castleRequest(url, options = {}) {
     const res = await fetch(url, {
         ...options,
-        headers: { ...API_HEADERS, ...(options.headers || {}) },
+        headers: { ...API_HEADERS, Referer: castleBase(), ...(options.headers || {}) },
         signal: AbortSignal.timeout(12000)
     });
     if (!res.ok) {
@@ -89,7 +93,7 @@ function unwrap(obj) {
 }
 
 async function getSecurityKey() {
-    const url = `${CASTLE_BASE}/v0.1/system/getSecurityKey/1?channel=${CHANNEL}&clientType=${CLIENT}&lang=${LANG}`;
+    const url = `${castleBase()}/v0.1/system/getSecurityKey/1?channel=${CHANNEL}&clientType=${CLIENT}&lang=${LANG}`;
     const res = await castleRequest(url);
     const json = await res.json();
     if (json.code !== 200 || !json.data) {
@@ -109,13 +113,13 @@ async function searchCastle(secKey, keyword) {
         page: '1',
         size: '30'
     });
-    const res = await castleRequest(`${CASTLE_BASE}/film-api/v1.1.0/movie/searchByKeyword?${params}`);
+    const res = await castleRequest(`${castleBase()}/film-api/v1.1.0/movie/searchByKeyword?${params}`);
     const cipher = await extractCipher(res);
     return castleSafeParse(decryptCastle(cipher, secKey));
 }
 
 async function getCastleDetails(secKey, movieId) {
-    const url = `${CASTLE_BASE}/film-api/v1.9.9/movie?channel=${CHANNEL}&clientType=${CLIENT}&lang=${LANG}&movieId=${movieId}&packageName=${PKG}`;
+    const url = `${castleBase()}/film-api/v1.9.9/movie?channel=${CHANNEL}&clientType=${CLIENT}&lang=${LANG}&movieId=${movieId}&packageName=${PKG}`;
     const res = await castleRequest(url);
     const cipher = await extractCipher(res);
     return castleSafeParse(decryptCastle(cipher, secKey));
@@ -136,7 +140,7 @@ async function getVideoByLanguage(secKey, movieId, episodeId, languageId, resolu
         resolution: resolution.toString(),
         packageName: PKG
     };
-    const url = `${CASTLE_BASE}/film-api/v2.0.1/movie/getVideo2?clientType=${CLIENT}&packageName=${PKG}&channel=${CHANNEL}&lang=${LANG}`;
+    const url = `${castleBase()}/film-api/v2.0.1/movie/getVideo2?clientType=${CLIENT}&packageName=${PKG}&channel=${CHANNEL}&lang=${LANG}`;
     const res = await castleRequest(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -160,7 +164,7 @@ async function getVideoShared(secKey, movieId, episodeId, resolution) {
         resolution: resolution.toString(),
         packageName: PKG
     };
-    const url = `${CASTLE_BASE}/film-api/v2.0.1/movie/getVideo2?clientType=${CLIENT}&packageName=${PKG}&channel=${CHANNEL}&lang=${LANG}`;
+    const url = `${castleBase()}/film-api/v2.0.1/movie/getVideo2?clientType=${CLIENT}&packageName=${PKG}&channel=${CHANNEL}&lang=${LANG}`;
     const res = await castleRequest(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -575,4 +579,4 @@ async function getCastletvStreams(tmdbId, mediaType = 'movie', seasonNum = null,
     }
 }
 
-module.exports = { getCastletvStreams };
+module.exports = { getCastletvStreams, UPSTREAM };

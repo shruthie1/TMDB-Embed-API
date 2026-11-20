@@ -18,7 +18,19 @@ const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 //      and the plaintext (one url per line) starts at ptr+12.
 //   4. GET <stream origin>/generate.php?api_token -> host token, appended as
 //      ?token= (or replacing __TOKEN__). Without it the master answers 401.
+const upstream = require('../utils/upstreamBase');
+
+// Seed only; wrapperOrigin() is the live host (utils/upstreamBase.js).
 const WRAPPER_ORIGIN = process.env.VAPLAYER_WRAPPER_ORIGIN || 'https://vaplayer.ru';
+const UPSTREAM = { name: 'vaplayer', seed: WRAPPER_ORIGIN };
+function wrapperOrigin() { return upstream.getBase('vaplayer', WRAPPER_ORIGIN); }
+// api.php lives on streamdata.<wrapper host>. Unhealed it is the fixed
+// STREAM_API; after a heal it follows the new wrapper host. A wrong guess here
+// fails verify, so it is never applied.
+function streamApi() {
+    if (!upstream.isHealed('vaplayer', WRAPPER_ORIGIN)) return STREAM_API;
+    return `https://streamdata.${new URL(wrapperOrigin()).host}/api.php`;
+}
 const STEP_TIMEOUT_MS = Number(process.env.VAPLAYER_STEP_TIMEOUT_MS) || 8000;
 
 function apiHeaders(extra = {}) {
@@ -38,10 +50,10 @@ function embedPath(imdb, type, season, episode) {
 async function getApiToken(imdb, type, season, episode) {
     const path = embedPath(imdb, type, season, episode);
     const vs = JSON.parse(await getText(
-        `${WRAPPER_ORIGIN}/embed/va_src.php?path=${encodeURIComponent(path)}`,
-        { 'User-Agent': USER_AGENT, Referer: `${WRAPPER_ORIGIN}${path}` }));
+        `${wrapperOrigin()}/embed/va_src.php?path=${encodeURIComponent(path)}`,
+        { 'User-Agent': USER_AGENT, Referer: `${wrapperOrigin()}${path}` }));
     if (!vs || !vs.src) return null;
-    const page = await getText(vs.src, { 'User-Agent': USER_AGENT, Referer: `${WRAPPER_ORIGIN}/` });
+    const page = await getText(vs.src, { 'User-Agent': USER_AGENT, Referer: `${wrapperOrigin()}/` });
     const m = page.match(/"apiToken":"([^"]+)"/);
     return m ? m[1] : null;
 }
@@ -94,7 +106,7 @@ async function fetchStreamUrls(imdb, type, season, episode) {
             params.set('season', String(season));
             params.set('episode', String(episode));
         }
-        const url = `${STREAM_API}?${params.toString()}&stream_urls&api_token=${encodeURIComponent(apiToken)}`;
+        const url = `${streamApi()}?${params.toString()}&stream_urls&api_token=${encodeURIComponent(apiToken)}`;
         const json = JSON.parse(await getText(url, apiHeaders()));
         // Measured 2026-11-20: a title VaPlayer lacks answers HTTP 200
         // {"status_code":404}. That is the only clean "not here"; a rejected
@@ -291,4 +303,4 @@ async function getVaplayerStreams(tmdbId, mediaType = 'movie', seasonNum = null,
     }
 }
 
-module.exports = { applyToken, decryptStreamUrls, getVaplayerStreams };
+module.exports = { applyToken, decryptStreamUrls, getVaplayerStreams, UPSTREAM };

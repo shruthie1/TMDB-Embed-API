@@ -46,6 +46,20 @@ const MIRRORS = [
 ].map((m) => ({ api: String(m.api).replace(/\/+$/, ''), player: String(m.player).replace(/\/+$/, '') }));
 const API_BASE = MIRRORS[0].api;
 
+// A healed api host (utils/upstreamBase.js) goes in front of the static list,
+// read per call. Its player is the same name with `api.` -> `player.`, the
+// pairing every mirror so far has used.
+const upstream = require('../utils/upstreamBase');
+const playerFor = (api) => api.replace('//api.', '//player.');
+const UPSTREAM = { name: 'showsst', seed: API_BASE, player: playerFor };
+function mirrors() {
+    const api = upstream.getBase('showsst', API_BASE);
+    if (api === API_BASE) return MIRRORS;
+    const known = MIRRORS.find((m) => m.api === api);
+    const first = known || { api, player: playerFor(api) };
+    return [first, ...MIRRORS.filter((m) => m !== first)];
+}
+
 // Headers for the stream host. The MP4 hosts answer 206 with or without a
 // Referer; the player's own Referer is kept as the safe default.
 function streamHeaders(player = MIRRORS[0].player) {
@@ -118,7 +132,8 @@ async function getShowsstStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
     // Fail over on transport errors and non-2xx only. A null source is the
     // shared backend's real answer; asking the next mirror repeats it.
     let body = null; let mirror = null;
-    for (const m of MIRRORS) {
+    const order = mirrors();
+    for (const m of order) {
         try {
             body = await callMirror(m, path);
             mirror = m;
@@ -128,7 +143,7 @@ async function getShowsstStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
         }
     }
     // Every mirror failed (transport error or non-2xx): unknown, not empty.
-    if (!body) throw new Error(`showsst: all ${MIRRORS.length} mirrors failed for ${tmdbId}`);
+    if (!body) throw new Error(`showsst: all ${order.length} mirrors failed for ${tmdbId}`);
     const source = body && body.source;
     if (!source || !source.url) {
         console.log(`[showsst] No source url for ${tmdbId}`);
@@ -170,4 +185,4 @@ async function getShowsstStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
     }));
 }
 
-module.exports = { getShowsstStreams, API_BASE, MIRRORS, streamHeaders };
+module.exports = { getShowsstStreams, API_BASE, MIRRORS, UPSTREAM, streamHeaders };

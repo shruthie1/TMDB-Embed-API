@@ -92,6 +92,27 @@ async function nmFetch(url, options = {}, fetchImpl = fetch) {
 const streamCache = new Map();
 const inflight = new Map();
 let resolvedApiUrl = '';
+// The newtv api base used to be cached for the life of the process, so a
+// rotated base stayed pinned until a restart. Ported from ott's
+// resolveApiBase: recheck after a TTL, and drop it after 2 consecutive search
+// failures so the next resolve asks checknewtv.php again (ONE request).
+const NEWTV_API_TTL_MS = Number(process.env.NETMIRROR_NEWTV_API_TTL_MS) || 10 * 60 * 1000;
+const NEWTV_MAX_FAILURES = 2;
+let resolvedApiAt = 0;
+let newTvFailures = 0;
+
+function noteNewTvFailure() {
+    if (!resolvedApiUrl) return;
+    newTvFailures += 1;
+    if (newTvFailures >= NEWTV_MAX_FAILURES) {
+        console.log(`[NetMirror] newtv api ${resolvedApiUrl} failed ${newTvFailures}x - rediscovering on next resolve`);
+        resolvedApiUrl = '';
+        resolvedApiAt = 0;
+        newTvFailures = 0;
+    }
+}
+
+function noteNewTvOk() { newTvFailures = 0; }
 
 const NEW_TV_DOMAINS = [
     'aHR0cHM6Ly9tb2JpbGVkZXRlY3RzLmNvbQ==',
@@ -190,7 +211,9 @@ function newTvHeaders(ott, extra = {}) {
 }
 
 async function resolveNewTvApi() {
-    if (resolvedApiUrl) return resolvedApiUrl;
+    if (resolvedApiUrl && Date.now() - resolvedApiAt < NEWTV_API_TTL_MS) return resolvedApiUrl;
+    resolvedApiUrl = '';
+    newTvFailures = 0;
     const custom = (process.env.NEWTV_DOMAINS || '')
         .split(',')
         .map((value) => value.trim().replace(/\/$/, ''))
@@ -209,6 +232,7 @@ async function resolveNewTvApi() {
             const data = await response.json();
             if (data.token_hash) {
                 resolvedApiUrl = Buffer.from(data.token_hash, 'base64').toString('utf8').replace(/\/$/, '');
+                resolvedApiAt = Date.now();
                 return resolvedApiUrl;
             }
         } catch {
@@ -522,6 +546,7 @@ async function fetchPlatform(platform, title, type, season, episode) {
                 { headers: newTvHeaders(config.ott), signal: AbortSignal.timeout(15000) }
             );
             const searchData = await searchResponse.json();
+            noteNewTvOk();
             const results = searchData.searchResult || [];
             if (results.length) lastSeen = results;
             matches = pickSearchMatches(results, title);
@@ -545,6 +570,7 @@ async function fetchPlatform(platform, title, type, season, episode) {
         return err ? failure(err, out) : out;
     } catch (error) {
         console.log(`[NetMirror] ${platform} failed: ${error.message}`);
+        noteNewTvFailure();
         return failure(`${platform}: ${error.message}`);
     }
 }

@@ -87,6 +87,38 @@ function loadProvider(providerFile) {
   return providerCache.get(providerFile);
 }
 
+// Domain self-healing (utils/upstreamBase.js) for providers that export
+// UPSTREAM. A throw, a timeout, or an empty answer on a title every source
+// should carry counts toward the streak; an empty answer on any other title
+// is a catalogue gap and counts for nothing. Crossing the streak starts a
+// rediscover in the background; this request is never held for it.
+const upstream = require('../utils/upstreamBase');
+// ott tierprobe TIER_TITLES: Inception, Dune 2, Breaking Bad.
+const MAINSTREAM_IDS = new Set(['27205', '693134', '1396']);
+const VERIFY_TITLE = { tmdbId: '27205', mediaType: 'movie' };
+
+function noteUpstream(providerInfo, module, outcome, ctx) {
+  const u = module && module.UPSTREAM;
+  if (!u) return;
+  if (outcome === 'ok') { upstream.noteOk(u.name); return; }
+  if (outcome === 'empty' && !MAINSTREAM_IDS.has(String(ctx.tmdbId))) return;
+  if (upstream.noteFail(u.name) < upstream.FAIL_STREAK) return;
+  const fn = module[providerInfo.functionName];
+  const current = upstream.getBase(u.name, u.seed);
+  console.warn(`[registry] ${providerInfo.name} failed ${upstream.failStreak(u.name)}x in a row on ${current} - rediscovering`);
+  upstream.triggerRediscover(u.name, {
+    seed: u.seed,
+    player: u.player ? u.player(current) : undefined,
+    aggregatorSlug: u.aggregatorSlug,
+    // The provider's own resolve, pointed at the candidate, carrying a title
+    // it should have. Anything less is satisfied by a parked page.
+    verify: (candidate) => upstream.withBase(u.name, candidate, async () => {
+      const r = await fn(VERIFY_TITLE.tmdbId, VERIFY_TITLE.mediaType, null, null);
+      return Array.isArray(r) && r.length > 0;
+    }),
+  });
+}
+
 // Create fetch function for a provider
 function createFetchFunction(providerInfo) {
   return async function(ctx) {
@@ -166,9 +198,15 @@ function createFetchFunction(providerInfo) {
       console.log(`[registry] ${providerInfo.name} fetch duration ${durationMs}ms`);
 
       // The aggregate route records this as a 'timeout', not an 'empty'.
-      if (result === TIMED_OUT) { const out = []; out.timedOut = true; return out; }
+      if (result === TIMED_OUT) {
+        noteUpstream(providerInfo, module, 'fail', ctx);
+        const out = []; out.timedOut = true; return out;
+      }
 
       if (!Array.isArray(result)) return [];
+      if (!(result.upstreamError && result.length === 0)) {
+        noteUpstream(providerInfo, module, result.length ? 'ok' : 'empty', ctx);
+      }
 
       // A provider marks `upstreamError` on its result when part of its
       // upstream failed. With no rows that is a failure, not an empty; with
@@ -188,6 +226,7 @@ function createFetchFunction(providerInfo) {
       // does not cache it; returning [] here made every upstream outage look
       // like "this title has no streams" for PROVIDER_EMPTY_TTL_MS.
       console.error(`[registry] ${providerInfo.name} fetch error:`, e.message);
+      noteUpstream(providerInfo, module, 'fail', ctx);
       throw e;
     }
   };

@@ -29,7 +29,13 @@
 const { createHash } = require('crypto');
 const hls = require('../lib/media/hlsManifest');
 
+const upstream = require('../utils/upstreamBase');
+
+// Seed only. The live host comes from mappleBase(), which a verified rediscover can
+// move without a code edit (utils/upstreamBase.js).
 const BASE = process.env.MAPPLE_BASE || 'https://mapple.fun';
+const UPSTREAM = { name: 'mapple', seed: BASE };
+function mappleBase() { return upstream.getBase('mapple', BASE); }
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
     + '(KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36';
 
@@ -83,7 +89,7 @@ let session = null; // { jar: Map, requestToken, at }
 let inFlight = null; // single-flight, so a burst of titles bootstraps once
 
 function streamHeaders() {
-    return { 'User-Agent': UA, Referer: `${BASE}/`, Origin: BASE };
+    return { 'User-Agent': UA, Referer: `${mappleBase()}/`, Origin: mappleBase() };
 }
 
 // difficulty is LEADING ZERO BITS, not hex characters. Read off their own
@@ -120,8 +126,8 @@ function request(jar, url, opt, signal) {
         signal,
         headers: {
             'user-agent': UA,
-            origin: BASE,
-            referer: `${BASE}/`,
+            origin: mappleBase(),
+            referer: `${mappleBase()}/`,
             ...(opt.headers || {}),
             ...(jar.size ? { cookie: cookieHeader(jar) } : {}),
         },
@@ -173,8 +179,8 @@ async function json(res) {
 
 async function bootstrap(mediaType, mediaId) {
     const jar = new Map();
-    const page = await go(jar, `${BASE}/watch/${mediaType}/${mediaId}`);
-    const res = await go(jar, `${BASE}${REQUEST_TOKEN_PATH}`, {
+    const page = await go(jar, `${mappleBase()}/watch/${mediaType}/${mediaId}`);
+    const res = await go(jar, `${mappleBase()}${REQUEST_TOKEN_PATH}`, {
         method: 'POST', headers: { accept: 'application/json' },
     });
     const body = await res.text().catch(() => '');
@@ -185,16 +191,21 @@ async function bootstrap(mediaType, mediaId) {
         throw new Error(`no requestToken (watch ${page.status}, session ${res.status}: `
             + `${body.slice(0, 120).replace(/\s+/g, ' ')})`);
     }
-    return { jar, requestToken: rt.token, at: Date.now() };
+    return { jar, requestToken: rt.token, at: Date.now(), base: mappleBase() };
 }
 
+// Keyed by host: a session's cookies and token belong to the host that issued
+// them, so a healed host (or a verify run on a candidate) bootstraps afresh.
 async function getSession(mediaType, mediaId) {
-    if (session && Date.now() - session.at < SESSION_TTL_MS) return session;
-    if (inFlight) return inFlight;
-    inFlight = bootstrap(mediaType, mediaId)
+    const host = mappleBase();
+    if (session && session.base === host && Date.now() - session.at < SESSION_TTL_MS) return session;
+    if (inFlight && inFlight.base === host) return inFlight;
+    const p = bootstrap(mediaType, mediaId)
         .then((s) => { session = s; return s; })
-        .finally(() => { inFlight = null; });
-    return inFlight;
+        .finally(() => { if (inFlight === p) inFlight = null; });
+    p.base = host;
+    inFlight = p;
+    return p;
 }
 
 // Pull the ladder out of the master so the UI can show a real quality menu and
@@ -287,7 +298,7 @@ async function getMappleStreams(tmdbId, mediaType = 'movie', seasonNum = null, e
             base.episode = Number(episodeNum);
         }
 
-        let init = await json(await go(jar, `${BASE}${PLAYBACK_INIT_PATH}`, {
+        let init = await json(await go(jar, `${mappleBase()}${PLAYBACK_INIT_PATH}`, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify(base),
@@ -296,7 +307,7 @@ async function getMappleStreams(tmdbId, mediaType = 'movie', seasonNum = null, e
         if (init?.requiresPow) {
             const nonce = solvePow(init.pow.challenge, init.pow.difficulty);
             if (!nonce) throw new Error(`PoW unsolved for ${tmdbId}`);
-            init = await json(await go(jar, `${BASE}${PLAYBACK_INIT_PATH}`, {
+            init = await json(await go(jar, `${mappleBase()}${PLAYBACK_INIT_PATH}`, {
                 method: 'POST',
                 headers: { 'content-type': 'application/json' },
                 body: JSON.stringify({
@@ -335,14 +346,14 @@ async function getMappleStreams(tmdbId, mediaType = 'movie', seasonNum = null, e
             let out = null;
             let streamUrl = '';
             try {
-                const enc = await goJson(jar, `${BASE}/api/encrypt`, {
+                const enc = await goJson(jar, `${mappleBase()}/api/encrypt`, {
                     method: 'POST',
                     headers: { 'content-type': 'application/json' },
                     // requestToken twice, deliberately - see the header note.
                     body: JSON.stringify({ data, endpoint: 'stream-encrypted', requestToken }),
                 }, stepMs());
                 if (enc?.url) {
-                    const signed = `${BASE}${enc.url}`
+                    const signed = `${mappleBase()}${enc.url}`
                         + `&requestToken=${encodeURIComponent(requestToken)}`
                         + `&token=${encodeURIComponent(init.token)}`;
                     out = await goJson(jar, signed, { headers: { accept: 'application/json' } }, stepMs());
@@ -434,7 +445,7 @@ async function getMappleStreams(tmdbId, mediaType = 'movie', seasonNum = null, e
         if (code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE'
             || code === 'SELF_SIGNED_CERT_IN_CHAIN'
             || code === 'CERT_HAS_EXPIRED') {
-            console.error(`[mapple] TLS interception blocking ${BASE} (${code}).`
+            console.error(`[mapple] TLS interception blocking ${mappleBase()} (${code}).`
                 + ' A middlebox is re-signing this domain; mapple cannot be reached'
                 + ' until its CA is trusted or the domain is exempted.');
             throw e;
@@ -446,4 +457,4 @@ async function getMappleStreams(tmdbId, mediaType = 'movie', seasonNum = null, e
     }
 }
 
-module.exports = { REQUEST_TOKEN_PATH, isEmptyPlaylist, PLAYBACK_INIT_PATH, getMappleStreams, solvePow, SOURCES, BASE, streamHeaders };
+module.exports = { REQUEST_TOKEN_PATH, isEmptyPlaylist, PLAYBACK_INIT_PATH, getMappleStreams, solvePow, SOURCES, BASE, UPSTREAM, streamHeaders };
