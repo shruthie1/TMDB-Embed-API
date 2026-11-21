@@ -143,12 +143,23 @@ describe('useRotateFullscreen', () => {
     expect(el.requestFullscreen).toBeUndefined();
   });
 
-  it('reports rotation-driven fullscreen as unsupported on iOS Safari', () => {
+  it('enters the native video player on iPhone, where the box has no fullscreen API', () => {
     setUA('Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Version/17.0 Mobile/15E148 Safari/604.1');
-    installMatchMedia(false);
-    const { el } = installFullscreen({ supported: false });
+    const mm = installMatchMedia(false);
+    const { el, calls } = installFullscreen({ supported: false });
+    // iPhone only exposes webkitEnterFullscreen on the <video>, not on the box.
+    const video = document.createElement('video');
+    const enter = vi.fn();
+    video.webkitEnterFullscreen = enter;
+    el.appendChild(video);
     const { api } = harness({ boxRef: { current: el }, enabled: true });
-    expect(api.canRotateFullscreen).toBe(false);
+    // The device CAN reach fullscreen (via the native video path).
+    expect(api.canRotateFullscreen).toBe(true);
+    act(() => api.arm());               // the viewer tapped play
+    mm.set(true);
+    // Rotation uses the native path, never the (absent) element API.
+    expect(enter).toHaveBeenCalledTimes(1);
+    expect(calls.request).toBe(0);
   });
 
   it('locks the orientation once fullscreen, so the OS rotation lock cannot trap it', async () => {

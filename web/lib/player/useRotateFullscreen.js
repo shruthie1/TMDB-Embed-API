@@ -39,9 +39,11 @@ import { isTvDevice } from './hlsConfig';
  * player — losing our control bar, our source switcher, and our custom
  * subtitle rendering, which is the whole reason the player draws its own cues.
  *
- * We therefore do NOT call it on rotation. `canRotateFullscreen` reports false
- * there, and the player keeps its own UI. This is a real platform gap and is
- * reported as one rather than papered over.
+ * The viewer still wants fullscreen there, and a silent no-op reads as broken.
+ * So on iPhone a rotation (or the Fullscreen button) now enters the native
+ * player via `video.webkitEnterFullscreen()`. Our custom control bar, source
+ * switcher and cue rendering are hidden while native fullscreen is up; that is
+ * the platform's limit, and real fullscreen beats none.
  *
  * @param {object} opts
  * @param {{current: HTMLElement|null}} opts.boxRef  element to fullscreen
@@ -61,6 +63,48 @@ export const ARM_MS = 3000;
 /** Does this element support being fullscreened at all? */
 function canFullscreenElement(el) {
   return typeof el?.requestFullscreen === 'function';
+}
+
+/** Can this device reach fullscreen one way or another (box FS, or iPhone native video)? */
+function canFullscreenAny(el) {
+  if (canFullscreenElement(el)) return true;
+  return typeof videoIn(el)?.webkitEnterFullscreen === 'function';
+}
+
+/** The <video> inside a player box, for the iPhone native-fullscreen path. */
+function videoIn(el) {
+  if (!el) return null;
+  return el.matches?.('video') ? el : el.querySelector?.('video');
+}
+
+/**
+ * Toggle fullscreen for the player, with the iPhone native fallback.
+ *
+ * Desktop and Android: fullscreen the whole box so our control bar, cue layer
+ * and settings sheet come with it. iPhone Safari has no Element.requestFullscreen,
+ * so there we hand the <video> to Apple's native player via webkitEnterFullscreen.
+ * That loses our custom chrome while fullscreen, but it is real fullscreen, which
+ * is what the viewer asked for; without it the button was a silent no-op.
+ *
+ * @param {HTMLElement} box  the player root (element to fullscreen)
+ * @returns {boolean} true if a fullscreen request was issued
+ */
+export function toggleFullscreen(box) {
+  if (typeof document === 'undefined' || !box) return false;
+  // Already fullscreen (our box path) - exit.
+  if (document.fullscreenElement) { document.exitFullscreen?.(); return true; }
+  if (canFullscreenElement(box)) {
+    box.requestFullscreen().catch(() => {});
+    return true;
+  }
+  // iPhone: only the native video player can go fullscreen.
+  const v = videoIn(box);
+  if (typeof v?.webkitEnterFullscreen === 'function') {
+    // webkitDisplayingFullscreen is the iOS "are we fullscreen" flag.
+    if (v.webkitDisplayingFullscreen) { v.webkitExitFullscreen?.(); return true; }
+    try { v.webkitEnterFullscreen(); return true; } catch { return false; }
+  }
+  return false;
 }
 
 /**
@@ -102,7 +146,16 @@ export function useRotateFullscreen({ boxRef, enabled = true } = {}) {
 
   const enter = useCallback(async () => {
     const el = boxRef?.current;
-    if (!canFullscreenElement(el)) return false;
+    if (!canFullscreenElement(el)) {
+      // iPhone: no Element.requestFullscreen. Hand the <video> to Apple's native
+      // player instead, so a rotation (or a tap) still reaches real fullscreen.
+      const v = videoIn(el);
+      if (typeof v?.webkitEnterFullscreen === 'function' && !v.webkitDisplayingFullscreen) {
+        try { v.webkitEnterFullscreen(); setNeedsTap(false); return true; }
+        catch { setNeedsTap(true); return false; }
+      }
+      return false;
+    }
     if (document.fullscreenElement) return true;
     try {
       // Claim it BEFORE awaiting. `fullscreenchange` fires as soon as the
@@ -127,9 +180,12 @@ export function useRotateFullscreen({ boxRef, enabled = true } = {}) {
 
   const exit = useCallback(async () => {
     try { screen.orientation?.unlock?.(); } catch { /* not supported */ }
+    // iPhone native video fullscreen leaves through the video, not the document.
+    const v = videoIn(boxRef?.current);
+    if (v?.webkitDisplayingFullscreen) { try { v.webkitExitFullscreen?.(); } catch { /* gone */ } return; }
     if (!document.fullscreenElement) return;
     try { await document.exitFullscreen?.(); } catch { /* already gone */ }
-  }, []);
+  }, [boxRef]);
 
   /** Optional programmatic consumer path; the player keeps rotation UI silent. */
   const fullscreenFromTap = useCallback(() => {
@@ -144,7 +200,7 @@ export function useRotateFullscreen({ boxRef, enabled = true } = {}) {
   useEffect(() => {
     if (!enabled) { setCan(false); return; }
     if (isTvDevice()) { setCan(false); return; }
-    setCan(canFullscreenElement(boxRef?.current));
+    setCan(canFullscreenAny(boxRef?.current));
   }, [enabled, boxRef]);
 
   // Track fullscreen leaving under us — Escape, the system back gesture, or
@@ -180,7 +236,7 @@ export function useRotateFullscreen({ boxRef, enabled = true } = {}) {
         // until they rotate back to portrait and change their mind.
         if (userExited.current) return;
         if (document.fullscreenElement) return;
-        if (!canFullscreenElement(boxRef?.current)) return;
+        if (!canFullscreenAny(boxRef?.current)) return;
         // Do we still hold activation? If not, requesting would only earn a
         // NotAllowedError, so ask for the tap that will actually work.
         if (Date.now() - armedAt.current > ARM_MS) { setNeedsTap(true); return; }

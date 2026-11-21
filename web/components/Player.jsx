@@ -36,7 +36,7 @@ import { pairDecodable } from '../lib/player/codecSupport';
 import {
   useResolve, useHls, useRecovery, useControlVisibility, HIDE_MS, HIDE_TV_MS,
   useSubtitles, useEpisodeProgress, useDeviceCapability, useCueOverlay,
-  useRotateFullscreen,
+  useRotateFullscreen, toggleFullscreen,
   useNetworkStatus,
   configFor, isTvDevice, tvLevelCap, networkLevelCap, defaultLevelCap,
 } from '../lib/player';
@@ -1060,12 +1060,10 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
         case 'ArrowDown':  if (navigating) return;
           v.volume = Math.max(0, v.volume - 0.1); break;
         case 'm': v.muted = !v.muted; break;
-        case 'f': {
-          const box = v.parentElement;
-          if (document.fullscreenElement) document.exitFullscreen?.();
-          else box?.requestFullscreen?.().catch(() => {});
+        case 'f':
+          // The player box on desktop/Android; the <video> native path on iPhone.
+          toggleFullscreen(playerRef.current || v.parentElement);
           break;
-        }
         case 'c': setMenuOpen(o => !o); break;
         default:
           if (/^[0-9]$/.test(e.key) && v.duration) {

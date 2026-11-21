@@ -10,6 +10,7 @@ import { SheetScrim, useAnchoredSheet } from './player/popover';
 import { audioOptions } from '../lib/player/audioOptions';
 import { videoChoices, audioChoices, pairingFor, videoIdOf } from '../lib/player/trackChoices';
 import { SIZES } from '../lib/subtitles';
+import { toggleFullscreen } from '../lib/player/useRotateFullscreen';
 
 // How long the settings sheet stays open with no interaction; any action
 // inside it restarts the clock. 3s was too short everywhere: a remote needs
@@ -824,9 +825,8 @@ export default function PlayerControls({
           {!tv && (
           <button className="icon-btn focusable" data-focus="" aria-label="Fullscreen"
                   onClick={() => {
-                    const el = v()?.parentElement;
-                    if (document.fullscreenElement) document.exitFullscreen?.();
-                    else el?.requestFullscreen?.().catch(() => {});
+                    // Box fullscreen on desktop/Android; <video> native path on iPhone.
+                    toggleFullscreen(v()?.closest?.('.player') || v()?.parentElement);
                   }}>
             <Icon name="fullscreen" size={17} />
           </button>
