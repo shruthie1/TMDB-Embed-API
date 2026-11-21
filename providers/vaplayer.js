@@ -31,10 +31,13 @@ function wrapperOrigin() { return upstream.getBase('vaplayer', vaSeed()); }
 // api.php lives on streamdata.<wrapper host>. Unhealed it is the fixed
 // STREAM_API; after a heal it follows the new wrapper host. A wrong guess here
 // fails verify, so it is never applied.
-function streamApi() {
-    // A verified CONFIG.streamDataApiUrl (heal) or a remote edit wins.
+function streamApi(pageUrl) {
+    // A verified heal or a remote edit (a person) wins, then the player
+    // page's own CONFIG.streamDataApiUrl for this request (Task 6), then the
+    // fixed STREAM_API or the healed wrapper's host.
     const healed = selfheal.cfg('vaplayer', 'streamDataApiUrl', '');
     if (/^https:\/\//.test(healed)) return healed;
+    if (typeof pageUrl === 'string' && /^https:\/\/[^/]+\/\S*$/.test(pageUrl)) return pageUrl;
     if (!upstream.isHealed('vaplayer', vaSeed())) return STREAM_API;
     return `https://streamdata.${new URL(wrapperOrigin()).host}/api.php`;
 }
@@ -54,6 +57,10 @@ function embedPath(imdb, type, season, episode) {
     return type === 'tv' ? `/embed/tv/${imdb}/${season}/${episode}` : `/embed/movie/${imdb}`;
 }
 
+// Returns { apiToken, streamDataApiUrl, rateLimited } or null when va_src
+// gave no player page. The "apiToken":"..." regex first (today's page); when
+// it misses, the page's `const CONFIG = {...}` object (Task 6, token heal).
+// rateLimited:true throws a message the classifier calls `blocked`.
 async function getApiToken(imdb, type, season, episode) {
     const path = embedPath(imdb, type, season, episode);
     const vs = JSON.parse(await getText(
@@ -62,7 +69,15 @@ async function getApiToken(imdb, type, season, episode) {
     if (!vs || !vs.src) return null;
     const page = await getText(vs.src, { 'User-Agent': USER_AGENT, Referer: `${wrapperOrigin()}/` });
     const m = page.match(/"apiToken":"([^"]+)"/);
-    return m ? m[1] : null;
+    const conf = require('../lib/selfheal/keys').parseVaConfig(page) || {};
+    if (conf.rateLimited === true) {
+        console.warn(`[VaPlayer] token rateLimited ${imdb}`);
+        throw new Error(require('../lib/selfheal/keys').vaRateLimitedMessage());
+    }
+    const fromConf = typeof conf.apiToken === 'string' && conf.apiToken ? conf.apiToken : null;
+    if (!m && fromConf) console.log(`[VaPlayer] token via CONFIG ${imdb} (regex missed)`);
+    const api = typeof conf.streamDataApiUrl === 'string' && /^https:\/\//.test(conf.streamDataApiUrl) ? conf.streamDataApiUrl : null;
+    return { apiToken: m ? m[1] : fromConf, streamDataApiUrl: api, rateLimited: false };
 }
 
 const wasmCache = new Map(); // va.w -> Promise<WebAssembly.Module>
@@ -105,7 +120,8 @@ function applyToken(url, token) {
 
 async function fetchStreamUrls(imdb, type, season, episode) {
     try {
-        const apiToken = await getApiToken(imdb, type, season, episode);
+        const tok = await getApiToken(imdb, type, season, episode);
+        const apiToken = tok && tok.apiToken;
         if (!apiToken) throw new Error('no apiToken on the player page');
 
         const params = new URLSearchParams({ imdb, type });
@@ -113,7 +129,7 @@ async function fetchStreamUrls(imdb, type, season, episode) {
             params.set('season', String(season));
             params.set('episode', String(episode));
         }
-        const url = `${streamApi()}?${params.toString()}&stream_urls&api_token=${encodeURIComponent(apiToken)}`;
+        const url = `${streamApi(tok.streamDataApiUrl)}?${params.toString()}&stream_urls&api_token=${encodeURIComponent(apiToken)}`;
         const json = JSON.parse(await getText(url, apiHeaders()));
         // Measured 2026-11-20: a title VaPlayer lacks answers HTTP 200
         // {"status_code":404}. That is the only clean "not here"; a rejected

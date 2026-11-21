@@ -63,21 +63,26 @@ function headers() {
     return { ...HEADERS, Referer: `${b}/`, Origin: b };
 }
 function streamKey() {
-    const hex = selfheal.cfg('vidrock', 'key', CONFIG_DEFAULTS.key);
+    // A key under test in a heal run (lib/selfheal/keys.js withTrial) first.
+    const hex = require('../lib/selfheal/keys').trial('vidrock', 'key') || selfheal.cfg('vidrock', 'key', CONFIG_DEFAULTS.key);
     return /^[0-9a-f]{64}$/i.test(hex) ? Buffer.from(hex, 'hex') : STREAM_KEY;
 }
 const API_TIMEOUT_MS = 10000;
 const MASTER_TIMEOUT_MS = 8000;
 const MASTER_RETRY_DELAY_MS = 500;
 
-// base64url ciphertext -> plaintext URL. Throws on input too short to hold
-// IV + tag, as the scraper did.
+// base64url ciphertext -> plaintext URL. AES-256-GCM with the tag checked
+// (self-heal Task 6): a wrong key throws "unable to authenticate data", which
+// the classifier calls `key`, where CTR (no tag) gave garbage that was
+// dropped as "not a URL". GCM with a 12-byte IV runs CTR from counter 2, so
+// the plaintext is the same as the scraper's (the recorded Nova url in
+// test/vidrock.test.js passes the tag). Throws on input too short for IV + tag.
 function decryptStreamUrl(encoded) {
     const buf = Buffer.from(String(encoded).replace(/-/g, '+').replace(/_/g, '/'), 'base64');
     if (buf.length <= GCM_IV_LENGTH + GCM_TAG_LENGTH) throw new Error('ciphertext too short');
-    const iv = Buffer.concat([buf.subarray(0, GCM_IV_LENGTH), Buffer.from([0, 0, 0, 2])]);
+    const d = createDecipheriv('aes-256-gcm', streamKey(), buf.subarray(0, GCM_IV_LENGTH));
+    d.setAuthTag(buf.subarray(buf.length - GCM_TAG_LENGTH));
     const body = buf.subarray(GCM_IV_LENGTH, buf.length - GCM_TAG_LENGTH);
-    const d = createDecipheriv('aes-256-ctr', streamKey(), iv);
     return Buffer.concat([d.update(body), d.final()]).toString('utf8');
 }
 
@@ -155,12 +160,16 @@ async function getVidrockStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
         return [];
     }
 
+    // Every entry failing the GCM tag means the key is wrong, not "no
+    // streams": thrown, so the registry's key heal can see it (Task 6).
+    let decryptFails = 0; let lastDecryptErr = '';
     const rows = await Promise.all(entries.map(async ({ name, entry }) => {
         let url;
         try {
             url = decryptStreamUrl(entry.url);
         } catch (e) {
             console.log(`[vidrock] ${name}: decrypt failed: ${e.message}`);
+            decryptFails++; lastDecryptErr = e.message;
             return null;
         }
         if (!/^https?:\/\//i.test(url)) {
@@ -186,10 +195,31 @@ async function getVidrockStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
         }
     }));
 
+    if (decryptFails === entries.length) {
+        throw new Error(`vidrock: decrypt failed on all ${entries.length} server(s) for ${id}: ${lastDecryptErr}`);
+    }
     const seen = new Set();
     const out = rows.filter((r) => r && !seen.has(r.url) && seen.add(r.url));
     console.log(`[vidrock] Got ${out.length} stream(s) for ${id} from ${entries.length} server(s)`);
     return out;
 }
 
-module.exports = { getVidrockStreams, decryptStreamUrl, streamFromMaster, tierOf, HEADERS, CONFIG_DEFAULTS, UPSTREAM, _internal: { apiBase, headers, streamKey } };
+// Task 6: what the key heal run needs from vidrock. One API GET for a fresh
+// ciphertext, then lib/selfheal/keys.js reads the page and its bundle (2 GETs).
+// The registry adds the verify (own resolve + title proof) and the trigger.
+function keyHeal(fetchFn) {
+    const keys = require('../lib/selfheal/keys');
+    return {
+        current: () => ({ key: streamKey().toString('hex') }),
+        extract: async () => {
+            const r = await fetchFn(`${apiBase()}/api/movie/${UPSTREAM.verifyTitle.tmdbId}`, { headers: headers(), signal: AbortSignal.timeout(API_TIMEOUT_MS) });
+            if (!r || !r.ok) throw new Error(`api HTTP ${r && r.status}`);
+            const body = await r.json().catch(() => null);
+            const sample = Object.values(body || {}).map((e) => e && typeof e === 'object' && e.url).find(Boolean);
+            if (!sample) { console.warn('[heal] vidrock key none: no ciphertext in the api answer'); return null; }
+            return keys.extractVidrockKey({ fetch: fetchFn, base: apiBase(), sample, headers: headers() });
+        },
+    };
+}
+
+module.exports = { getVidrockStreams, decryptStreamUrl, streamFromMaster, tierOf, HEADERS, CONFIG_DEFAULTS, UPSTREAM, _internal: { apiBase, headers, streamKey }, keyHeal };

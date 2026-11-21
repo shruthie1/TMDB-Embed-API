@@ -19,7 +19,8 @@ const streamHeaders = require('./lib/media/streamHeaders');
 const { verifyTopStreams } = require('./lib/media/segmentVerify');
 const { registerCapabilityRoutes } = require('./routes/capabilities');
 const { createProxyRoutes, processStreamsForProxy } = require('./proxy/proxyServer');
-const { routeStreams, surfaceAllows, surfaceOf } = require('./lib/routing/providerRoutes');
+const { routeStreams, surfaceAllows, surfaceOf, surfaceOnDevice } = require('./lib/routing/providerRoutes');
+const canaryMod = require('./lib/selfheal/canary');
 const { resolveImdbId, searchTitles } = require('./utils/tmdb');
 const { applyFilters } = require('./utils/streamFilters');
 const castleDemux = require('./utils/castleDemux');
@@ -283,7 +284,8 @@ app.get('/api/status', (req,res) => {
       else if (h.hit / calls < 0.5) verdict = 'degraded';
       else verdict = 'healthy';
     }
-    return { name: p.name, enabled: p.enabled, cookieRequired, cookieOk, verdict, health: h };
+    // Canary state (lib/selfheal/canary.js), read-only; null before its first run.
+    return { name: p.name, enabled: p.enabled, cookieRequired, cookieOk, verdict, health: h, heal: canaryMod.healStatus(getStore(), p.name) };
   });
   res.json({ success:true, providerCheckTmdbId: config.providerCheckTmdbId, metrics: {
     uptimeSeconds: Math.round((Date.now()-metrics.startTime)/1000),
@@ -803,7 +805,10 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
     const tmdbType = type === 'movie' ? 'movie' : 'tv';
     const imdbId = await resolveImdbId(tmdbType, tmdbId); if (imdbId) metrics.tmdbToImdbLookups++;
     const selectedProviders = (config.defaultProviders.length ? config.defaultProviders : listProviders().map(p=>p.name))
-      .filter((name) => surfaceAllows(name, surface));
+      .filter((name) => surfaceAllows(name, surface))
+      // Task 8: an APK-on-device provider the canary found blocked on this
+      // server is left to the device until a canary pass.
+      .filter((name) => !canaryMod.serveSkip(name, surface, getStore(), surfaceOnDevice));
     const providerTimings = {};
 
     // CastleTV runs ahead of the pack, alone, because the answer it gives
@@ -1215,6 +1220,9 @@ if (require.main === module) {
   });
 
   server.on('error', (err)=>{ console.error('[diagnostic] server error', err); });
+  // Provider canary: one provider per 10 min, 6 h healthy / 30 min failing.
+  // Drives auto-heal only (no alerts). Only in the real server process.
+  canaryMod.startCanary({ registry: require('./providers/registry'), store: getStore(), recordOutcome: recordProviderOutcome });
   installGracefulShutdown(server, { exit: (code) => { allowControlledExit = true; realProcessExit(code); } });
 }
 

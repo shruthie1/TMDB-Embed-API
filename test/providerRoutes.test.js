@@ -131,3 +131,113 @@ test('apiServer delegates to the config module (no "has headers -> proxy" rule l
     assert.match(body, /routeStreams\(/);
     assert.doesNotMatch(body, /needsHeaders/);
 });
+
+// ---- provider self-heal Task 9: routes from config ----
+// Remote `routes.<provider>` = { web: off|direct|proxy, apk: off|direct|proxy|device,
+// hostPatterns?: [{ re: string, web, apk }], hosts?: {...} }. The code words
+// none / on-device are accepted too. No remote: today's values.
+const selfhealConfig = require('../lib/selfheal/config');
+const routesMod = require('../lib/routing/providerRoutes');
+function withRemote(t, doc) {
+    selfhealConfig.shared._setRemote(doc);
+    const warn = console.warn; console.warn = () => {};
+    t.after(() => { selfhealConfig.shared._setRemote(null); console.warn = warn; });
+}
+
+test('Task 9 (a): no remote: routes and surfaces are the built-in values', () => {
+    selfhealConfig.shared._setRemote(null);
+    for (const [p, cfg] of Object.entries(PROVIDER_ROUTES)) {
+        assert.deepEqual(routeFor(p, 'https://unmatched.example/a.m3u8'), { web: cfg.web, apk: cfg.apk });
+    }
+    assert.equal(routesMod.surfaceAllows('mapple', 'web'), false);
+    assert.equal(routesMod.surfaceAllows('vaplayer', 'web'), false);
+    assert.equal(routesMod.surfaceAllows('castletv', 'web'), true);
+    assert.equal(routesMod.surfaceOnDevice('vaplayer'), true);
+    assert.equal(routesMod.surfaceOnDevice('castletv'), false);
+});
+
+test('Task 9 (b): remote vidrock {web:direct, apk:direct} gives direct, also on its built-in vercetti host rule', (t) => {
+    withRemote(t, { routes: { vidrock: { web: 'direct', apk: 'direct', hosts: {} } } });
+    assert.deepEqual(routeFor('vidrock', 'https://x.nucleardaydream.lol/a.m3u8'), { web: 'direct', apk: 'direct' });
+    assert.deepEqual(routeFor('vidrock', 'https://s1.vercetti.org/a.m3u8'), { web: 'direct', apk: 'direct' });
+});
+
+test('Task 9 (c): remote castletv {web:off} makes surfaceAllows(castletv, web) false; apk device -> on-device', (t) => {
+    withRemote(t, { routes: { castletv: { web: 'off', apk: 'device' } } });
+    assert.equal(routesMod.surfaceAllows('castletv', 'web'), false);
+    assert.equal(routesMod.surfaceAllows('castletv', null), true);
+    assert.equal(routesMod.surfaceOnDevice('castletv'), true);
+    // off/device are surface words: the row route keeps the built-in value.
+    assert.deepEqual(routeFor('castletv', 'https://img1.hscow.com/a.m3u8'), { web: 'direct', apk: 'direct' });
+});
+
+test('Task 9 (d): an invalid value falls back to the built-in, with one log line', (t) => {
+    const lines = [];
+    withRemote(t, { routes: { castletv: { web: 'fast', apk: 'proxy' }, mapple: { web: 'sometimes' } } });
+    console.warn = (...a) => lines.push(a.join(' '));
+    assert.deepEqual(routeFor('castletv', 'https://img1.hscow.com/a.m3u8'), { web: 'direct', apk: 'proxy' });
+    assert.equal(routesMod.surfaceAllows('mapple', 'web'), false);
+    routeFor('castletv', 'https://img1.hscow.com/b.m3u8');
+    assert.equal(lines.filter((l) => l.startsWith('[routes] config castletv.web=fast invalid')).length, 1, lines.join('\n'));
+});
+
+test('Task 9: remote hostPatterns with `re` as a string; a bad regex is skipped, not thrown', (t) => {
+    withRemote(t, { routes: { multimovies: { web: 'proxy', apk: 'direct', hostPatterns: [
+        { re: '([', web: 'direct', apk: 'direct' },
+        { re: '^dash-hls-bridge\\.newlabel\\.workers\\.dev$', web: 'direct', apk: 'direct' },
+    ] } } });
+    assert.deepEqual(routeFor('multimovies', 'https://dash-hls-bridge.newlabel.workers.dev/m.m3u8'), { web: 'direct', apk: 'direct' });
+    // The remote list replaced the built-in patterns.
+    assert.deepEqual(routeFor('multimovies', 'https://dash-hls-bridge.john1mc.workers.dev/m.m3u8'), { web: 'proxy', apk: 'direct' });
+    // Built-in hosts are kept when the remote names none.
+    assert.deepEqual(routeFor('multimovies', 'https://cdn.gzip.rousav.tech/a.m3u8'), { web: 'proxy', apk: 'direct' });
+});
+
+test('Task 9: the code words none / on-device are accepted as well', (t) => {
+    withRemote(t, { routes: { vaplayer: { web: 'none', apk: 'direct' }, showsst: { apk: 'on-device' } } });
+    assert.equal(routesMod.surfaceAllows('vaplayer', 'web'), false);
+    assert.equal(routesMod.surfaceOnDevice('vaplayer'), false);
+    assert.equal(routesMod.surfaceOnDevice('showsst'), true);
+});
+
+// Review M5: an invalid route word inside hostPatterns / hosts keeps the
+// built-in value (the built-in host entry, else the provider's built-in
+// default) and logs one line, as the header says.
+test('M5: invalid route word in hosts/hostPatterns keeps the built-in value, one log line each', (t) => {
+    const lines = [];
+    withRemote(t, { routes: { multimovies: {
+        hostPatterns: [{ re: '^x\\.workers\\.dev$', web: 'fast', apk: 'direct' }],
+        hosts: { 'gzip.rousav.tech': { web: 'direct', apk: 'zoom' }, 'new.example': { web: 'nope', apk: 'proxy' } },
+    } } });
+    console.warn = (...a) => lines.push(a.join(' '));
+    // Pattern: web invalid -> multimovies built-in web (proxy); apk valid.
+    assert.deepEqual(routeFor('multimovies', 'https://x.workers.dev/m.m3u8'), { web: 'proxy', apk: 'direct' });
+    // Known host: apk invalid -> its built-in host entry (apk direct).
+    assert.deepEqual(routeFor('multimovies', 'https://gzip.rousav.tech/a.m3u8'), { web: 'direct', apk: 'direct' });
+    // New host: web invalid -> provider built-in web (proxy).
+    assert.deepEqual(routeFor('multimovies', 'https://new.example/a.m3u8'), { web: 'proxy', apk: 'proxy' });
+    routeFor('multimovies', 'https://new.example/b.m3u8');
+    for (const k of ['hostPatterns[0].web=fast', 'hosts.gzip.rousav.tech.apk=zoom', 'hosts.new.example.web=nope']) {
+        assert.equal(lines.filter((l) => l.startsWith(`[routes] config multimovies.${k} invalid, built-in kept`)).length, 1, `${k}\n${lines.join('\n')}`);
+    }
+});
+
+// Review M4: a remote regex with nested quantifiers or over 200 chars is
+// rejected (catastrophic backtracking guard); the built-in patterns stay.
+test('M4: remote hostPatterns.re with nested quantifiers or > 200 chars is rejected, built-in kept, one warning', (t) => {
+    const lines = [];
+    const long = `^${'a'.repeat(210)}$`;
+    withRemote(t, { routes: { multimovies: { hostPatterns: [
+        { re: '(a+)+$', web: 'direct', apk: 'direct' },
+        { re: '^(\\w*)*\\.dev$', web: 'direct', apk: 'direct' },
+        { re: long, web: 'direct', apk: 'direct' },
+    ] } } });
+    console.warn = (...a) => lines.push(a.join(' '));
+    // All remote patterns rejected -> the built-in VidBolt pattern still routes.
+    assert.deepEqual(routeFor('multimovies', 'https://dash-hls-bridge.john1mc.workers.dev/m.m3u8'), { web: 'direct', apk: 'direct' });
+    const t0 = Date.now();
+    assert.deepEqual(routeFor('multimovies', `https://${'a'.repeat(40)}!.example/m.m3u8`), { web: 'proxy', apk: 'direct' });
+    assert.ok(Date.now() - t0 < 200, 'no backtracking stall');
+    routeFor('multimovies', 'https://other.example/m.m3u8');
+    assert.equal(lines.filter((l) => /^\[routes\] config multimovies\.hostPatterns re=.* rejected/.test(l)).length, 3, lines.join('\n'));
+});

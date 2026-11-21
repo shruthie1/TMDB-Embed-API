@@ -103,6 +103,22 @@ const MIGRATIONS = [
         updated_at integer not null
      );
      create index if not exists castle_demux_job_expires on castle_demux_job (expires_at);`,
+    // v3: provider canary state (provider self-heal Task 7, lib/selfheal/canary.js).
+    // One row per provider: last canary outcome, its heal kind, when it runs next.
+    `create table if not exists provider_canary (
+        provider text primary key,
+        state text,
+        kind text,
+        last_run_at integer,
+        last_ok_at integer,
+        next_due_at integer,
+        last_error text,
+        telugu_ok integer,
+        heal_how text,
+        heal_at integer,
+        runs integer not null default 0,
+        fails integer not null default 0
+     );`,
 ];
 
 // ---- input shaping -------------------------------------------------------
@@ -199,6 +215,16 @@ function sqliteBackend(file) {
              updated_at=excluded.updated_at`),
         demuxJobTouch: db.prepare('update castle_demux_job set expires_at=?, updated_at=? where id=?'),
         demuxJobPrune: db.prepare('delete from castle_demux_job where expires_at < ?'),
+        canaryGet: db.prepare('select * from provider_canary where provider=?'),
+        canaryAll: db.prepare('select * from provider_canary'),
+        canaryUpsert: db.prepare(`insert into provider_canary
+            (provider,state,kind,last_run_at,last_ok_at,next_due_at,last_error,telugu_ok,heal_how,heal_at,runs,fails)
+            values (@provider,@state,@kind,@last_run_at,@last_ok_at,@next_due_at,@last_error,@telugu_ok,@heal_how,
+             @heal_at,@runs,@fails)
+            on conflict (provider) do update set state=excluded.state, kind=excluded.kind,
+             last_run_at=excluded.last_run_at, last_ok_at=excluded.last_ok_at, next_due_at=excluded.next_due_at,
+             last_error=excluded.last_error, telugu_ok=excluded.telugu_ok, heal_how=excluded.heal_how,
+             heal_at=excluded.heal_at, runs=excluded.runs, fails=excluded.fails`),
     };
 
     return {
@@ -216,6 +242,9 @@ function sqliteBackend(file) {
         demuxJobPut: (row) => { q.demuxJobUpsert.run(row); },
         demuxJobTouch: (id, expiresAt, at) => { q.demuxJobTouch.run(expiresAt, at, id); },
         demuxJobPrune: (at) => q.demuxJobPrune.run(at).changes,
+        canaryGet: (name) => q.canaryGet.get(name),
+        canaryAll: () => q.canaryAll.all(),
+        canaryPut: (row) => { q.canaryUpsert.run(row); },
         close: () => db.close(),
     };
 }
@@ -228,7 +257,7 @@ function sqliteBackend(file) {
 
 function jsonBackend(file) {
     const empty = () => ({ version: MIGRATIONS.length, source_stats: {}, audio_evidence: [], provider_health: {},
-        castle_demux_job: {} });
+        castle_demux_job: {}, provider_canary: {} });
     let data = empty();
     let writable = file !== ':memory:';
     if (writable) {
@@ -289,6 +318,9 @@ function jsonBackend(file) {
             if (n) flush();
             return n;
         },
+        canaryGet: (name) => data.provider_canary[name],
+        canaryAll: () => Object.values(data.provider_canary),
+        canaryPut: (row) => { data.provider_canary[row.provider] = { ...row }; flush(); },
         close: () => { if (timer) { clearTimeout(timer); flushNow(); } },
     };
 }
@@ -398,6 +430,19 @@ function openStore(file = DEFAULT_PATH, { backend } = {}) {
     function touchDemuxJob(id, expiresAt) { b.demuxJobTouch(String(id), Math.trunc(expiresAt), now()); }
     function pruneDemuxJobs() { return b.demuxJobPrune(now()); }
 
+    // provider canary rows (lib/selfheal/canary.js). canaryPut merges fields
+    // into the provider's row.
+    const CANARY_EMPTY = { state: null, kind: null, last_run_at: null, last_ok_at: null, next_due_at: null,
+        last_error: null, telugu_ok: null, heal_how: null, heal_at: null, runs: 0, fails: 0 };
+    function canaryGet(name) { return b.canaryGet(lc(name)) || null; }
+    function canaryAll() { return b.canaryAll(); }
+    function canaryPut(name, fields) {
+        const key = lc(name);
+        const row = { ...CANARY_EMPTY, ...(b.canaryGet(key) || {}), ...fields, provider: key };
+        b.canaryPut(row);
+        return row;
+    }
+
     return {
         get backend() { return b.kind; },
         // Why sqlite was not used, or null. Health reports it so a silent
@@ -409,6 +454,7 @@ function openStore(file = DEFAULT_PATH, { backend } = {}) {
         putAudioEvidence, audioEvidenceFor,
         providerHealth, allProviderHealth, saveProviderHealth,
         putDemuxJob, getDemuxJob, touchDemuxJob, pruneDemuxJobs,
+        canaryGet, canaryAll, canaryPut,
         close: () => b.close(),
     };
 }

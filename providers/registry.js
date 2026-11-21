@@ -96,7 +96,8 @@ function loadProvider(providerFile) {
 // is a catalogue gap and counts for nothing. Crossing the streak starts a
 // rediscover in the background; this request is never held for it.
 const upstream = require('../utils/upstreamBase');
-const { classifyAndLog, shouldHeal } = require('../lib/selfheal/classify');
+const { classify, classifyAndLog, shouldHeal } = require('../lib/selfheal/classify');
+const keys = require('../lib/selfheal/keys');
 const proof = require('../lib/selfheal/proof');
 // ott tierprobe TIER_TITLES: Inception, Dune 2, Breaking Bad.
 const MAINSTREAM_IDS = new Set(['27205', '693134', '1396']);
@@ -157,10 +158,35 @@ function checkLegacy(providerInfo, module) {
     .catch((e) => console.warn(`[heal] ${u.name} legacy-verify failed: ${e.message}`));
 }
 
+// Task 6: the key heal run for a provider that exports keyHeal (vidrock,
+// onetouchtv). Built only when a run starts. The found key is checked by the
+// same verify as a host (own resolve + title proof) on the current host,
+// under a trial (lib/selfheal/keys.js withTrial), before it is saved.
+function keyHealFactory(providerInfo, module) {
+  return () => {
+    const u = module.UPSTREAM;
+    const run = typeof u.healRun === 'function' ? u.healRun() : null;
+    const budget = (run && run.budget) || proof.createBudget();
+    const kh = module.keyHeal(budget.wrap(proof.proofFetch()));
+    const verify = makeVerify(u, module[providerInfo.functionName], run, budget);
+    // Review I1: no new key -> one host rediscover (null inside its cooldown).
+    return { ...kh, verify: () => verify(upstream.getBase(u.name, u.seed), {}), fallback: () => startRediscover(providerInfo, module) };
+  };
+}
+
 function noteUpstream(providerInfo, module, outcome, ctx, err = null) {
   const u = module && module.UPSTREAM;
   if (!u) return;
-  if (outcome === 'ok') { upstream.noteOk(u.name); return; }
+  if (outcome === 'ok') { upstream.noteOk(u.name); keys.noteKeyOk(u.name); return; }
+  // A key failure (GCM tag, CBC padding) is not a move: it counts toward the
+  // key streak (3) only, never the host streak.
+  if (err && typeof module.keyHeal === 'function') {
+    if (classify({ message: err.message, status: err.status }) === 'key') {
+      keys.noteKeyFail(u.name, keyHealFactory(providerInfo, module));
+      return;
+    }
+    keys.noteKeyOk(u.name);
+  }
   // Empty answers count only on the provider's own validation title (review
   // M8: a provider that never carries Inception must not count it), or on
   // the mainstream titles when the provider names none.
@@ -179,16 +205,23 @@ function noteUpstream(providerInfo, module, outcome, ctx, err = null) {
       return;
     }
   }
+  console.warn(`[registry] ${providerInfo.name} failed ${upstream.failStreak(u.name)}x in a row on ${upstream.getBase(u.name, u.seed)} - rediscovering`);
+  startRediscover(providerInfo, module);
+}
+
+// One host rediscover with this provider's heal run. Returns the run's
+// promise, or null inside the 30-min cooldown (upstreamBase).
+function startRediscover(providerInfo, module) {
+  const u = module.UPSTREAM;
   const fn = module[providerInfo.functionName];
   const current = upstream.getBase(u.name, u.seed);
-  console.warn(`[registry] ${providerInfo.name} failed ${upstream.failStreak(u.name)}x in a row on ${current} - rediscovering`);
   // A provider-specific heal run (extra config hosts, lazy trails, a cheap
   // validator that runs before the full resolve). See lib/selfheal/vidbolt.js.
   const run = typeof u.healRun === 'function' ? u.healRun() : null;
   // One 12-GET budget for the whole run (review M6): redirects, player scans,
   // trails, validation, each own resolve and the title proof.
   const budget = (run && run.budget) || proof.createBudget();
-  upstream.triggerRediscover(u.name, {
+  return upstream.triggerRediscover(u.name, {
     seed: u.seed,
     player: u.player ? u.player(current) : undefined,
     aggregatorSlug: u.aggregatorSlug,
@@ -199,6 +232,40 @@ function noteUpstream(providerInfo, module, outcome, ctx, err = null) {
     onApplied: run && typeof run.onApplied === 'function' ? run.onApplied : undefined,
     verify: makeVerify(u, fn, run, budget),
   });
+}
+
+/**
+ * The canary's heal (Task 7/8): one run for a host or key failure, under the
+ * same cooldowns and the same verify as the request path. Returns
+ * { applied, how }. Logs `[heal] <name> canary <kind> ...`.
+ */
+async function healNow(name, kind) {
+  const info = providerFiles.find((p) => p.name === String(name).toLowerCase());
+  const module = info && loadProvider(info.file);
+  const u = module && module.UPSTREAM;
+  if (!u) { console.warn(`[heal] ${name} canary ${kind} skip (no UPSTREAM)`); return { applied: false }; }
+  if (kind === 'host') {
+    const p = startRediscover(info, module);
+    if (!p) { console.warn(`[heal] ${name} canary host skip (cooldown or running)`); return { applied: false }; }
+    const r = await p;
+    const c = r && r.applied && (r.candidates || []).find((x) => x.url === r.applied);
+    console.warn(`[heal] ${name} canary host ${r && r.applied ? `applied ${r.applied}` : 'none'}`);
+    return { applied: Boolean(r && r.applied), how: c ? `host:${c.how}` : (r && r.applied ? 'host' : null) };
+  }
+  if (kind === 'key' && typeof module.keyHeal === 'function') {
+    const ok = await keys.healNow(u.name, keyHealFactory(info, module));
+    if (ok === 'host') return { applied: true, how: 'host:key-fallback' };
+    return { applied: ok === true, how: ok === true ? 'key:bundle' : null };
+  }
+  console.warn(`[heal] ${name} canary ${kind} skip (no heal for this kind)`);
+  return { applied: false };
+}
+
+/** UPSTREAM.verifyTitle for name, or null (the canary's validation title). */
+function verifyTitleOf(name) {
+  const info = providerFiles.find((p) => p.name === String(name).toLowerCase());
+  const module = info && loadProvider(info.file);
+  return (module && module.UPSTREAM && module.UPSTREAM.verifyTitle) || null;
 }
 
 // Create fetch function for a provider
@@ -375,4 +442,4 @@ function getProvider(name) {
 
 function getCookieStats() { return lastCookieStats; }
 
-module.exports = { listProviders, getProvider, getCookieStats, PROVIDER_DEADLINE_MS, _noteUpstream: noteUpstream, _checkLegacy: checkLegacy, _makeVerify: makeVerify };
+module.exports = { listProviders, getProvider, getCookieStats, PROVIDER_DEADLINE_MS, healNow, verifyTitleOf, _noteUpstream: noteUpstream, _checkLegacy: checkLegacy, _makeVerify: makeVerify };

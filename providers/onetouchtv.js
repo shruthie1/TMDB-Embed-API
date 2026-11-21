@@ -38,13 +38,16 @@ const UPSTREAM = {
         fetchOnce: (url) => fetchEncryptedOnce(url),
         findBestOttMatch: (...a) => findBestOttMatch(...a),
         bases: () => selfheal.cfg('onetouchtv', 'bases', CONFIG_DEFAULTS.bases),
+        front: () => ottFront(),
     }),
 };
 function mainUrl() { return upstream.getBase('onetouchtv', ottSeed()); }
 function fetchHeaders() { return { ...FETCH_HEADERS, Referer: `${ottFront()}/` }; }
 function aesKeyIv() {
-    const k = selfheal.cfg('onetouchtv', 'key', CONFIG_DEFAULTS.key);
-    const iv = selfheal.cfg('onetouchtv', 'iv', CONFIG_DEFAULTS.iv);
+    // A key under test in a heal run (lib/selfheal/keys.js withTrial) first.
+    const keys = require('../lib/selfheal/keys');
+    const k = keys.trial('onetouchtv', 'key') || selfheal.cfg('onetouchtv', 'key', CONFIG_DEFAULTS.key);
+    const iv = keys.trial('onetouchtv', 'iv') || selfheal.cfg('onetouchtv', 'iv', CONFIG_DEFAULTS.iv);
     if (Buffer.byteLength(k) !== 32 || Buffer.byteLength(iv) !== 16) return [AES_KEY, AES_IV];
     return [Buffer.from(k, 'utf8'), Buffer.from(iv, 'utf8')];
 }
@@ -111,10 +114,28 @@ function decrypt(encoded) {
     if (pad !== 0) s += '='.repeat(4 - pad);
 
     const buf = Buffer.from(s, 'base64');
+    // Review I1: a moved host often answers 200 with HTML (parked page, SPA
+    // catch-all). That is not a key failure: throw a plain error the
+    // classifier calls `drift`, so the host streak counts and a rediscover
+    // can run. Ciphertext = base64 alphabet only, AES blocks after decode.
+    if (!/^[A-Za-z0-9+/=_.@-]+$/.test(s) || buf.length === 0 || buf.length % 16 !== 0) {
+        const head = String(encoded).trim().slice(0, 1) === '<' ? 'html' : 'other';
+        const err = new Error(`onetouchtv: upstream body is not ciphertext (${head}, ${String(encoded).length} chars)`);
+        err.notCiphertext = true;
+        throw err;
+    }
     const [key, iv] = aesKeyIv();
-    const decipher = createDecipheriv('aes-256-cbc', key, iv);
-    const dec = Buffer.concat([decipher.update(buf), decipher.final()]);
-    return JSON.parse(dec.toString('utf8'));
+    // A wrong key gives bad padding or garbage: one message the classifier
+    // calls `key` (Task 6), and no retry (the same key fails again).
+    try {
+        const decipher = createDecipheriv('aes-256-cbc', key, iv);
+        const dec = Buffer.concat([decipher.update(buf), decipher.final()]);
+        return JSON.parse(dec.toString('utf8'));
+    } catch (e) {
+        const err = new Error(`onetouchtv: decrypt to JSON failed: ${e.message}`);
+        err.keyError = true;
+        throw err;
+    }
 }
 
 async function fetchEncryptedOnce(url) {
@@ -136,6 +157,7 @@ async function fetchEncryptedOnce(url) {
 // 5xx. A 4xx is the origin's answer; asking again three times only added
 // ~1.2s before the same 404 (prod 2026-11-19 08:28 UTC, episode endpoint).
 function isRetryable(err) {
+    if (err && (err.keyError || err.notCiphertext)) return false;
     return !err || err.status === undefined || err.status >= 500;
 }
 
@@ -471,4 +493,21 @@ async function resolveStreams(tmdbId, mediaType, seasonNum, episodeNum) {
     }
 }
 
-module.exports = { getOnetouchtvStreams, STREAM_HEADERS, CONFIG_DEFAULTS, UPSTREAM, _internal: { mainUrl, fetchHeaders, aesKeyIv, fetchEncryptedOnce, isRetryable, cache, lastGood, timing, findBestOttMatch, splitTitleYear } };
+// Task 6: what the key heal run needs from onetouchtv. One api GET for a
+// fresh ciphertext (search "RRR"), then lib/selfheal/keys.js reads
+// <front>/main.dart.js (1 GET). The registry adds verify and the trigger.
+function keyHeal(fetchFn) {
+    const keys = require('../lib/selfheal/keys');
+    return {
+        current: () => { const [k, iv] = aesKeyIv(); return { key: k.toString('utf8'), iv: iv.toString('utf8') }; },
+        extract: async () => {
+            const r = await fetchFn(`${mainUrl()}/vod/search?keyword=RRR`, { headers: fetchHeaders(), signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+            if (!r || !r.ok) throw new Error(`api HTTP ${r && r.status}`);
+            const sample = (await r.text()).trim();
+            const out = await keys.extractOnetouchKey({ fetch: fetchFn, front: ottFront(), sample, headers: fetchHeaders() });
+            return out && out.key ? { key: out.key, iv: out.iv } : null;
+        },
+    };
+}
+
+module.exports = { getOnetouchtvStreams, STREAM_HEADERS, CONFIG_DEFAULTS, UPSTREAM, keyHeal, _internal: { mainUrl, decrypt, fetchHeaders, aesKeyIv, fetchEncryptedOnce, isRetryable, cache, lastGood, timing, findBestOttMatch, splitTitleYear } };
