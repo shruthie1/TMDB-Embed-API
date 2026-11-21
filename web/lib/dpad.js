@@ -288,8 +288,11 @@ export function initDpad() {
       // TV title page: the hero (Back, title, Play, My List) is the top of the
       // page. 'nearest' only scrolled Play to the viewport's top edge, so
       // coming back up from Cast left the backdrop and title cut off. Show the
-      // whole page top instead.
-      if (isTv() && next.closest('.detail .hero, .detail-back')) {
+      // whole page top instead. The home page's featured carousel is its top
+      // too: coming up from the first rail onto Watch now / My List left the
+      // header and the top of the backdrop off-screen (the APK scrolls fully
+      // to the top here, and so does this).
+      if (isTv() && next.closest('.detail .hero, .detail-back, .home-hero')) {
         window.scrollTo({ top: 0, left: 0, behavior: 'smooth' });
       } else {
         next.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'smooth' });

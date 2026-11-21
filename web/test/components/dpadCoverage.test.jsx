@@ -92,4 +92,18 @@ describe('D-pad reachability', () => {
     const dpad = readFileSync('lib/dpad.js', 'utf8');
     expect(dpad).toMatch(/INPUT\|TEXTAREA\|SELECT/);
   });
+
+  it('focus reaching a page-top hero scrolls the page fully to the top on TV', () => {
+    // 'nearest' only brought the hero button to the viewport edge, so coming
+    // up from the first rail left the header and backdrop top cut off. The
+    // home carousel (.home-hero) and the title hero both take window top.
+    const src = readFileSync('lib/dpad.js', 'utf8');
+    const branch = src.match(/if \(isTv\(\) && next\.closest\('([^']+)'\)\) \{\s*window\.scrollTo\(\{ top: 0/);
+    expect(branch, 'lib/dpad.js must scroll to top when focus lands in a hero').toBeTruthy();
+    const sel = branch[1].split(',').map((s) => s.trim());
+    expect(sel).toContain('.home-hero');
+    expect(sel).toContain('.detail .hero');
+    // The class the selector names must be the one Hero.jsx renders.
+    expect(readFileSync('components/Hero.jsx', 'utf8')).toMatch(/className="home-hero"/);
+  });
 });
