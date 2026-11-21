@@ -664,4 +664,24 @@ class AddAudioTest {
         assertTrue(s.hybrid && s.headers.isEmpty() && s.segmentToken == null && s.onDevice == null && !s.progressive)
         assertEquals("Telugu", s.languages.first())
     }
+
+    // Review C1: a picture playing DIRECT (DirectRoute.forPlay) must not hand its
+    // direct state to the fused master, or a slow fused master "falls back" to the
+    // plain video and the donor audio is lost; reports and casts must use the
+    // fused url.
+    @Test fun aFusedRowOnADirectPictureNeverRoutesDirectOrFallsBackToTheVideo() {
+        val directPicture = com.chitram.app.player.DirectRoute.forPlay(
+            picture.copy(directUrl = "https://img1.hscow.com/a.m3u8", directHeaders = mapOf("Referer" to "r")), emptySet())
+        assertTrue(com.chitram.app.player.DirectRoute.isDirect(directPicture))
+        val fused = AddAudio.fusedSource(directPicture, AddAudio.Hit(row("CastleTV", "Telugu", i = 1), ok()), "Telugu")
+        assertFalse(com.chitram.app.player.DirectRoute.isDirect(fused))
+        assertFalse(com.chitram.app.player.DirectRoute.shouldFallBack(fused, framed = false))
+        assertEquals(null, fused.directUrl)
+        assertTrue(fused.directHeaders.isEmpty())
+        assertEquals(fused, com.chitram.app.player.DirectRoute.forPlay(fused, emptySet()))
+        // Report mediaUrl and WVC cast both read proxyOf(row).url.
+        assertEquals("https://vm/hybrid/x/master.m3u8", com.chitram.app.player.DirectRoute.proxyOf(fused).url)
+        val cast = com.chitram.app.player.WvcCast.spec(fused, com.chitram.app.player.PlayRequest("movie", 1L, "T"))
+        assertEquals("https://vm/hybrid/x/master.m3u8", cast.url)
+    }
 }

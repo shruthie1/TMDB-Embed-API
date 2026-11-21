@@ -45,6 +45,32 @@ object PlayPolicy {
         else -> Switch.WAIT
     }
 
+    /**
+     * multimovies-slow-rca.md fix 3: a mapple row whose own (proxy) host refused
+     * the connection before any frame is dead now. ExoPlayer retries a refused
+     * connection silently, so without this the 8 s watchdog decides. An HTTP
+     * reply, a frame, or another host (captions) keeps the normal path.
+     */
+    fun proxyHostDead(row: Source?, failedUri: String?, httpReplied: Boolean, framed: Boolean): Boolean {
+        if (row == null || failedUri == null || httpReplied || framed) return false
+        if (!row.provider.equals("mapple", true)) return false
+        val h = DirectRoute.host(failedUri)
+        return h != "?" && h == DirectRoute.host(row.url)
+    }
+
+    // ---- Provider captions ------------------------------------------------------
+
+    private val HLS_CAPTION = Regex("""\.m3u8|m3u8-proxy""", RegexOption.IGNORE_CASE)
+
+    /**
+     * Captions the player may sideload as one file. An HLS subtitle playlist
+     * is not a VTT file: sideloaded, it never parses, and its direct fetch held
+     * up the first frame (multimovies-slow-rca.md fix 1). The master's own
+     * SUBTITLES rendition still reaches the player through the HLS source.
+     */
+    fun sideloadable(subs: List<com.chitram.app.data.SubtitleRef>): List<com.chitram.app.data.SubtitleRef> =
+        subs.filter { it.url.isNotBlank() && !HLS_CAPTION.containsMatchIn(it.url) }
+
     // ---- Auto-advance (switchFlow.advanceTarget, deadSources.nextAlive) --------
 
     /**

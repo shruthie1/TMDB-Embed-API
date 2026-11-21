@@ -181,6 +181,15 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     private val twinTried = HashSet<String>()
     /** On-device providers already re-resolved once for this title. */
     private val reresolved = HashSet<String>()
+    /** Rows (DirectRoute.key) whose direct play failed before a frame: proxy from now on. */
+    private val directFailed = HashSet<String>()
+    /**
+     * A first frame was rendered since the last play() (direct fallback gate). A per-play
+     * flag, not `framed` (once per title start, so a later switch would never fall back)
+     * and not identity (recordAudio replaces `current` with a copy).
+     */
+    private var framedThisPlay = false
+    private var directJob: Job? = null
     /** H13: the Telugu row merged under the playing picture, or null. */
     var pairedAudio by mutableStateOf<Source?>(null); private set
     private var pairApplied = false
@@ -207,6 +216,14 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     private var requestedAt = 0L
     private var playStartedAt = 0L
     private var landed = false
+    /**
+     * The watchdog (or a dead proxy host) judged this play dead. Kept apart
+     * from [landed]: a judged row is not landed, so checkRuntime never reports
+     * it ok (multimovies-slow-rca.md side finding: ok + fail pairs).
+     */
+    private var judged = false
+    /** This play got playlists or segments (FailPolicy rowDelivered). */
+    private var deliveredThisPlay = false
     private var runtimeDone = false
     /** Language and height playing when the last row landed: auto-advance keeps them (U7). */
     private var ctxLang: String? = null
@@ -249,10 +266,19 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                 if (state == Player.STATE_ENDED) onEnded()
             }
             override fun onVideoSizeChanged(size: VideoSize) { videoSize = size }
-            override fun onRenderedFirstFrame() { markFramed() }
+            override fun onRenderedFirstFrame() { framedThisPlay = true; directJob?.cancel(); markFramed() }
             override fun onCues(cueGroup: CueGroup) { cues = cueGroup.cues.joinToString("\n") { Mojibake.fix(it.text?.toString() ?: "") }.trim() }
             override fun onTracksChanged(t: Tracks) { tracks = t; recordAudio(t); if (pairedAudio != null && !pairFused) applyPair(t) else pickPreferredAudio(t); if (landed) current?.let { snapshotCtx(it) } }
             override fun onPlayerError(error: PlaybackException) { handleError(error) }
+        })
+        player.addAnalyticsListener(object : androidx.media3.exoplayer.analytics.AnalyticsListener {
+            override fun onLoadError(
+                eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+                loadEventInfo: androidx.media3.exoplayer.source.LoadEventInfo,
+                mediaLoadData: androidx.media3.exoplayer.source.MediaLoadData,
+                error: java.io.IOException,
+                wasCanceled: Boolean,
+            ) { if (!wasCanceled) onLoadFailed(loadEventInfo.uri.toString(), error) }
         })
         viewModelScope.launch {
             var n = 0
@@ -539,7 +565,14 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
      * already the server-fused master and plays as one url; without it the two
      * rows are merged on the device (Task 6 path).
      */
-    fun play(s: Source, startMs: Long = player.currentPosition.coerceAtLeast(0), pairAudio: Source? = null, audioLanguage: String? = selectedAudioLanguage, fused: Boolean = false) {
+    fun play(row: Source, startMs: Long = player.currentPosition.coerceAtLeast(0), pairAudio: Source? = null, audioLanguage: String? = selectedAudioLanguage, fused: Boolean = false) {
+        // Direct when the server's provider config allows it and this row has
+        // not failed direct before; else the proxied url, as before (DirectRoute).
+        val s = DirectRoute.forPlay(row, directFailed)
+        if (row.directUrl != null) android.util.Log.i("Chitram", DirectRoute.logLine(if (DirectRoute.isDirect(s)) "direct" else "proxy", s,
+            "reason=" + if (DirectRoute.isDirect(s)) "config-direct" else "direct-failed-before"))
+        framedThisPlay = false
+        directJob?.cancel()
         // Another picture replaces the run's: no late donor answer may land on it.
         if (pairAudio == null) runEffects(journey.otherPicture(s.id))
         selectedAudioLanguage = audioLanguage?.takeIf { it.isNotBlank() }
@@ -555,13 +588,16 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         videoSize = VideoSize.UNKNOWN
         playStartedAt = System.currentTimeMillis()
         landed = false
+        judged = false
+        deliveredThisPlay = false
         runtimeDone = false
         // OpenSubtitles first (Telugu, then English), then any the provider row carries.
         val external = subs.map { t ->
             MediaItem.SubtitleConfiguration.Builder(Uri.parse(t.url))
                 .setMimeType(MimeTypes.APPLICATION_SUBRIP).setLabel(t.label).setLanguage(t.lang).build()
         }
-        val own = s.subtitles.take(12).map { sub ->
+        // An HLS subtitle playlist is not a caption file: never sideloaded (PlayPolicy.sideloadable).
+        val own = PlayPolicy.sideloadable(s.subtitles).take(12).map { sub ->
             val mime = if (sub.url.contains(".srt", ignoreCase = true)) MimeTypes.APPLICATION_SUBRIP else MimeTypes.TEXT_VTT
             MediaItem.SubtitleConfiguration.Builder(Uri.parse(sub.url))
                 .setMimeType(mime).setLabel(sub.lang ?: "Subtitles").setLanguage(sub.lang?.lowercase()).build()
@@ -585,7 +621,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                 .apply { if (!pairAudio.progressive) setMimeType(MimeTypes.APPLICATION_M3U8) }.build()
             android.util.Log.i("Chitram", "[hybrid] ${s.provider} video + ${pairAudio.provider} ${desiredAudio()} audio, offset ${HybridPair.OFFSET_US}us")
             player.setMediaSource(HybridPair.merge(sourceFor(s, item), sourceFor(pairAudio, audioItem)), startMs)
-        } else if (s.onDevice != null || TsAudioSwap.wanted(s)) {
+        } else if (s.onDevice != null || TsAudioSwap.wanted(s) || s.headers.isNotEmpty()) {
             player.setMediaSource(sourceFor(s, item), startMs)
         } else {
             player.setMediaItem(item, startMs)
@@ -595,6 +631,23 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         phase = Phase.Playing
         status = ""
         startNoPictureGuard(s)
+        if (DirectRoute.isDirect(s)) directJob = viewModelScope.launch {
+            delay(DirectRoute.FIRST_FRAME_MS)
+            val playing = current
+            if (playing != null && DirectRoute.timerShouldFallBack(playing, s, framedThisPlay)) directFallBack(playing, player.currentPosition.coerceAtLeast(0), "no-first-frame-10s")
+        }
+    }
+
+    /**
+     * A direct play failed before its first frame: the SAME row once more via
+     * its proxied url, before any refresh, device twin or failover. The row
+     * stays on the proxy for this session.
+     */
+    private fun directFallBack(cur: Source, pos: Long, why: String) {
+        directJob?.cancel()
+        directFailed += DirectRoute.key(cur)
+        android.util.Log.i("Chitram", DirectRoute.logLine("direct-failed", cur, "reason=$why fallback=proxy"))
+        play(DirectRoute.proxyOf(cur), pos, pairAudio = pairedAudio, fused = pairFused)
     }
 
     /**
@@ -604,8 +657,9 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
      */
     private fun sourceFor(s: Source, item: MediaItem): androidx.media3.exoplayer.source.MediaSource {
         val swap = if (TsAudioSwap.wanted(s)) TsAudioSwap(desiredAudio()) else null
-        if (s.onDevice == null && swap == null) return DefaultMediaSourceFactory(OkHttpDataSource.Factory(g.api.client)).createMediaSource(item)
-        val streamClient = StreamInterceptor.client(g.api.client, s.headers, s.segmentToken)
+        // A backend row playing direct (DirectRoute) carries the provider's headers.
+        if (s.onDevice == null && swap == null && s.headers.isEmpty() && s.segmentToken == null) return DefaultMediaSourceFactory(OkHttpDataSource.Factory(g.api.client)).createMediaSource(item)
+        val streamClient = StreamInterceptor.playerClient(g.api.client, s.headers, s.segmentToken)
             .let { c -> if (swap == null) c else c.newBuilder().addInterceptor(swap).build() }
         if (swap != null) android.util.Log.i("Chitram", "[tsaudio] ${s.provider}: swapping in ${g.prefs.preferredAudio()} from ${s.languages.joinToString("/")}")
         val http = OkHttpDataSource.Factory(okhttp3.Call.Factory { req ->
@@ -642,12 +696,21 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         val pos = player.currentPosition.coerceAtLeast(0)
         val cur = current
         val serverReplied = http != null || e.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS
-        val action = FailPolicy.onError(cur, http?.responseCode, refreshedOnce, cur?.onDevice in reresolved, offline = offline || isOffline(), twinTried = cur?.provider?.lowercase() in twinTried, languageSelection = languageTrial != null, serverReplied = serverReplied)
+        val delivered = deliveredThisPlay || player.totalBufferedDuration > 0 || player.duration > 0
+        val action = FailPolicy.onError(cur, http?.responseCode, refreshedOnce, cur?.onDevice in reresolved, offline = offline || isOffline(), twinTried = cur?.provider?.lowercase() in twinTried, languageSelection = languageTrial != null, serverReplied = serverReplied, rowDelivered = delivered)
+        if (delivered && action == FailPolicy.Action.FAILOVER && FailPolicy.hasDeviceTwin(cur?.provider) && cur?.provider?.lowercase() !in twinTried) android.util.Log.i("Chitram", "[mm] ${cur?.provider}: VM row delivered bytes, no device re-resolve")
         if (serverReplied && (offline || isOffline())) android.util.Log.i("Chitram", "[offline] ${cur?.provider}: ${e.errorCodeName} http=${http?.responseCode} server replied, not offline -> $action")
         val why = LoadingModel.reasonFor(http?.responseCode, decoder = e.errorCode in 4000..4999)
         if (action == FailPolicy.Action.WAIT_ONLINE) {
             android.util.Log.i("Chitram", "[offline] ${cur?.provider}: ${e.errorCodeName} while offline, waiting")
             goOffline()
+            return
+        }
+        // On-device merge: a donor request failed. The donor's fault, not the
+        // picture's route: next donor first, the picture stays direct (m-B).
+        if (!pairFused && DirectRoute.donorAtFault(http?.dataSpec?.uri?.toString(), cur, pairedAudio) && pairFailed("${e.errorCodeName}", pos)) return
+        if (DirectRoute.shouldFallBack(cur, framed = framedThisPlay) && cur != null) {
+            directFallBack(cur, pos, "${e.errorCodeName}${http?.responseCode?.let { "-$it" } ?: ""}")
             return
         }
         // A pair the device cannot play: the next donor, or back to what played before. Never the donor alone.
@@ -774,6 +837,11 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                 if (FailPolicy.onResolveMiss(isOffline()) == FailPolicy.ResolveMiss.GO_OFFLINE) { resolveMissOffline(s, pos); return@launch }
                 failover("$reason, re-resolve failed", pos, why); return@launch
             }
+            if (FailPolicy.unchangedProxiedRetry(s, fresh)) {
+                android.util.Log.i("Chitram", "[mm] mapple: re-resolve gave the same proxied row; next server instead")
+                failover("$reason, same proxied row", pos, why)
+                return@launch
+            }
             if (why == LoadingModel.Reason.NO_ANSWER && FailPolicy.unchangedNetmirrorRetry(s, fresh)) {
                 android.util.Log.i("Chitram", "netmirror: unchanged CDN target after timeout; advancing instead of reattaching")
                 failover("NetMirror CDN did not respond", pos, why)
@@ -882,28 +950,51 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
      */
     private fun checkSwitch() {
         val s = current ?: return
-        if (landed || phase != Phase.Playing) return
+        if (landed || judged || phase != Phase.Playing) return
         val now = System.currentTimeMillis()
         // Paused before the first frame, or offline: nothing to judge; restart the clock.
         if (offline || !player.playWhenReady) { playStartedAt = now; return }
         val alive = player.totalBufferedDuration > 0 || player.duration > 0 || player.playbackState == Player.STATE_READY
+        if (alive) deliveredThisPlay = true
         when (PlayPolicy.switchVerdict(now - playStartedAt, alive, frames = player.isPlaying)) {
             PlayPolicy.Switch.LANDED -> onLanded(s, now)
             PlayPolicy.Switch.DEAD -> {
-                landed = true // judged; play() resets it
                 val reason = if (alive) "switch: no frame in 20s" else "switch: no response in 8s"
-                val why = if (alive) LoadingModel.Reason.NO_PICTURE else LoadingModel.Reason.NO_ANSWER
-                android.util.Log.i("Chitram", "[switch] ${s.provider} dead: $reason")
-                if (!isOffline() && pairFailed(reason, player.currentPosition.coerceAtLeast(0))) return
-                when (FailPolicy.onError(s, null, refreshedOnce, s.onDevice in reresolved, offline = isOffline(), twinTried = s.provider.lowercase() in twinTried, languageSelection = languageTrial != null)) {
-                    FailPolicy.Action.WAIT_ONLINE -> { landed = false; goOffline() }
-                    FailPolicy.Action.RERESOLVE -> reresolve(s, player.currentPosition.coerceAtLeast(0), "${s.provider}: $reason", why)
-                    FailPolicy.Action.DEVICE -> toDevice(s, player.currentPosition.coerceAtLeast(0), "${s.provider}: $reason", why)
-                    else -> failover("${s.provider}: $reason", player.currentPosition.coerceAtLeast(0), why)
-                }
+                judgeDead(s, alive, reason, if (alive) LoadingModel.Reason.NO_PICTURE else LoadingModel.Reason.NO_ANSWER, if (alive) "no-frame-20s" else "no-response-8s")
             }
             PlayPolicy.Switch.WAIT -> {}
         }
+    }
+
+    /** The row on screen is dead before its first frame: direct fallback, pair, device, or the next server. */
+    private fun judgeDead(s: Source, alive: Boolean, reason: String, why: String, directWhy: String) {
+        judged = true // play() resets it; never `landed` (checkRuntime would report ok)
+        android.util.Log.i("Chitram", "[switch] ${s.provider} dead: $reason")
+        if (!isOffline() && DirectRoute.shouldFallBack(s, framed = framedThisPlay)) {
+            directFallBack(s, player.currentPosition.coerceAtLeast(0), directWhy)
+            return
+        }
+        if (!isOffline() && pairFailed(reason, player.currentPosition.coerceAtLeast(0))) return
+        when (FailPolicy.onError(s, null, refreshedOnce, s.onDevice in reresolved, offline = isOffline(), twinTried = s.provider.lowercase() in twinTried, languageSelection = languageTrial != null, rowDelivered = alive || deliveredThisPlay)) {
+            FailPolicy.Action.WAIT_ONLINE -> { judged = false; goOffline() }
+            FailPolicy.Action.RERESOLVE -> reresolve(s, player.currentPosition.coerceAtLeast(0), "${s.provider}: $reason", why)
+            FailPolicy.Action.DEVICE -> toDevice(s, player.currentPosition.coerceAtLeast(0), "${s.provider}: $reason", why)
+            else -> failover("${s.provider}: $reason", player.currentPosition.coerceAtLeast(0), why)
+        }
+    }
+
+    /**
+     * A load of the row on screen failed (ExoPlayer may still retry it). A mapple
+     * proxy host that refused the connection before any frame is dead now, not
+     * after the 8 s watchdog (multimovies-slow-rca.md fix 3).
+     */
+    private fun onLoadFailed(uri: String, error: java.io.IOException) {
+        val s = current ?: return
+        if (landed || judged || offline || phase != Phase.Playing || isOffline()) return
+        val replied = generateSequence<Throwable>(error) { it.cause }.any { it is HttpDataSource.InvalidResponseCodeException }
+        if (!PlayPolicy.proxyHostDead(s, uri, httpReplied = replied, framed = framedThisPlay)) return
+        android.util.Log.i("Chitram", "[mm] ${s.provider}: proxy host ${DirectRoute.host(uri)} failed (${error.javaClass.simpleName}) before a frame")
+        judgeDead(s, alive = false, reason = "proxy host failed", why = LoadingModel.Reason.NO_ANSWER, directWhy = "proxy-host-failed")
     }
 
     private fun onLanded(s: Source, now: Long) {
@@ -931,7 +1022,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     private fun checkRuntime() {
         val s = current ?: return
         val r = request ?: return
-        if (!landed || runtimeDone || phase != Phase.Playing) return
+        if (!landed || judged || runtimeDone || phase != Phase.Playing) return
         val d = player.duration
         when (PlayPolicy.runtimeVerdict(r.runtimeMin, d)) {
             PlayPolicy.Runtime.UNKNOWN -> {}
@@ -958,7 +1049,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             provider = s.provider, ok = ok, reason = reason?.take(60),
             startupMs = if (playStartedAt > 0) now - playStartedAt else 0,
             waitMs = if (requestedAt > 0) now - requestedAt else 0,
-            mediaUrl = s.url, audioLang = ctxLang,
+            mediaUrl = DirectRoute.proxyOf(s).url, audioLang = ctxLang,
             device = if (Device.isTv(getApplication<Application>())) "tv" else "mobile",
         ))
     }

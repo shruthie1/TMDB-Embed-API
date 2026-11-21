@@ -54,6 +54,7 @@ class OnDeviceResolver(
         names(vmDown).map { n -> scope.async { resolveAll(n, type, id, season, episode, codecs, preferred, title = title) } }
 
     suspend fun resolveAll(name: String, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, preferred: String = "Telugu", fresh: Boolean = false, title: String? = null): List<Source> {
+        if (name == MULTIMOVIES) return resolveMultiMovies(type, id, season, episode, codecs, fresh)
         if (name != NETMIRROR) return listOfNotNull(resolveOne(name, type, id, season, episode, codecs, preferred, fresh, title))
         if (!fresh && isOpen(name)) return emptyList()
         return guarded(name) {
@@ -78,12 +79,24 @@ class OnDeviceResolver(
         }.orEmpty()
     }
 
+    /** Every VidBolt source as its own row (one per language master): never only the first. */
+    private suspend fun resolveMultiMovies(type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, fresh: Boolean): List<Source> {
+        val m = multimovies ?: return emptyList()
+        if (!fresh && isOpen(MULTIMOVIES)) return emptyList()
+        return guarded(MULTIMOVIES) {
+            var timedOut = true
+            val r = withTimeoutOrNull(MULTIMOVIES_BUDGET_MS) { m.resolveAll(type, id, season, episode).also { timedOut = false } }
+            if (timedOut) throw StepException(MULTIMOVIES, 0, "budget ${MULTIMOVIES_BUDGET_MS}ms spent")
+            r.orEmpty().map { toSource(it, codecs) }
+        }.orEmpty()
+    }
+
     /**
      * One provider, bounded by its budget, never throws. `fresh` = recovery after a
      * playback error: a new mapple session, a new vaplayer token for the current IP.
      */
     suspend fun resolveOne(name: String, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, preferred: String = "Telugu", fresh: Boolean = false, title: String? = null): Source? {
-        if (name == NETMIRROR) return com.chitram.app.data.Ranking.rank(resolveAll(name, type, id, season, episode, codecs, preferred, fresh, title), preferred).firstOrNull()
+        if (name == NETMIRROR || name == MULTIMOVIES) return com.chitram.app.data.Ranking.rank(resolveAll(name, type, id, season, episode, codecs, preferred, fresh, title), preferred).firstOrNull()
         if (!fresh && isOpen(name)) {
             android.util.Log.i("Chitram", "on-device $name: skipped, breaker open")
             return null
@@ -113,13 +126,6 @@ class OnDeviceResolver(
                         out
                     }
                     if (timedOut) throw StepException(name, 0, "budget ${CASTLE_BUDGET_MS}ms spent")
-                    r
-                }
-                MULTIMOVIES -> {
-                    val m = multimovies ?: return@guarded null
-                    var timedOut = true
-                    val r = withTimeoutOrNull(MULTIMOVIES_BUDGET_MS) { m.resolve(type, id, season, episode).also { timedOut = false } }
-                    if (timedOut) throw StepException(name, 0, "budget ${MULTIMOVIES_BUDGET_MS}ms spent")
                     r
                 }
                 else -> {

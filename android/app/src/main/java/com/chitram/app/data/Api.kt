@@ -120,6 +120,8 @@ class Api(
         /** The VM origin (Vercel rewrites /api/streams here). */
         const val VM = "https://tmdb-187-127-137-163.sslip.io"
         const val VM_CONNECT_TIMEOUT_MS = 3_000L
+        /** Connect timeout for provider hosts the phone fetches itself (multimovies-slow-rca.md fix 5). */
+        const val DIRECT_CONNECT_TIMEOUT_MS = 3_000L
         /** Was readTimeout 120s + callTimeout 125s with 2 retries. */
         const val STREAMS_CALL_TIMEOUT_MS = 22_000L
         /** A9 follow-up, same as web/lib/backend.js. */
@@ -164,8 +166,9 @@ class Api(
 
         /** /hybrid/pair body: same sides as web pairSources, plus the asked `language`. */
         fun pairBody(video: Source, audio: Source, language: String, tmdbId: Long, type: String): String = buildJsonObject {
+            // The proxied url, as before direct play existed: the server unwraps it.
             fun side(s: Source) = buildJsonObject {
-                put("url", s.url); put("provider", s.provider); put("quality", s.quality)
+                put("url", com.chitram.app.player.DirectRoute.proxyOf(s).url); put("provider", s.provider); put("quality", s.quality)
                 if (!s.codecString.isNullOrBlank()) put("codecs", s.codecString)
             }
             put("video", side(video)); put("audio", side(audio)); put("language", language)

@@ -40,9 +40,12 @@ import java.util.concurrent.TimeUnit
  *   4. POST /api/encrypt per front   signed path; GET it -> stream_url (the master)
  * Every path, the front list and the hosts come from [MappleConfig].
  *
- * Self-recovery: the session host heals through [HostBook]; a front that errors
- * is skipped for the rest of the session; the last front that worked is tried
- * first next time (kept across launches).
+ * Self-recovery: the session host heals through [HostBook]; per-front outcomes
+ * live in [FrontBook] (kept across launches): fronts that gave Telugu go first,
+ * failing ones go last or are skipped to the tail for a self-ending window.
+ *
+ * Timing: one line per resolve, "mapple: timing total=... session=... media=...
+ * pow=... fronts=... wait=...", so device time can be read from logcat.
  */
 class MappleResolver(
     client: OkHttpClient,
@@ -57,14 +60,20 @@ class MappleResolver(
 
     private class Session(val base: String, val jar: Jar, val requestToken: String, val at: Long)
 
-    /**
-     * Per-front health, kept across sessions. A front that errors or times out
-     * cools down (frontCooldownMs, doubling per consecutive failure, max 10 min)
-     * and is tried LAST while cooling, never dropped: one slow answer must not
-     * hide the only front that has the title. Any answer resets it.
-     */
-    private class FrontHealth(var fails: Int = 0, var coolUntil: Long = 0)
-    private val health = java.util.concurrent.ConcurrentHashMap<String, FrontHealth>()
+    /** Per-front outcomes on the device; see [FrontBook]. */
+    private val book = FrontBook(kv, now)
+
+    /** What a race did: fronts started, and when the first non-preferred hit arrived (0 = none). */
+    class RaceStats {
+        val started = java.util.concurrent.atomic.AtomicInteger()
+        val fallbackAt = java.util.concurrent.atomic.AtomicLong()
+    }
+
+    /** Per-resolve phase times for the timing log line. */
+    private class Timing(val t0: Long) {
+        var session = 0L; var media = 0L; var pow = 0L; var fronts = 0L; var wait = 0L
+        var started = 0; var total = 0; var parallel = 0; var skipped: List<String> = emptyList(); var on = "-"
+    }
 
     /**
      * null: no front has this title. Throws when the chain itself failed.
@@ -78,34 +87,51 @@ class MappleResolver(
         val mediaType = if (type == "tv" || type == "series") "tv" else "movie"
         val id = tmdbId.toString()
         val http = base.newBuilder().callTimeout(cfg.stepTimeoutMs, TimeUnit.MILLISECONDS).build()
+        val tm = Timing(now())
+        var outcome = "error"
         try {
-            var s = session(cfg, http, mediaType, id, fresh)
+            val (first, reused) = session(cfg, http, mediaType, id, fresh)
+            var s = first
+            tm.session = now() - tm.t0
+            val m0 = now()
+            var retryBoot = 0L
             val token = try {
-                mediaSession(cfg, http, s, mediaType, id, season, episode)
+                mediaSession(cfg, http, s, mediaType, id, season, episode, tm)
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
-                // A reused session may have expired on their side: one fresh retry.
-                if (now() - s.at < 2000) throw e
-                android.util.Log.i("Chitram", "mapple: session stale (${e.message}), re-bootstrapping")
-                s = session(cfg, http, mediaType, id, fresh = true)
-                mediaSession(cfg, http, s, mediaType, id, season, episode)
+                // A reused session the site rejected (TTL is 5 h, the site can drop it
+                // sooner): one fresh session, one retry. Only a token/session rejection
+                // qualifies; a PoW or network failure is not the session's fault. A
+                // session made in this call is not retried, so this cannot loop.
+                if (!reused || (e as? StepException)?.step != STEP_REJECTED) throw e
+                android.util.Log.i("Chitram", "mapple: session rejected (${e.message}), re-bootstrapping")
+                val b0 = now()
+                s = session(cfg, http, mediaType, id, fresh = true).first
+                retryBoot = now() - b0
+                tm.session += retryBoot
+                mediaSession(cfg, http, s, mediaType, id, season, episode, tm)
             }
-            return sweep(cfg, s, token, mediaType, id, season, episode, preferred)
+            tm.media = now() - m0 - retryBoot // a retry's bootstrap is counted under session
+            return sweep(cfg, s, token, mediaType, id, season, episode, preferred, tm).also { outcome = if (it == null) "none" else "ok" }
         } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) outcome = "cancelled"
             // A failed chain says nothing good about the session: next resolve starts clean.
             if (e !is kotlinx.coroutines.CancellationException) session = null
             throw e
+        } finally {
+            android.util.Log.i("Chitram", timingLine(tm, now() - tm.t0, outcome, "$mediaType/$id"))
         }
     }
 
-    private suspend fun session(cfg: MappleConfig, http: OkHttpClient, type: String, id: String, fresh: Boolean): Session = mutex.withLock {
+    /** The session and whether it was reused (true) or made by this call. */
+    private suspend fun session(cfg: MappleConfig, http: OkHttpClient, type: String, id: String, fresh: Boolean): Pair<Session, Boolean> = mutex.withLock {
         val cur = session
         val configured = hosts.candidates(NAME, cfg.bases)
-        if (!fresh && cur != null && now() - cur.at < cfg.sessionTtlMs && cur.base in configured) return cur
+        if (!fresh && cur != null && now() - cur.at < cfg.sessionTtlMs && cur.base in configured) return cur to true
         val (b, s) = hosts.heal(NAME, cfg.bases) { candidate -> bootstrap(cfg, http, candidate, type, id) }
         android.util.Log.i("Chitram", "mapple: session on $b")
         session = s
-        s
+        s to false
     }
 
     private suspend fun bootstrap(cfg: MappleConfig, http: OkHttpClient, b: String, type: String, id: String): HostBook.Probe<Session> {
@@ -126,13 +152,13 @@ class MappleResolver(
         return HostBook.Probe.Ok(Session(b, jar, token, now()))
     }
 
-    private suspend fun mediaSession(cfg: MappleConfig, http: OkHttpClient, s: Session, type: String, id: String, season: Int, episode: Int): String {
+    private suspend fun mediaSession(cfg: MappleConfig, http: OkHttpClient, s: Session, type: String, id: String, season: Int, episode: Int, tm: Timing): String {
         fun body(pow: JsonObject?) = buildJsonObject {
             put("mediaId", id); put("mediaType", type); put("tv_slug", ""); put("requestToken", s.requestToken)
             if (type == "tv" && season > 0) { put("season", season); put("episode", episode) }
             if (pow != null) put("pow", pow)
         }.toString()
-        var init = postJson(cfg, http, s, s.base + cfg.mediaSessionPath, body(null))
+        var init = postMedia(cfg, http, s, body(null))
         if (init?.get("requiresPow")?.let { (it as? JsonPrimitive)?.booleanOrNull } == true) {
             val pow = init["pow"] as? JsonObject ?: throw StepException("mapple pow", 200, "no pow object")
             val challenge = pow.str("challenge") ?: throw StepException("mapple pow", 200, "no challenge")
@@ -143,65 +169,75 @@ class MappleResolver(
                 val ctx = currentCoroutineContext()
                 Pow.solve(challenge, difficulty, cfg.powMaxIterations) { ctx.isActive }
             } ?: throw StepException("mapple pow", 200, "unsolved at difficulty $difficulty")
+            tm.pow += now() - t0
             android.util.Log.i("Chitram", "mapple: pow d=$difficulty solved in ${now() - t0}ms")
             // The nonce is nested under pow{} and sent as a STRING (flat = re-challenged forever).
             val answer = buildJsonObject { put("challengeId", pow["challengeId"] ?: JsonPrimitive("")); put("nonce", nonce) }
-            init = postJson(cfg, http, s, s.base + cfg.mediaSessionPath, body(answer))
+            init = postMedia(cfg, http, s, body(answer))
         }
         return init?.str("token") ?: throw StepException("mapple media-session", 200, "no streamToken")
     }
 
     private class Hit(val front: String, val url: String, val master: Master)
 
-    private fun noteFail(cfg: MappleConfig, front: String) {
-        val h = health.getOrPut(front) { FrontHealth() }
-        synchronized(h) {
-            h.fails++
-            val cool = (cfg.frontCooldownMs shl (h.fails - 1).coerceAtMost(4)).coerceAtMost(MAX_COOL_MS)
-            h.coolUntil = now() + cool
-        }
-    }
+    /** media includes pow; fronts = race start to first hit (or to the end); wait = fallback hit to the end. */
+    private fun timingLine(t: Timing, total: Long, outcome: String, what: String): String =
+        "mapple: timing $what $outcome total=${total}ms session=${t.session}ms media=${t.media}ms pow=${t.pow}ms " +
+            "fronts=${t.fronts}ms wait=${t.wait}ms tried=${t.started}/${t.total} parallel=${t.parallel} skipped=${t.skipped} on=${t.on}"
 
-    /** Fronts cooling down right now (test and log seam). */
-    internal fun coolingFronts(): Set<String> = health.filter { it.value.coolUntil > now() }.keys
+    /** Fronts tried last or skipped right now (test and log seam). */
+    internal fun coolingFronts(): Set<String> = book.cooling()
 
     /**
-     * Fronts in order: the last one that worked first, then the configured list,
-     * with cooling-down fronts moved to the end. Up to `frontParallelism` run at
-     * once. A playable master that carries the preferred audio language wins at
+     * Fronts in [FrontBook] order (Telugu fronts first, skipped ones at the tail).
+     * Up to `frontParallelism` run at once. A playable master that carries the
+     * preferred audio language wins at
      * once; one without it (s25 gave Salaar with no audio list, s12 gave five
      * languages, Telugu first) is held for `betterWaitMs` while the other fronts
      * finish, so the Telugu one is not lost to whichever answered first.
      */
-    private suspend fun sweep(cfg: MappleConfig, s: Session, token: String, type: String, id: String, season: Int, episode: Int, preferred: String): Resolved? {
-        val last = kv.get(KEY_FRONT)?.takeIf { it in cfg.fronts }
-        val all = (listOfNotNull(last) + cfg.fronts).distinct()
-        val t = now()
-        val (ready, cooling) = all.partition { (health[it]?.coolUntil ?: 0L) <= t }
-        val order = ready + cooling
-        if (cooling.isNotEmpty()) android.util.Log.i("Chitram", "mapple: cooling fronts tried last: $cooling")
+    private suspend fun sweep(cfg: MappleConfig, s: Session, token: String, type: String, id: String, season: Int, episode: Int, preferred: String, tm: Timing): Resolved? {
+        val plan = book.plan(cfg.fronts)
+        val order = plan.order
+        if (plan.last.isNotEmpty()) android.util.Log.i("Chitram", "mapple: failing fronts tried last: ${plan.last}")
+        if (plan.skipped.isNotEmpty()) android.util.Log.i("Chitram", "mapple: fronts skipped to the tail: ${plan.skipped}")
         val answered = java.util.concurrent.atomic.AtomicInteger()
         val failed = java.util.concurrent.atomic.AtomicInteger()
         fun wanted(m: Master) = Hls.languages(m.audio).any { com.chitram.app.data.Ranking.sameLanguage(it, preferred) }
-        val hit: Hit? = raceFronts(
-            order, cfg.frontParallelism, cfg.betterWaitMs, cfg.betterWaitMaxMs,
-            wanted = { wanted(it.master) },
-            onFallback = { h, waitMs -> android.util.Log.i("Chitram", "mapple: ${h.front} has it without $preferred audio, waiting up to ${waitMs}ms for a better front") },
-        ) { front ->
-            val cap = cfg.frontTimeoutMs[front] ?: cfg.defaultFrontTimeoutMs
-            val r = try {
-                withTimeoutOrNull(cap) { tryFront(cfg, s, token, front, type, id, season, episode) }
-                    ?: throw StepException("mapple front $front", 0, "timed out after ${cap}ms")
-            } catch (e: Exception) {
-                if (e is kotlinx.coroutines.CancellationException) throw e
-                failed.incrementAndGet()
-                noteFail(cfg, front)
-                android.util.Log.i("Chitram", "mapple: front $front failed: ${e.message}")
-                return@raceFronts null
+        val stats = RaceStats()
+        val r0 = System.currentTimeMillis() // same clock as RaceStats.fallbackAt
+        tm.total = order.size; tm.parallel = cfg.frontParallelism; tm.skipped = plan.skipped
+        val hit: Hit? = try {
+            raceFronts(
+                order, cfg.frontParallelism, cfg.betterWaitMs, cfg.betterWaitMaxMs,
+                wanted = { wanted(it.master) },
+                onFallback = { h, waitMs -> android.util.Log.i("Chitram", "mapple: ${h.front} has it without $preferred audio, waiting up to ${waitMs}ms for a better front") },
+                stats = stats,
+            ) { front ->
+                val cap = cfg.frontTimeoutMs[front] ?: cfg.defaultFrontTimeoutMs
+                val r = try {
+                    withTimeoutOrNull(cap) { tryFront(cfg, s, token, front, type, id, season, episode) }
+                        ?: throw StepException("mapple front $front", 0, "timed out after ${cap}ms")
+                } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                    failed.incrementAndGet()
+                    book.failed(front, FrontBook.kindOf(e.message), cfg.frontCooldownMs)
+                    android.util.Log.i("Chitram", "mapple: front $front failed: ${e.message}")
+                    return@raceFronts null
+                }
+                answered.incrementAndGet()
+                when (r) {
+                    is FrontResult.Found -> book.found(front, wanted(r.master))
+                    else -> book.notHere(front)
+                }
+                (r as? FrontResult.Found)?.let { Hit(front, it.url, it.master) }
             }
-            answered.incrementAndGet()
-            health.remove(front)
-            (r as? FrontResult.Found)?.let { Hit(front, it.url, it.master) }
+        } finally {
+            val end = System.currentTimeMillis()
+            val fb = stats.fallbackAt.get()
+            tm.started = stats.started.get()
+            tm.fronts = (if (fb > 0) fb else end) - r0
+            tm.wait = if (fb > 0) end - fb else 0
         }
         if (hit == null) {
             if (answered.get() == 0 && failed.get() > 0) throw StepException("mapple fronts", 0, "all ${failed.get()} fronts tried failed")
@@ -210,6 +246,7 @@ class MappleResolver(
         }
         // Remember a front that carried the preferred language; a language-less one only if nothing better is known.
         nextStoredFront(kv.get(KEY_FRONT), hit.front, wanted(hit.master))?.let { kv.put(KEY_FRONT, it) }
+        tm.on = hit.front
         android.util.Log.i("Chitram", "mapple: $type/$id on ${hit.front}, ${hit.master.audio.size} audio tracks")
         return Resolved(
             provider = NAME,
@@ -246,7 +283,8 @@ class MappleResolver(
         val streamUrl = (out?.get("data") as? JsonObject)?.str("stream_url").orEmpty()
         // SOURCE_BUSY / SOURCE_TIMEOUT / UPSTREAM_UNAVAILABLE: says nothing about the title.
         if (streamUrl.isEmpty() && (out?.get("retryable") as? JsonPrimitive)?.booleanOrNull == true) {
-            throw StepException("mapple front $front", r.code, out.str("details") ?: out.str("failureKind") ?: "retryable")
+            // failureKind first: FrontBook reads the kind (SOURCE_COOLDOWN, SCRAPE_FAILED) from this text.
+            throw StepException("mapple front $front", r.code, listOfNotNull(out.str("failureKind"), out.str("details")).joinToString(": ").ifEmpty { "retryable" })
         }
         if (streamUrl.isEmpty() || streamUrl.contains(cfg.unavailableMarker)) return FrontResult.NotHere
         // The master must answer with the site's headers and must not be empty.
@@ -257,6 +295,21 @@ class MappleResolver(
         val master = Hls.parse(mres.body, streamUrl)
         if (master.empty) return FrontResult.NotHere
         return FrontResult.Found(streamUrl, master)
+    }
+
+    /**
+     * POST to media-session. A 401/403, or an error naming the token or session
+     * (the old path's 401 "Invalid request token"), throws [STEP_REJECTED].
+     */
+    private suspend fun postMedia(cfg: MappleConfig, http: OkHttpClient, s: Session, json: String): JsonObject? {
+        val r = http.fetch(req(cfg, s.base, s.jar, s.base + cfg.mediaSessionPath).header("content-type", "application/json")
+            .post(json.toRequestBody(JSON)).build())
+        s.jar.absorb(r.headers)
+        val o = obj(r.body)
+        val err = o?.str("error").orEmpty()
+        if (r.code == 401 || r.code == 403 || (o?.str("token") == null && (err.contains("token", true) || err.contains("session", true))))
+            throw StepException(STEP_REJECTED, r.code, "HTTP ${r.code} ${err.ifEmpty { r.body.take(80) }}")
+        return o
     }
 
     private suspend fun postJson(cfg: MappleConfig, http: OkHttpClient, s: Session, url: String, json: String): JsonObject? {
@@ -276,7 +329,7 @@ class MappleResolver(
     companion object {
         const val NAME = "mapple"
         const val KEY_FRONT = "resolve.mapple.front"
-        private const val MAX_COOL_MS = 10 * 60 * 1000L
+        private const val STEP_REJECTED = "mapple session rejected"
         private val JSON = "application/json".toMediaType()
         private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
@@ -300,6 +353,7 @@ class MappleResolver(
             order: List<String>, parallelism: Int, betterWaitMs: Long, betterWaitMaxMs: Long,
             wanted: (T) -> Boolean,
             onFallback: (T, Long) -> Unit = { _, _ -> },
+            stats: RaceStats? = null,
             attempt: suspend (String) -> T?,
         ): T? = coroutineScope {
             val scope = this
@@ -311,9 +365,11 @@ class MappleResolver(
                 launch {
                     sem.withPermit {
                         if (done.isCompleted) return@withPermit
+                        stats?.started?.incrementAndGet()
                         val r = attempt(front) ?: return@withPermit
                         if (wanted(r)) done.complete(r)
                         else if (fallback.compareAndSet(null, r)) {
+                            stats?.fallbackAt?.set(System.currentTimeMillis())
                             onFallback(r, waitMs)
                             // In the outer scope: a child of this front's job would hold joinAll open.
                             scope.launch { kotlinx.coroutines.delay(waitMs); done.complete(fallback.get()) }

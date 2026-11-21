@@ -130,7 +130,20 @@ data class RawStream(
     /** Availability labels from a catalog, never proof of selectable audio. */
     val catalogLanguages: List<String> = emptyList(),
     val netmirrorCatalog: String? = null,
+    /**
+     * Upstream url and its request headers, sent when the server's provider
+     * config (lib/routing/providerRoutes.js) says a client may skip the VM
+     * proxy. `url` stays proxied for older builds. Header values are read as
+     * JSON elements so one odd value can never fail the whole parse.
+     */
+    val directUrl: String? = null,
+    val directHeaders: Map<String, kotlinx.serialization.json.JsonElement> = emptyMap(),
+    val route: RawRoute? = null,
 )
+
+/** Per-client route for one row: "direct" or "proxy". */
+@Serializable
+data class RawRoute(val web: String? = null, val apk: String? = null)
 
 @Serializable
 data class StreamsResponse(

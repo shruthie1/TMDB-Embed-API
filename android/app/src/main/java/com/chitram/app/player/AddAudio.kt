@@ -214,9 +214,14 @@ object AddAudio {
         }
     }
 
-    /** The fused master as a playable row: the picture's identity, the server's url, no device headers. */
+    /**
+     * The fused master as a playable row: the picture's identity, the server's url, no device headers.
+     * No direct-route state either (review C1): the fused master lives on the VM, so it must
+     * never "fall back" to the picture's proxied video, and reports/casts must see its own url.
+     */
     fun fusedSource(picture: Source, hit: Hit, language: String): Source = picture.copy(
         url = requireNotNull(hit.ok) { "an on-device hit has no fused master" }.url, progressive = false, hybrid = true, headers = emptyMap(), segmentToken = null, onDevice = null,
+        directUrl = null, directHeaders = emptyMap(), proxyUrl = null,
         selectableAudio = true,
         languages = (listOf(language) + picture.languages).distinctBy { Ranking.canonLang(it) ?: it.lowercase() },
         audioLanguages = (listOf(language) + (picture.audioLanguages ?: picture.languages)).distinctBy { Ranking.canonLang(it) ?: it.lowercase() },

@@ -92,7 +92,7 @@ class OnDeviceResolveTest {
         v/1080.m3u8
     """.trimIndent()
 
-    private fun mappleSite(frontDelayMs: Map<String, Long> = emptyMap(), hasOn: Set<String> = setOf("s12"), bare: Set<String> = emptySet(), sessionOk: () -> Boolean = { true }) = serve { r ->
+    private fun mappleSite(frontDelayMs: Map<String, Long> = emptyMap(), hasOn: Set<String> = setOf("s12"), bare: Set<String> = emptySet(), sessionOk: () -> Boolean = { true }, failKinds: Map<String, String> = emptyMap(), rejectToken: () -> Boolean = { false }, mediaDown: () -> Boolean = { false }, encryptGate: () -> java.util.concurrent.CountDownLatch? = { null }) = serve { r ->
         val path = r.requestUrl!!.encodedPath
         when {
             path.startsWith("/watch/") -> MockResponse().addHeader("Set-Cookie", "_mapple_site=c1; Path=/; HttpOnly").setBody("<html/>")
@@ -103,7 +103,8 @@ class OnDeviceResolveTest {
                 val b = bodyJson(r)
                 val pow = b["pow"] as? JsonObject
                 when {
-                    b["requestToken"]?.jsonPrimitive?.content != "RT" -> json("""{"error":"Invalid request token"}""")
+                    mediaDown() -> MockResponse().setResponseCode(503).setBody("busy")
+                    b["requestToken"]?.jsonPrimitive?.content != "RT" || rejectToken() -> json("""{"error":"Invalid request token"}""").setResponseCode(401)
                     pow == null -> json("""{"requiresPow":true,"pow":{"challenge":"chal","difficulty":8,"challengeId":"cid"}}""")
                     pow["challengeId"]!!.jsonPrimitive.content == "cid" &&
                         pow["nonce"]!!.jsonPrimitive.isString &&
@@ -112,9 +113,12 @@ class OnDeviceResolveTest {
                 }
             }
             path == "/api/encrypt" -> {
+                // Optional gate: hold every encrypt until N have arrived, so no front can
+                // finish (and free a slot) before the whole first wave has started.
+                encryptGate()?.let { g -> g.countDown(); g.await(5, TimeUnit.SECONDS) }
                 val b = bodyJson(r)
                 if (b["requestToken"]?.jsonPrimitive?.content != "RT") json("""{"error":"no top-level token"}""")
-                else json("""{"url":"/api/stream-encrypted?src=${b["data"]!!.jsonObject["source"]!!.jsonPrimitive.content}"}""")
+                else json("""{"url":"/api/stream-encrypted?src=${b["data"]!!.jsonObject["source"]!!.jsonPrimitive.content}&id=${b["data"]!!.jsonObject["mediaId"]!!.jsonPrimitive.content}"}""")
             }
             path == "/api/stream-encrypted" -> {
                 val src = r.requestUrl!!.queryParameter("src")!!
@@ -122,6 +126,9 @@ class OnDeviceResolveTest {
                 val resp = when {
                     !okTokens -> json("""{"error":"bad tokens"}""")
                     src == "s25" -> json("""{"retryable":true,"failureKind":"SOURCE_TIMEOUT"}""")
+                    // Keyed "front" (every title) or "front/mediaId" (one title).
+                    (failKinds["$src/${r.requestUrl!!.queryParameter("id")}"] ?: failKinds[src]) != null ->
+                        json("""{"retryable":true,"failureKind":"${failKinds["$src/${r.requestUrl!!.queryParameter("id")}"] ?: failKinds[src]}"}""")
                     src in hasOn -> json("""{"data":{"stream_url":"$base/m/$src/master.m3u8"}}""")
                     else -> json("""{"data":{"stream_url":"https://cdn.example/playback-unavailable"}}""")
                 }
@@ -198,6 +205,99 @@ class OnDeviceResolveTest {
         // Cooldown expires: back in configured order.
         clock += 11 * 60 * 1000L
         assertTrue(m.coolingFronts().isEmpty())
+    }
+
+    @Test fun mappleFrontMemorySurvivesRestartAndSkipsCoolingFronts() = runBlocking {
+        // s10 answers SOURCE_COOLDOWN, s7 has Telugu. Parallelism 1 makes the order visible.
+        mappleSite(hasOn = setOf("s7"), failKinds = mapOf("s10" to "SOURCE_COOLDOWN"))
+        var clock = 1_000_000L
+        val kv = MemoryKeyValue()
+        val cfg = mappleCfg("s10", "s4", "s7")
+        assertEquals("$base/m/s7/master.m3u8", MappleResolver(client, HostBook(kv), kv) { clock }.resolve(cfg, "movie", 1)!!.url)
+        fun encryptOrder() = seen.filter { it.requestUrl!!.encodedPath == "/api/encrypt" }.map { bodyJson(it)["data"]!!.jsonObject["source"]!!.jsonPrimitive.content }
+        assertEquals(listOf("s10", "s4", "s7"), encryptOrder())
+
+        // App restart (new resolver, same store), another title: s7 first, s10 skipped to the tail.
+        kv.put(MappleResolver.KEY_FRONT, null) // the new memory alone must carry it
+        seen.clear()
+        val m2 = MappleResolver(client, HostBook(kv), kv) { clock }
+        assertEquals("$base/m/s7/master.m3u8", m2.resolve(cfg, "movie", 2)!!.url)
+        assertEquals(listOf("s7"), encryptOrder())
+
+        // Title only on s10 while it is skipped: still found (skip = tail, never dropped)
+        // once the site stops answering SOURCE_COOLDOWN.
+        mappleSite(hasOn = setOf("s10"))
+        seen.clear()
+        assertEquals("$base/m/s10/master.m3u8", m2.resolve(cfg, "movie", 3)!!.url)
+        assertEquals(listOf("s7", "s4", "s10"), encryptOrder())
+
+        // Window over: back in the remembered/configured order.
+        clock += 11 * 60_000L
+        seen.clear()
+        assertNotNull(MappleResolver(client, HostBook(kv), kv) { clock }.resolve(cfg, "movie", 4))
+        assertEquals("s10", encryptOrder().first())
+    }
+
+    @Test fun mappleExpiredSessionIsRefreshedOnceAndThePlaySucceeds() = runBlocking {
+        // The site expires the session before our 5 h TTL: media-session answers 401
+        // until a new /api/ui/session. The clock does not move, so the retry must not
+        // depend on the session's age.
+        var expired = false
+        var sessionsAtExpiry = 0
+        fun sessions() = seen.count { it.requestUrl!!.encodedPath == "/api/ui/session" }
+        mappleSite(rejectToken = { expired && sessions() <= sessionsAtExpiry })
+        val kv = MemoryKeyValue()
+        val m = MappleResolver(client, HostBook(kv), kv) { 1_000_000L }
+        val cfg = mappleCfg("s12")
+        assertNotNull(m.resolve(cfg, "movie", 1))
+        assertEquals(1, sessions())
+
+        expired = true; sessionsAtExpiry = sessions()
+        assertEquals("$base/m/s12/master.m3u8", m.resolve(cfg, "movie", 2)!!.url)
+        assertEquals(2, sessions()) // refreshed exactly once
+
+        // A brand-new session that is rejected too: one try, then a clear error, no loop.
+        expired = true; sessionsAtExpiry = Int.MAX_VALUE
+        try { m.resolve(cfg, "movie", 3); fail("rejected fresh session must throw") } catch (e: com.chitram.app.resolve.StepException) {}
+        assertEquals(3, sessions())
+    }
+
+    @Test fun mappleTeluguFrontStaysInFirstWaveAfterPerTitleFailures() = runBlocking {
+        // Review I1: s7 is the only Telugu front. It answers SCRAPE_FAILED for titles 2 and 3
+        // (not on it). Title 4 is on s7: s7 must still start in the first wave of 4.
+        // The 4 first-wave POSTs reach the server in any order (seen: [s2, mapple, s28, s7, ...]),
+        // so the gate holds them until all 4 arrived; the first 4 arrivals are then exactly the wave.
+        var gate: java.util.concurrent.CountDownLatch? = null
+        mappleSite(hasOn = setOf("s7"), failKinds = mapOf("s7/2" to "SCRAPE_FAILED", "s7/3" to "SCRAPE_FAILED"), encryptGate = { gate })
+        val kv = MemoryKeyValue()
+        var clock = 1_000_000L
+        val m = MappleResolver(client, HostBook(kv), kv) { clock }
+        val cfg = MappleConfig(bases = listOf(base), frontParallelism = 4)
+        assertEquals("$base/m/s7/master.m3u8", m.resolve(cfg, "movie", 1)!!.url)
+        clock += 10_000; assertNull(m.resolve(cfg, "movie", 2))
+        clock += 10_000; assertNull(m.resolve(cfg, "movie", 3))
+        kv.put(MappleResolver.KEY_FRONT, null) // the front memory alone must keep s7 first
+        seen.clear()
+        clock += 10_000
+        // Launch order is deterministic: s7 heads the plan.
+        assertEquals("s7", com.chitram.app.resolve.FrontBook(kv) { clock }.plan(cfg.fronts).order.first())
+        gate = java.util.concurrent.CountDownLatch(4)
+        assertEquals("$base/m/s7/master.m3u8", MappleResolver(client, HostBook(kv), kv) { clock }.resolve(cfg, "movie", 4)!!.url)
+        val order = seen.filter { it.requestUrl!!.encodedPath == "/api/encrypt" }.map { bodyJson(it)["data"]!!.jsonObject["source"]!!.jsonPrimitive.content }
+        // The wave is the plan's first 4: s7 (Telugu), then config order without s25 (failing, last).
+        assertEquals(setOf("s7", "mapple", "s2", "s28"), order.take(4).toSet())
+    }
+
+    @Test fun mappleReusedSessionIsNotRebuiltOnANetworkFailure() = runBlocking {
+        // Review M2: only a token rejection earns a new session; a 503 does not.
+        var down = false
+        mappleSite(mediaDown = { down })
+        val kv = MemoryKeyValue()
+        val m = MappleResolver(client, HostBook(kv), kv) { 1_000_000L }
+        assertNotNull(m.resolve(mappleCfg("s12"), "movie", 1))
+        down = true
+        try { m.resolve(mappleCfg("s12"), "movie", 2); fail("503 must throw") } catch (e: com.chitram.app.resolve.StepException) {}
+        assertEquals(1, seen.count { it.requestUrl!!.encodedPath == "/api/ui/session" })
     }
 
     @Test fun mappleTeluguFrontBeatsFasterNoAudioFront() = runBlocking {

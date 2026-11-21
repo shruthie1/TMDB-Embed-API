@@ -51,7 +51,9 @@ object WvcCast {
      * then adds the headers and vaplayer's token itself, so the TV needs neither
      * the headers nor WVC's phone routing.
      */
-    fun spec(s: Source, r: PlayRequest, lanUrl: String? = null): Spec {
+    fun spec(row: Source, r: PlayRequest, lanUrl: String? = null): Spec {
+        // A TV gets no provider headers from WVC: cast a direct row's proxied url.
+        val s = DirectRoute.proxyOf(row)
         val title = if (r.type == "tv" && r.season > 0) "${r.title} S${r.season} E${r.episode}" else r.title
         val viaPhone = lanUrl != null && s.onDevice != null
         val headers = if (s.onDevice == null || viaPhone) emptyMap()

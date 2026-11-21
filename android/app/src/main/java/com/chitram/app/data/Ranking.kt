@@ -41,6 +41,12 @@ data class Source(
      * sourceAudioRenditions `uri`). Add-audio tries these donors first (I4).
      */
     val uriLanguages: List<String> = emptyList(),
+    /** Upstream url the APK may play directly (route.apk == "direct"); null = proxy only. */
+    val directUrl: String? = null,
+    /** Headers for [directUrl] (provider Referer/Origin/UA). */
+    val directHeaders: Map<String, String> = emptyMap(),
+    /** Set while this row plays direct: the proxied url to fall back to (player.DirectRoute). */
+    val proxyUrl: String? = null,
 )
 
 /** Answers "can this device decode this video codec family?" null = unknown. */
@@ -263,6 +269,10 @@ object Ranking {
             catalogLanguages = languageLabels(s.catalogLanguages),
             netmirrorCatalog = s.netmirrorCatalog,
             uriLanguages = uriLanguages,
+            directUrl = s.directUrl?.takeIf { it.isNotBlank() && s.route?.apk == "direct" },
+            directHeaders = if (s.route?.apk == "direct") s.directHeaders.mapNotNull { (k, v) ->
+                (v as? kotlinx.serialization.json.JsonPrimitive)?.content?.let { k to it }
+            }.toMap() else emptyMap(),
         )
     }
 

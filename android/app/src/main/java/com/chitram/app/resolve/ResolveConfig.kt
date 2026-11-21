@@ -38,7 +38,8 @@ data class MappleConfig(
     val frontTimeoutMs: Map<String, Long> = mapOf("mapple" to 8000L, "s10" to 12000L, "s2" to 22000L, "s25" to 24000L, "s28" to 25000L),
     /** 8s: s12 took 3.5s on a Mac and more on a phone; 5s cut it off (2026-11-20). */
     val defaultFrontTimeoutMs: Long = 8000,
-    val frontParallelism: Int = 3,
+    /** 4: s25, s2 and s28 carry 22-25s caps, so 3 slots could all hold slow fronts; not more, the home-IP rate limit is unmeasured (2026-11-21). */
+    val frontParallelism: Int = 4,
     /** A failed front is tried last for this long (doubling per repeat, max 10 min). */
     val frontCooldownMs: Long = 60_000,
     /**
@@ -53,7 +54,8 @@ data class MappleConfig(
     val betterWaitMaxMs: Long = 12000,
     val stepTimeoutMs: Long = 8000,
     val budgetMs: Long = 25000,
-    val sessionTtlMs: Long = 10 * 60 * 1000L,
+    /** 5 h: the requestToken lives 6 h (expiresIn 21599999, measured 2026-11-21). An earlier server-side expiry is refreshed once per resolve. */
+    val sessionTtlMs: Long = 5 * 60 * 60 * 1000L,
     val unavailableMarker: String = "playback-unavailable",
     val userAgent: String = MAPPLE_UA,
     val powMaxIterations: Int = 20_000_000,
@@ -145,7 +147,7 @@ data class ResolveConfig(
                 betterWaitMaxMs = o.long("betterWaitMaxMs")?.coerceIn(0, 30_000) ?: d.betterWaitMaxMs,
                 stepTimeoutMs = o.long("stepTimeoutMs")?.coerceIn(1000, 60_000) ?: d.stepTimeoutMs,
                 budgetMs = o.long("budgetMs")?.coerceIn(3000, 90_000) ?: d.budgetMs,
-                sessionTtlMs = o.long("sessionTtlMs")?.coerceIn(0, 3_600_000) ?: d.sessionTtlMs,
+                sessionTtlMs = o.long("sessionTtlMs")?.coerceIn(0, 21_600_000) ?: d.sessionTtlMs,
                 unavailableMarker = o.str("unavailableMarker") ?: d.unavailableMarker,
                 userAgent = o.str("userAgent") ?: d.userAgent,
                 powMaxIterations = o.int("powMaxIterations")?.coerceIn(1000, 200_000_000) ?: d.powMaxIterations,
