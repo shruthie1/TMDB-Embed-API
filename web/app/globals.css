@@ -2674,7 +2674,11 @@ body:not(:has(.page-backdrop)) .topbar::after{opacity:1}
   width:min(200px,60%);margin:0;justify-content:center;
 }
 .hero-dots{flex:1 1 auto;gap:var(--space-1-5);justify-content:center}
-.hero-dot{flex:1 1 0;min-width:0;width:auto;height:3px;border-radius:var(--radius-pill);
+/* Radius is capped to the 3px bar height, NOT --radius-pill. The hit-area rule
+   below gives this element an 8px/29px transparent border on a content-box, so a
+   999px pill radius rounds the whole ~40px border box and the bar reads as a
+   downward half-moon arc. 2px keeps flat pill ends on the 3px bar. */
+.hero-dot{flex:1 1 0;min-width:0;width:auto;height:3px;border-radius:2px;
   background:var(--indicator);position:relative;overflow:hidden}
 /* Hit area: the bar is 3px tall. Transparent borders make it 40px (8px up to
    the buttons above, 29px down over the row heading) and 3px each side in
