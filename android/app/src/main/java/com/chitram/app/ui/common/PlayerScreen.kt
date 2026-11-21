@@ -285,7 +285,7 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
                             if (ev.changes.count { it.pressed } >= 2) zoom *= ev.calculateZoom()
                         } while (ev.changes.any { it.pressed })
                         val pick = when { zoom > 1.15f -> VideoFit.Fill; zoom < 0.87f -> VideoFit.Fit; else -> null }
-                        if (pick != null && pick != fit) { fit = pick; playerPrefs.fit = pick; poke() }
+                        if (pick != null && pick != fit) { fit = pick; playerPrefs.save(isTv, pick); poke() }
                     }
                 }.pointerInput(Unit) {
                     detectTapGestures(
@@ -302,15 +302,16 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
     ) {
         // Video surface. Fit: the whole picture, inside the screen both ways (a
         // fixed width overflowed 16:9 video on a 20:9 phone). Fill: cover the
-        // screen and crop. Stretch: the full screen, distorted.
+        // screen and crop. Fit width (TV sheet): full width, crop top and bottom.
+        // Stretch: the full screen, distorted. Bare SurfaceView, so media3
+        // resize modes do not apply; the surface is sized here (fitSize rules).
         val vs = vm.videoSize
         val ratio = if (vs.width > 0 && vs.height > 0) vs.width * vs.pixelWidthHeightRatio / vs.height else 16f / 9f
         BoxWithConstraints(Modifier.fillMaxSize().clipToBounds(), contentAlignment = Alignment.Center) {
             val surface = when (fit) {
                 VideoFit.Fit -> Modifier.aspectRatio(ratio)
                 VideoFit.Stretch -> Modifier.fillMaxSize()
-                VideoFit.Fill -> if (maxWidth / maxHeight > ratio) Modifier.requiredSize(maxWidth, maxWidth / ratio)
-                    else Modifier.requiredSize(maxHeight * ratio, maxHeight)
+                VideoFit.Fill, VideoFit.FitWidth -> fitSize(fit, maxWidth.value, maxHeight.value, ratio).let { (w, h) -> Modifier.requiredSize(w.dp, h.dp) }
             }
             AndroidView(
                 factory = { ctx -> SurfaceView(ctx).also { vm.player.setVideoSurfaceView(it) } },
@@ -350,7 +351,7 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
         // The control row cannot fit that width, so wait for landscape before drawing it.
         val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
         if (controls && (isTv || landscape) && vm.phase is PlayerVm.Phase.Playing && vm.framed && vm.nextUp == null) {
-            Controls(vm, now, isTv, playFocus, menuFocus, fit, onFit = { fit = fit.next(); playerPrefs.fit = fit; poke() }, onMenu = { menu = it; returnTo = it; serverProvider = null; poke() }, onBack = onBack, poke = ::poke,
+            Controls(vm, now, isTv, playFocus, menuFocus, fit, onFit = { fit = fit.next(); playerPrefs.save(isTv, fit); poke() }, onMenu = { menu = it; returnTo = it; serverProvider = null; poke() }, onBack = onBack, poke = ::poke,
                 onAnchor = { k, r -> if (menuAnchors[k] != r) menuAnchors[k] = r })
         }
 
@@ -360,7 +361,8 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
             val items = when (m) {
                 Menu.Server -> vm.serverItems(serverProvider)
                 Menu.Audio -> vm.audioItems()
-                Menu.Quality -> vm.qualityItems()
+                // TV has no bar fit button: picture fit is a section of the Quality sheet.
+                Menu.Quality -> if (isTv) vm.qualityItems() + fitItems(fit) else vm.qualityItems()
                 Menu.Subtitles -> vm.subtitleItems()
             }
             val shown = if (m == Menu.Server && serverProvider.equals("netmirror", true)) items + MenuItem("check:netmirror", if (vm.checkingNetmirror) "Checking sources…" else "Check for more streams", vm.netmirrorNote ?: "Current playback continues") else items
@@ -373,6 +375,9 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
                             if (serverProvider.equals("netmirror", true) && vm.serverItems(serverProvider).isEmpty()) vm.checkNetmirror()
                         }
                         MenuTap.Check -> vm.checkNetmirror()
+                        // TV picture fit: apply and stay in the sheet. Row keys do not change,
+                        // so focus stays on the picked row (never falls to Play/Pause).
+                        MenuTap.Fit -> VideoFit.parse(key.removePrefix(FIT_KEY))?.let { fit = it; playerPrefs.save(isTv, it) }
                         // A2: the selected row is already playing; just close.
                         MenuTap.Close -> menu = null
                         // TV, sheet opened from the bar: apply and stay in the sheet; focus
@@ -647,7 +652,7 @@ private fun Controls(
                     // Picture fit: one press cycles Fit, Fill, Stretch; the label names the current mode.
                     // Phone only (owner, 1.1.3): a TV is already full screen and the remote has no use for it.
                     if (!isTv) CtlButton(
-                        when (fit) { VideoFit.Fit -> Glyphs.fitContain; VideoFit.Fill -> Glyphs.fitCover; VideoFit.Stretch -> Glyphs.fitFill },
+                        when (fit) { VideoFit.Fit -> Glyphs.fitContain; VideoFit.Fill, VideoFit.FitWidth -> Glyphs.fitCover; VideoFit.Stretch -> Glyphs.fitFill },
                         "Picture: ${fit.label}", m, label = fit.label, onClick = onFit,
                     )
                 }

@@ -36,7 +36,7 @@ internal fun tvAnchoredMenu(width: Float, height: Float): TvAnchoredMenu {
     return TvAnchoredMenu(minWidth, maxOf(minWidth, minOf(width * 0.5f, maxWidth)), minOf(356.4f, height - margin * 2).coerceAtLeast(1f), margin)
 }
 
-internal enum class MenuTap { Drill, Check, Close, Choose }
+internal enum class MenuTap { Drill, Check, Close, Choose, Fit }
 
 /** A tap on a sheet row. Re-tapping the selected row only closes the sheet (A2); dim rows stay tappable. */
 internal fun menuTap(item: com.chitram.app.player.MenuItem?): MenuTap = when {
@@ -44,5 +44,32 @@ internal fun menuTap(item: com.chitram.app.player.MenuItem?): MenuTap = when {
     item.key.startsWith("group:") -> MenuTap.Drill
     item.key == "check:netmirror" -> MenuTap.Check
     item.selected -> MenuTap.Close
+    item.key.startsWith(FIT_KEY) -> MenuTap.Fit
     else -> MenuTap.Choose
+}
+
+internal const val FIT_KEY = "fit:"
+
+/** TV Quality sheet: a "Picture" section, one row per fit, the current one checked. */
+internal fun fitItems(current: com.chitram.app.data.VideoFit): List<com.chitram.app.player.MenuItem> =
+    com.chitram.app.data.VideoFit.entries.map { f ->
+        com.chitram.app.player.MenuItem(FIT_KEY + f.name, f.label, fitDetail(f), selected = f == current, group = "Picture")
+    }
+
+private fun fitDetail(f: com.chitram.app.data.VideoFit) = when (f) {
+    com.chitram.app.data.VideoFit.Fit -> "Whole picture"
+    com.chitram.app.data.VideoFit.Fill -> "Fill screen, crop edges"
+    com.chitram.app.data.VideoFit.FitWidth -> "Full width, crop top and bottom"
+    com.chitram.app.data.VideoFit.Stretch -> "Fill screen, ignore shape"
+}
+
+/**
+ * Surface size for [fit] in a [w] x [h] box, video aspect [ratio] (width / height).
+ * Same rules as media3 AspectRatioFrameLayout; the box clips any overflow.
+ */
+internal fun fitSize(fit: com.chitram.app.data.VideoFit, w: Float, h: Float, ratio: Float): Pair<Float, Float> = when (fit) {
+    com.chitram.app.data.VideoFit.Fit -> if (w / h > ratio) h * ratio to h else w to w / ratio
+    com.chitram.app.data.VideoFit.Fill -> if (w / h > ratio) w to w / ratio else h * ratio to h
+    com.chitram.app.data.VideoFit.FitWidth -> w to w / ratio
+    com.chitram.app.data.VideoFit.Stretch -> w to h
 }

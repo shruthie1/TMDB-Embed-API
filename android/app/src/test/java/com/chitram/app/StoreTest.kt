@@ -22,7 +22,7 @@ class StoreTest {
         val p = PlayerPrefs(kv)
         assertEquals(null, p.fit) // nothing chosen yet
         assertEquals(VideoFit.Fill, p.fitFor(isTv = false)) // phone: fill the 20:9 panel
-        assertEquals(VideoFit.Fill, p.fitFor(isTv = true)) // TV: fill too
+        assertEquals(VideoFit.Fit, p.fitFor(isTv = true)) // TV: whole frame, nothing cropped
         assertEquals(VideoFit.Fill, VideoFit.Fit.next())
         assertEquals(VideoFit.Stretch, VideoFit.Fill.next())
         assertEquals(VideoFit.Fit, VideoFit.Stretch.next())
@@ -32,6 +32,19 @@ class StoreTest {
         assertEquals(VideoFit.Fit, PlayerPrefs(kv).fitFor(isTv = false)) // a choice beats the phone default
         kv.put(PlayerPrefs.FIT, "bogus")
         assertEquals(VideoFit.Fill, PlayerPrefs(kv).fitFor(isTv = false))
+    }
+
+    @Test fun tvFitKeepsItsOwnChoiceAndDefaultsToFit() {
+        val kv = MemoryKeyValue()
+        kv.put(PlayerPrefs.FIT, "Fill") // an old shared choice does not crop the TV
+        val p = PlayerPrefs(kv)
+        assertEquals(VideoFit.Fit, p.fitFor(isTv = true))
+        p.save(isTv = true, VideoFit.FitWidth)
+        assertEquals(VideoFit.FitWidth, PlayerPrefs(kv).fitFor(isTv = true))
+        assertEquals(VideoFit.Fill, PlayerPrefs(kv).fitFor(isTv = false)) // phone untouched
+        assertEquals(VideoFit.Fit, VideoFit.FitWidth.next()) // phone cycle never lands on Fit width
+        // media3 AspectRatioFrameLayout: FIT 0, FIXED_WIDTH 1, FILL 3, ZOOM 4
+        assertEquals(listOf(0, 4, 1, 3), VideoFit.entries.map { it.resizeMode })
     }
 
     @Test fun languagePrefs() {

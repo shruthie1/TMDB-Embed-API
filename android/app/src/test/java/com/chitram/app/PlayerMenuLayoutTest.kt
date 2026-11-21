@@ -1,5 +1,10 @@
 package com.chitram.app
 
+import com.chitram.app.data.VideoFit
+import com.chitram.app.ui.common.MenuTap
+import com.chitram.app.ui.common.fitItems
+import com.chitram.app.ui.common.fitSize
+import com.chitram.app.ui.common.menuTap
 import com.chitram.app.ui.common.playerMenuLayout
 import org.junit.Assert.*
 import org.junit.Test
@@ -34,5 +39,24 @@ class PlayerMenuLayoutTest {
             assertTrue(p.width + p.inset*2 <= w)
             assertTrue(p.height + p.inset*2 <= h)
         }
+    }
+    @Test fun tvFitRowsCheckCurrentAndApplyInPlace() {
+        val rows = fitItems(VideoFit.Fit)
+        assertEquals(listOf("Fit", "Fill", "Fit width", "Stretch"), rows.map { it.label })
+        assertEquals(listOf("fit:Fit"), rows.filter { it.selected }.map { it.key })
+        assertTrue(rows.all { it.group == "Picture" })
+        assertEquals(MenuTap.Fit, menuTap(rows[2])) // pick: apply, sheet stays open
+        assertEquals(MenuTap.Close, menuTap(rows[0])) // re-pick current: close (A2)
+    }
+    @Test fun fitSizeMatchesMedia3ResizeModes() {
+        val scope = 2.39f // CinemaScope on a 16:9 960x540 TV
+        assertEquals(960f to 960f / scope, fitSize(VideoFit.Fit, 960f, 540f, scope)) // letterbox, nothing cropped
+        assertEquals(540f * scope to 540f, fitSize(VideoFit.Fill, 960f, 540f, scope)) // crops the sides
+        assertEquals(960f to 960f / scope, fitSize(VideoFit.FitWidth, 960f, 540f, scope))
+        assertEquals(960f to 540f, fitSize(VideoFit.Stretch, 960f, 540f, scope))
+        val tall = 4f / 3f
+        assertEquals(540f * tall to 540f, fitSize(VideoFit.Fit, 960f, 540f, tall)) // pillarbox
+        assertEquals(960f to 720f, fitSize(VideoFit.FitWidth, 960f, 540f, tall)) // crops top and bottom
+        assertEquals(960f to 720f, fitSize(VideoFit.Fill, 960f, 540f, tall))
     }
 }

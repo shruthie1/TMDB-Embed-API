@@ -225,13 +225,19 @@ class LastProviderStore(private val kv: KeyValue) {
     private companion object { const val MANUAL = "|manual" }
 }
 
-/** How the picture fills the screen (web Player.jsx fit: contain / cover / fill). */
-enum class VideoFit(val label: String) {
-    Fit("Fit"),         // whole picture, bars where the shapes differ
-    Fill("Fill"),       // fill the screen, crop the overflow
-    Stretch("Stretch"); // fill the screen, distort
+/**
+ * How the picture fills the screen (web Player.jsx fit: contain / cover / fill).
+ * [resizeMode] is the media3 AspectRatioFrameLayout RESIZE_MODE_* this mirrors;
+ * the player draws on a bare SurfaceView, so PlayerScreen sizes it itself.
+ */
+enum class VideoFit(val label: String, val resizeMode: Int) {
+    Fit("Fit", 0),               // RESIZE_MODE_FIT: whole picture, bars where the shapes differ
+    Fill("Fill", 4),             // RESIZE_MODE_ZOOM: fill the screen, crop the overflow
+    FitWidth("Fit width", 1),    // RESIZE_MODE_FIXED_WIDTH: full width, crop top and bottom
+    Stretch("Stretch", 3);       // RESIZE_MODE_FILL: fill the screen, distort
 
-    fun next(): VideoFit = entries[(ordinal + 1) % entries.size]
+    /** Phone bar button cycle: Fit, Fill, Stretch. Fit width is a TV sheet choice. */
+    fun next(): VideoFit = when (this) { Fit -> Fill; Fill -> Stretch; Stretch, FitWidth -> Fit }
 
     companion object {
         fun parse(s: String?): VideoFit? = entries.firstOrNull { it.name == s }
@@ -240,16 +246,22 @@ enum class VideoFit(val label: String) {
 
 /** Player choices kept across sessions. */
 class PlayerPrefs(private val kv: KeyValue) {
-    companion object { const val FIT = "player:fit" }
-    /** The viewer's last choice, or null before they pick one. */
+    companion object { const val FIT = "player:fit"; const val TV_FIT = "player:fitTv" }
+    /** The viewer's last phone choice, or null before they pick one. */
     var fit: VideoFit?
         get() = VideoFit.parse(kv.get(FIT))
         set(v) = kv.put(FIT, v?.name)
 
+    /** The viewer's last TV choice (own key, so an old stored Fill does not hold the TV on a crop). */
+    var tvFit: VideoFit?
+        get() = VideoFit.parse(kv.get(TV_FIT))
+        set(v) = kv.put(TV_FIT, v?.name)
+
     /**
-     * Phones and TVs default to Fill: the picture opens filling the screen
-     * (crop to fill). A stored choice from the phone Fit control still wins.
+     * Phones default to Fill (crop to fill the 20:9 panel). TVs default to Fit:
+     * the whole frame, nothing cropped (owner, 1.2.23). A stored choice wins.
      */
-    @Suppress("UNUSED_PARAMETER")
-    fun fitFor(isTv: Boolean): VideoFit = fit ?: VideoFit.Fill
+    fun fitFor(isTv: Boolean): VideoFit = if (isTv) tvFit ?: VideoFit.Fit else fit ?: VideoFit.Fill
+
+    fun save(isTv: Boolean, v: VideoFit) { if (isTv) tvFit = v else fit = v }
 }
