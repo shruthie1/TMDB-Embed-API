@@ -760,11 +760,15 @@ private fun TvDetail(nav: Nav, type: String, id: Long) {
     val t = vm.full
     val playFocus = remember { FocusRequester() }
     Box(Modifier.fillMaxSize()) {
-        // The art starts at the screen top with one short top fade (owner,
-        // 2026-11-21, same as the web detail hero): page colour at the edge, eased
-        // to clear by 10% of the art (web stops 0/3/6/10%), so no dark band.
-        Art(t?.backdrop, "w1280", Modifier.align(Alignment.TopEnd).fillMaxWidth(0.72f).fillMaxHeight(0.8f), alignment = Alignment.TopCenter)
-        Box(Modifier.fillMaxWidth().fillMaxHeight(0.08f).background(Brush.verticalGradient(0f to Tok.bg, 0.3f to Tok.bg.copy(alpha = 0.6f), 0.6f to Tok.bg.copy(alpha = 0.25f), 1f to Color.Transparent)))
+        // The art sits a little below the screen edge (owner, 2026-11-20) so the
+        // bottom and left scrims overlap it the way they did before. The top fade is
+        // kept SHORT (owner, 2026-11-21): page colour only right at the art's top
+        // edge, eased to clear over a thin strip, so there is no deep dark band under
+        // the nav. Restoring artTop also fixes the regression where the image rode up
+        // and lost its bottom fade / left framing.
+        val artTop = 96.dp
+        Art(t?.backdrop, "w1280", Modifier.align(Alignment.TopEnd).padding(top = artTop).fillMaxWidth(0.72f).fillMaxHeight(0.8f), alignment = Alignment.TopCenter)
+        Box(Modifier.padding(top = artTop).fillMaxWidth().fillMaxHeight(0.1f).background(Brush.verticalGradient(0f to Tok.bg, 0.3f to Tok.bg.copy(alpha = 0.6f), 0.6f to Tok.bg.copy(alpha = 0.25f), 1f to Color.Transparent)))
         Box(Modifier.fillMaxSize().background(Tok.scrimLeft))
         Box(Modifier.fillMaxSize().background(Tok.scrimBottom))
         if (t == null) {
