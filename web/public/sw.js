@@ -42,8 +42,10 @@ const IMAGE_CACHE = 'chitram-img-v1';
 const API_CACHE = 'chitram-api-v1';
 const KEEP_CACHES = [SHELL_CACHE, IMAGE_CACHE, API_CACHE];
 
-const IMAGE_MAX_ENTRIES = 300;
-const IMAGE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+// TMDB image paths are content-addressed (hash filenames), so a stored poster
+// never goes stale: keep many, for a long time. w185/w342 are ~10-40KB each.
+const IMAGE_MAX_ENTRIES = 1500;
+const IMAGE_TTL_MS = 180 * 24 * 60 * 60 * 1000;
 const API_MAX_ENTRIES = 200;
 const API_FRESH_MS = 60 * 60 * 1000;          // serve without a refresh
 const API_MAX_STALE_MS = 24 * 60 * 60 * 1000; // older than this: network first
@@ -86,7 +88,8 @@ const BYPASS_EXTENSIONS = /\.(ts|m4s|mp4|m3u8|mpd|webm|mkv|m4a|aac|vtt|srt|key)(
 
 /*
  * Artwork hosts the SW may cache. Both send `access-control-allow-origin: *`
- * (checked 2026-11-20), so the SW refetches in CORS mode and stores a real,
+ * to a request that carries Origin (checked 2026-11-21; tmdb omits it for a
+ * plain <img> request), so the SW refetches in CORS mode and stores a real,
  * readable response. images.metahub.space sends no CORS header: its response
  * would be opaque, which Chrome pads to ~7MB of quota each, so it is left to
  * the browser's HTTP cache (it sends max-age=5184000).
@@ -282,7 +285,13 @@ async function cacheFirstImage(event) {
   const hit = await cache.match(url);
   if (hit && ageOf(hit) < IMAGE_TTL_MS) return hit;
   try {
-    const response = await fetch(url, { mode: 'cors', credentials: 'omit' });
+    // cache: 'reload' skips the browser HTTP cache. image.tmdb.org sends
+    // access-control-allow-origin only when the request carries Origin, and
+    // no Vary: Origin. A poster an <img> loaded before the SW took control
+    // sits in the HTTP cache WITHOUT that header, so a CORS fetch served from
+    // it failed ("blocked by CORS policy") on every such image, doubling the
+    // requests. reload goes to the network with Origin and gets the header.
+    const response = await fetch(url, { mode: 'cors', credentials: 'omit', cache: 'reload' });
     if (cacheable(response)) {
       event.waitUntil(store(IMAGE_CACHE, url, response.clone(), IMAGE_MAX_ENTRIES));
       return response;

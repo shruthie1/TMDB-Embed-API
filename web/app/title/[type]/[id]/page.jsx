@@ -38,6 +38,15 @@ function HeroPoster({ title }) {
   const src = sources[n];
   // A cached image can finish before React attaches onLoad.
   const ref = useCallback(img => { if (img?.complete && img.naturalWidth) setLoading(false); }, []);
+  // The fast record can carry Cinemeta's metahub URL, which on some networks
+  // hangs with no error, so onError never fires. While nothing shows yet,
+  // switch to the full record's TMDB poster as soon as it arrives.
+  useEffect(() => {
+    if (!loading) return;
+    const next = posterSources(title).filter(u => !sources.includes(u));
+    if (next.length) { setSources([...next, ...sources.slice(n)]); setN(0); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [title, loading]);
   // Last source failed too: drop the img so no broken-image icon shows.
   // Every source failed: try any the full record added before giving up.
   const onError = () => {

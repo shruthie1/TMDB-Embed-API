@@ -159,6 +159,16 @@ describe('full title enrichment when the fast record is absent', () => {
     expect(title.runtimeMin).toBe(95);
     expect(title.cast).toEqual(['Actor']);
   });
+  it('prefers the TMDB poster over the Cinemeta metahub URL', async () => {
+    const mh = 'https://images.metahub.space/poster/small/tt1/img';
+    globalThis.fetch = vi.fn(async url => {
+      const u = String(url);
+      if (u.includes('external_ids')) return { ok: true, json: async () => ({ imdb_id: 'tt1' }) };
+      if (u.includes('cinemeta')) return { ok: true, json: async () => ({ meta: { name: 'Fast', poster: mh } }) };
+      return { ok: true, json: async () => ({ ...rich, title: 'Movie', poster_path: '/p.jpg' }) };
+    });
+    expect((await getTitleFull('movie', 1)).poster).toBe('/p.jpg');
+  });
   it('keeps a usable fast record when rich metadata fails', async () => {
     globalThis.fetch = vi.fn(async url => ({ ok: !String(url).includes('append_to_response'), json: async () => String(url).includes('external_ids') ? { imdb_id: 'tt1' } : { meta: { name: 'Fast title', year: '2016' } } }));
     expect((await getTitleFull('tv', 1)).title).toBe('Fast title');

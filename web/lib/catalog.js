@@ -619,6 +619,9 @@ export async function getTitleFull(type, id) {
   return {
     ...seed,
     overview: rich.overview || seed.overview,
+    // TMDB path over Cinemeta's metahub URL: the row card already loaded this
+    // exact TMDB URL, so it is a cache hit, and metahub can hang with no error.
+    poster: rich.poster_path || seed.poster,
     backdrop: rich.backdrop_path || seed.backdrop,
     genres: (rich.genres || []).map(g => g.name).length
       ? (rich.genres || []).map(g => g.name) : seed.genres,
