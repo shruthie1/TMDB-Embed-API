@@ -91,6 +91,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -404,8 +405,10 @@ private fun PhoneDetail(nav: Nav, type: String, id: Long, rowPoster: String? = n
     var toast by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(toast) { if (toast != null) { delay(2200); toast = null } }
     val t = vm.full
-    val detailList = rememberLazyListState()
-    val pastArt by remember { derivedStateOf { detailList.firstVisibleItemIndex > 0 || detailList.firstVisibleItemScrollOffset > 420 } }
+    // Detail -> Detail (a related card) stays in the same composable slot; key the
+    // list state to the title so the new title opens at the top.
+    val detailList = key(type, id) { rememberLazyListState() }
+    val pastArt by remember(detailList) { derivedStateOf { detailList.firstVisibleItemIndex > 0 || detailList.firstVisibleItemScrollOffset > 420 } }
     Box(Modifier.fillMaxSize()) {
         if (t == null) {
             Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
