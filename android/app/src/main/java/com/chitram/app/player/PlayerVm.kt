@@ -241,8 +241,11 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                 bufferedMs = player.bufferedPosition
                 if (player.duration > 0) durationMs = player.duration
                 if (++n % 20 == 0 && player.isPlaying) saveProgress()
+                checkOfflineLatch()
+                checkNotice()
                 checkSwitch()
                 checkStall()
+                checkFrozen()
                 checkRuntime()
             }
         }
@@ -267,6 +270,58 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         if (now - stallSince >= STALL_SWITCH_MS) {
             stallSince = 0
             failover("${current?.provider ?: "Source"}: stalled", player.currentPosition.coerceAtLeast(0), LoadingModel.Reason.STOPPED)
+        }
+    }
+
+    // Offline latch self-heal (Fire TV never-recovering buffer): goOffline() can
+    // latch on a brief false isOffline() reading, and then ONLY netCallback
+    // onAvailable clears it. If the default network never actually dropped, that
+    // event never fires and the player stays paused with the offline notice
+    // forever. So while latched, re-check connectivity each tick and clear it
+    // ourselves the moment we are online again, instead of waiting for the event.
+    private fun checkOfflineLatch() {
+        if (offline && !isOffline()) backOnline()
+    }
+
+    // A notice set while already READY (audio-menu messages, "Trying X on the
+    // same source") only cleared on a fresh READY transition, so a spinner could
+    // sit over a video that is in fact playing. Clear it once the picture is
+    // actually advancing.
+    private var noticeClearPos = -1L
+    private fun checkNotice() {
+        if (notice.isEmpty() || offline || phase != Phase.Playing) { noticeClearPos = -1; return }
+        val pos = player.currentPosition
+        if (isPlaying && pos > noticeClearPos && noticeClearPos >= 0) { notice = ""; noticeClearPos = -1; return }
+        noticeClearPos = pos
+    }
+
+    // Frozen-playback watchdog: position not advancing while we should be
+    // playing. Covers the gaps checkStall misses - a 0-fps decoder freeze stays
+    // STATE_READY (no buffering, no error), and a "Reconnecting..." resolve sits
+    // in STATE_IDLE. Re-prepare+seek first, then failover if still stuck.
+    private var frozenPos = -1L
+    private var frozenSince = 0L
+    private var frozenRepreparedAt = 0L
+    private fun checkFrozen() {
+        val active = landed && !offline && phase == Phase.Playing &&
+            player.playWhenReady && !isPlaying &&
+            player.playbackState != Player.STATE_ENDED
+        if (!active) { frozenSince = 0; frozenRepreparedAt = 0; return }
+        val now = System.currentTimeMillis()
+        val pos = player.currentPosition
+        if (frozenSince == 0L || pos > frozenPos + 250) { frozenSince = now; frozenPos = pos; frozenRepreparedAt = 0; return }
+        val stuckFor = now - frozenSince
+        // One re-prepare+seek (cheap, keeps the source) before the heavier switch.
+        if (frozenRepreparedAt == 0L && stuckFor >= FROZEN_REPREPARE_MS) {
+            frozenRepreparedAt = now
+            android.util.Log.i("Chitram", "recover: frozen ${stuckFor}ms at ${pos}ms, re-prepare ${current?.provider}")
+            val seekTo = pos.coerceAtLeast(0)
+            runCatching { player.prepare(); player.seekTo(seekTo); player.play() }
+            return
+        }
+        if (stuckFor >= FROZEN_FAILOVER_MS) {
+            frozenSince = 0; frozenRepreparedAt = 0
+            failover("${current?.provider ?: "Source"}: frozen", pos.coerceAtLeast(0), LoadingModel.Reason.STOPPED)
         }
     }
 
@@ -1160,6 +1215,16 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     companion object {
         /** Web useRecovery STAGES.switching. */
         const val STALL_SWITCH_MS = 25_000L
+
+        /**
+         * Frozen-playback watchdog (Fire TV never-recovering buffer). When the
+         * position has not advanced while we should be playing: re-prepare+seek
+         * after FROZEN_REPREPARE_MS, failover after FROZEN_FAILOVER_MS. This is
+         * separate from checkStall (which needs STATE_BUFFERING): a 0-fps decoder
+         * freeze stays STATE_READY and raises no error, so only position proves it.
+         */
+        const val FROZEN_REPREPARE_MS = 12_000L
+        const val FROZEN_FAILOVER_MS = 22_000L
 
         /** How long the first play waits for the subtitle list after the streams answered. */
         const val SUBS_WAIT_MS = 1_500L
