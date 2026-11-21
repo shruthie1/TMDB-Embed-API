@@ -32,6 +32,13 @@ import com.chitram.app.data.Source
 object HybridPair {
     /** Extra audio shift for a merged pair, in microseconds. Measured as 0 for TS+TS. */
     const val OFFSET_US = 0L
+    /**
+     * Step 2 Task 6: the on-device merge's duration gate, in seconds. Equal to the
+     * server's DURATION_TOLERANCE_SECONDS default (utils/hybridStream.js:48; a
+     * guard test fails when that changes). No padded rule here: the device has no
+     * offset correction (OFFSET_US = 0), so a short half is refused, not padded.
+     */
+    const val DURATION_TOLERANCE_S = 15
     private val AUDIO_HALVES = listOf("castletv", "netmirror")
     private val AUDIO_MIME = mapOf("mp4a" to "audio/mp4a-latm", "ac-3" to "audio/ac3", "ec-3" to "audio/eac3", "opus" to "audio/opus")
 
@@ -67,26 +74,78 @@ object HybridPair {
         // and the window (duration, metadata) is the picture's.
         MergingMediaSource(false, false, video, audio)
 
+    /** What a merged pair's tracks allow. */
+    sealed interface Pick {
+        /** The halves have not both reported tracks yet. */
+        data object Pending : Pick
+        /** Both halves are known and the audio half has no playable track in the language: a failed try. */
+        data object NoMatch : Pick
+        data class Pin(val video: TrackSelectionOverride, val audio: TrackSelectionOverride) : Pick
+    }
+
     /**
-     * Track overrides for a merged pair: every video track of the picture (ABR
-     * kept) and the `want` audio from the audio half, else that half's first
-     * audio track. Null until both halves have their tracks.
+     * Every video track of the picture (ABR kept) and the `want` audio from the
+     * audio half. No any-track fallback (Task 6 ruling): a half with no track
+     * whose tag or label is `want` is [Pick.NoMatch], never another language.
      */
-    fun overrides(t: Tracks, want: List<String>): Pair<TrackSelectionOverride, TrackSelectionOverride>? {
+    fun pick(t: Tracks, want: List<String>): Pick {
         val w = want.mapNotNull(Ranking::canonLang).toSet()
-        val video = t.groups.firstOrNull { it.type == C.TRACK_TYPE_VIDEO && it.mediaTrackGroup.id.startsWith("0:") } ?: return null
-        val vIdx = (0 until video.length).filter { video.isTrackSupported(it) }.ifEmpty { return null }
+        val video = t.groups.firstOrNull { it.type == C.TRACK_TYPE_VIDEO && it.mediaTrackGroup.id.startsWith("0:") } ?: return Pick.Pending
+        // MergingMediaPeriod reports tracks once every child is prepared: no "1:" group means not yet.
+        if (t.groups.none { it.mediaTrackGroup.id.startsWith("1:") }) return Pick.Pending
+        val vIdx = (0 until video.length).filter { video.isTrackSupported(it) }.ifEmpty { return Pick.NoMatch }
         val audio = t.groups.filter { it.type == C.TRACK_TYPE_AUDIO && it.mediaTrackGroup.id.startsWith("1:") }
-        if (audio.isEmpty()) return null
         fun matches(g: Tracks.Group, i: Int): Boolean {
             val f = g.getTrackFormat(i)
             // media3 normalises "tel" to "te": tag or label language, one canonical key (Ranking.trackMatches).
             return w.any { Ranking.trackMatches(f.language, f.label, it) }
         }
         val hit = audio.firstNotNullOfOrNull { g -> (0 until g.length).firstOrNull { g.isTrackSupported(it) && matches(g, it) }?.let { g to it } }
-            ?: audio.firstNotNullOfOrNull { g -> (0 until g.length).firstOrNull { g.isTrackSupported(it) }?.let { g to it } }
-            ?: return null
-        return TrackSelectionOverride(video.mediaTrackGroup, vIdx) to TrackSelectionOverride(hit.first.mediaTrackGroup, hit.second)
+            ?: return Pick.NoMatch
+        return Pick.Pin(TrackSelectionOverride(video.mediaTrackGroup, vIdx), TrackSelectionOverride(hit.first.mediaTrackGroup, hit.second))
+    }
+
+    /** [pick]'s pin as a pair; null while pending and when no track is in the language. */
+    fun overrides(t: Tracks, want: List<String>): Pair<TrackSelectionOverride, TrackSelectionOverride>? =
+        (pick(t, want) as? Pick.Pin)?.let { it.video to it.audio }
+
+    /** Sum of #EXTINF in a media playlist, in seconds; null when it has none (a master, or junk). */
+    fun playlistSeconds(text: String): Double? {
+        var sum = 0.0; var any = false
+        for (l in text.lineSequence()) {
+            val t = l.trim()
+            if (!t.startsWith("#EXTINF:")) continue
+            val d = t.removePrefix("#EXTINF:").substringBefore(',').trim().toDoubleOrNull() ?: continue
+            sum += d; any = true
+        }
+        return if (any) sum else null
+    }
+
+    /**
+     * Duration of the row at [url] from its media playlist, read with [fetch] (the
+     * row's own headers and token). A master is followed to its first variant. A
+     * progressive file or a failed read is null: unknown, and the gate refuses it.
+     */
+    suspend fun mediaSeconds(url: String, progressive: Boolean, fetch: suspend (String) -> String?): Double? {
+        if (progressive) return null
+        val text = fetch(url) ?: return null
+        playlistSeconds(text)?.let { return it }
+        val variant = com.chitram.app.resolve.Hls.parse(text, url).firstVariant ?: return null
+        return fetch(variant)?.let(::playlistSeconds)
+    }
+
+    /** Null when the two halves agree within [DURATION_TOLERANCE_S] (server rule: refuse when delta > tolerance), else why not. */
+    fun durationRefusal(video: Double?, audio: Double?): String? {
+        if (video == null || audio == null) return "duration unknown (video ${video ?: "?"} s, audio ${audio ?: "?"} s)"
+        val delta = kotlin.math.abs(video - audio)
+        return if (delta > DURATION_TOLERANCE_S) "durations differ by ${"%.1f".format(java.util.Locale.ROOT, delta)} s (video $video s, audio $audio s)" else null
+    }
+
+    /** Task 6 gate before an on-device merge: read both halves' playlists, then compare. Null = merge allowed. */
+    suspend fun deviceGate(video: Source, audio: Source, fetchFor: (Source) -> suspend (String) -> String?): String? {
+        val v = mediaSeconds(video.url, video.progressive, fetchFor(video))
+        val a = if (v == null) null else mediaSeconds(audio.url, audio.progressive, fetchFor(audio))
+        return durationRefusal(v, a)
     }
 
     /** Audio decoder MIME types on this device, or null when unknown. */

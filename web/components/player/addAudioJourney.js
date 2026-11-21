@@ -82,7 +82,8 @@ export const streamKey = (src) => `${src?.id ?? ''}|${src?.masterUrl ?? ''}`;
  *   snapshot() -> { key, at, ... } | null       what is on screen now
  *   position?() -> seconds                      playback position at the tap
  *   restore(snap)                               put that back
- *   notice(text)
+ *   notice(text, opts?)                        opts.holdMs: keep it up that long
+ *   clearNotice?(text)                         take text down if still shown
  *   label?(donor) -> string                     server name in the notices
  *   setTimer?, clearTimer?, now?, tryMs?
  * }
@@ -104,6 +105,12 @@ export function createAddAudioJourney(deps) {
 
   const checking = (s) => Copy.checkingAudio(s.language, s.lastTry?.server || 'servers',
     s.lastTry?.n || 1, s.lastTry?.total || s.run.next(now())?.total || 1);
+  // I1: the Checking line stays up for the whole try (the per-try cap), as on
+  // the APK, and comes down when the run ends without another notice.
+  const showChecking = (s) => {
+    s.shown = checking(s);
+    deps.notice(s.shown, { holdMs: tryMs });
+  };
 
   function stopWatch(s) {
     if (s.watch != null) clearTimer(s.watch);
@@ -116,7 +123,7 @@ export function createAddAudioJourney(deps) {
       onTry: (donor, n, total) => {
         if (s !== current) return;
         s.lastTry = { server: label(donor), n, total };
-        deps.notice(checking(s));
+        showChecking(s);
       },
       signal: s.controller.signal,
       now,
@@ -131,6 +138,8 @@ export function createAddAudioJourney(deps) {
       s.pending = { donor: out.donor, key };
       s.expect = key;
       deps.applyPair(s.video, out.donor, s.language, out.result, s.at);
+      // The device check is part of the try: keep the line up through it.
+      showChecking(s);
       // No frame within the try time counts as a device failure.
       s.watch = setTimer(() => { s.watch = null; deviceFailed(); }, tryMs);
       return out;
@@ -147,6 +156,7 @@ export function createAddAudioJourney(deps) {
     current = null;
     stopWatch(s);
     s.controller.abort();
+    if (s.shown) deps.clearNotice?.(s.shown);
     return s;
   }
 
@@ -164,7 +174,7 @@ export function createAddAudioJourney(deps) {
   /** The viewer tapped "Add <language> audio". */
   function start({ language, video, donors }) {
     if (current && current.language === language) {
-      deps.notice(checking(current));
+      showChecking(current);
       return current.promise || Promise.resolve({ joined: true });
     }
     // Another entry: the old run stops. If its pair is still on screen, its
@@ -180,7 +190,7 @@ export function createAddAudioJourney(deps) {
       // The run's resume position: set at the tap, moved to the snapshot's
       // on a restore. A carried-over unsettled pair keeps the pre-run one.
       at: prev?.pending ? prev.at : (deps.position?.() ?? 0),
-      pending: null, watch: null, lastTry: null, promise: null,
+      pending: null, watch: null, lastTry: null, promise: null, shown: null,
     };
     current = s;
     s.promise = step(s);
@@ -203,7 +213,7 @@ export function createAddAudioJourney(deps) {
       if (s.snap.at != null) s.at = s.snap.at;
       deps.restore(s.snap);
     }
-    deps.notice(checking(s));
+    showChecking(s);
     s.promise = step(s);
     return true;
   }

@@ -29,6 +29,7 @@ import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -53,6 +54,19 @@ class AddAudioTest {
         val telugu = offers.filter { Ranking.sameLanguage(it.first, "Telugu") }
         assertEquals(1, telugu.size)
         assertEquals(listOf(a.id, b.id, c.id), telugu.single().second.map { it.id })
+    }
+
+    // Fix wave I4: web addAudio.js donorsFrom order. Rows whose matching rendition
+    // has a uri first, then index order inside each group; then the cap of 3.
+    @Test fun donorsWithARenditionUriComeFirstLikeWeb() {
+        fun uriRow(provider: String, i: Int, uri: String?) = Ranking.toSource(RawStream(url = "https://fixture/$provider-$i.m3u8", provider = provider,
+            audio = listOf(RawAudio(language = "Telugu", uri = uri)), selectableAudio = true), i, codecs)!!
+        val r1 = uriRow("A1", 1, null); val r2 = uriRow("A2", 2, null); val r3 = uriRow("A3", 3, null)
+        val r4 = uriRow("A4", 4, "https://fixture/a4-te.m3u8"); val r5 = uriRow("A5", 5, "https://fixture/a5-te.m3u8")
+        val donors = AddAudio.donors(listOf(picture, r1, r2, r3, r4, r5), "Telugu", picture)
+        assertEquals(listOf(r4.id, r5.id, r1.id), donors.map { it.id })
+        val offer = AddAudio.offers(listOf(picture, r1, r2, r3, r4, r5), picture, emptySet()).first { Ranking.sameLanguage(it.first, "Telugu") }
+        assertEquals(listOf(r4.id, r5.id, r1.id), offer.second.map { it.id })
     }
 
     @Test fun everyMissingLanguageIsOfferedTeluguFirst() {
@@ -135,6 +149,8 @@ class AddAudioTest {
         /** PlayerVm addedNotice: shown again at READY; play() clears it. */
         var addedNotice: String? = null
         var pending: AddAudio.Effect.Check? = null
+        /** Task 6: the on-device merge try (duration gate); null = no device path. */
+        var device: ((Source) -> Boolean)? = null
         fun label(s: Source) = s.provider
         fun apply(effects: List<AddAudio.Effect>) {
             for (e in effects) {
@@ -146,25 +162,27 @@ class AddAudioTest {
                     is AddAudio.Effect.ClearHeld -> { addedNotice = null; if (e.stale != null && notice == e.stale) notice = "" }
                     is AddAudio.Effect.Check -> pending = e
                     // Each play() starts a stream that has not loaded yet and clears addedNotice.
-                    is AddAudio.Effect.PlayPair -> AddAudio.fusedSource(e.run.picture, e.hit, e.run.language).let {
+                    is AddAudio.Effect.PlayPair -> AddAudio.pairSource(e.run.picture, e.hit, e.run.language).let {
                         addedNotice = null
-                        played += it; screen = screen.copy(current = it, pairedAudio = e.hit.donor, fused = true, audioLanguage = e.run.language, positionMs = 0, loaded = false, ready = false) }
+                        played += it; screen = screen.copy(current = it, pairedAudio = e.hit.donor, fused = e.hit.ok != null, audioLanguage = e.run.language, positionMs = 0, loaded = false, ready = false) }
                     is AddAudio.Effect.Restore -> e.fallback.let {
                         addedNotice = null
-                        played += it.source; screen = screen.copy(current = it.source, pairedAudio = it.pairedAudio, fused = it.pairedAudio != null, audioLanguage = it.audioLanguage, positionMs = 0, loaded = false, ready = false) }
+                        played += it.source; screen = screen.copy(current = it.source, pairedAudio = it.pairedAudio, fused = it.fused, audioLanguage = it.audioLanguage, positionMs = 0, loaded = false, ready = false) }
                     is AddAudio.Effect.PictureOnly -> { addedNotice = null; played += e.picture; screen = screen.copy(current = e.picture, pairedAudio = null, fused = false, positionMs = 0, loaded = false, ready = false) }
                 }
             }
         }
         /** The stream on screen reached READY at [pos]: PlayerVm shows addedNotice, else clears the notice. */
-        fun ready(pos: Long) { screen = screen.copy(loaded = true, ready = true, positionMs = pos); notice = addedNotice ?: ""; addedNotice = null }
+        fun ready(pos: Long) { screen = screen.copy(loaded = true, ready = true, positionMs = pos); j.ready(screen); notice = addedNotice ?: ""; addedNotice = null }
         /** A later seek or rebuffer: BUFFERING (the notice is left alone), then READY again. */
         fun rebuffer(pos: Long) { screen = screen.copy(ready = false); ready(pos) }
         /** Let the pending check finish now. */
         fun finish() = runBlocking {
             val c = pending ?: return@runBlocking
             pending = null
-            val hit = AddAudio.run(c.run, tryOne = { answer(it) }, onTry = { d, n, t -> apply(j.checking(c.gen, c.run, LoadingModel.Copy.checkingAudio(c.run.language, d.provider, n, t), screen)) })
+            val dev = device
+            val hit = AddAudio.run(c.run, tryOne = { answer(it) }, onTry = { d, n, t -> apply(j.checking(c.gen, c.run, LoadingModel.Copy.checkingAudio(c.run.language, d.provider, n, t), screen)) },
+                device = dev?.let { f -> val tryDevice: suspend (Source) -> Boolean = { s -> f(s) }; tryDevice })
             apply(j.result(c.gen, c.run, hit, screen, ::label))
         }
         fun tap(lang: String) = apply(j.tap(lang, sources, screen))
@@ -243,6 +261,53 @@ class AddAudioTest {
         val last = sim.fail()!!
         assertTrue(last.first() is AddAudio.Effect.Restore)
         assertTrue(last.last() is AddAudio.Effect.Notice)
+    }
+
+    // Fix wave I2: web landed(). The run ends at the pair's first READY; a later
+    // failure of that stream is normal recovery, never the add-audio restore.
+    @Test fun aFailureAfterThePairWasReadyIsNotTheJourneys() {
+        for (merge in listOf(false, true)) {
+            val sim = Sim(listOf(picture, d1, d2)) { if (merge) PairOutcome.Unreachable("x") else ok() }
+            if (merge) sim.device = { true }
+            sim.tap("Telugu"); sim.finish()
+            assertEquals(d1.id, sim.screen.pairedAudio?.id)
+            sim.ready(30_000)
+            assertEquals("Telugu audio added from CastleTV.", sim.notice)
+            sim.log.clear()
+            // 30 minutes later the pair's segments 403.
+            assertNull("merge=$merge", sim.fail(pos = 1_800_000))
+            assertTrue(sim.log.none { it is AddAudio.Effect.Restore || it is AddAudio.Effect.PictureOnly || it is AddAudio.Effect.Check })
+            assertTrue(sim.log.filterIsInstance<AddAudio.Effect.Notice>().none { it.text.startsWith("No server has working") })
+            assertNull(sim.pending)
+        }
+    }
+
+    @Test fun aFailureBeforeTheFirstReadyStillRestoresAndTriesTheNext() {
+        val sim = Sim(listOf(picture, d1, d2)) { ok() }
+        sim.tap("Telugu"); sim.finish()
+        // READY of some other stream does not land the pair.
+        sim.j.ready(sim.screen.copy(current = d2, pairedAudio = null, fused = false))
+        val effects = sim.fail(pos = 5_000, loaded = false)!!
+        assertTrue(effects.first() is AddAudio.Effect.Restore)
+        assertTrue(effects[1] is AddAudio.Effect.Check)
+    }
+
+    // Fix wave M4: web joins the run while its pair is still pending.
+    @Test fun aSecondTapWhileTheMergeLoadsJoinsTheRun() {
+        for (merge in listOf(true, false)) {
+            val sim = Sim(listOf(picture, d1, d2)) { if (merge) PairOutcome.Unreachable("x") else ok() }
+            if (merge) sim.device = { true }
+            sim.tap("Telugu"); sim.finish()
+            val run = sim.j.onScreen!!
+            assertNull(sim.j.active)
+            val again = sim.j.tap("Telugu", sim.sources, sim.screen)
+            assertTrue("merge=$merge", again.none { it is AddAudio.Effect.Check || it is AddAudio.Effect.CancelCheck })
+            assertEquals(listOf(AddAudio.Effect.Notice(run.checking!!)), again)
+            assertSame(run, sim.j.onScreen)
+            // Once READY the pair has landed: the same entry is not offered, but a tap is a new run.
+            sim.ready(10_000)
+            assertTrue(sim.j.tap("Telugu", sim.sources, sim.screen).any { it is AddAudio.Effect.Check })
+        }
     }
 
     @Test fun aPairErrorNeverPlaysTheDonorAlone() {
@@ -356,8 +421,8 @@ class AddAudioTest {
     @Test fun aRestoreAfterThePairPlayedLandsWhereTheViewerWas() {
         val sim = Sim(listOf(picture, d1, d2)) { ok() }
         sim.tap("Telugu"); sim.finish()
-        sim.ready(60_000)
-        // The pair played on to 300 000, then the device failed: restore there, not at the tap.
+        // The pair loaded (duration known) and played on to 300 000 but never reached READY,
+        // then the device failed: restore there, not at the tap. (After READY it is normal recovery, I2.)
         val restore = sim.fail(pos = 300_000)!!.first() as AddAudio.Effect.Restore
         assertEquals(300_000L, restore.positionMs)
         // The restored stream has not loaded (reads 0) when the next donor answers: the pair starts at 300 000.
@@ -379,7 +444,7 @@ class AddAudioTest {
 
     @Test fun noticesAfterARestoreOutliveTheRestoredStreamsReady() {
         val sim = Sim(listOf(picture, d1, d2)) { if (it.id == d2.id) PairOutcome.Refused(null) else ok() }
-        sim.tap("Telugu"); sim.finish(); sim.ready(60_000)
+        sim.tap("Telugu"); sim.finish() // fails before READY: still the journey's (I2)
         // First check before any restore: an ordinary notice, READY may clear it.
         assertFalse((sim.log.filterIsInstance<AddAudio.Effect.Notice>().first()).untilReady)
         sim.fail(pos = 70_000)
@@ -397,7 +462,7 @@ class AddAudioTest {
     @Test fun noWorkingAudioNeverComesBackAtALaterRebuffer() {
         // Final device failure: held through the restored stream's READY, shown once, then gone.
         val sim = Sim(listOf(picture, d1)) { ok() }
-        sim.tap("Telugu"); sim.finish(); sim.ready(60_000)
+        sim.tap("Telugu"); sim.finish() // fails before READY: still the journey's (I2)
         sim.fail()
         sim.ready(90_000)
         assertEquals("No server has working Telugu audio. Playback is unchanged.", sim.notice)
@@ -405,7 +470,7 @@ class AddAudioTest {
         assertEquals("", sim.notice)
         // A spent continuation whose restored stream is already READY: shown now, never held.
         val late = Sim(listOf(picture, d1, d2)) { if (it.id == d2.id) PairOutcome.Refused(null) else ok() }
-        late.tap("Telugu"); late.finish(); late.ready(60_000)
+        late.tap("Telugu"); late.finish() // fails before READY: still the journey's (I2)
         late.fail()
         late.ready(90_000) // the restored stream is READY before d2 answers
         late.finish()
@@ -418,7 +483,7 @@ class AddAudioTest {
     @Test fun aCancelledChecksNoticeNeverComesBack() {
         for (cancel in listOf<(AddAudio.Journey) -> List<AddAudio.Effect>>({ it.pick() }, { it.drop() }, { it.offline() })) {
             val sim = Sim(listOf(picture, d1, d2)) { ok() }
-            sim.tap("Telugu"); sim.finish(); sim.ready(60_000)
+            sim.tap("Telugu"); sim.finish() // fails before READY: still the journey's (I2)
             sim.fail() // restore; the next check's "Checking…" is held for the restored stream's READY
             val c = sim.pending!!
             sim.apply(sim.j.checking(c.gen, c.run, "Checking OneTouch for Telugu audio (2 of 2)…", sim.screen))
@@ -531,6 +596,64 @@ class AddAudioTest {
         } finally { server.shutdown() }
         val dead = Api(OkHttpClient(), base = "http://vercel.invalid", vmBase = "http://127.0.0.1:1")
         assertTrue(dead.pair(picture, picture, "Telugu", 1, "movie") is PairOutcome.Unreachable)
+    }
+
+    // ---- Task 6: the on-device merge inside the same journey --------------------------
+
+    @Test fun anOnDeviceMergeErrorTriesTheNextDonorThenRestoresNeverTheDonor() {
+        // Backend down: every donor goes to the device merge.
+        val sim = Sim(listOf(picture, d1, d2)) { PairOutcome.Unreachable("HTTP 502") }
+        sim.device = { true }
+        sim.tap("Telugu"); sim.finish()
+        // The merged pair is the picture row with the donor as its audio half, not fused.
+        assertEquals(picture, sim.screen.current)
+        assertEquals(d1.id, sim.screen.pairedAudio?.id)
+        assertFalse(sim.screen.fused)
+        assertEquals("Telugu audio added from CastleTV.", sim.notice)
+        // The merged pair errors: restore at once, then the next donor behind it.
+        val e1 = sim.fail(pos = 90_000)!!
+        val restore = e1.first() as AddAudio.Effect.Restore
+        assertEquals(picture, restore.fallback.source)
+        assertNull(restore.fallback.pairedAudio)
+        assertEquals(90_000L, restore.positionMs)
+        assertTrue(e1[1] is AddAudio.Effect.Check)
+        sim.finish()
+        assertEquals(d2.id, sim.screen.pairedAudio?.id)
+        // The last one errors too: back to the pairFallback, no donor left, said so.
+        val e2 = sim.fail(pos = 120_000)!!
+        assertEquals(AddAudio.Effect.Restore(restore.fallback, 120_000), e2.first())
+        assertEquals(AddAudio.Effect.Notice("No server has working Telugu audio. Playback is unchanged.", untilReady = true), e2.last())
+        assertNull(sim.screen.pairedAudio)
+        assertTrue(sim.played.none { it.id in donorIds })
+        assertTrue(sim.played.all { it.id == picture.id })
+    }
+
+    @Test fun anOnDevicePairKeepsEveryJourneyRule() {
+        // Caps across continuations: refused d1, device d2 fails on the device, only d3 is left.
+        val asked = ArrayList<String>()
+        val d4 = row("Extra", "Telugu", "Hindi", i = 4)
+        val sim = Sim(listOf(picture, d1, d2, d3, d4)) { asked += it.id; if (it.id == d1.id) PairOutcome.Refused(null) else PairOutcome.Unreachable("x") }
+        sim.device = { true }
+        sim.tap("Telugu"); sim.finish()
+        assertEquals(d2.id, sim.screen.pairedAudio?.id)
+        sim.fail(); sim.finish()
+        assertEquals(listOf(d1.id, d2.id, d3.id), asked)
+        assertEquals(d3.id, sim.screen.pairedAudio?.id)
+        assertTrue(sim.fail()!!.last() is AddAudio.Effect.Notice)
+        // A cancel (any pick) while the device try is out: the late merge never applies.
+        val late = Sim(listOf(picture, d1)) { PairOutcome.Unreachable("x") }
+        late.device = { late.apply(late.j.pick()); true }
+        late.tap("Telugu"); late.finish()
+        assertTrue(late.played.isEmpty())
+        assertNull(late.screen.pairedAudio)
+        // A second pair on top of a device pair: its fallback is the device pair, restored as a device pair.
+        val stack = Sim(listOf(picture, d1, row("OneTouch", "Tamil", i = 5))) { PairOutcome.Unreachable("x") }
+        stack.device = { true }
+        stack.tap("Telugu"); stack.finish(); stack.ready(70_000)
+        stack.tap("Tamil"); stack.finish()
+        val back = stack.fail()!!.first() as AddAudio.Effect.Restore
+        assertEquals(d1.id, back.fallback.pairedAudio?.id)
+        assertFalse(back.fallback.fused)
     }
 
     @Test fun theFusedRowKeepsThePictureIdentityAndTheServerUrl() {

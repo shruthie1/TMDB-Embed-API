@@ -142,4 +142,12 @@ class SwitchCopyGuardTest {
         assertTrue(web.contains("export const ADD_AUDIO_TRY_MS = 15000;"))
         assertTrue(web.contains("export const ADD_AUDIO_TOTAL_MS = 30000;"))
     }
+
+    /** Task 6: the device duration gate must equal the server's (utils/hybridStream.js DURATION_TOLERANCE_SECONDS). */
+    @Test fun deviceDurationToleranceMatchesTheServerDefault() {
+        val js = listOf(File("../utils/hybridStream.js"), File("../../utils/hybridStream.js")).first { it.exists() }.readText()
+        val line = js.lines().single { it.trimStart().startsWith("const DURATION_TOLERANCE_SECONDS") }
+        assertTrue(line, line.trimEnd().endsWith("|| 15;"))
+        assertEquals(15, com.chitram.app.player.HybridPair.DURATION_TOLERANCE_S)
+    }
 }

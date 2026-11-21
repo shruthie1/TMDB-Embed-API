@@ -237,6 +237,8 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                 buffering = state == Player.STATE_BUFFERING
                 if (state == Player.STATE_READY) {
                     durationMs = player.duration.coerceAtLeast(0)
+                    // The run's pair is playing: the add-audio run is over (web landed(), I2).
+                    journey.ready(journeyScreen())
                     // "<L> audio added from <server>." is said once the pair is ready, not wiped by it.
                     if (!offline) { notice = addedNotice ?: ""; addedNotice = null }
                     current?.let { request?.let { r -> g.lastProvider.put(r.type, r.id, it.provider, manual = it.id == manualPickId) } }
@@ -578,7 +580,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             // H13: picture first, Telugu second. Each half keeps its own headers, token and swap.
             val audioItem = MediaItem.Builder().setUri(pairAudio.url)
                 .apply { if (!pairAudio.progressive) setMimeType(MimeTypes.APPLICATION_M3U8) }.build()
-            android.util.Log.i("Chitram", "[hybrid] ${s.provider} video + ${pairAudio.provider} ${g.prefs.preferredAudio()} audio, offset ${HybridPair.OFFSET_US}us")
+            android.util.Log.i("Chitram", "[hybrid] ${s.provider} video + ${pairAudio.provider} ${desiredAudio()} audio, offset ${HybridPair.OFFSET_US}us")
             player.setMediaSource(HybridPair.merge(sourceFor(s, item), sourceFor(pairAudio, audioItem)), startMs)
         } else if (s.onDevice != null || TsAudioSwap.wanted(s)) {
             player.setMediaSource(sourceFor(s, item), startMs)
@@ -613,7 +615,17 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     private fun applyPair(t: Tracks) {
         val a = pairedAudio ?: return
         if (pairApplied) return
-        val (v, au) = HybridPair.overrides(t, isoFor(desiredAudio()).toList()) ?: return
+        val (v, au) = when (val p = HybridPair.pick(t, isoFor(desiredAudio()).toList())) {
+            HybridPair.Pick.Pending -> return
+            is HybridPair.Pick.Pin -> p.video to p.audio
+            HybridPair.Pick.NoMatch -> {
+                // Task 6 ruling: no other-language track. A failed try: next donor or restore, never the donor alone.
+                pairApplied = true
+                val pos = player.currentPosition.coerceAtLeast(0)
+                if (!pairFailed("no ${desiredAudio()} track in ${a.provider}", pos)) current?.let { play(it, pos) }
+                return
+            }
+        }
         pairApplied = true
         audioPickedFor = current?.id
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
@@ -675,7 +687,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             is AddAudio.Effect.Restore -> {
                 val fb = e.fallback
                 android.util.Log.i("Chitram", "[addaudio] restoring ${fb.source.provider} at ${e.positionMs}ms")
-                play(fb.source, e.positionMs, pairAudio = fb.pairedAudio, audioLanguage = fb.audioLanguage, fused = fb.pairedAudio != null)
+                play(fb.source, e.positionMs, pairAudio = fb.pairedAudio, audioLanguage = fb.audioLanguage, fused = fb.fused)
             }
             is AddAudio.Effect.PictureOnly -> play(e.picture, e.positionMs)
         }
@@ -689,10 +701,30 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             val hit = AddAudio.run(run,
                 tryOne = { d -> g.api.pair(run.picture, d, run.language, r.id, r.type).also { o -> android.util.Log.i("Chitram", "[addaudio] ${d.provider}: ${o.javaClass.simpleName}") } },
                 onTry = { d, n, total -> runEffects(journey.checking(gen, run, LoadingModel.Copy.checkingAudio(run.language, label(d), n, total), journeyScreen())) },
-                accept = { ok -> AddAudio.decodes(ok, g.codecs, audioDecoders).also { if (!it) android.util.Log.i("Chitram", "[addaudio] ${ok.codecs} not decodable here") } })
+                accept = { ok -> AddAudio.decodes(ok, g.codecs, audioDecoders).also { if (!it) android.util.Log.i("Chitram", "[addaudio] ${ok.codecs} not decodable here") } },
+                device = { d -> deviceMergeOk(run.picture, d) })
             if (request != r) return@launch
             runEffects(journey.result(gen, run, hit, journeyScreen(), ::label))
         }
+    }
+
+    /**
+     * Task 6 on-device merge try for one donor: both halves decodable here, and
+     * their media playlists (read with each row's own headers) within
+     * HybridPair.DURATION_TOLERANCE_S. The language gate runs at the tracks
+     * (applyPair): a half with no track in L fails like a playback error.
+     */
+    private suspend fun deviceMergeOk(picture: Source, donor: Source): Boolean {
+        if (g.codecs.supports(picture.videoCodec, picture.codecString) == false || !HybridPair.audioDecodes(donor.codecString, audioDecoders)) {
+            android.util.Log.i("Chitram", "[addaudio] device merge ${picture.provider}+${donor.provider}: not decodable here")
+            return false
+        }
+        val why = HybridPair.deviceGate(picture, donor) { s ->
+            val c = StreamInterceptor.client(g.api.client, s.headers, s.segmentToken)
+            ({ url: String -> g.api.text(c, url) })
+        }
+        android.util.Log.i("Chitram", "[addaudio] device merge ${picture.provider}+${donor.provider}: ${why ?: "durations agree"}")
+        return why == null
     }
 
     /**
@@ -704,8 +736,9 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         val a = pairedAudio ?: return false
         val effects = journey.deviceFailure(journeyScreen(pos))
         if (effects == null) {
-            // On-device merge (Task 6) or a pair with no run: drop the donor, keep the picture's own failover.
-            android.util.Log.w("Chitram", "[hybrid] pair failed ($reason), not playing ${a.provider} alone")
+            // A pair no journey run owns, or one that already reached READY (I2):
+            // drop the donor, keep the picture's own failover.
+            android.util.Log.w("Chitram", "[hybrid] pair failed ($reason), normal recovery, not playing ${a.provider} alone")
             pairedAudio = null; pairFused = false
             return false
         }
@@ -1281,7 +1314,8 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                     notice = "Switching to ${label(source)}…"
                 }
             }
-            // pair:<donorId>:<L>: the journey's accepted donor, played as the server-fused master in L.
+            // pair:<donorId>:<L>: the journey's accepted donor in L, as the server-fused master
+            // or (Task 6) the picture row merged on the device with the donor's audio.
             "pair" -> journey.onScreen?.let { run ->
                 val hit = run.hit?.takeIf { it.donor.id == p.getOrNull(1) } ?: return
                 val language = p.getOrNull(2)?.takeIf { it.isNotBlank() } ?: run.language
@@ -1289,7 +1323,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                 // The run's saved position, never a not-yet-loaded restored stream's 0.
                 val at = pairAtMs ?: AddAudio.positionFor(journeyScreen(), run)
                 pairAtMs = null
-                play(AddAudio.fusedSource(run.picture, hit, language), at, pairAudio = hit.donor, audioLanguage = language, fused = true)
+                play(AddAudio.pairSource(run.picture, hit, language), at, pairAudio = hit.donor, audioLanguage = language, fused = hit.ok != null)
             }
             "trk" -> {
                 // An in-stream pick: stop a donor check, keep a pair already on screen.
@@ -1418,7 +1452,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             // Step 2: one "Add <L> audio from another server" row per language this
             // stream lacks and a pairable server carries (Telugu first). The sheet is
             // a scrolling Column of focusable rows (PlayerScreen MenuPanel), so a long list stays D-pad reachable on TV.
-            for ((lang, _) in AddAudio.offers(sources, current, names)) {
+            for ((lang, _) in AddAudio.offers(sources, current, names, onDevicePath = true)) {
                 out += MenuItem("add:$lang", LoadingModel.Copy.addAudio(lang), group = LoadingModel.Copy.ADD_AUDIO_GROUP)
             }
             return out

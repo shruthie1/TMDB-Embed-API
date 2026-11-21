@@ -334,6 +334,12 @@ describe('Player.jsx wiring', () => {
     expect(body('const applyPair = useCallback(')).toMatch(/lastPair\.current = /);
   });
 
+  it('(M1) the audio-timing re-pair sends the run\'s language', () => {
+    expect(body('const applyPair = useCallback(')).toMatch(/lastPair\.current = \{ video, audio, language \}/);
+    const sync = body('const commitAudioSync = useCallback(');
+    expect(sync).toMatch(/pairSources\(pair\.video, pair\.audio,\s*\{ nudge: want, language: pair\.language \|\| undefined,/);
+  });
+
   it('onFatal hands a journey pair to the journey first', () => {
     const fatal = body('const onFatal = useCallback(');
     const mine = fatal.indexOf('addAudioJourney.deviceFailed()');

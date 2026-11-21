@@ -304,6 +304,18 @@ class Api(
         }
     }
 
+    /**
+     * Step 2 Task 6 duration gate: one playlist read with the row's own client
+     * ([c] carries its headers and token). Null on any failure: the gate refuses.
+     */
+    suspend fun text(c: OkHttpClient, url: String): String? = try {
+        exchange(c, Request.Builder().url(url).build()).takeIf { it.first in 200..299 }?.second
+    } catch (e: IOException) {
+        null
+    } catch (e: IllegalArgumentException) {
+        null
+    }
+
     /** Status and body of any answer (a 409 carries its reason in the body). */
     private suspend fun exchange(c: OkHttpClient, req: Request): Pair<Int, String> {
         val call = c.newCall(req)

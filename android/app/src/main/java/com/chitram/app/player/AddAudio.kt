@@ -13,8 +13,11 @@ import kotlinx.coroutines.withTimeoutOrNull
  * player (PlayerVm) does the side effects. Donors are never pre-validated: a try
  * IS the check (POST /hybrid/pair with `language`).
  *
- * Rows resolved on this device (`onDevice != null`) are left out here: the
- * server has no headers for them. Task 6 adds them for the on-device merge.
+ * Task 6: the on-device merge (media3 MergingMediaSource) is a second path
+ * inside the same run. A donor goes there when the server is Unreachable
+ * (network, 5xx, per-try timeout), or at once when either half was resolved on
+ * this device (the server has no headers for it). A Refused answer never does.
+ * Rows resolved on this device are donors only on that path (`onDevicePath`).
  */
 object AddAudio {
     private const val TELUGU = "telugu"
@@ -23,10 +26,20 @@ object AddAudio {
      * What was on screen before the run's first pair: restored at once when a pair
      * fails on the device. [owner]: the run whose fused pair this was, if any.
      */
-    data class Fallback(val source: Source, val audioLanguage: String?, val positionMs: Long, val pairedAudio: Source? = null, val owner: Run? = null)
+    data class Fallback(val source: Source, val audioLanguage: String?, val positionMs: Long, val pairedAudio: Source? = null, val owner: Run? = null,
+        /** [pairedAudio] was in a server-fused master; false for an on-device merge. */
+        val fused: Boolean = pairedAudio != null)
 
-    /** A donor the server accepted and the device can decode. */
-    data class Hit(val donor: Source, val ok: PairOutcome.Ok)
+    /**
+     * A donor to play. [ok]: the server's fused master; null for the on-device
+     * merge (picture row + donor row, both with their own headers).
+     */
+    data class Hit(val donor: Source, val ok: PairOutcome.Ok?) {
+        val onDevice: Boolean get() = ok == null
+    }
+
+    /** Either half was resolved on this device: the server cannot fetch it, so the merge is on the device. */
+    fun deviceResolved(picture: Source, donor: Source): Boolean = picture.onDevice != null || donor.onDevice != null
 
     /**
      * One add-audio journey. It owns every donor it tried (failed or played),
@@ -59,6 +72,13 @@ object AddAudio {
         var restored = false
         /** Every answer, by donor id. A per-try timeout is Unreachable (Task 6 falls back to the device on it). */
         val outcomes = LinkedHashMap<String, PairOutcome>()
+        /** On-device merge tries, by donor id: true when the duration gate passed. */
+        val deviceOutcomes = LinkedHashMap<String, Boolean>()
+        /**
+         * The run's pair reached READY on the device (web landed()). From then on
+         * the run is over: a later failure of that stream is normal recovery (I2).
+         */
+        var landed = false
         /** Last "Checking … (n of total)" line, repeated on a second tap. */
         var checking: String? = null
         @Volatile var cancelled = false; private set
@@ -82,17 +102,29 @@ object AddAudio {
 
     private fun langs(s: Source): List<String> = AudioChoice.languages(s)
 
-    /** Rows that can lend [key]'s language to [playing] via /hybrid/pair, index order. */
-    private fun donorsFrom(rows: List<Source>, playing: Source?, failed: Set<String>): List<Source> = rows.filter {
-        it.id != playing?.id && !it.unsupported && !it.hybrid && it.selectableAudio && it.onDevice == null &&
-            // The server refuses a same-provider pair.
-            !(playing != null && it.provider.equals(playing.provider, true)) &&
-            it.id !in failed
-    }.take(LoadingModel.ADD_AUDIO_MAX_TRIES)
+    /**
+     * Rows that can lend [language] to [playing] via /hybrid/pair. Web order
+     * (addAudio.js donorsFrom, I4): rows whose rendition in [language] has a uri
+     * first, index order inside each group, then the cap.
+     */
+    private fun donorsFrom(rows: List<Source>, language: String, playing: Source?, failed: Set<String>, onDevicePath: Boolean): List<Source> {
+        val ok = rows.filter {
+            it.id != playing?.id && !it.unsupported && !it.hybrid && it.selectableAudio && (onDevicePath || it.onDevice == null) &&
+                // The server refuses a same-provider pair.
+                !(playing != null && it.provider.equals(playing.provider, true)) &&
+                it.id !in failed
+        }
+        val (withUri, rest) = ok.partition { r -> r.uriLanguages.any { Ranking.sameLanguage(it, language) } }
+        return (withUri + rest).take(LoadingModel.ADD_AUDIO_MAX_TRIES)
+    }
 
-    fun donors(sources: List<Source>, language: String, current: Source?, failed: Set<String> = emptySet()): List<Source> {
+    /**
+     * [onDevicePath]: the on-device merge is available, so rows resolved on this
+     * device are donors too. AUDIO_HALVES (H13) does not limit these donors.
+     */
+    fun donors(sources: List<Source>, language: String, current: Source?, failed: Set<String> = emptySet(), onDevicePath: Boolean = false): List<Source> {
         val rows = AudioChoice.index(sources).entries.firstOrNull { Ranking.sameLanguage(it.key, language) }?.value.orEmpty()
-        return donorsFrom(rows, current, failed)
+        return donorsFrom(rows, language, current, failed, onDevicePath)
     }
 
     /**
@@ -101,13 +133,13 @@ object AddAudio {
      * then the playing row's own languages. No cap on offers. Telugu first, then
      * index order.
      */
-    fun offers(sources: List<Source>, current: Source?, carried: Set<String>): List<Pair<String, List<Source>>> {
+    fun offers(sources: List<Source>, current: Source?, carried: Set<String>, onDevicePath: Boolean = false): List<Pair<String, List<Source>>> {
         val have = carried.mapNotNull(Ranking::canonLang).toSet()
             .ifEmpty { current?.let(::langs).orEmpty().mapNotNull(Ranking::canonLang).toSet() }
         val index = AudioChoice.index(sources)
         val keys = index.keys.filter { Ranking.canonLang(it) !in have }
             .sortedBy { if (Ranking.canonLang(it) == TELUGU) 0 else 1 }
-        return keys.mapNotNull { lang -> donorsFrom(index.getValue(lang), current, emptySet()).takeIf { it.isNotEmpty() }?.let { lang to it } }
+        return keys.mapNotNull { lang -> donorsFrom(index.getValue(lang), lang, current, emptySet(), onDevicePath).takeIf { it.isNotEmpty() }?.let { lang to it } }
     }
 
     /** Can the device play the fused master? Unknown codecs count as yes (the device check is the play). */
@@ -124,6 +156,12 @@ object AddAudio {
      * or undecodable answer is a failed donor. Only one call per run runs at a
      * time: a second trigger while one is in flight gets null at once. A run
      * cancelled while a try is out returns null, never a late hit.
+     *
+     * [device] (Task 6): the on-device merge try for one donor (decoders and the
+     * duration gate; true = merge it). It runs for the same donor when the server
+     * is Unreachable, and instead of the server when either half was resolved on
+     * this device. It is bounded like a server try (min(tryMs, budget left)) and
+     * counts against the same donor cap and total budget.
      */
     suspend fun run(
         run: Run,
@@ -131,6 +169,7 @@ object AddAudio {
         onTry: (Source, Int, Int) -> Unit,
         clock: () -> Long = System::currentTimeMillis,
         accept: (PairOutcome.Ok) -> Boolean = { true },
+        device: (suspend (Source) -> Boolean)? = null,
     ): Hit? {
         if (!run.begin()) return null
         try {
@@ -142,16 +181,33 @@ object AddAudio {
                 if (!run.claim(donor)) continue
                 val n = run.tried.size
                 onTry(donor, n, n + left.size - 1)
-                val out = try {
-                    withTimeoutOrNull(minOf(run.tryMs, budget)) { tryOne(donor) } ?: PairOutcome.Unreachable("timeout")
+                val onDeviceOnly = device != null && deviceResolved(run.picture, donor)
+                if (!onDeviceOnly) {
+                    val out = try {
+                        withTimeoutOrNull(minOf(run.tryMs, budget)) { tryOne(donor) } ?: PairOutcome.Unreachable("timeout")
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        PairOutcome.Unreachable(e.javaClass.simpleName)
+                    }
+                    synchronized(run) { run.outcomes[donor.id] = out }
+                    if (run.cancelled) return null
+                    if (out is PairOutcome.Ok && accept(out)) return Hit(donor, out)
+                    // Only an outage falls back to the device; a Refused (or undecodable) donor is done.
+                    if (device == null || out !is PairOutcome.Unreachable) continue
+                }
+                val deviceBudget = run.totalMs - (clock() - run.startedAt)
+                if (deviceBudget <= 0) return null
+                val merge = try {
+                    withTimeoutOrNull(minOf(run.tryMs, deviceBudget)) { device!!(donor) } ?: false
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    PairOutcome.Unreachable(e.javaClass.simpleName)
+                    false
                 }
-                synchronized(run) { run.outcomes[donor.id] = out }
+                synchronized(run) { run.deviceOutcomes[donor.id] = merge }
                 if (run.cancelled) return null
-                if (out is PairOutcome.Ok && accept(out)) return Hit(donor, out)
+                if (merge) return Hit(donor, null)
             }
         } finally {
             run.end()
@@ -160,12 +216,19 @@ object AddAudio {
 
     /** The fused master as a playable row: the picture's identity, the server's url, no device headers. */
     fun fusedSource(picture: Source, hit: Hit, language: String): Source = picture.copy(
-        url = hit.ok.url, progressive = false, hybrid = true, headers = emptyMap(), segmentToken = null, onDevice = null,
+        url = requireNotNull(hit.ok) { "an on-device hit has no fused master" }.url, progressive = false, hybrid = true, headers = emptyMap(), segmentToken = null, onDevice = null,
         selectableAudio = true,
         languages = (listOf(language) + picture.languages).distinctBy { Ranking.canonLang(it) ?: it.lowercase() },
         audioLanguages = (listOf(language) + (picture.audioLanguages ?: picture.languages)).distinctBy { Ranking.canonLang(it) ?: it.lowercase() },
         codecString = hit.ok.codecs?.let { (it.video + listOfNotNull(it.audio)).joinToString(",") } ?: picture.codecString,
     )
+
+    /**
+     * The row to play for [hit]: the fused master, or for an on-device merge the
+     * picture row itself (the donor goes in as `pairAudio`). Never the donor row.
+     */
+    fun pairSource(picture: Source, hit: Hit, language: String): Source =
+        if (hit.ok != null) fusedSource(picture, hit, language) else picture
 
     /** What the player shows and plays now (PlayerVm fills it; tests build it by hand). */
     data class Screen(
@@ -213,7 +276,11 @@ object AddAudio {
      * is in flight; [onScreen] the run whose fused pair is playing. [gen] changes
      * whenever a check is cancelled, so a late answer never applies.
      */
-    class Journey(private val clock: () -> Long = System::currentTimeMillis) {
+    class Journey(
+        private val clock: () -> Long = System::currentTimeMillis,
+        /** Task 6: the player can merge on the device, so device-resolved rows are donors and get offers. */
+        private val onDevicePath: Boolean = true,
+    ) {
         var active: Run? = null; private set
         var onScreen: Run? = null; private set
         var gen = 0; private set
@@ -226,21 +293,26 @@ object AddAudio {
             return listOf(Effect.CancelCheck)
         }
 
-        private fun pairOnScreen(screen: Screen): Run? =
-            onScreen?.takeIf { screen.fused && it.hit != null && it.hit?.donor?.id == screen.pairedAudio?.id }
+        /** The pair on screen is this journey's: same donor, and fused or merged on the device as the hit says. */
+        private fun pairOnScreen(screen: Screen): Run? = onScreen?.takeIf {
+            val hit = it.hit
+            hit != null && hit.donor.id == screen.pairedAudio?.id && screen.fused == (hit.ok != null)
+        }
 
         /** The viewer tapped "Add <L> audio from another server". */
         fun tap(language: String, sources: List<Source>, screen: Screen): List<Effect> {
             if (screen.offline) return emptyList() // the offline notice stays; nothing can be checked
-            active?.let { run ->
-                // The same entry again: one check at a time, repeat where it is.
-                if (Ranking.sameLanguage(run.language, language) || run.language.equals(language, true))
-                    return run.checking?.let { listOf(Effect.Notice(it)) }.orEmpty()
+            // The same entry again: one check at a time, repeat where it is. That
+            // includes the run's pair still loading (fused or an on-device merge, M4).
+            val same = { run: Run -> Ranking.sameLanguage(run.language, language) || run.language.equals(language, true) }
+            active?.let { run -> if (same(run)) return run.checking?.let { listOf(Effect.Notice(it)) }.orEmpty() }
+            pairOnScreen(screen)?.let { run ->
+                if (active == null && !run.landed && same(run)) return run.checking?.let { listOf(Effect.Notice(it)) }.orEmpty()
             }
             val out = ArrayList(cancelActive()) // another add: entry is a new pick
             val prior = pairOnScreen(screen)
             val picture = prior?.picture ?: screen.current ?: return out
-            val donors = donors(sources, language, picture)
+            val donors = donors(sources, language, picture, onDevicePath = onDevicePath)
             if (donors.isEmpty()) return out + Effect.Notice(LoadingModel.Copy.noWorkingAudio(language))
             val run = Run(language, donors, picture, clock())
             run.resumeMs = screen.positionMs.coerceAtLeast(0)
@@ -293,8 +365,9 @@ object AddAudio {
             active = null
             if (hit == null) return listOf(Effect.Notice(LoadingModel.Copy.noWorkingAudio(run.language), untilReady = run.restored && !screen.ready))
             if (run.pairFallback == null) screen.current?.let {
+                // A pair on screen (fused or merged on the device) comes back as it was.
                 run.pairFallback = Fallback(it, screen.audioLanguage, positionFor(screen, run),
-                    screen.pairedAudio?.takeIf { screen.fused }, pairOnScreen(screen))
+                    screen.pairedAudio, pairOnScreen(screen), fused = screen.pairedAudio != null && screen.fused)
             }
             run.hit = hit
             onScreen = run
@@ -302,13 +375,26 @@ object AddAudio {
         }
 
         /**
+         * The player reached READY. If it is this journey's pair, the pair has
+         * landed: the run is over (web landed()).
+         */
+        fun ready(screen: Screen) {
+            pairOnScreen(screen)?.let { it.landed = true }
+        }
+
+        /**
          * The device failed to play the pair on screen. Null when it is not this
-         * journey's pair. Otherwise: restore what played before at once (stream,
+         * journey's pair, or when that pair already reached READY (I2: then the
+         * player's normal recovery and failover run, never the add-audio restore). Otherwise: restore what played before at once (stream,
          * position, audio), then check the next donor behind it inside the same
          * caps; with none left, say nothing worked. Never the donor alone.
          */
         fun deviceFailure(screen: Screen): List<Effect>? {
             val run = pairOnScreen(screen) ?: return null
+            if (run.landed) {
+                onScreen = null
+                return null
+            }
             // Offline the player waits for the network (PlayerVm goOffline); nothing is restored or checked.
             if (screen.offline) return emptyList()
             val out = ArrayList<Effect>()

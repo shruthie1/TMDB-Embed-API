@@ -34,6 +34,7 @@ import { pairSources, listSources as listBackendSources } from '../lib/backend';
 import { canCast, castBody, prepareCast } from '../lib/cast';
 import { pairDecodable } from '../lib/player/codecSupport';
 import { pairDonors } from '../lib/player/addAudio';
+import { makeNotice } from '../lib/player/notice';
 import { createAddAudioJourney, makeCheckPair, pairedStream, resumePoint, streamKey } from './player/addAudioJourney';
 import {
   useResolve, useHls, useRecovery, useControlVisibility, HIDE_MS, HIDE_TV_MS,
@@ -61,9 +62,6 @@ import {
  * into a handful of shared values, and every regression was two of them
  * racing. See lib/player/README.md.
  */
-/** Long enough to read a short sentence, short enough not to sit on the film. */
-const NOTICE_MS = 4000;
-
 function playbackDevice() {
   if (typeof navigator === 'undefined') return null;
   const ua = navigator.userAgent || '';
@@ -96,12 +94,18 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
    */
   const [notice, setNoticeState] = useState(null);
   const noticeSeq = useRef(0);
-  const setNotice = useCallback((text) => {
-    setNoticeState(text ? { text, id: ++noticeSeq.current } : null);
+  // opts.holdMs keeps a notice up longer (the add-audio "Checking …" line,
+  // I1); every other notice clears after NOTICE_MS.
+  const setNotice = useCallback((text, opts) => {
+    setNoticeState(makeNotice(text, ++noticeSeq.current, opts));
+  }, []);
+  // Take a notice down only while it is still the one shown.
+  const clearNotice = useCallback((text) => {
+    setNoticeState((n) => (n && n.text === text ? null : n));
   }, []);
   useEffect(() => {
     if (!notice) return;
-    const t = setTimeout(() => setNoticeState(null), NOTICE_MS);
+    const t = setTimeout(() => setNoticeState(null), notice.ms);
     return () => clearTimeout(t);
   }, [notice]);
   const [playing, setPlaying] = useState(false);
@@ -175,7 +179,8 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     snapshot: () => addAudioDeps.current.snapshot(),
     position: () => addAudioDeps.current.position(),
     restore: (snap) => addAudioDeps.current.restore(snap),
-    notice: (text) => addAudioDeps.current.notice(text),
+    notice: (text, opts) => addAudioDeps.current.notice(text, opts),
+    clearNotice: (text) => addAudioDeps.current.clearNotice(text),
     label: (donor) => addAudioDeps.current.label(donor),
   }));
   useEffect(() => () => addAudioJourney.cancel(), [addAudioJourney]);
@@ -1665,7 +1670,9 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     recovery.clearStall();
     // Kept so the Audio timing bar can rebuild this exact pairing with a
     // different offset without the viewer re-picking the language.
-    lastPair.current = { video, audio };
+    // `language` too, so a timing re-pair keeps the asked language as the
+    // master's DEFAULT=YES track (M1), not the server's Telugu default.
+    lastPair.current = { video, audio, language };
     setPairPadding(paired.padded ? { deltaSeconds: paired.delta } : null);
     // The fused master carries this language; remember it so a later server
     // change keeps it rather than reverting to that provider's default.
@@ -1799,6 +1806,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       setPairPadding(snap.padding);
     },
     notice: setNotice,
+    clearNotice,
     position: () => resumePoint(videoRef.current),
     label: (donor) => rowLabel(donor.id, donor.provider),
   };
@@ -1896,7 +1904,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     if (!pair?.video || !pair?.audio) return;
     const syncTimer = beginSwitch('Adjusting audio timing…', null, { replacesStream: true });
     const paired = await pairSources(pair.video, pair.audio,
-      { nudge: want, tmdbId: title.tmdbId, mediaType: title.mediaType });
+      { nudge: want, language: pair.language || undefined, tmdbId: title.tmdbId, mediaType: title.mediaType });
     if (!paired?.url || pairDecodable(paired.codecs) === false) {
       if (paired?.url) console.warn(`[pair] undecodable here, keeping current timing: video=${(paired.codecs?.video || []).join('|')} audio=${paired.codecs?.audio}`);
       endSwitch(syncTimer);

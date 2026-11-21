@@ -187,3 +187,65 @@ test('asked non-language: fixed 409 reason, the value is not echoed', async (t) 
   assert.equal(res.code, 409, JSON.stringify(res.body));
   assert.equal(res.body.reason, 'the audio source has no audio track in the asked language');
 });
+
+// Fix wave I3 (2026-11-21): every language a client can offer must resolve.
+// Clients send the display name (web languageName, APK JVM display name:
+// "Bangla" on JDK 17) and donors tag renditions with any ISO 639-1/639-2 code.
+test('asked language: Marathi "mr" with a generic name matches', () => {
+  assert.equal(h.languageRenditionIndex([{ name: 'Audio 1', language: 'te' }, { name: 'Audio 2', language: 'mr' }], 'Marathi', { byTrackName: true }), 1);
+  assert.equal(h.languageRenditionIndex([{ name: 'Audio 2', language: 'mr' }], 'mr', { byTrackName: true }), 0);
+});
+
+test('asked language: Bengali "bn" matches Bengali and Bangla', () => {
+  const r = [{ name: 'Track 1', language: 'bn' }];
+  assert.equal(h.languageRenditionIndex(r, 'Bengali', { byTrackName: true }), 0);
+  assert.equal(h.languageRenditionIndex(r, 'Bangla', { byTrackName: true }), 0);
+  assert.equal(h.languageRenditionIndex([{ name: 'Track 1', language: 'ben' }], 'Bangla', { byTrackName: true }), 0);
+});
+
+test('asked language: Spanish "es" named Español matches', () => {
+  assert.equal(h.languageRenditionIndex([{ name: 'Español', language: 'es' }], 'Spanish', { byTrackName: true }), 0);
+  assert.equal(h.languageRenditionIndex([{ name: 'Español', language: 'spa' }], 'es', { byTrackName: true }), 0);
+});
+
+test('asked language: Bhojpuri "bho" by tag, and by name when the tag is und', () => {
+  assert.equal(h.languageRenditionIndex([{ name: 'Audio 1', language: 'hi' }, { name: 'Audio 2', language: 'bho' }], 'Bhojpuri', { byTrackName: true }), 1);
+  assert.equal(h.languageRenditionIndex([{ name: 'Bhojpuri', language: 'und' }], 'Bhojpuri', { byTrackName: true }), 0);
+  assert.equal(h.languageRenditionIndex([{ name: 'Bhojpuri', language: 'und' }], 'BHO', { byTrackName: true }), 0);
+});
+
+test('asked language: the tag still beats the name for a wider language set', () => {
+  assert.equal(h.languageRenditionIndex([{ name: 'Marathi', language: 'hi' }], 'Marathi', { byTrackName: true }), -1);
+  assert.equal(h.languageRenditionIndex([{ name: 'Audio', language: 'tel-hin' }], 'Telugu', { byTrackName: true }), -1);
+  assert.equal(h.languageRenditionIndex([{ name: 'AAC', language: 'und' }], 'aac', { byTrackName: true }), -1);
+});
+
+test('asked language: Telugu "te" is still index 0', () => {
+  const r = [{ name: 'Audio 1', language: 'te' }, { name: 'Audio 2', language: 'mr' }];
+  assert.equal(h.languageRenditionIndex(r, 'Telugu', { byTrackName: true }), 0);
+  assert.equal(h.defaultAudioIndex(r, 'Telugu'), 0);
+  assert.equal(h.defaultAudioIndex(r), 0, 'no-language default unchanged');
+  assert.equal(h.defaultAudioIndex(r, 'Marathi'), 1);
+});
+
+test('POST /hybrid/pair with Marathi resolves an "mr" rendition named Audio 2', async (t) => {
+  t.after(() => { global.fetch = realFetch; });
+  const { app, body } = setup('plmr', [['Audio 1', 'te', 'te.m3u8'], ['Audio 2', 'mr', 'mr.m3u8']]);
+  const res = await postPair(app, body({ language: 'Marathi' }));
+  assert.equal(res.code, 200, JSON.stringify(res.body));
+});
+
+test('POST /hybrid/pair with Bangla resolves a "bn" rendition', async (t) => {
+  t.after(() => { global.fetch = realFetch; });
+  const { app, body } = setup('plbn', [['Track 1', 'bn', 'bn.m3u8']]);
+  const res = await postPair(app, body({ language: 'Bangla' }));
+  assert.equal(res.code, 200, JSON.stringify(res.body));
+});
+
+test('every name a client can offer resolves (web NAMES table, JDK Locale names)', () => {
+  const src = require('node:fs').readFileSync(require('node:path').join(__dirname, '../web/lib/subtitles.js'), 'utf8');
+  const names = [...src.match(/const NAMES = \{([\s\S]*?)\};/)[1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
+  assert.ok(names.length > 40);
+  const jdk = ['Bangla', 'Bihari', 'Odia', 'Oriya', 'Fulah', 'Maori', 'Moldavian', 'Tagalog', 'Norwegian Bokmål', 'Bhojpuri'];
+  assert.deepEqual([...names, ...jdk].filter((n) => h.languageDisplayName(n) == null), []);
+});

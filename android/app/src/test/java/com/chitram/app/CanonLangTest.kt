@@ -109,9 +109,9 @@ class CanonLangTest {
         // und tag, language only in the label.
         val named = Tracks(listOf(group("0:main", video()), group("1:a", audio("hin")), group("1:b", audio("und", "Telugu 5.1"))))
         assertEquals("1:b", HybridPair.overrides(named, listOf("Telugu"))!!.second.mediaTrackGroup.id)
-        // Fallback unchanged: no match takes the first supported audio-half track.
+        // Step 2 Task 6 ruling: no any-track fallback. No Telugu track means no pick (a failed try).
         val none = Tracks(listOf(group("0:main", video()), group("1:a", audio("hin")), group("1:b", audio("tam"))))
-        assertEquals("1:a", HybridPair.overrides(none, listOf("Telugu"))!!.second.mediaTrackGroup.id)
+        assertNull(HybridPair.overrides(none, listOf("Telugu")))
     }
 
     @Test fun playerCarriesAndLoadingUseTheSameKey() {

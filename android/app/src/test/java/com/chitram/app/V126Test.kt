@@ -111,11 +111,10 @@ class V126Test {
         assertEquals(listOf(0), a.trackIndices)
     }
 
-    @Test fun muxedCastleAudioWithoutATagStillComesFromTheAudioHalf() {
+    @Test fun anAudioHalfWithNoTrackInTheLanguageIsRefused() {
+        // Step 2 Task 6 ruling: no any-track fallback. An untagged ("und") track is not Telugu.
         val tracks = Tracks(listOf(group("0:main", video(1080)), group("0:a", audio("hin")), group("1:main", video(720)), group("1:a", audio("und"))))
-        val (_, a) = HybridPair.overrides(tracks, listOf("tel"))!!
-        assertEquals("1:a", a.mediaTrackGroup.id)
-        assertEquals(listOf(0), a.trackIndices)
+        assertNull(HybridPair.overrides(tracks, listOf("tel")))
     }
 
     @Test fun noOverridesUntilBothHalvesHaveTracks() {

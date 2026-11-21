@@ -677,25 +677,111 @@ function knownLanguageName(value) {
     return canon && KNOWN_LANGUAGES.has(canon) ? canon : null;
 }
 
-// One rendition's language, Step 1's rule as on web (languageSources.js
-// renditionLanguage) and APK: the LANGUAGE tag first. The name is read only
-// when the tag is empty, 'und' or not a language, so {name:'Hindi',
-// language:'tel'} is Telugu, and an und track named 'Hindi AAC 2.0' is Hindi.
-function renditionLanguage(r) {
-    return knownLanguageName(r.language)
-        || knownLanguageName(r.name)
-        || trackNameLanguage(r.name);
+// Fix wave I3: one identity for an asked language, wider than LANG_CANON's ~30
+// keys. Clients offer any ISO 639 language by display name (web languageName,
+// APK JVM display name, which says "Bangla" for bn) and donors tag renditions
+// with any ISO 639-1 or 639-2 code. The identity is ICU's English name of the
+// canonical code, lower-cased: te, tel, Telugu and tel-IN all give 'telugu';
+// ben, Bengali and Bangla give 'bangla'; bh, bho and Bhojpuri give 'bhojpuri'.
+const DISPLAY = new Intl.DisplayNames('en', { type: 'language', fallback: 'code' });
+const CODE_ONLY = /^[a-z]{2,3}$/;
+// Only a BCP-47 region or script subtag strips (tel-IN, zh-Hant, es-419), so a
+// compound such as tel-hin names no single language. Same rule as knownLanguage.
+const CODE_TAG = /^([a-z]{2,3})(?:[-_](?:[a-z]{2}|[a-z]{4}|\d{3}))?$/;
+// Display names ICU does not give for the code, but clients and LANG_CANON use:
+// web subtitles.js NAMES ('Portuguese (BR)', 'Chinese (Trad)') and the JDK 17
+// Locale names the APK offers (Bihari, Fulah, Maori, Moldavian, Tagalog).
+const NAME_ALIASES = {
+    bengali: 'bn', bangla: 'bn', oriya: 'or', odia: 'or', 'portuguese (br)': 'pt', 'chinese (trad)': 'zh',
+    bihari: 'bh', fulah: 'ff', maori: 'mi', moldavian: 'mo', tagalog: 'tl',
+};
+
+// Identity of a bare ISO 639 code, or null when ICU knows no name for it.
+function isoCode(code) {
+    if (!CODE_ONLY.test(code) || NOT_LANGUAGE_CODES.has(code)) return null;
+    let canon;
+    try { [canon] = Intl.getCanonicalLocales(code); } catch { return null; }
+    const base = String(canon || '').toLowerCase().split('-')[0];
+    if (!base || NOT_LANGUAGE_CODES.has(base)) return null;
+    const name = String(DISPLAY.of(base) || '').toLowerCase();
+    return name && name !== base ? name : null;
+}
+const NOT_LANGUAGE_CODES = new Set(['und', 'mul', 'zxx', 'mis', 'root']);
+
+let namesToCode = null;
+// Lower-case English display name -> identity, for every 2- and 3-letter code ICU names.
+function nameCodes() {
+    if (namesToCode) return namesToCode;
+    namesToCode = new Map();
+    const letters = 'abcdefghijklmnopqrstuvwxyz';
+    for (const a of letters) for (const b of letters) {
+        for (const code of [a + b, ...[...letters].map((c) => a + b + c)]) {
+            const name = isoCode(code);
+            if (name) namesToCode.set(name, name);
+        }
+    }
+    for (const [alias, code] of Object.entries(NAME_ALIASES)) {
+        const name = isoCode(code);
+        if (name) namesToCode.set(alias, name);
+    }
+    return namesToCode;
+}
+
+// Code identity of a language NAME ('Marathi', 'Bangla'), or null.
+function nameIdentity(value) {
+    const key = String(value || '').trim().toLowerCase();
+    if (!key) return null;
+    return nameCodes().get(key) || null;
+}
+
+// Code identity of a LANGUAGE tag or an asked language: a code (with an
+// optional region subtag) or a full name. Null for und, mul, zxx and non-languages.
+function languageIdentity(value) {
+    if (value == null) return null;
+    const key = String(value).trim().toLowerCase();
+    if (!key) return null;
+    const m = CODE_TAG.exec(key);
+    if (m) {
+        const code = isoCode(m[1]);
+        if (code) return code;
+    }
+    return nameIdentity(key) || nameIdentity(knownLanguageName(key));
+}
+
+// One rendition's language identity, Step 1's rule as on web
+// (languageSources.js renditionLanguage) and APK: the LANGUAGE tag first. The
+// name is read only when the tag is empty, 'und' or not a language, so
+// {name:'Hindi', language:'tel'} is Telugu, and an und track named
+// 'Hindi AAC 2.0' is Hindi. A NAME counts as a full language name or as a
+// LANG_CANON code (trackNameLanguage's stoplist), never as any obscure ISO
+// code, so a track named 'AAC' is not Ghotuo.
+function renditionIdentity(r) {
+    return languageIdentity(r.language)
+        || nameIdentity(r.name)
+        || nameIdentity(knownLanguageName(r.name))
+        || nameIdentity(trackNameLanguage(r.name));
+}
+
+// The display name of an asked language ('mr' -> 'Marathi'), or null.
+function languageDisplayName(value) {
+    const known = knownLanguageName(value);
+    if (known) return known;
+    const code = CODE_TAG.exec(String(value || '').trim().toLowerCase());
+    const base = code && isoCode(code[1]) ? Intl.getCanonicalLocales(code[1])[0].split('-')[0] : null;
+    if (base) return DISPLAY.of(base);
+    const name = nameIdentity(value);
+    return name ? name.charAt(0).toUpperCase() + name.slice(1) : null;
 }
 
 // The index of the first rendition in `language` (any name or code), or -1.
 // opts.byTrackName (an ASKED language): tag first, then the name, via
-// renditionLanguage. Without it, the old exact LANGUAGE/NAME match, so the
+// renditionIdentity. Without it, the old exact LANGUAGE/NAME match, so the
 // no-language default stays exactly as it was for APK 1.2.37 and the web.
 function languageRenditionIndex(renditions, language, opts = {}) {
     const list = renditions || [];
     if (opts.byTrackName) {
-        const wanted = knownLanguageName(language);
-        return wanted ? list.findIndex((r) => renditionLanguage(r) === wanted) : -1;
+        const wanted = languageIdentity(language);
+        return wanted ? list.findIndex((r) => renditionIdentity(r) === wanted) : -1;
     }
     const wanted = canonicalLanguage(language);
     if (!wanted) return -1;
@@ -939,6 +1025,7 @@ module.exports.buildMaster = buildMaster;
 module.exports.defaultAudioIndex = defaultAudioIndex;
 module.exports.languageRenditionIndex = languageRenditionIndex;
 module.exports.knownLanguageName = knownLanguageName;
+module.exports.languageDisplayName = languageDisplayName;
 module.exports.realisePlan = realisePlan;
 module.exports.masterCodecs = masterCodecs;
 module.exports.planId = planId;

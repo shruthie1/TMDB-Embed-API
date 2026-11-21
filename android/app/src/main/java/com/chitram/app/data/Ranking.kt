@@ -36,6 +36,11 @@ data class Source(
     val netmirrorCatalog: String? = null,
     /** The provider returned usable rows while more catalogs/dubs remain unresolved. */
     val incomplete: Boolean = false,
+    /**
+     * Languages whose first in-stream rendition has its own uri (web
+     * sourceAudioRenditions `uri`). Add-audio tries these donors first (I4).
+     */
+    val uriLanguages: List<String> = emptyList(),
 )
 
 /** Answers "can this device decode this video codec family?" null = unknown. */
@@ -220,11 +225,15 @@ object Ranking {
         // ('Telugu 5.1', a name copied in by the provider, I1) is read as a label, then
         // the name is; only then does the raw tag stand, as before. A name-only value
         // counts only when it is a real ISO language, so 'Commentary' never becomes one.
-        val audioLanguages = s.audio?.mapNotNull { t ->
-            tagOrNameLanguage(t.language, t.name) ?: tagOrNameLanguage(t.languageCode, null)
+        val trackLanguages = s.audio?.mapNotNull { t ->
+            (tagOrNameLanguage(t.language, t.name) ?: tagOrNameLanguage(t.languageCode, null)
                 ?: trackLanguage(t.language, null) ?: trackLanguage(t.languageCode, null)
-                ?: languageFromTrackName(t.name)?.takeIf { languageCode(it) != null }
-        }?.distinctBy { it.lowercase() }
+                ?: languageFromTrackName(t.name)?.takeIf { languageCode(it) != null })?.let { it to t }
+        }
+        val audioLanguages = trackLanguages?.map { it.first }?.distinctBy { it.lowercase() }
+        // The first rendition of each language decides, as on web (renditions.find).
+        val uriLanguages = trackLanguages.orEmpty().distinctBy { canonLang(it.first) ?: it.first.lowercase() }
+            .filter { !it.second.uri.isNullOrBlank() }.map { it.first }
         val languages = when {
             !audioLanguages.isNullOrEmpty() -> audioLanguages
             s.selectableAudio && audioLanguages != null -> emptyList()
@@ -253,6 +262,7 @@ object Ranking {
             audioLanguages = audioLanguages,
             catalogLanguages = languageLabels(s.catalogLanguages),
             netmirrorCatalog = s.netmirrorCatalog,
+            uriLanguages = uriLanguages,
         )
     }
 

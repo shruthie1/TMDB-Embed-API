@@ -123,6 +123,51 @@ export function detectBakedBars(video) {
   return bar;
 }
 
+/**
+ * Where the picture sits, in the coordinates of the <video>'s parent (.player),
+ * which is what the sibling .cue-layer is positioned against.
+ *
+ * `rect` is the <video> element's client rect, `host` its parent's (omit when
+ * they coincide). `inset` is the baked-in bar fraction from detectBakedBars.
+ */
+export function pictureBox({ videoW: w, videoH: h, rect: r, host, fit, inset = 0 }) {
+  // Offset of the element inside the stage. Zero for the inset:0 fits; the
+  // centred height-auto 'width' fit starts (stageH - elemH)/2 down.
+  const dx = host ? r.left - host.left : 0;
+  const dy = host ? r.top - host.top : 0;
+  if (!w || !h) return { left: dx, top: dy, width: r.width, height: r.height };
+  const ar = w / h, boxAr = r.width / r.height;
+  // With 'cover' or 'fill' the picture occupies the whole element, so
+  // there is no letterbox to correct for.
+  // ONE decision, applied to both axes. These were two separate
+  // conditions - `boxAr > ar` for the width and `boxAr <= ar` for the
+  // height - which disagree for a window WIDER than the film: the width
+  // came from the element while the height was derived from that same
+  // width, so the box was taller than the picture and bottom-aligned
+  // captions landed mid-frame instead of near the lower edge.
+  // Wider box than film -> bars on the SIDES, full height.
+  // Taller box than film -> bars top and bottom, full width.
+  const barsOnSides = boxAr > ar;
+  // 'contain' letterboxes on whichever axis. 'width' sizes the video box to
+  // the full width (height auto), so there is NO internal bar for a film
+  // wider than the box; a bar appears only when max-height:100% clamps a tall
+  // film, which is the side-bar (boxAr < ar) case. 'cover'/'fill' never bar.
+  const letterboxed = fit === 'contain' || (fit === 'width' && barsOnSides);
+  const picW = !letterboxed || !barsOnSides ? r.width : r.height * ar;
+  const picH = !letterboxed || barsOnSides ? r.height : r.width / ar;
+  // A film wider than its raster carries the letterbox IN THE PIXELS.
+  // videoWidth/videoHeight report 1920x1080 for a 2.35:1 film, so the box
+  // above is the RASTER, not the image, and a bottom-aligned caption sits
+  // inside the baked-in black bar - which reads as floating in the middle
+  // of the frame. Geometry cannot see this; only the pixels can.
+  const shownH = picH * (1 - inset * 2);
+  return {
+    left: dx + (r.width - picW) / 2,
+    top: dy + (r.height - picH) / 2 + picH * inset,
+    width: picW, height: shownH,
+  };
+}
+
 export function useCueOverlay({ videoRef, subUrl, fit = 'cover', enabled = true }) {
   const [text, setText] = useState('');
   // The picture's box inside the element, so the overlay can match it.
@@ -158,41 +203,15 @@ export function useCueOverlay({ videoRef, subUrl, fit = 'cover', enabled = true 
       // close enough otherwise - and it self-corrects the moment metadata
       // arrives, because `loadedmetadata` re-runs this.
       if (!r.width || !r.height) { setBox(null); return; }
-      if (!w || !h) {
-        setBox({ left: 0, top: 0, width: r.width, height: r.height });
-        return;
-      }
-      const ar = w / h, boxAr = r.width / r.height;
-      // With 'cover' or 'fill' the picture occupies the whole element, so
-      // there is no letterbox to correct for.
-      // ONE decision, applied to both axes. These were two separate
-      // conditions - `boxAr > ar` for the width and `boxAr <= ar` for the
-      // height - which disagree for a window WIDER than the film: the width
-      // came from the element while the height was derived from that same
-      // width, so the box was taller than the picture and bottom-aligned
-      // captions landed mid-frame instead of near the lower edge.
-      // Wider box than film -> bars on the SIDES, full height.
-      // Taller box than film -> bars top and bottom, full width.
-      const barsOnSides = boxAr > ar;
-      // 'contain' letterboxes on whichever axis. 'width' sizes the video box to
-      // the full width (height auto), so there is NO internal bar for a film
-      // wider than the box; a bar appears only when max-height:100% clamps a tall
-      // film, which is the side-bar (boxAr < ar) case. 'cover'/'fill' never bar.
-      const letterboxed = fit === 'contain' || (fit === 'width' && barsOnSides);
-      const picW = !letterboxed || !barsOnSides ? r.width : r.height * ar;
-      const picH = !letterboxed || barsOnSides ? r.height : r.width / ar;
-      // A film wider than its raster carries the letterbox IN THE PIXELS.
-      // videoWidth/videoHeight report 1920x1080 for a 2.35:1 film, so the box
-      // above is the RASTER, not the image, and a bottom-aligned caption sits
-      // inside the baked-in black bar - which reads as floating in the middle
-      // of the frame. Geometry cannot see this; only the pixels can.
-      const inset = bakedBarRef.current;
-      const shownH = picH * (1 - inset * 2);
-      setBox({
-        left: (r.width - picW) / 2,
-        top: (r.height - picH) / 2 + picH * inset,
-        width: picW, height: shownH,
-      });
+      // The overlay is a SIBLING of the <video>, positioned in .player, so its
+      // left/top must be in .player's coordinates, not the element's. With
+      // 'cover'/'contain'/'fill' the element is inset:0 and the two agree. With
+      // 'width' the element is height-auto and centred (top:50% + translate),
+      // so it starts (stageH - elemH)/2 down the stage; leaving that out put a
+      // 2.39:1 film's captions that far ABOVE the picture's foot, mid-frame.
+      const host = video.parentElement?.getBoundingClientRect();
+      setBox(pictureBox({ videoW: w, videoH: h, rect: r, host, fit,
+                          inset: bakedBarRef.current }));
     };
 
     // Sample the pixels for a burned-in letterbox, then re-measure if the
