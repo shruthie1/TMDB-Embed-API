@@ -102,6 +102,18 @@ function teluguFirst(langs) {
     return [...langs.filter(isTe), ...langs.filter((l) => !isTe(l))];
 }
 
+// VidBolt masters carry no CODECS, but the sacdn path names the encode
+// (..._1080_h265_956/master.m3u8) and its init segments sniff as hev1. Tag it
+// so a browser that cannot decode HEVC skips the row (web codecSupport.js).
+// The bridge wraps the sacdn url in ?url=, so the decoded url is checked too.
+function videoCodecOf(masterText, masterUrl) {
+    const stated = hls.videoCodecFamily(hls.masterCodecs(masterText));
+    if (stated) return stated;
+    let u = String(masterUrl || '');
+    try { u += ' ' + decodeURIComponent(u); } catch { /* keep raw */ }
+    return /_h265_/i.test(u) ? 'hevc' : null;
+}
+
 // Pure: the stream row for one fetched master. Exported for tests.
 function streamFromMaster(src, masterText, masterUrl, deadAudioUrls = null) {
     const levels = hls.parseLevels(masterText, masterUrl);
@@ -125,6 +137,7 @@ function streamFromMaster(src, masterText, masterUrl, deadAudioUrls = null) {
         selectableAudio: audio.length > 0,
         levels: levels.map((l) => ({ height: l.height, quality: tierOf(l), bandwidth: l.bandwidth, codecs: l.codecs })),
         codecs: hls.masterCodecs(masterText),
+        videoCodec: videoCodecOf(masterText, masterUrl),
         subtitles,
         headers: { ...STREAM_HEADERS },
     };

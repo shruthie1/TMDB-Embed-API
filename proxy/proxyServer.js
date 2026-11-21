@@ -354,33 +354,37 @@ function sniffSegmentType(ct, buf) {
     return FMP4_BOXES.has(String.fromCharCode(b[4], b[5], b[6], b[7])) ? 'video/mp4' : ct;
 }
 
+// Unwraps ONLY this server's own proxy shapes: /m3u8-proxy?url=, /ts-proxy?url=
+// and /proxy/<encoded http url>. Matched by path on any host, like
+// hybridStream.unwrapProxied: the public base the url was built on need not
+// equal this request's. Any other url, even one with a `url=` param, is
+// returned unchanged: VidBolt's dash-hls-bridge carries the CloudFront
+// Policy/Signature/Key-Pair-Id beside its inner url, and keeping only the
+// inner url made CloudFront answer 403 MissingKey (RRR 579974, 2026-11-21).
+// Returns {url, headers}; headers are the wrapper's own, {} otherwise.
 function extractOriginalUrl(proxyUrl) {
+    const plain = { url: proxyUrl, headers: {} };
+    let url;
+    try { url = new URL(proxyUrl); } catch { return plain; }
+    const pathMatch = url.pathname.match(/\/proxy\/(.+)$/);
+    if (pathMatch) {
+        let decoded = pathMatch[1];
+        try { decoded = decodeURIComponent(decoded); } catch { return plain; }
+        while (decoded.includes('%2F')) {
+            try { decoded = decodeURIComponent(decoded); } catch { break; }
+        }
+        // A bare path (like Vidlink /proxy/wiwii/...) is someone else's route.
+        return /^https?:\/\//i.test(decoded) ? { url: decoded, headers: {} } : plain;
+    }
+    if (!/\/(m3u8-proxy|ts-proxy)$/.test(url.pathname)) return plain;
+    const inner = url.searchParams.get('url');
+    if (!inner || !/^https?:\/\//i.test(inner)) return plain;
+    let headers = {};
     try {
-        const url = new URL(proxyUrl);
-        if (url.pathname.includes('/proxy/')) {
-            const m = url.pathname.match(/\/proxy\/(.+)$/);
-            if (m) {
-                let decoded = decodeURIComponent(m[1]);
-                while (decoded.includes('%2F')) {
-                    try { decoded = decodeURIComponent(decoded); } catch { break; }
-                }
-                if (decoded.startsWith('http://') || decoded.startsWith('https://')) return decoded;
-                // If it's just a path (like Vidlink /proxy/wiwii/...), keep the full original URL
-                return proxyUrl;
-            }
-        }
-        if (url.searchParams.has('url')) return decodeURIComponent(url.searchParams.get('url'));
-        const patterns = [
-            /\/api\/[^/]+\/proxy\?url=(.+)$/,
-            /\/proxy\?.*url=([^&]+)/,
-            /\/stream\/proxy\/(.+)$/,
-            /\/p\/(.+)$/
-        ];
-        for (const p of patterns) {
-            const m = proxyUrl.match(p); if (m) return decodeURIComponent(m[1]);
-        }
-        return proxyUrl;
-    } catch { return proxyUrl; }
+        const parsed = JSON.parse(url.searchParams.get('headers') || '{}');
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) headers = parsed;
+    } catch { /* wrapper without readable headers */ }
+    return { url: inner, headers };
 }
 
 // `ptsOffset` routes SEGMENTS through /pts-rebase instead of /ts-proxy, so a
@@ -922,6 +926,15 @@ function createProxyRoutes(app) {
             const resp = await fetchWithTimeout(targetUrl, upstreamOptions);
             stage(`main fetch headers status=${resp.status}`);
             if (!resp.ok && resp.status !== 206) {
+                // One greppable line per upstream 403 (vercetti, CloudFront...):
+                // host and path only, no query string, so no signing tokens.
+                if (resp.status === 403) {
+                    let head = '';
+                    try { head = (await readBodyWithTimeout(resp, 2000, 'text')).slice(0, 200); } catch { /* body unreadable */ }
+                    let where = 'upstream';
+                    try { const u = new URL(targetUrl); where = `host=${u.host} path=${u.pathname}`; } catch { /* bad url */ }
+                    console.log(`[ts-proxy-403] ${where} status=403 ct=${resp.headers.get('content-type') || '-'} server=${resp.headers.get('server') || '-'} body=${JSON.stringify(head)}`);
+                }
                 // Highest-traffic leak of the three: this is the SEGMENT route,
                 // so one abandoned body per failed segment drains the pool fast.
                 discardBody(resp);
@@ -1031,8 +1044,8 @@ function processStreamsForProxy(streams, serverUrl) {
         // A synthetic master already points at this server and embeds proxied
         // child URLs of its own; wrapping it again would proxy the proxy.
         if (s.__noProxy) { const { __noProxy, ...rest } = s; return rest; }
-        const original = extractOriginalUrl(s.url);
-        const headers = s.headers || {};
+        const { url: original, headers: wrapperHeaders } = extractOriginalUrl(s.url);
+        const headers = (s.headers && Object.keys(s.headers).length) ? s.headers : wrapperHeaders;
         const hParam = Object.keys(headers).length ? `&headers=${encodeURIComponent(JSON.stringify(headers))}` : '';
         let host = '';
         try {
