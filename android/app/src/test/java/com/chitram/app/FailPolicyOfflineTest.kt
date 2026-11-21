@@ -17,6 +17,22 @@ class FailPolicyOfflineTest {
         assertEquals(ResolveMiss.FAIL_OVER, FailPolicy.onResolveMiss(false))
     }
 
+    // vidrift-apk.md follow-up: a failed VM row of a provider with a VM-down
+    // on-device resolver (CastleTV, MultiMovies, showsst, OneTouchTV, Vidrift)
+    // re-resolves on the device once. Only MultiMovies skips it after delivery.
+    @Test fun vmTwinProvidersReResolveOnDevice() {
+        for (p in listOf("castletv", "CastleTV", "multimovies", "showsst", "OneTouchTV", "onetouchtv", "vidrift")) {
+            assertTrue(p, FailPolicy.hasDeviceTwin(p))
+            val row = com.chitram.app.data.Source("vm-$p", p, p, "https://vm/m3u8-proxy?url=x", false, "1080p", emptyList(), listOf("Telugu"), false, false, emptyList(), null, null, false)
+            assertEquals(p, FailPolicy.Action.DEVICE, FailPolicy.onError(row, null, refreshedOnce = false))
+            val delivered = if (p == "multimovies") FailPolicy.Action.FAILOVER else FailPolicy.Action.DEVICE
+            assertEquals(p, delivered, FailPolicy.onError(row, null, refreshedOnce = false, rowDelivered = true))
+            assertNotEquals(p, FailPolicy.Action.DEVICE, FailPolicy.onError(row, null, refreshedOnce = false, twinTried = true))
+        }
+        assertFalse(FailPolicy.hasDeviceTwin("vidrock"))
+        assertFalse(FailPolicy.hasDeviceTwin(null))
+    }
+
     @Test fun backOnlineRetriesAFailureReachedOffline() {
         assertTrue(FailPolicy.backOnlineRetries("failed", true))
         assertFalse(FailPolicy.backOnlineRetries("failed", false))

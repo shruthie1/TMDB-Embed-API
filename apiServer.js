@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const compression = require('compression');
 const os = require('os');
 const { config, saveConfigPatch, OVERRIDE_PATH } = require('./utils/config');
 const { requireAuth, getSession } = require('./utils/auth');
@@ -74,6 +75,14 @@ process.exit = function(code){
 };
 setImmediate(()=>console.log('[diagnostic] post-start setImmediate fired'));
 app.use(cors());
+// gzip JSON only (/api/streams answers are ~90 KB raw). m3u8 playlists, media
+// segments and HTML are left alone: the filter runs when headers go out and
+// passes nothing whose Content-Type is not JSON, so the proxy and hybrid
+// routes stream exactly as before.
+app.use(compression({
+  filter: (req, res) => /\bjson\b/i.test(String(res.getHeader('Content-Type') || ''))
+    && compression.filter(req, res),
+}));
 app.use(express.json());
 // Auth routes + login rate limiting live in routes/auth.js.
 registerAuthRoutes(app);
@@ -416,6 +425,18 @@ const SECONDARY_GRACE_MS = Number(process.env.SECONDARY_GRACE_MS) || 1500;
 // Once a preferred-language stream exists, how long the rest get before the
 // answer goes out without them. Short: they keep running in the background.
 const FIRST_ANSWER_GRACE_MS = Number(process.env.FIRST_ANSWER_GRACE_MS) || 400;
+// An early answer never goes out before this long after the request started.
+// The grace used to start after the castle gate, so a provider with a short
+// settle cap (multimovies, 2 s) missed the first answer by tens of ms on every
+// request (RRR 579974, 2026-11-21).
+const EARLY_ANSWER_FLOOR_MS = Number(process.env.EARLY_ANSWER_FLOOR_MS) || 2500;
+// Whole-request budget, from request start. Providers still running at the
+// budget go out as late (partial, no-store); ?full=1 waits for them. Without
+// it the castle gate, NetMirror and the breaker retry ran in series, each up
+// to the 20 s registry deadline, past the APK's 22 s call timeout.
+const REQUEST_BUDGET_MS = Number(process.env.REQUEST_BUDGET_MS) || 12000;
+// How long NetMirror waits for the castle gate before it starts anyway.
+const CASTLE_GATE_MAX_MS = Number(process.env.CASTLE_GATE_MAX_MS) || 3000;
 
 // Per-provider result caches, keyed provider|title. Separate from the breaker:
 // the breaker is about a provider's health, these are about one title.
@@ -748,6 +769,7 @@ function parseSeasonEpisode(query) {
 }
 
 app.get('/api/streams/:type/:tmdbId', async (req,res) => {
+  const reqT0 = Date.now();
   const { type, tmdbId } = req.params;
   if (!['movie','series'].includes(type)) return res.status(400).json({ success:false, error:'INVALID_TYPE' });
   // A TMDB id is always a positive integer. Without this, "notanumber" ran the
@@ -855,9 +877,25 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
     const early = new Map(selectedProviders
       .filter((name) => name !== GATE_PROVIDER && !GATED_BY_DEMUX.includes(name))
       .map((name) => [name, runProvider(name)]));
+    // The gate is capped at CASTLE_GATE_MAX_MS. A slower Castle joins the
+    // fan-out as an ordinary primary task and NetMirror starts at once.
+    let castleGate = null;
     if (selectedProviders.includes(GATE_PROVIDER)) {
-      castleStreams = await runProvider(GATE_PROVIDER);
-      demuxed = await buildCastleDemuxEntry(castleStreams, serverUrlEarly);
+      castleGate = (async () => {
+        const rows = await runProvider(GATE_PROVIDER);
+        return { rows, demux: await buildCastleDemuxEntry(rows, serverUrlEarly) };
+      })();
+      let gateTimer;
+      const gate = await Promise.race([castleGate,
+        new Promise((r) => { gateTimer = setTimeout(() => r(null), CASTLE_GATE_MAX_MS); })]);
+      clearTimeout(gateTimer);
+      if (gate) {
+        castleStreams = gate.rows;
+        demuxed = gate.demux;
+        castleGate = null;
+      } else {
+        console.log(`[api] castle-gate-cap ${GATE_PROVIDER} not done after ${CASTLE_GATE_MAX_MS}ms for ${tmdbId} - starting ${GATED_BY_DEMUX.join(', ')} anyway`);
+      }
       if (demuxed) {
         const covered = new RegExp(preferredLanguage, 'i')
           .test(`${demuxed.name || ''} ${demuxed.language || ''}`);
@@ -875,6 +913,7 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
       name !== GATE_PROVIDER && !(gateHolds && GATED_BY_DEMUX.includes(name)));
 
     const tasks = remaining.map((name) => ({ name, p: early.get(name) || runProvider(name) }));
+    if (castleGate) tasks.push({ name: GATE_PROVIDER, p: castleGate.then((g) => g.rows) });
     // Answer early once a stream in the preferred language is in hand: the
     // viewer can start, and everything still running fills providerHitCache
     // for the next request (the web app also asks NetMirror on its own after
@@ -893,31 +932,63 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
       if (gateHolds || hasPreferred(castleStreams)) foundPreferred(true);
       for (const x of tasks) x.p.then((r) => { if (hasPreferred(r)) foundPreferred(true); });
     }
+    const LATE = Symbol('late');
+    // ?full=1 has no budget: it is the follow-up that collects late rows.
+    // budgetFired: a timer can fire a millisecond before Date.now() agrees.
+    let budgetTimer;
+    let budgetFired = false;
+    const budgetOver = wantFull ? new Promise(() => {}) : new Promise((r) => {
+      budgetTimer = setTimeout(() => { budgetFired = true; r(LATE); },
+        Math.max(0, REQUEST_BUDGET_MS - (Date.now() - reqT0)));
+    });
+    const budgetSpent = () => !wantFull && (budgetFired || Date.now() - reqT0 >= REQUEST_BUDGET_MS);
     const answeredEarly = await Promise.race([
       Promise.all(tasks.filter((x) => primary(x.name)).map((x) => x.p)).then(() => false),
       preferredFound,
+      budgetOver.then(() => false),
     ]);
-    const LATE = Symbol('late');
     let grace;
-    const graceOver = new Promise((r) => {
-      grace = setTimeout(() => r(LATE), answeredEarly ? FIRST_ANSWER_GRACE_MS : SECONDARY_GRACE_MS);
-    });
+    // Early-answer grace counts from request start, with a floor, so the
+    // castle gate's time is not taken out of the other providers' time.
+    const graceMs = answeredEarly
+      ? Math.max(FIRST_ANSWER_GRACE_MS, EARLY_ANSWER_FLOOR_MS - (Date.now() - reqT0))
+      : SECONDARY_GRACE_MS;
+    const graceOver = Promise.race([budgetOver, new Promise((r) => {
+      grace = setTimeout(() => r(LATE), graceMs);
+    })]);
     let results = await Promise.all(tasks.map((x) =>
-      (primary(x.name) && !answeredEarly) ? x.p : Promise.race([x.p, graceOver])));
+      Promise.race([x.p, (primary(x.name) && !answeredEarly) ? budgetOver : graceOver])));
     clearTimeout(grace);
     const late = tasks.filter((x, i) => results[i] === LATE);
     results = results.map((r) => (r === LATE ? [] : r));
     if (late.length && castleStreams.length === 0 && results.every((r) => r.length === 0)) {
-      // Nothing yet: an answer with streams is worth waiting for.
-      const settled = await Promise.all(late.map((x) => x.p));
-      late.forEach((x, k) => { results[tasks.indexOf(x)] = settled[k]; });
+      // Nothing yet: an answer with streams is worth waiting for, up to the
+      // request budget.
+      const settled = await Promise.all(late.map((x) => Promise.race([x.p, budgetOver])));
+      const still = late.filter((x, k) => settled[k] === LATE);
+      late.forEach((x, k) => { if (settled[k] !== LATE) results[tasks.indexOf(x)] = settled[k]; });
       late.length = 0;
+      late.push(...still);
+    }
+    clearTimeout(budgetTimer);
+    if (budgetSpent() && late.length) {
+      console.log(`[api] request-budget spent after ${Date.now() - reqT0}ms for ${tmdbId}; late: ${late.map((x) => x.name).join(', ')}`);
+    }
+    // A Castle that missed the gate cap but answered in time still gets its
+    // demuxed audio menu.
+    const castleTask = tasks.find((x) => x.name === GATE_PROVIDER);
+    if (castleTask && castleGate && !late.includes(castleTask)) {
+      const g = await castleGate;
+      if (!demuxed) demuxed = g.demux;
     }
     for (const x of late) {
       providerTimings[x.name] = null;
       console.log(`[api] ${x.name} still running after grace for ${tmdbId}; its result will be cached for the next request`);
     }
-    if (castleStreams.length === 0 && results.every((r) => r.length === 0) && skippedByBreaker.length) {
+    if (castleStreams.length === 0 && results.every((r) => r.length === 0) && skippedByBreaker.length
+        && budgetSpent()) {
+      console.log(`[api] request-budget spent after ${Date.now() - reqT0}ms for ${tmdbId}; skipping breaker retry: ${skippedByBreaker.join(', ')}`);
+    } else if (castleStreams.length === 0 && results.every((r) => r.length === 0) && skippedByBreaker.length) {
       const retry = skippedByBreaker.splice(0);
       console.log(`[api] no streams for ${tmdbId}; retrying breaker-skipped providers: ${retry.join(', ')}`);
       if (retry.includes(GATE_PROVIDER)) {

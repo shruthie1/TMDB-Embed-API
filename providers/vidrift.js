@@ -131,9 +131,13 @@ const LABEL_LANG = {
     en: 'English', eng: 'English', english: 'English',
 };
 
+// "<lang> sub/subs/subbed/subtitles" carries the original audio with
+// subtitles, so it is never an audio language (same rule as
+// multimovies.js sourceLanguage and the APK VidriftResolver).
 function langName(raw) {
     const k = String(raw || '').trim();
     if (!k || /^(und|unk|mul|zxx|original)$/i.test(k)) return null;
+    if (/\bsub(s|bed|titles?)?$/i.test(k)) return null;
     return LABEL_LANG[k.toLowerCase()] || k;
 }
 

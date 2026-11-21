@@ -37,20 +37,40 @@ class StartRace(
             allDone = { device.all { it.isCompleted } })
     }
 
+    /**
+     * `extras` (first-play fix A): starts the VM-down-only device providers and
+     * returns their jobs. Called at most once, when the VM call fails or when the
+     * VM lead ends with no playable row in the viewer's language, whichever is
+     * first. Its jobs join the race like the others.
+     */
     @OptIn(ExperimentalCoroutinesApi::class)
-    suspend fun firstMany(backend: Deferred<List<Source>>?, device: List<Deferred<List<Source>>>, preferred: String): First =
-        firstReady(backend, preferred,
-            ready = { device.filter { it.isCompleted && !it.isCancelled }.flatMap { runCatching { it.getCompleted() }.getOrDefault(emptyList()) } },
-            allDone = { device.all { it.isCompleted } })
+    suspend fun firstMany(backend: Deferred<List<Source>>?, device: List<Deferred<List<Source>>>, preferred: String,
+                          extras: ((why: String) -> List<Deferred<List<Source>>>)? = null): First {
+        val jobs = device.toMutableList()
+        var started = false
+        fun startExtras(why: String) {
+            if (started || extras == null) return
+            started = true
+            jobs += extras(why)
+        }
+        return firstReady(backend, preferred,
+            ready = { jobs.filter { it.isCompleted && !it.isCancelled }.flatMap { runCatching { it.getCompleted() }.getOrDefault(emptyList()) } },
+            allDone = { jobs.all { it.isCompleted } },
+            onLeadNoGood = { startExtras("VM lead over, no ${preferred} row") },
+            onVmFailed = { startExtras("VM failed") })
+    }
 
-    private suspend fun firstReady(backend: Deferred<List<Source>>?, preferred: String, ready: () -> List<Source>, allDone: () -> Boolean): First {
+    private suspend fun firstReady(backend: Deferred<List<Source>>?, preferred: String, ready: () -> List<Source>, allDone: () -> Boolean,
+                                   onLeadNoGood: () -> Unit = {}, onVmFailed: () -> Unit = {}): First {
         val t0 = now()
         fun good(s: Source) = !s.unsupported && Ranking.tier(s, preferred) <= 2
 
         // 1. The VM's lead: wait for it, but never past VM_LEAD_MS when a device row can play.
         while (backend != null && !backend.isCompleted) {
             val r = ready()
-            if (now() - t0 >= leadMs && (r.any(::good) || (allDone() && r.isNotEmpty()))) {
+            val leadOver = now() - t0 >= leadMs
+            if (leadOver && !r.any(::good)) onLeadNoGood()
+            if (leadOver && (r.any(::good) || (allDone() && r.isNotEmpty()))) {
                 android.util.Log.i("Chitram", "[race] VM still out after ${now() - t0}ms: starting with ${r.size} device row(s)")
                 return First(emptyList(), null, r, backendPending = true)
             }
@@ -62,14 +82,16 @@ class StartRace(
             error = e
             emptyList()
         }
+        if (error != null) onVmFailed()
         // 2. Device rows: none needed when the VM gave a good row; else wait for a good one (or all, or the budget).
+        // A good device row ends the wait at once, even beside non-good VM rows: never hold for every job.
         val haveGood = rows.any(::good)
         val deadline = now() + when {
             haveGood -> 0L
             rows.isEmpty() -> waitMs
             else -> graceMs
         }
-        while (now() < deadline && !allDone() && !(rows.isEmpty() && ready().any(::good))) delay(POLL_MS)
+        while (now() < deadline && !allDone() && !ready().any(::good)) delay(POLL_MS)
         return First(rows, error, ready(), backendPending = false)
     }
 

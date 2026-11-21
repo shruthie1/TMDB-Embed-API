@@ -2,6 +2,7 @@ package com.chitram.app.resolve
 
 import com.chitram.app.data.KeyValue
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
@@ -12,7 +13,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
@@ -69,6 +69,21 @@ class MappleResolver(
         val fallbackAt = java.util.concurrent.atomic.AtomicLong()
     }
 
+    /**
+     * Early return (mapple-speed-2, RRR on CPH2447: 11.1 s of the 19.8 s was the
+     * wait behind a non-Telugu hit, and no Telugu front existed). With a [Later],
+     * the first playable front is returned at once and the race keeps looking for
+     * the preferred language in [scope], under the same betterWaitMaxMs cap.
+     * [deliver] gets that row (its own key, so both rows stay) or null, once.
+     * [handedOff] is set before resolve returns when a background search is live;
+     * when it is false after resolve returns or throws, nothing more will come and
+     * the caller completes its side with null. [deliver] must be idempotent
+     * (a CompletableDeferred.complete).
+     */
+    class Later(val scope: CoroutineScope, val deliver: (Resolved?) -> Unit) {
+        @Volatile var handedOff = false
+    }
+
     /** Per-resolve phase times for the timing log line. */
     private class Timing(val t0: Long) {
         var session = 0L; var media = 0L; var pow = 0L; var fronts = 0L; var wait = 0L
@@ -83,6 +98,7 @@ class MappleResolver(
     suspend fun resolve(
         cfg: MappleConfig, type: String, tmdbId: Long, season: Int = 0, episode: Int = 0,
         preferred: String = "Telugu", fresh: Boolean = false,
+        later: Later? = null,
     ): Resolved? {
         val mediaType = if (type == "tv" || type == "series") "tv" else "movie"
         val id = tmdbId.toString()
@@ -112,7 +128,7 @@ class MappleResolver(
                 mediaSession(cfg, http, s, mediaType, id, season, episode, tm)
             }
             tm.media = now() - m0 - retryBoot // a retry's bootstrap is counted under session
-            return sweep(cfg, s, token, mediaType, id, season, episode, preferred, tm).also { outcome = if (it == null) "none" else "ok" }
+            return sweep(cfg, s, token, mediaType, id, season, episode, preferred, tm, later).also { outcome = if (it == null) "none" else "ok" }
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) outcome = "cancelled"
             // A failed chain says nothing good about the session: next resolve starts clean.
@@ -194,9 +210,11 @@ class MappleResolver(
      * preferred audio language wins at
      * once; one without it (s25 gave Salaar with no audio list, s12 gave five
      * languages, Telugu first) is held for `betterWaitMs` while the other fronts
-     * finish, so the Telugu one is not lost to whichever answered first.
+     * finish, so the Telugu one is not lost to whichever answered first. With a
+     * [Later] it is returned at once instead and the hold runs in the background:
+     * a Telugu front found there arrives as a second row through [Later.deliver].
      */
-    private suspend fun sweep(cfg: MappleConfig, s: Session, token: String, type: String, id: String, season: Int, episode: Int, preferred: String, tm: Timing): Resolved? {
+    private suspend fun sweep(cfg: MappleConfig, s: Session, token: String, type: String, id: String, season: Int, episode: Int, preferred: String, tm: Timing, later: Later? = null): Resolved? {
         val plan = book.plan(cfg.fronts)
         val order = plan.order
         if (plan.last.isNotEmpty()) android.util.Log.i("Chitram", "mapple: failing fronts tried last: ${plan.last}")
@@ -211,8 +229,23 @@ class MappleResolver(
             raceFronts(
                 order, cfg.frontParallelism, cfg.betterWaitMs, cfg.betterWaitMaxMs,
                 wanted = { wanted(it.master) },
-                onFallback = { h, waitMs -> android.util.Log.i("Chitram", "mapple: ${h.front} has it without $preferred audio, waiting up to ${waitMs}ms for a better front") },
+                onFallback = { h, waitMs ->
+                    android.util.Log.i("Chitram", if (later != null) "mapple: ${h.front} has it without $preferred audio, playing it now; looking for $preferred for up to ${waitMs}ms in the background"
+                        else "mapple: ${h.front} has it without $preferred audio, waiting up to ${waitMs}ms for a better front")
+                },
                 stats = stats,
+                background = later?.scope,
+                onBetter = { better ->
+                    val ms = System.currentTimeMillis() - r0
+                    if (better == null) {
+                        if (later?.handedOff == true) android.util.Log.i("Chitram", "mapple: background $type/$id: no $preferred front after ${ms}ms, tried ${stats.started.get()}/${order.size}")
+                        later?.deliver?.invoke(null)
+                    } else {
+                        nextStoredFront(kv.get(KEY_FRONT), better.front, true)?.let { kv.put(KEY_FRONT, it) }
+                        android.util.Log.i("Chitram", "mapple: background $type/$id: $preferred on ${better.front} after ${ms}ms, ${better.master.audio.size} audio tracks, row added")
+                        later?.deliver?.invoke(toResolved(cfg, s, better, key = "$NAME-${better.front}"))
+                    }
+                },
             ) { front ->
                 val cap = cfg.frontTimeoutMs[front] ?: cfg.defaultFrontTimeoutMs
                 val r = try {
@@ -244,21 +277,27 @@ class MappleResolver(
             android.util.Log.i("Chitram", "mapple: no front has $type/$id")
             return null
         }
+        // A non-preferred first hit with a live background race: the race goes on after this return.
+        if (later != null && !wanted(hit.master)) later.handedOff = true
         // Remember a front that carried the preferred language; a language-less one only if nothing better is known.
         nextStoredFront(kv.get(KEY_FRONT), hit.front, wanted(hit.master))?.let { kv.put(KEY_FRONT, it) }
         tm.on = hit.front
         android.util.Log.i("Chitram", "mapple: $type/$id on ${hit.front}, ${hit.master.audio.size} audio tracks")
-        return Resolved(
-            provider = NAME,
-            label = if (hit.front == "mapple") "mapple" else "mapple · ${hit.front}",
-            url = hit.url,
-            headers = streamHeaders(cfg, s.base),
-            segmentToken = null,
-            audio = hit.master.audio,
-            levels = hit.master.levels,
-            codecs = hit.master.codecs,
-        )
+        return toResolved(cfg, s, hit, key = null)
     }
+
+    /** `key` null keeps the row id "device-mapple"; a background row gets its own key so both rows stay. */
+    private fun toResolved(cfg: MappleConfig, s: Session, hit: Hit, key: String?) = Resolved(
+        provider = NAME,
+        label = if (hit.front == "mapple") "mapple" else "mapple · ${hit.front}",
+        url = hit.url,
+        headers = streamHeaders(cfg, s.base),
+        segmentToken = null,
+        audio = hit.master.audio,
+        levels = hit.master.levels,
+        codecs = hit.master.codecs,
+        key = key,
+    )
 
     private sealed interface FrontResult {
         data object NotHere : FrontResult
@@ -354,33 +393,88 @@ class MappleResolver(
             wanted: (T) -> Boolean,
             onFallback: (T, Long) -> Unit = { _, _ -> },
             stats: RaceStats? = null,
+            /**
+             * Early return (mapple-speed-2): the first hit of any kind is returned at
+             * once and the race keeps running in this scope for a `wanted` one, under
+             * the same wait cap. null = the old blocking race.
+             */
+            background: CoroutineScope? = null,
+            /**
+             * With [background]: called exactly once when the background race ends:
+             * the `wanted` hit found after an early non-wanted return, else null
+             * (none found, nothing left to look for, or cancelled).
+             */
+            onBetter: (T?) -> Unit = {},
             attempt: suspend (String) -> T?,
-        ): T? = coroutineScope {
-            val scope = this
-            val sem = Semaphore(parallelism.coerceAtLeast(1))
+        ): T? {
+            if (background == null) return coroutineScope {
+                val done = CompletableDeferred<T?>()
+                startFronts(this, order, parallelism, maxOf(betterWaitMs, betterWaitMaxMs), wanted, onFallback, stats, null, done, attempt)
+                val h = done.await()
+                coroutineContext.job.children.forEach { it.cancel() }
+                h
+            }
+            val first = CompletableDeferred<T?>()
             val done = CompletableDeferred<T?>()
-            val fallback = java.util.concurrent.atomic.AtomicReference<T?>(null)
-            val waitMs = maxOf(betterWaitMs, betterWaitMaxMs)
-            val jobs = order.map { front ->
-                launch {
-                    sem.withPermit {
-                        if (done.isCompleted) return@withPermit
-                        stats?.started?.incrementAndGet()
-                        val r = attempt(front) ?: return@withPermit
-                        if (wanted(r)) done.complete(r)
-                        else if (fallback.compareAndSet(null, r)) {
-                            stats?.fallbackAt?.set(System.currentTimeMillis())
-                            onFallback(r, waitMs)
-                            // In the outer scope: a child of this front's job would hold joinAll open.
-                            scope.launch { kotlinx.coroutines.delay(waitMs); done.complete(fallback.get()) }
-                        }
-                    }
+            val told = java.util.concurrent.atomic.AtomicBoolean(false)
+            val best = java.util.concurrent.atomic.AtomicReference<T?>(null)
+            val race = background.launch {
+                coroutineScope {
+                    startFronts(this, order, parallelism, maxOf(betterWaitMs, betterWaitMaxMs), wanted, onFallback, stats, first, done, attempt)
+                    val end = done.await()
+                    // Only a wanted hit that came after the early return is "better".
+                    // `first` is always complete here: it is set before `done` on every path.
+                    if (end != null && wanted(end) && first.await() !== end) best.set(end)
+                    coroutineContext.job.children.forEach { it.cancel() }
                 }
             }
-            launch { jobs.joinAll(); done.complete(fallback.get()) }
-            val h = done.await()
-            coroutineContext.job.children.forEach { it.cancel() }
-            h
+            race.invokeOnCompletion {
+                first.complete(null)
+                if (told.compareAndSet(false, true)) onBetter(best.get())
+            }
+            val f = try { first.await() } catch (e: kotlinx.coroutines.CancellationException) { race.cancel(); throw e }
+            // A wanted first hit, or no hit at all: nothing more to look for.
+            if (f == null || wanted(f)) race.cancel()
+            return f
+        }
+
+        /**
+         * The race itself, in [scope]. `first` (optional) gets the first hit of any
+         * kind, or null when every front settled without one; `done` gets the
+         * wanted hit, or the fallback after `waitMs` / when every front settled.
+         */
+        private fun <T : Any> startFronts(
+            scope: CoroutineScope, order: List<String>, parallelism: Int, waitMs: Long,
+            wanted: (T) -> Boolean, onFallback: (T, Long) -> Unit, stats: RaceStats?,
+            first: CompletableDeferred<T?>?, done: CompletableDeferred<T?>,
+            attempt: suspend (String) -> T?,
+        ) {
+            val sem = Semaphore(parallelism.coerceAtLeast(1))
+            val fallback = java.util.concurrent.atomic.AtomicReference<T?>(null)
+            // One loop takes the slots in plan order, so the FrontBook order holds on a
+            // multi-threaded dispatcher too (13 coroutines racing for permits did not).
+            scope.launch {
+                val jobs = ArrayList<kotlinx.coroutines.Job>()
+                for (front in order) {
+                    sem.acquire()
+                    if (done.isCompleted) { sem.release(); break }
+                    stats?.started?.incrementAndGet()
+                    jobs += scope.launch {
+                        try {
+                            val r = attempt(front) ?: return@launch
+                            first?.complete(r)
+                            if (wanted(r)) done.complete(r)
+                            else if (fallback.compareAndSet(null, r)) {
+                                stats?.fallbackAt?.set(System.currentTimeMillis())
+                                onFallback(r, waitMs)
+                                // In the outer scope: a child of this front's job would hold joinAll open.
+                                scope.launch { kotlinx.coroutines.delay(waitMs); done.complete(fallback.get()) }
+                            }
+                        } finally { sem.release() }
+                    }
+                }
+                jobs.joinAll(); first?.complete(null); done.complete(fallback.get())
+            }
         }
 
         fun streamHeaders(cfg: MappleConfig, base: String) = mapOf("User-Agent" to cfg.userAgent, "Referer" to "$base/", "Origin" to base)

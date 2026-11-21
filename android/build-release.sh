@@ -7,8 +7,10 @@ export JAVA_HOME="${JAVA_HOME:-/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/
 export CHITRAM_KEYSTORE="${CHITRAM_KEYSTORE:-$HOME/Documents/Projects/local/chitram-android/release.jks}"
 CHITRAM_KS_PASS="$(security find-generic-password -s chitram-apk-sign -w)"
 export CHITRAM_KS_PASS
-# One APK for phone and TV: square icon + wide banner serve both (the Fire TV
-# launcher draws the banner, not the icon).
+# One APK for phone and TV. The Fire OS 6 home row draws the Appstore's copy of
+# mipmap/ic_launcher, not the banner. FireTvIconTest guards those resources.
+# After `adb install -r` the Appstore deletes that copy (its PACKAGE_REPLACED bug),
+# so the tile goes blank. Repair: see firetv-icon-rca.md in .superpowers/sdd.
 ./gradlew --no-daemon testReleaseUnitTest assembleRelease "$@"
 version="$(sed -n 's/.*versionName = "\(.*\)".*/\1/p' app/build.gradle.kts)"
 out="$HOME/Documents/Projects/local/chitram-android/Chitram-${version}.apk"

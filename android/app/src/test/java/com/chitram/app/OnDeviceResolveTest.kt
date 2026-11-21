@@ -320,6 +320,77 @@ class OnDeviceResolveTest {
         assertTrue("took ${System.currentTimeMillis() - t0}ms", System.currentTimeMillis() - t0 < 3000)
     }
 
+    /** OnDeviceResolver on the fake site with this mapple config served at /api/resolve-config. */
+    private fun deviceOn(mappleJson: String): OnDeviceResolver {
+        val local = server.url("/")
+        val routed = client.newBuilder().addInterceptor { ch ->
+            val u = ch.request().url
+            ch.proceed(if (u.host == "mapple.test") ch.request().newBuilder().url(u.newBuilder().scheme("http").host(local.host).port(local.port).build()).build() else ch.request())
+        }.build()
+        val inner = server.dispatcher
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse =
+                if (request.requestUrl!!.encodedPath == ResolveConfigStore.PATH) json("""{"mapple":$mappleJson}""")
+                else inner.dispatch(request)
+        }
+        val kv = MemoryKeyValue()
+        val hosts = HostBook(kv)
+        val store = ResolveConfigStore(routed, base + ResolveConfigStore.PATH, kv)
+        return OnDeviceResolver(null, store, MappleResolver(routed, hosts, kv), VaplayerResolver(routed, hosts) { null }, { _, _ -> null })
+    }
+
+    /**
+     * mapple-speed-2 (RRR on CPH2447: 11.1 s of 19.8 s was the wait behind a
+     * non-Telugu front). The first playable front is a row at once; a Telugu
+     * front found later joins as its own row, never replacing the first.
+     */
+    @Test fun mappleFirstFrontPlaysAtOnceAndTeluguJoinsAsItsOwnRow() = runBlocking {
+        mappleSite(hasOn = setOf("s4", "s12"), bare = setOf("s4"), frontDelayMs = mapOf("s12" to 2000L))
+        val od = deviceOn("""{"bases":["https://mapple.test"],"fronts":["s4","s12"],"frontParallelism":2,"betterWaitMs":2500,"betterWaitMaxMs":12000}""")
+        val late = kotlinx.coroutines.CompletableDeferred<List<Source>>()
+        val t0 = System.currentTimeMillis()
+        val jobs = od.launchAll(this, "movie", 1, 0, 0, noCodecs, late = late)
+        val first = jobs[0].await()
+        val firstMs = System.currentTimeMillis() - t0
+        assertEquals(listOf("device-mapple"), first.map { it.id })
+        assertEquals("$base/m/s4/master.m3u8", first.single().url)
+        assertTrue("first row in ${firstMs}ms, before s12's 2000 ms", firstMs < 1800)
+        assertFalse("Telugu still being looked for", late.isCompleted)
+
+        val more = kotlinx.coroutines.withTimeout(6000) { late.await() }
+        assertEquals(listOf("device-mapple-s12"), more.map { it.id })
+        assertEquals("$base/m/s12/master.m3u8", more.single().url)
+        assertEquals("mapple · s12", more.single().label)
+        // Audio and language info intact.
+        assertEquals(listOf("Telugu", "Hindi"), more.single().languages)
+        assertEquals(listOf("Telugu", "Hindi"), more.single().audioLanguages)
+        // Both rows kept; Telugu ranks first.
+        val ranked = Ranking.merge(first, more, "Telugu")
+        assertEquals(listOf("device-mapple-s12", "device-mapple"), ranked.map { it.id })
+    }
+
+    @Test fun mappleNoTeluguFrontNoLongerHoldsTheFirstRow() = runBlocking {
+        // RRR: one front has it with no audio list, the others are not there (slowly).
+        mappleSite(hasOn = setOf("s4"), bare = setOf("s4"), frontDelayMs = mapOf("s12" to 2500L))
+        val od = deviceOn("""{"bases":["https://mapple.test"],"fronts":["s4","s12"],"frontParallelism":2,"betterWaitMs":2500,"betterWaitMaxMs":12000}""")
+        val late = kotlinx.coroutines.CompletableDeferred<List<Source>>()
+        val t0 = System.currentTimeMillis()
+        val first = od.launchAll(this, "movie", 1, 0, 0, noCodecs, late = late)[0].await()
+        val firstMs = System.currentTimeMillis() - t0
+        assertEquals("$base/m/s4/master.m3u8", first.single().url)
+        assertTrue("first row in ${firstMs}ms, not after s12 settles", firstMs < 2000)
+        assertEquals(emptyList<Source>(), kotlinx.coroutines.withTimeout(6000) { late.await() })
+    }
+
+    @Test fun mappleTeluguFirstFrontNeedsNoBackgroundRow() = runBlocking {
+        mappleSite(hasOn = setOf("s12", "s4"), bare = setOf("s4"), frontDelayMs = mapOf("s4" to 3000L))
+        val od = deviceOn("""{"bases":["https://mapple.test"],"fronts":["s12","s4"],"frontParallelism":2}""")
+        val late = kotlinx.coroutines.CompletableDeferred<List<Source>>()
+        val first = od.launchAll(this, "movie", 1, 0, 0, noCodecs, late = late)[0].await()
+        assertEquals("$base/m/s12/master.m3u8", first.single().url)
+        assertEquals(emptyList<Source>(), kotlinx.coroutines.withTimeout(1000) { late.await() })
+    }
+
     @Test fun breakerOpensAfterThreeFailuresAndFreshBypassesIt() = runBlocking {
         var sessionUp = false
         mappleSite(sessionOk = { sessionUp })

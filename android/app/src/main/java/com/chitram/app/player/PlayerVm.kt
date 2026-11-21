@@ -171,6 +171,13 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     /** On-device resolves still running after the first source started; they join late. */
     private var lateJobs: List<Job> = emptyList()
     private var deviceJobs: List<Deferred<List<Source>>> = emptyList()
+    /**
+     * mapple-speed-2: mapple's background search for the preferred language after
+     * it returned a non-preferred front at once; [deviceLate] gets that row (or
+     * nothing). Same life as [deviceJobs].
+     */
+    private var deviceBg: Job? = null
+    private var deviceLate: Deferred<List<Source>>? = null
     /** OnDeviceResolver names of [deviceJobs], same order. */
     private var deviceNames: List<String> = emptyList()
     /** The VM /api/streams call of this start (null when the breaker skipped it). */
@@ -191,6 +198,9 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
      * and not identity (recordAudio replaces `current` with a copy).
      */
     private var framedThisPlay = false
+    /** First-play timing (fix D): master / variant / seg0 logged once per play(), first frame once per tap. */
+    private val loadMarks = LoadMarks()
+    private var firstFrameLogged = false
     private var directJob: Job? = null
     /** H13: the Telugu row merged under the playing picture, or null. */
     var pairedAudio by mutableStateOf<Source?>(null); private set
@@ -268,7 +278,14 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                 if (state == Player.STATE_ENDED) onEnded()
             }
             override fun onVideoSizeChanged(size: VideoSize) { videoSize = size }
-            override fun onRenderedFirstFrame() { framedThisPlay = true; directJob?.cancel(); markFramed() }
+            override fun onRenderedFirstFrame() {
+                framedThisPlay = true; directJob?.cancel(); markFramed()
+                if (!firstFrameLogged && requestedAt > 0) {
+                    firstFrameLogged = true
+                    val now = System.currentTimeMillis()
+                    android.util.Log.i("Chitram", firstFrameLine(now - requestedAt, current?.provider, now - playStartedAt))
+                }
+            }
             override fun onCues(cueGroup: CueGroup) { cues = cueGroup.cues.joinToString("\n") { Mojibake.fix(it.text?.toString() ?: "") }.trim() }
             override fun onTracksChanged(t: Tracks) { tracks = t; recordAudio(t); if (pairedAudio != null && !pairFused) applyPair(t) else pickPreferredAudio(t); if (landed) current?.let { snapshotCtx(it) } }
             override fun onPlayerError(error: PlaybackException) { handleError(error) }
@@ -281,6 +298,14 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                 error: java.io.IOException,
                 wasCanceled: Boolean,
             ) { if (!wasCanceled) onLoadFailed(loadEventInfo.uri.toString(), error) }
+            override fun onLoadCompleted(
+                eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+                loadEventInfo: androidx.media3.exoplayer.source.LoadEventInfo,
+                mediaLoadData: androidx.media3.exoplayer.source.MediaLoadData,
+            ) {
+                val kind = loadMarks.mark(mediaLoadData.dataType) ?: return
+                android.util.Log.i("Chitram", loadLine(kind, loadEventInfo.loadDurationMs, System.currentTimeMillis() - playStartedAt, loadEventInfo.uri.toString()))
+            }
         })
         viewModelScope.launch {
             var n = 0
@@ -403,6 +428,8 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         ctxLang = null
         ctxHeight = null
         requestedAt = System.currentTimeMillis()
+        firstFrameLogged = false
+        android.util.Log.i("Chitram", startLine(r.type, r.id, r.season, r.episode, requestedAt))
         resetStart()
         subs = emptyList()
         subsJob?.cancel()
@@ -427,6 +454,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         if (!keep) {
             lateJobs.forEach { it.cancel() }
             deviceJobs.forEach { it.cancel() }
+            deviceBg?.cancel()
             twins = emptyMap()
         }
         player.stop()
@@ -446,7 +474,15 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             // VM breaker open: no VM call, MultiMovies, showsst and OneTouchTV resolve on the device instead.
             val vmDown = !g.api.vmUp
             val names = g.onDevice.names(vmDown)
-            val device = if (keep) deviceJobs else g.onDevice.launchAll(viewModelScope, r.type, r.id, r.season, r.episode, g.codecs, preferred, r.title, vmDown, r.originalLang).also { d ->
+            val device = if (keep) deviceJobs else {
+                val bg = kotlinx.coroutines.SupervisorJob(viewModelScope.coroutineContext[Job])
+                val late = kotlinx.coroutines.CompletableDeferred<List<Source>>()
+                deviceBg = bg
+                deviceLate = late
+                g.onDevice.launchAll(viewModelScope, r.type, r.id, r.season, r.episode, g.codecs, preferred, r.title, vmDown, r.originalLang,
+                    late = late, lateScope = kotlinx.coroutines.CoroutineScope(viewModelScope.coroutineContext + bg))
+            }.also { d ->
+                if (keep) return@also
                 deviceNames = names
                 d.zip(names).forEach { (job, n) -> watchCheck(job, n, t0) }
             }
@@ -463,7 +499,10 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             }
             vmJob = vm
             if (vm == null) android.util.Log.i("Chitram", "[vm] paused: starting from device rows only")
-            val first = StartRace().firstMany(vm, device, preferred)
+            // Fix A: VM-down-only providers start once the VM fails or its lead ends with no row in the viewer's language.
+            val first = StartRace().firstMany(vm, device, preferred, extras = if (vm == null) null else { why ->
+                startVmDownJobs(r, preferred, t0, vmDownExtras(g.onDevice.names(vmDown = true), g.onDevice.names(vmDown = false), deviceNames), why)
+            })
             val backend = first.backend
             val backendError = first.backendError
             if (!first.backendPending) {
@@ -478,7 +517,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             if (firstListSize == 0) firstListSize = list.size
             listReady = true
             // Include jobs completing between the initial snapshot and listener setup.
-            lateJobs = device.map { d -> viewModelScope.launch { joinLate(r, d, preferred, pin, manualPin) } } +
+            lateJobs = (deviceJobs + listOfNotNull(deviceLate)).map { d -> viewModelScope.launch { joinLate(r, d, preferred, pin, manualPin) } } +
                 listOfNotNull(vm?.takeIf { first.backendPending }?.let { j -> viewModelScope.launch { joinVm(r, j, preferred, pin, manualPin, t0, wantsFull) } })
             if (!first.backendPending && backendError == null && wantsFull.get()) followFull(r, preferred, pin, manualPin)
             if (sources.isEmpty() && isOffline()) {
@@ -507,16 +546,24 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
 
     /**
      * The VM is down or failed: start every VM-down-only on-device provider
-     * (MultiMovies, showsst, OneTouchTV) not already running, once per start.
+     * (MultiMovies, showsst, OneTouchTV, Vidrift) not already running, once per start.
      * Each joins late on its own; nothing here waits, so the first row is not delayed.
      */
     private fun launchVmDownOnly(r: PlayRequest, preferred: String, pin: String?, manualPin: Boolean, t0: Long) {
-        for (n in vmDownExtras(g.onDevice.names(vmDown = true), g.onDevice.names(vmDown = false), deviceNames)) {
+        for (d in startVmDownJobs(r, preferred, t0, vmDownExtras(g.onDevice.names(vmDown = true), g.onDevice.names(vmDown = false), deviceNames), "VM failed after start")) {
+            lateJobs = lateJobs + viewModelScope.launch { joinLate(r, d, preferred, pin, manualPin) }
+        }
+    }
+
+    /** Starts [names] on the device (each recorded in deviceNames, so never twice) and returns their jobs. */
+    private fun startVmDownJobs(r: PlayRequest, preferred: String, t0: Long, names: List<String>, why: String): List<Deferred<List<Source>>> {
+        if (names.isNotEmpty()) android.util.Log.i("Chitram", "[race] $why: starting ${names.joinToString(",")} on device after ${System.currentTimeMillis() - t0}ms")
+        return names.map { n ->
             deviceNames = deviceNames + n
             val d = viewModelScope.async { g.onDevice.resolveAll(n, r.type, r.id, r.season, r.episode, g.codecs, preferred, title = r.title, originalLang = r.originalLang) }
             deviceJobs = deviceJobs + d
             watchCheck(d, n, t0)
-            lateJobs = lateJobs + viewModelScope.launch { joinLate(r, d, preferred, pin, manualPin) }
+            d
         }
     }
 
@@ -578,6 +625,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         if (row.directUrl != null) android.util.Log.i("Chitram", DirectRoute.logLine(if (DirectRoute.isDirect(s)) "direct" else "proxy", s,
             "reason=" + if (DirectRoute.isDirect(s)) "config-direct" else "direct-failed-before"))
         framedThisPlay = false
+        loadMarks.reset()
         directJob?.cancel()
         // Another picture replaces the run's: no late donor answer may land on it.
         if (pairAudio == null) runEffects(journey.otherPicture(s.id))
@@ -1214,6 +1262,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         resolveJob?.cancel()
         lateJobs.forEach { it.cancel() }
         deviceJobs.forEach { it.cancel() }
+        deviceBg?.cancel()
         vmJob?.cancel()
         fullJob?.cancel()
         guardJob?.cancel()
@@ -1523,11 +1572,19 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         const val OFFLINE_TEXT = "You're offline. Playback will resume when the connection returns."
 
         /** After the backend answers, how long on-device rows may still join the first ranking. */
+        /** Fix D log lines. Greppable prefixes: `play: start`, `play: master`, `play: variant`, `play: seg0`, `play: first-frame total=`. */
+        internal fun startLine(type: String, id: Long, season: Int, episode: Int, atMs: Long): String =
+            "play: start $type/$id" + (if (type == "tv") " s${season}e$episode" else "") + " at=$atMs"
+        internal fun loadLine(kind: String, loadMs: Long, sincePlayMs: Long, uri: String): String =
+            "play: $kind ${loadMs}ms (+${sincePlayMs}ms since play) ${DirectRoute.host(uri)}${uri.substringAfter("://").substringAfter('/', "").substringBefore('?').let { if (it.isEmpty()) "" else "/" + it.takeLast(48) }}"
+        internal fun firstFrameLine(totalMs: Long, provider: String?, sincePlayMs: Long): String =
+            "play: first-frame total=${totalMs}ms provider=${provider ?: "?"} sincePlay=${sincePlayMs}ms"
+
         /** VM-down-only names ([down] minus [up]) not yet started ([running]), in [down] order. */
         internal fun vmDownExtras(down: List<String>, up: List<String>, running: List<String>): List<String> =
             down.filter { it !in up && it !in running }
 
-        private val CHECK_LABELS = mapOf("mapple" to "Mapple", "vaplayer" to "VaPlayer", "castletv" to "CastleTV", "multimovies" to "MultiMovies", "netmirror" to "NetMirror", "showsst" to "showsst", "onetouchtv" to "OneTouchTV")
+        private val CHECK_LABELS = mapOf("mapple" to "Mapple", "vaplayer" to "VaPlayer", "castletv" to "CastleTV", "multimovies" to "MultiMovies", "netmirror" to "NetMirror", "showsst" to "showsst", "onetouchtv" to "OneTouchTV", "vidrift" to "Vidrift")
         const val DEVICE_GRACE_MS = 3_000L
         /** When the backend gave nothing: wait for on-device rows up to their own budgets. */
         const val DEVICE_WAIT_MS = 30_000L
@@ -1654,4 +1711,21 @@ private class NoKeyframeSkipVideoRenderer(
     selector: MediaCodecSelector, joiningMs: Long, fallback: Boolean, handler: android.os.Handler, listener: VideoRendererEventListener,
 ) : MediaCodecVideoRenderer(context, factory, selector, joiningMs, fallback, handler, listener, DefaultRenderersFactory.MAX_DROPPED_VIDEO_FRAME_COUNT_TO_NOTIFY) {
     public override fun shouldDropBuffersToKeyframe(earlyUs: Long, elapsedRealtimeUs: Long, isLastBuffer: Boolean): Boolean = false
+}
+
+/**
+ * Fix D: names the first loads of one play(). HLS: the first manifest is the
+ * master, the second a variant (or audio) playlist; the first media or init
+ * load is seg0. Each name is given once until [reset].
+ */
+internal class LoadMarks {
+    private var manifests = 0
+    private var seg0 = false
+    fun reset() { manifests = 0; seg0 = false }
+    fun mark(dataType: Int): String? = when (dataType) {
+        androidx.media3.common.C.DATA_TYPE_MANIFEST -> when (++manifests) { 1 -> "master"; 2 -> "variant"; else -> null }
+        androidx.media3.common.C.DATA_TYPE_MEDIA, androidx.media3.common.C.DATA_TYPE_MEDIA_INITIALIZATION ->
+            if (seg0) null else { seg0 = true; "seg0" }
+        else -> null
+    }
 }

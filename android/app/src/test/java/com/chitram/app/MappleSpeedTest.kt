@@ -222,6 +222,112 @@ class MappleSpeedTest {
         assertTrue(stats.fallbackAt.get() > 0)
     }
 
+    // ---- early return + background Telugu (mapple-speed-2) --------------------
+
+    /**
+     * Phone log 2026-11-21 20:37 IST, CPH2447, APK 1.2.42, RRR (movie/579974), race
+     * start to settle, scaled 1/10: s25 8890 ms, mapple 8015 ms, s2 3990 ms, s28 1680 ms
+     * failed; s27 answered 2000 ms after it started, no Telugu (0 audio tracks); the
+     * other 8 fronts failed or were not there, the last at 18.8 s.
+     */
+    private val rrr = mapOf("s25" to 889L, "mapple" to 802L, "s2" to 399L, "s28" to 168L, "s27" to 200L)
+    private val rrrOrder = MappleConfig().fronts
+
+    private suspend fun rrrRace(parallel: Int, bg: kotlinx.coroutines.CoroutineScope?, onBetter: (String?) -> Unit = {}): String? =
+        MappleResolver.raceFronts<String>(rrrOrder, parallel, 250, 1200, wanted = { false }, background = bg, onBetter = onBetter) { f ->
+            delay(rrr[f] ?: 300L)
+            f.takeIf { it == "s27" }
+        }
+
+    @Test fun rrrReplayFirstRowNoLongerWaitsForAbsentTelugu() = runBlocking {
+        var t0 = System.currentTimeMillis()
+        assertEquals("s27", rrrRace(3, null))
+        val blocking = System.currentTimeMillis() - t0
+
+        val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default)
+        val better = kotlinx.coroutines.CompletableDeferred<String?>()
+        t0 = System.currentTimeMillis()
+        assertEquals("s27", rrrRace(3, scope) { better.complete(it) })
+        val early3 = System.currentTimeMillis() - t0
+        assertNull("no Telugu front: nothing more", kotlinx.coroutines.withTimeout(5000) { better.await() })
+
+        t0 = System.currentTimeMillis()
+        assertEquals("s27", rrrRace(4, scope))
+        val early4 = System.currentTimeMillis() - t0
+        println("RRR-REPLAY blocking=${blocking}ms early3=${early3}ms early4=${early4}ms (x10 = device ms)")
+        // Log: fronts 7673 ms then wait 11130 ms. Early: s27's own 767 ms (scaled); parallel 4 starts s27 at s28's end, about 368 ms.
+        assertTrue("blocking $blocking", blocking >= 1500)
+        assertTrue("early3 $early3", early3 in 700..1200)
+        assertTrue("early4 $early4", early4 in 330..700)
+        scope.coroutineContext[kotlinx.coroutines.Job]!!.cancel()
+    }
+
+    @Test fun earlyRaceReturnsFirstHitAndHandsTeluguToTheBackground() = runBlocking {
+        val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default)
+        val better = kotlinx.coroutines.CompletableDeferred<Pair<String, Boolean>?>()
+        val t0 = System.currentTimeMillis()
+        val r = MappleResolver.raceFronts<Pair<String, Boolean>>(
+            listOf("s27", "s7", "s8"), 3, 2500, 12000, wanted = { it.second }, background = scope, onBetter = { better.complete(it) },
+        ) { f ->
+            when (f) {
+                "s27" -> { delay(50); f to false }
+                "s7" -> { delay(800); f to true }
+                else -> { delay(5000); null }
+            }
+        }
+        val took = System.currentTimeMillis() - t0
+        assertEquals("s27" to false, r)
+        assertTrue("first row in ${took}ms", took < 600)
+        assertEquals("s7" to true, kotlinx.coroutines.withTimeout(3000) { better.await() })
+        // The Telugu hit ends the background race: s8 (5 s) does not hold it.
+        assertTrue("background ended in ${System.currentTimeMillis() - t0}ms", System.currentTimeMillis() - t0 < 2000)
+        scope.coroutineContext[kotlinx.coroutines.Job]!!.cancel()
+    }
+
+    @Test fun earlyRaceWithTeluguFirstStopsEverythingAndTellsNull() = runBlocking {
+        val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default)
+        val better = kotlinx.coroutines.CompletableDeferred<Pair<String, Boolean>?>()
+        val finished = java.util.concurrent.atomic.AtomicInteger()
+        val r = MappleResolver.raceFronts<Pair<String, Boolean>>(
+            listOf("s7", "s8"), 2, 2500, 12000, wanted = { it.second }, background = scope, onBetter = { better.complete(it) },
+        ) { f ->
+            if (f == "s7") { delay(50); f to true } else { delay(3000); finished.incrementAndGet(); null }
+        }
+        assertEquals("s7" to true, r)
+        assertNull(kotlinx.coroutines.withTimeout(1000) { better.await() })
+        delay(3200)
+        assertEquals("slow front cancelled", 0, finished.get())
+        scope.coroutineContext[kotlinx.coroutines.Job]!!.cancel()
+    }
+
+    @Test fun earlyRaceCancelledBeforeAnyHitStopsTheRaceAndTellsNull() = runBlocking {
+        val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default)
+        val better = kotlinx.coroutines.CompletableDeferred<String?>()
+        val finished = java.util.concurrent.atomic.AtomicInteger()
+        val r = kotlinx.coroutines.withTimeoutOrNull(200) {
+            MappleResolver.raceFronts<String>(listOf("a", "b"), 2, 100, 100, wanted = { true }, background = scope, onBetter = { better.complete(it) }) { f ->
+                delay(1500); finished.incrementAndGet(); f
+            }
+        }
+        assertNull(r)
+        assertNull(kotlinx.coroutines.withTimeout(1000) { better.await() })
+        delay(1600)
+        assertEquals("race cancelled with its caller", 0, finished.get())
+        scope.coroutineContext[kotlinx.coroutines.Job]!!.cancel()
+    }
+
+    @Test fun earlyRaceKeepsTheSameTeluguCapAsTheBlockingRace() = runBlocking {
+        // Telugu after the cap (betterWaitMaxMs) is not delivered, as in the blocking race.
+        val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default)
+        val better = kotlinx.coroutines.CompletableDeferred<Pair<String, Boolean>?>()
+        val r = MappleResolver.raceFronts<Pair<String, Boolean>>(
+            listOf("s27", "s7"), 2, 100, 300, wanted = { it.second }, background = scope, onBetter = { better.complete(it) },
+        ) { f -> if (f == "s27") { delay(20); f to false } else { delay(2000); f to true } }
+        assertEquals("s27" to false, r)
+        assertNull(kotlinx.coroutines.withTimeout(1500) { better.await() })
+        scope.coroutineContext[kotlinx.coroutines.Job]!!.cancel()
+    }
+
     @Test fun defaultParallelismCoversTheSlowFirstWave() {
         // s25, s2, s28 carry 22-25s caps; with 3 slots they could hold every slot.
         // 4, not more: the rate limit from one home IP is unmeasured (coordinator ruling 2026-11-21).

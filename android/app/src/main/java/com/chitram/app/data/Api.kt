@@ -1,6 +1,7 @@
 package com.chitram.app.data
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -83,6 +84,8 @@ class Api(
     private val vm: VmHealth? = null,
     private val streamsCallTimeoutMs: Long = STREAMS_CALL_TIMEOUT_MS,
     private val streamsFullTimeoutMs: Long = STREAMS_FULL_TIMEOUT_MS,
+    /** Fix C: no response headers from /api/streams in this long sends a second call on a fresh connection. */
+    private val streamsHedgeMs: Long = STREAMS_HEDGE_MS,
 ) {
     /** False while the VM breaker is open (paused after failures): no VM call would go out. */
     val vmUp: Boolean get() = vm?.allow() != false
@@ -135,6 +138,8 @@ class Api(
         const val STREAMS_CALL_TIMEOUT_MS = 22_000L
         /** A9 follow-up, same as web/lib/backend.js. */
         const val STREAMS_FULL_TIMEOUT_MS = 60_000L
+        /** Fix C: all 3 measured VM answers had headers in 1.1-3.1 s (first-play-slow.md). */
+        const val STREAMS_HEDGE_MS = 6_000L
         const val IMG = "https://image.tmdb.org/t/p"
         /** Phone card and detail poster: 112-104 dp x 3 = 312-336 px; w500 leaves headroom (owner 2026-11-21). */
         const val POSTER_PHONE = "w500"
@@ -241,7 +246,7 @@ class Api(
     private suspend fun get(path: String): String =
         call(if (isCatalogPath(path)) catalogClient else client, request(path))
 
-    private suspend fun call(c: OkHttpClient, req: Request): String {
+    private suspend fun call(c: OkHttpClient, req: Request, onHeaders: (() -> Unit)? = null): String {
         val call = c.newCall(req)
         return withContext(Dispatchers.IO) {
             suspendCancellableCoroutine { cont ->
@@ -249,6 +254,7 @@ class Api(
                 call.enqueue(object : Callback {
                     override fun onFailure(call: Call, e: IOException) { cont.resumeWithException(e) }
                     override fun onResponse(call: Call, response: Response) {
+                        onHeaders?.invoke()
                         response.use {
                             if (!it.isSuccessful) cont.resumeWithException(HttpException(it.code))
                             else try { cont.resume(it.body!!.string()) } catch (e: IOException) { cont.resumeWithException(e) }
@@ -413,7 +419,7 @@ class Api(
         var retried = false
         while (true) {
             try {
-                val body = call(vmClient, noStore(vmBase + path))
+                val body = hedged(vmClient, noStore(vmBase + path), streamsHedgeMs)
                 h?.onSuccess()
                 return json.decodeFromString(StreamsResponse.serializer(), body)
             } catch (e: IOException) {
@@ -426,6 +432,42 @@ class Api(
                 android.util.Log.i("Chitram", "[vm] streams failed: ${e.javaClass.simpleName} ${e.message}")
                 throw e
             }
+        }
+    }
+
+    /**
+     * Fix C: an idempotent GET that has no response headers after [hedgeMs] is
+     * sent again on a fresh connection (its own pool, inside the same overall
+     * call timeout); the first success wins and the other call is cancelled.
+     * Both failing throws the last error. Anything but a GET is sent once.
+     */
+    internal suspend fun hedged(c: OkHttpClient, req: Request, hedgeMs: Long): String {
+        if (req.method != "GET" || hedgeMs <= 0) return call(c, req)
+        return kotlinx.coroutines.coroutineScope {
+            val heads = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val first = async { runCatching { call(c, req) { heads.complete(Unit) } } }
+            val answered = kotlinx.coroutines.withTimeoutOrNull(hedgeMs) {
+                kotlinx.coroutines.selects.select<Unit> { heads.onAwait {}; first.onAwait {} }
+            }
+            if (answered != null) return@coroutineScope first.await().getOrThrow()
+            android.util.Log.i("Chitram", "[vm] no response headers in ${hedgeMs}ms: hedging ${req.url.encodedPath} on a fresh connection")
+            val fresh = c.newBuilder().connectionPool(okhttp3.ConnectionPool())
+                .callTimeout((c.callTimeoutMillis - hedgeMs).coerceAtLeast(1_000), TimeUnit.MILLISECONDS).build()
+            val second = async { runCatching { call(fresh, req) } }
+            val (won, other, label) = kotlinx.coroutines.selects.select<Triple<Result<String>, kotlinx.coroutines.Deferred<Result<String>>, String>> {
+                first.onAwait { Triple(it, second, "first") }
+                second.onAwait { Triple(it, first, "hedge") }
+            }
+            if (won.isSuccess) {
+                other.cancel()
+                fresh.connectionPool.evictAll()
+                android.util.Log.i("Chitram", "[vm] hedge: $label call answered first")
+                return@coroutineScope won.getOrThrow()
+            }
+            val last = other.await()
+            fresh.connectionPool.evictAll()
+            android.util.Log.i("Chitram", "[vm] hedge: ${if (last.isSuccess) "${if (label == "first") "hedge" else "first"} call answered" else "both calls failed"}")
+            last.getOrThrow()
         }
     }
 
@@ -446,7 +488,11 @@ internal class SlowCallLog : okhttp3.EventListener() {
     private var dnsMs = -1L
     private var connAt = 0L
     private var connMs = -1L
+    private var headersMs = -1L
+    private var bodyMs = -1L
     override fun callStart(call: okhttp3.Call) { t0 = System.nanoTime() }
+    override fun responseHeadersEnd(call: okhttp3.Call, response: Response) { headersMs = (System.nanoTime() - t0) / 1_000_000 }
+    override fun responseBodyEnd(call: okhttp3.Call, byteCount: Long) { bodyMs = (System.nanoTime() - t0) / 1_000_000 }
     override fun dnsStart(call: okhttp3.Call, domainName: String) { dnsAt = System.nanoTime() }
     override fun dnsEnd(call: okhttp3.Call, domainName: String, inetAddressList: List<java.net.InetAddress>) { dnsMs = (System.nanoTime() - dnsAt) / 1_000_000 }
     override fun connectStart(call: okhttp3.Call, inetSocketAddress: java.net.InetSocketAddress, proxy: java.net.Proxy) { connAt = System.nanoTime() }
@@ -459,6 +505,12 @@ internal class SlowCallLog : okhttp3.EventListener() {
         val u = call.request().url
         // Video segments are long by nature: log them only when the network setup itself was slow.
         if (!u.encodedPath.startsWith("/api/") && how == "ok" && dnsMs < 1000 && connMs < 1000) return
-        android.util.Log.i("Chitram", "slow http: ${u.host}${u.encodedPath.take(60)} $how in ${ms}ms (dns ${dnsMs}ms, connect ${connMs}ms)")
+        android.util.Log.i("Chitram", line(u.host + u.encodedPath.take(60), how, ms, dnsMs, connMs, headersMs, bodyMs))
+    }
+
+    companion object {
+        /** Fix B: headers and body are end times since call start, -1 when not reached (headers-late vs body-stall). */
+        internal fun line(target: String, how: String, ms: Long, dnsMs: Long, connMs: Long, headersMs: Long, bodyMs: Long) =
+            "slow http: $target $how in ${ms}ms (dns ${dnsMs}ms, connect ${connMs}ms, headers ${headersMs}ms, body ${bodyMs}ms)"
     }
 }

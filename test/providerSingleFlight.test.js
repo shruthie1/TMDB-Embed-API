@@ -88,7 +88,7 @@ test('the per-provider route joins a NetMirror fetch the aggregate already start
 test('a partial answer is no-store, and ?full=1 joins the late provider instead of restarting it', async () => {
     plan[4004] = {
         castletv: async () => [stream('CastleTV', 'Telugu')],
-        mapple: async () => { await sleep(1500); return [stream('Mapple', 'English')]; },
+        mapple: async () => { await sleep(3500); return [stream('Mapple', 'English')]; },
     };
     const first = await get('/api/streams/movie/4004');
     assert.equal(first.d.partial, true);

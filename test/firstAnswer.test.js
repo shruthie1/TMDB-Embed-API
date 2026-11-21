@@ -77,7 +77,8 @@ test('answers once a Telugu stream exists, without waiting for a slow NetMirror'
     };
     const first = await get(3001);
     console.log(`[measure] telugu-early first answer ${first.ms}ms`);
-    assert.ok(first.ms < 1500, `first answer took ${first.ms}ms`);
+    // EARLY_ANSWER_FLOOR_MS (2500) from request start; NetMirror ends ~3300.
+    assert.ok(first.ms < 3000, `first answer took ${first.ms}ms`);
     assert.deepEqual(first.d.streams.map((s) => s.provider), ['CastleTV']);
     assert.equal(first.d.partial, true, 'an early answer is flagged so clients do not cache it');
     await sleep(3000);
@@ -95,7 +96,7 @@ test('providers Castle does not gate start alongside Castle, not after it', asyn
     };
     const first = await get(3002);
     console.log(`[measure] concurrent-gate first answer ${first.ms}ms`);
-    assert.ok(first.ms < 1800, `first answer took ${first.ms}ms`);
+    assert.ok(first.ms < 3000, `first answer took ${first.ms}ms`);
     assert.ok(first.d.streams.some((s) => s.provider === 'OneTouchTV'));
 });
 
@@ -108,6 +109,22 @@ test('with no Telugu stream yet it still waits for the primaries (no silent lang
     console.log(`[measure] no-telugu first answer ${first.ms}ms`);
     assert.ok(first.d.streams.some((s) => s.provider === 'NetMirror' && s.languages.includes('Telugu')),
         'the Telugu NetMirror row must be in the first answer');
+});
+
+// RRR 579974, 2026-11-21: the 400 ms grace started after the castle gate, so
+// multimovies (2 s settle cap) missed the first answer on every request. The
+// grace now runs from request start with a 2500 ms floor.
+test('early-answer grace has a 2500 ms floor from request start, so a 2 s provider makes the first answer', async () => {
+    plan[3004] = {
+        castletv: async () => { await sleep(400); return [stream('CastleTV', 'Telugu')]; },
+        onetouchtv: async () => { await sleep(2000); return [stream('OneTouchTV', 'Hindi')]; },
+        netmirror: async () => { await sleep(5000); return []; },
+    };
+    const first = await get(3004);
+    console.log(`[measure] grace-floor first answer ${first.ms}ms`);
+    assert.ok(first.ms >= 2400 && first.ms < 3200, `first answer took ${first.ms}ms`);
+    assert.ok(first.d.streams.some((s) => s.provider === 'OneTouchTV'), 'the 2 s provider is in the first answer');
+    assert.equal(first.d.partial, true, 'NetMirror is still running, so the answer is partial');
 });
 
 test('makes no outbound network call', () => {

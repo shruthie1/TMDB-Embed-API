@@ -334,6 +334,21 @@ test('R1: knownLanguage covers 2- and 3-letter Indian codes', () => {
     for (const [k, v] of Object.entries(want)) assert.equal(knownLanguage(k), v, k);
 });
 
+test('"<lang> sub/subs/subbed/subtitles" is never an audio language (multimovies and APK rule)', () => {
+    for (const l of ['Telugu Sub', 'Telugu subs', 'Hindi Subbed', 'English subtitles', 'Tamil SUB']) {
+        assert.deepEqual(vidrift.pageLanguage({ name: `Orion · ${l}` }, 'te'), { language: null, label: null }, l);
+    }
+    assert.equal(vidrift.pageLanguage({ name: 'Orion · Telugu' }, null).language, 'Telugu');
+    assert.equal(vidrift.pageLanguage({ name: 'Orion · Bangla' }, null).language, 'Bengali');
+    assert.equal(vidrift.pageLanguage({ name: 'Orion · Subramanian' }, null).language, 'Subramanian');
+});
+
+test('a muxed master under a "Telugu Sub" page label: row has no audio language', () => {
+    const n = normaliseStream(vidrift.streamFromMaster({ name: 'Orion · Telugu Sub' }, MASTER_NO_AUDIO, MURL, BASE, 'te'));
+    assert.ok(!(n.languages || []).includes('Telugu Sub'), JSON.stringify(n.languages));
+    assert.ok(!(n.languages || []).includes('Telugu'), JSON.stringify(n.languages));
+});
+
 test('tv embed path', () => {
     assert.equal(vidrift.embedUrl(BASE, '1396', 'tv', 2, 3), `${BASE}/embed/tv/1396/2/3`);
     assert.equal(vidrift.embedUrl(BASE, '579974', 'movie'), `${BASE}/embed/movie/579974`);
