@@ -14,6 +14,7 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.C
+import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.MimeTypes
@@ -71,7 +72,8 @@ data class PlayRequest(
     val runtimeMin: Int? = null,
 )
 
-data class MenuItem(val key: String, val label: String, val detail: String = "", val selected: Boolean = false, val dim: Boolean = false)
+/** [group]: a sheet sub-heading ("In this stream" / "Other servers"); rows with the same group sit under one label. */
+data class MenuItem(val key: String, val label: String, val detail: String = "", val selected: Boolean = false, val dim: Boolean = false, val group: String = "")
 
 class PlayerVm(app: Application) : AndroidViewModel(app) {
     private val g = app as App
@@ -1028,34 +1030,10 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
 
     private fun groups(type: Int) = tracks.groups.filter { it.type == type }
 
-    fun audioItems(): List<MenuItem> {
-        val out = ArrayList<MenuItem>()
-        val names = HashSet<String>()
-        groups(C.TRACK_TYPE_AUDIO).forEachIndexed { gi, gr ->
-            for (i in 0 until gr.length) {
-                if (!gr.isTrackSupported(i)) continue
-                val f = gr.getTrackFormat(i)
-                // HLS renditions are often named just "Audio"; prefer a language.
-                val name = langName(f.language) ?: f.label?.takeUnless { it.equals("audio", true) || it.isBlank() }
-                    ?: current?.let { LoadingModel.langOf(it, desiredAudio()) } ?: "Default"
-                if (!names.add(name.lowercase())) continue
-                val count = AudioChoice.candidates(sources, name).size
-                out += MenuItem("trk:$gi:$i", name, "in this stream" + if (count > 1) " · $count streams" else "", gr.isTrackSelected(i))
-            }
-        }
-        // Tracks not known yet: name the language that will play, not the row's first (A8).
-        if (out.isEmpty()) current?.let { LoadingModel.langOf(it, g.prefs.preferredAudio()) }?.let { names += it.lowercase(); out += MenuItem("cur", it, "this server", true) }
-        // Key per language, not per source: one selectable-audio source (a Castle
-        // demux row) offers several languages, so a bare src:<id> key repeats and
-        // the audio LazyColumn throws "Key already used". Mirrors web trackChoices
-        // (src:<id>:<lang>). choose() reads the id from p[1], so the :lang tail is
-        // for uniqueness only. (Crash: Kubera, CastleTV-0 twice, 2026-11-21.)
-        for ((lang, rows) in AudioChoice.index(sources)) {
-            if (lang.lowercase() in names) continue
-            out += MenuItem("lang:$lang", lang, "${rows.size} streams · tries available servers")
-        }
-        return out
-    }
+    fun audioItems(): List<MenuItem> =
+        audioMenu(groups(C.TRACK_TYPE_AUDIO), sources, current,
+            unnamed = current?.let { LoadingModel.langOf(it, desiredAudio()) },
+            curLang = current?.let { LoadingModel.langOf(it, g.prefs.preferredAudio()) })
 
     fun qualityItems(): List<MenuItem> {
         val video = groups(C.TRACK_TYPE_VIDEO)
@@ -1072,17 +1050,8 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         return out
     }
 
-    fun subtitleItems(): List<MenuItem> {
-        val disabled = C.TRACK_TYPE_TEXT in player.trackSelectionParameters.disabledTrackTypes
-        val out = arrayListOf(MenuItem("sub:off", "Off", "", disabled))
-        groups(C.TRACK_TYPE_TEXT).forEachIndexed { gi, gr ->
-            for (i in 0 until gr.length) {
-                val f = gr.getTrackFormat(i)
-                out += MenuItem("sub:$gi:$i", f.label ?: langName(f.language) ?: "Subtitles", "", !disabled && gr.isTrackSelected(i))
-            }
-        }
-        return out
-    }
+    fun subtitleItems(): List<MenuItem> =
+        subtitleMenu(groups(C.TRACK_TYPE_TEXT), C.TRACK_TYPE_TEXT in player.trackSelectionParameters.disabledTrackTypes)
 
     fun choose(key: String) {
         val p = key.split(":")
@@ -1092,7 +1061,10 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                 val all = AudioChoice.candidates(sources, language)
                 if (all.isEmpty()) { notice = "No playable $language stream found yet."; return }
                 if (AudioChoice.candidates(sources, language, tried).isEmpty()) all.forEach { tried.remove(it.id) }
-                val next = AudioChoice.candidates(sources, language, tried).firstOrNull() ?: return
+                // A1: the playing source with no track in this language cannot
+                // switch anything; go to another server or say there is none.
+                val next = nextForLanguage(AudioChoice.candidates(sources, language, tried), all, current?.id, carries(groups(C.TRACK_TYPE_AUDIO), language))
+                if (next == null) { notice = "No other $language stream found"; return }
                 languageFallback = current?.let { Triple(it, selectedAudioLanguage ?: ctxLang, player.currentPosition.coerceAtLeast(0)) }
                 languageTrial = language
                 selectedAudioLanguage = language
@@ -1185,6 +1157,74 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                 .setArtworkUri((Api.image(r.backdrop, "w780") ?: Api.image(r.poster, "w342"))?.let(Uri::parse))
                 .setMediaType(if (r.type == "tv") MediaMetadata.MEDIA_TYPE_TV_SHOW else MediaMetadata.MEDIA_TYPE_MOVIE)
                 .build()
+        }
+
+        const val IN_STREAM = "In this stream"
+        const val OTHER_SERVERS = "Other servers"
+
+        private fun known(f: Format): String? =
+            langName(f.language) ?: f.label?.takeIf(AudioChoice::knownLanguage)?.let { com.chitram.app.data.Ranking.languageLabel(it) ?: it }
+
+        /** True when the tracks are not known yet, or a supported track is in [language]. */
+        internal fun carries(audio: List<Tracks.Group>, language: String): Boolean {
+            if (audio.isEmpty()) return true
+            val want = com.chitram.app.data.Ranking.languageLabel(language) ?: language
+            return audio.any { gr -> (0 until gr.length).any { i -> gr.isTrackSupported(i) && known(gr.getTrackFormat(i))?.equals(want, true) == true } }
+        }
+
+        /** Next source for a language pick. The playing source only when it [currentCarries] the language (A1). */
+        internal fun nextForLanguage(pool: List<Source>, all: List<Source>, currentId: String?, currentCarries: Boolean): Source? {
+            val first = pool.firstOrNull()
+            if (first != null && (first.id != currentId || currentCarries)) return first
+            return pool.firstOrNull { it.id != currentId } ?: all.firstOrNull { it.id != currentId && !it.unsupported }
+        }
+
+        /**
+         * Audio sheet. [unnamed] names a track with no language (the row's language);
+         * [curLang] is the row shown while tracks are not known yet. A language
+         * whose only server is the playing one is left out once its tracks are
+         * known: picking it could change nothing (A1).
+         */
+        internal fun audioMenu(audio: List<Tracks.Group>, sources: List<Source>, current: Source?, unnamed: String?, curLang: String?): List<MenuItem> {
+            val out = ArrayList<MenuItem>()
+            val names = HashSet<String>()
+            audio.forEachIndexed { gi, gr ->
+                for (i in 0 until gr.length) {
+                    if (!gr.isTrackSupported(i)) continue
+                    val f = gr.getTrackFormat(i)
+                    // HLS renditions are often named just "Audio"; prefer a language.
+                    val name = langName(f.language) ?: f.label?.takeUnless { it.equals("audio", true) || it.isBlank() } ?: unnamed ?: "Default"
+                    if (!names.add(name.lowercase())) continue
+                    val count = AudioChoice.candidates(sources, name).size
+                    out += MenuItem("trk:$gi:$i", name, if (count > 1) "$count streams" else "", gr.isTrackSelected(i), group = IN_STREAM)
+                }
+            }
+            // Tracks not known yet: name the language that will play, not the row's first (A8).
+            if (out.isEmpty()) curLang?.let { names += it.lowercase(); out += MenuItem("cur", it, "this server", true, group = IN_STREAM) }
+            // Key per language, not per source: one selectable-audio source (a Castle
+            // demux row) offers several languages, so a bare src:<id> key repeats and
+            // the audio LazyColumn throws "Key already used". (Kubera, 2026-11-21.)
+            val known = audio.isNotEmpty()
+            for ((lang, rows) in AudioChoice.index(sources)) {
+                if (lang.lowercase() in names) continue
+                val n = rows.count { !it.unsupported && (!known || it.id != current?.id) }
+                if (n == 0) continue
+                out += MenuItem("lang:$lang", lang, if (n == 1) "1 stream" else "$n streams", group = OTHER_SERVERS)
+            }
+            return out
+        }
+
+        /** Subtitle sheet: unsupported tracks are left out, like audio and quality (A3). */
+        internal fun subtitleMenu(text: List<Tracks.Group>, disabled: Boolean): List<MenuItem> {
+            val out = arrayListOf(MenuItem("sub:off", "Off", "", disabled))
+            text.forEachIndexed { gi, gr ->
+                for (i in 0 until gr.length) {
+                    if (!gr.isTrackSupported(i)) continue
+                    val f = gr.getTrackFormat(i)
+                    out += MenuItem("sub:$gi:$i", f.label ?: langName(f.language) ?: "Subtitles", "", !disabled && gr.isTrackSelected(i))
+                }
+            }
+            return out
         }
 
         private val ISO = mapOf("telugu" to "te", "tamil" to "ta", "hindi" to "hi", "malayalam" to "ml", "kannada" to "kn", "english" to "en")

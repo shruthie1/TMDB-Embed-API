@@ -3051,7 +3051,12 @@ html .pctl-scrub:focus-visible,html .sync-bar:focus-visible{outline:none}
   display:inline-block;font-size:13px;font-weight:var(--weight-medium);color:var(--color-text-secondary);
   max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
 }
-@media (max-width:639px){ .pctl-row > .pmenu-wrap > .pctl-pick-btn .pctl-pick-badge{display:none} }
+@media (max-width:639px){
+  .pctl-row > .pmenu-wrap > .pctl-pick-btn .pctl-pick-badge{display:none}
+  /* Portrait: icon-only, so centre it in a 38px box like the other icon
+     buttons; the open highlight sat with ~20px empty on the icon's right. */
+  .pctl-row > .pmenu-wrap > .pctl-pick-btn{justify-content:center;min-width:38px;padding:0}
+}
 .pctl-pick-chev{display:none}
 
 /* ── Player menus: dark glass, not a solid slab ─────────────────────────────
@@ -3205,27 +3210,36 @@ html .pctl-scrub:focus-visible,html .sync-bar:focus-visible{outline:none}
 [data-tv="true"] .ov-load-panel{width:min(560px,60vw)}
 
 /* Shared player menu surfaces. These rules never size the player or controls. */
-.pmenu-unified{width:296px;max-width:calc(100vw - 24px);padding:0;display:flex;flex-direction:column;overflow:hidden}
-.pmenu-picker-head{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3);min-height:52px}
+.pmenu-unified{width:272px;max-width:calc(100vw - 24px);padding:0;display:flex;flex-direction:column;overflow:hidden}
+.pmenu-picker-head{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3);min-height:44px}
 .pmenu-heading{display:flex;align-items:center;gap:var(--space-2);font-size:var(--text-sm);font-weight:var(--weight-medium)}
 .pmenu-picker-head .icon-btn,.pmenu-sheet-head .icon-btn{min-width:44px;min-height:44px}
 .pmenu-picker-body{min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:var(--space-1-5)}
-.pmenu .pmenu-item{min-height:48px;padding:var(--space-2) var(--space-3);gap:var(--space-3)}
+.pmenu .pmenu-item{min-height:44px;padding:var(--space-1-5) var(--space-3);gap:var(--space-2-5)}
+.pmenu .pmenu-item:active{background:rgb(var(--rgb-white) / .12)}
+.pmenu-group{margin:var(--space-2) var(--space-3) var(--space-1);font-size:var(--text-xs);font-weight:var(--weight-medium);color:var(--color-text-muted)}
+.pmenu-group:first-child{margin-top:var(--space-1)}
 .pmenu-marker{width:18px;flex:0 0 18px;display:flex;align-items:center;justify-content:center;color:var(--color-text-primary)}
-.pmenu-copy{display:flex;flex:1;min-width:0;flex-direction:column;gap:var(--space-1);align-items:stretch}
+.pmenu-copy{display:flex;flex:1;min-width:0;flex-direction:column;gap:var(--space-0-5);align-items:stretch}
 .pmenu-copy .pmenu-text{flex:none;display:block;font-size:var(--text-sm);line-height:1.4}
-.pmenu-copy .pmenu-meta{margin:0;white-space:normal;overflow-wrap:anywhere;font-size:var(--text-xs);line-height:1.4}
-.pmenu-item.on{background:var(--color-fill-1)}
+.pmenu-copy .pmenu-meta{margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:var(--text-xs);line-height:1.4}
+.pmenu-item.on{background:var(--color-fill-2)}
 .pmenu-item:focus-visible{outline:var(--focus-ring);outline-offset:calc(-1 * var(--focus-offset))}
 .sheet-picks .pmenu-unified{width:auto;max-width:none;overflow:visible}
 .sheet-picks .pmenu-picker-head{display:none}
 .sheet-picks .pmenu-picker-body{overflow:visible;padding:0}
 @media (max-width:639px){
   .pctl .pmenu-unified,.embed-stage .pmenu-unified{
-    position:fixed;left:0;right:0;bottom:0;top:auto;width:auto;max-width:none;max-height:70svh;
+    position:fixed;left:0;right:0;bottom:0;top:auto;width:auto;max-width:none;max-height:min(60svh,420px);
     border-radius:var(--radius-lg) var(--radius-lg) 0 0;border-bottom:0;
   }
+  /* Drag handle: says "bottom sheet" at a glance. */
+  .pctl .pmenu-unified::before,.embed-stage .pmenu-unified::before{
+    content:"";flex:none;align-self:center;width:36px;height:4px;margin-top:var(--space-1-5);
+    border-radius:var(--radius-full,999px);background:rgb(var(--rgb-white) / .24);
+  }
   .pctl .sheet-picks .pmenu-unified{position:static;max-height:none;border:0;border-radius:0}
+  .pctl .sheet-picks .pmenu-unified::before{content:none}
   .pmenu-unified .pmenu-picker-body{padding-bottom:calc(var(--space-3) + var(--safe-b))}
 }
 @media (pointer:coarse) and (max-height:500px) and (min-width:640px){

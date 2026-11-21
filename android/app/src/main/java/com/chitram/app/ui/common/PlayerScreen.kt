@@ -60,6 +60,7 @@ import com.chitram.app.player.LoadingModel
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -336,13 +337,15 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
             MenuPanel(m, shown, isTv, titleOverride = if (m == Menu.Server) serverProvider else null,
                 onUp = if (m == Menu.Server && serverProvider != null) ({ serverProvider = null }) else null,
                 onClose = { menu = null }, onPick = { key ->
-                    when {
-                        key.startsWith("group:") -> {
+                    when (menuTap(shown.firstOrNull { it.key == key })) {
+                        MenuTap.Drill -> {
                             serverProvider = key.removePrefix("group:")
                             if (serverProvider.equals("netmirror", true) && vm.serverItems(serverProvider).isEmpty()) vm.checkNetmirror()
                         }
-                        key == "check:netmirror" -> vm.checkNetmirror()
-                        else -> { vm.choose(key); menu = null }
+                        MenuTap.Check -> vm.checkNetmirror()
+                        // A2: the selected row is already playing; just close.
+                        MenuTap.Close -> menu = null
+                        MenuTap.Choose -> { vm.choose(key); menu = null }
                     }
                     poke()
                 })
@@ -775,17 +778,20 @@ private fun MenuPanel(menu: Menu, items: List<MenuItem>, isTv: Boolean, titleOve
                 .clip(shape).background(Tok.surfaceSolid).border(1.dp, Tok.border, shape)
                 .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { }
                 .windowInsetsPadding(WindowInsets.displayCutout)
-                .padding(top = if (isTv) 24.dp else 4.dp),
+                .padding(top = if (isTv) 24.dp else 0.dp),
         ) {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (layout.bottomSheet) Box(Modifier.fillMaxWidth().padding(top = 6.dp), contentAlignment = Alignment.Center) {
+                Box(Modifier.width(36.dp).height(4.dp).clip(Tok.pill).background(Tok.fill3))
+            }
+            Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 if (onUp != null) Box(Modifier.size(44.dp).clickable(onClick = onUp).semantics { contentDescription = "Back to servers" }, contentAlignment = Alignment.Center) {
                     Icon(Glyphs.back, contentDescription = null, tint = Tok.text, modifier = Modifier.size(20.dp))
                 }
-                Icon(icon, contentDescription = null, tint = Tok.textSecondary, modifier = Modifier.padding(start = 8.dp).size(20.dp))
-                BasicText(title, style = TextStyle(color = Tok.text, fontSize = if (isTv) 20.sp else 16.sp, fontWeight = FontWeight.SemiBold), modifier = Modifier.weight(1f).padding(horizontal = 12.dp))
+                Icon(icon, contentDescription = null, tint = Tok.textSecondary, modifier = Modifier.padding(start = 4.dp).size(18.dp))
+                BasicText(title, style = TextStyle(color = Tok.text, fontSize = if (isTv) 20.sp else 15.sp, fontWeight = FontWeight.SemiBold), modifier = Modifier.weight(1f).padding(horizontal = 10.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
                 val closeSource = remember { MutableInteractionSource() }
                 val closeFocused by closeSource.collectIsFocusedAsState()
-                Box(Modifier.size(48.dp).controlFocus(closeFocused, Tok.radiusMd)
+                Box(Modifier.size(if (isTv) 48.dp else 44.dp).controlFocus(closeFocused, Tok.radiusMd)
                     .clickable(interactionSource = closeSource, indication = null, onClick = onClose)
                     .semantics { contentDescription = "Close $title" }, contentAlignment = Alignment.Center) {
                     Icon(Glyphs.close, contentDescription = null, tint = if (closeFocused) Focus.ink else Tok.text, modifier = Modifier.size(20.dp))
@@ -793,31 +799,36 @@ private fun MenuPanel(menu: Menu, items: List<MenuItem>, isTv: Boolean, titleOve
             }
             Box(Modifier.fillMaxWidth().height(1.dp).background(Tok.fill2))
             if (items.isEmpty()) BasicText("Nothing to choose here.", style = TextStyle(color = Tok.textMuted, fontSize = 14.sp), modifier = Modifier.padding(24.dp))
-            LazyColumn(Modifier.fillMaxWidth().weight(1f, fill = false).padding(horizontal = 8.dp, vertical = 4.dp), state = listState) {
+            LazyColumn(Modifier.fillMaxWidth().weight(1f, fill = false).padding(horizontal = 6.dp, vertical = 4.dp), state = listState) {
                 itemsIndexed(items, key = { _, it -> it.key }) { i, item ->
                     val src = remember { MutableInteractionSource() }
                     val focused by src.collectIsFocusedAsState()
+                    // Audio rows sit under "In this stream" / "Other servers".
+                    if (item.group.isNotEmpty() && (i == 0 || items[i - 1].group != item.group)) BasicText(item.group,
+                        style = TextStyle(color = Tok.textMuted, fontSize = if (isTv) 13.sp else 11.sp, fontWeight = FontWeight.Medium),
+                        modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = if (i == 0) 4.dp else 10.dp, bottom = 2.dp))
                     Row(
-                        Modifier.fillMaxWidth().padding(vertical = 2.dp)
+                        Modifier.fillMaxWidth().padding(vertical = if (isTv) 2.dp else 0.dp)
                             .then(if (i == start) Modifier.focusRequester(first) else Modifier)
                             .controlFocus(focused, Tok.radiusMd, lift = false)
                             .clip(Tok.radiusMd)
-                            .background(if (focused) Focus.fill else if (item.selected) Tok.fill1 else Color.Transparent)
-                            .clickable(interactionSource = src, indication = null) { onPick(item.key) }
+                            .background(if (focused) Focus.fill else if (item.selected) Tok.fill2 else Color.Transparent)
+                            // Press feedback on touch only; TV keeps the white focus fill.
+                            .clickable(interactionSource = src, indication = if (isTv) null else ripple(color = Color.White)) { onPick(item.key) }
                             .semantics { stateDescription = if (item.selected) "Selected" else "Not selected" }
-                            .heightIn(min = if (isTv) 56.dp else 48.dp)
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                            .heightIn(min = if (isTv) 56.dp else 44.dp)
+                            .padding(horizontal = 12.dp, vertical = if (isTv) 10.dp else 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Box(Modifier.size(20.dp), contentAlignment = Alignment.Center) {
-                            if (item.selected) Icon(Glyphs.check, contentDescription = "Selected", tint = if (focused) Focus.ink else Tok.text, modifier = Modifier.size(18.dp))
+                        Box(Modifier.size(if (isTv) 20.dp else 18.dp), contentAlignment = Alignment.Center) {
+                            if (item.selected) Icon(Glyphs.check, contentDescription = "Selected", tint = if (focused) Focus.ink else Tok.text, modifier = Modifier.size(if (isTv) 18.dp else 16.dp))
                         }
-                        Spacer(Modifier.width(12.dp))
+                        Spacer(Modifier.width(if (isTv) 12.dp else 10.dp))
                         Column(Modifier.weight(1f)) {
-                            BasicText(item.label, style = TextStyle(color = if (focused) Focus.ink else if (item.dim) Tok.textDim else Tok.text, fontSize = if (isTv) 18.sp else 16.sp))
-                            if (item.detail.isNotEmpty()) BasicText(item.detail, style = TextStyle(color = if (focused) Focus.ink.copy(alpha = 0.7f) else Tok.textMuted, fontSize = if (isTv) 14.sp else 12.sp), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            BasicText(item.label, style = TextStyle(color = if (focused) Focus.ink else if (item.dim) Tok.textDim else Tok.text, fontSize = if (isTv) 18.sp else 15.sp,
+                                fontWeight = if (item.selected) FontWeight.Medium else FontWeight.Normal), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            if (item.detail.isNotEmpty()) BasicText(item.detail, style = TextStyle(color = if (focused) Focus.ink.copy(alpha = 0.7f) else Tok.textMuted, fontSize = if (isTv) 14.sp else 12.sp), maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
-
                     }
                 }
             }

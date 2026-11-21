@@ -100,7 +100,7 @@ export default function VideoMenu({
           ))}
           {provider && providerRows.map(c => {
             const i = choices.indexOf(c);
-            return <MenuRow key={c.id ?? i} label={labels[i]} meta={[c.source?.netmirrorCatalog, maxOf(c), sourceAudioLanguages(c.source).join(', ')].filter(Boolean).join(' · ')} selected={i === selectedIndex} dim={c.unsupported} onClick={() => onPick?.(c)} />;
+            return <MenuRow key={`${c.id}-${i}`} label={labels[i]} meta={[c.source?.netmirrorCatalog, maxOf(c), sourceAudioLanguages(c.source).join(', ')].filter(Boolean).join(' · ')} selected={i === selectedIndex} dim={c.unsupported} onClick={() => onPick?.(c)} />;
           })}
           {provider && !providerRows.length && <p className="pmenu-note">No streams found in current results.</p>}
           {(incomplete || isNetmirror) && onCheckSources && (

@@ -10,12 +10,22 @@ import { audioOptions } from '../lib/player/audioOptions';
 import { videoChoices, audioChoices, pairingFor, videoIdOf } from '../lib/player/trackChoices';
 import { SIZES } from '../lib/subtitles';
 
-// How long the settings sheet stays open with no interaction. Short, because
-// it covers the picture; any action inside it restarts the clock.
-const SHEET_IDLE_MS = 3000;
-// A remote is slower than a pointer: reading a row and pressing Down took
-// longer than 3s, and the sheet closed under the viewer's thumb.
+// How long the settings sheet stays open with no interaction; any action
+// inside it restarts the clock. 3s was too short everywhere: a remote needs
+// longer to read a row and press Down, and on a phone a tap after 3s landed on
+// the video because the sheet had already closed under the thumb.
+const SHEET_IDLE_MS = 10000;
 const SHEET_IDLE_TV_MS = 10000;
+
+/**
+ * Idle close in ms, or null for none. A touch screen (coarse pointer) keeps a
+ * picker open until the viewer closes it: a tap outside does that already,
+ * and a timed close only turned slow taps into taps on the picture (W1).
+ */
+export function sheetIdleMs({ tv, coarse }) {
+  if (tv) return SHEET_IDLE_TV_MS;
+  return coarse ? null : SHEET_IDLE_MS;
+}
 
 const fmt = (s) => {
   if (!Number.isFinite(s)) return '0:00';
@@ -324,13 +334,22 @@ export default function PlayerControls({
    * clock, so reading never gets interrupted.
    */
   const sheetTimer = useRef(null);
+  const [coarse, setCoarse] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia('(pointer:coarse)');
+    const on = () => setCoarse(mq.matches);
+    on(); mq.addEventListener('change', on);
+    return () => mq.removeEventListener('change', on);
+  }, []);
   const touchSheet = useCallback(() => {
     clearTimeout(sheetTimer.current);
+    const ms = sheetIdleMs({ tv, coarse });
+    if (ms == null) return;
     sheetTimer.current = setTimeout(() => {
       setMenu(null);
       onMenuChange?.(false);
-    }, tv ? SHEET_IDLE_TV_MS : SHEET_IDLE_MS);
-  }, [onMenuChange, tv]);
+    }, ms);
+  }, [onMenuChange, tv, coarse]);
 
   useEffect(() => {
     if (!menu) { clearTimeout(sheetTimer.current); return; }

@@ -31,3 +31,17 @@ it('generic numbered track labels do not become language evidence', () => {
   expect(languageCandidates([source('A',['Track 1'])], 'Track 1')).toEqual([]);
   expect(languageCandidates([source('B',['Audio 2'])], 'Audio 2')).toEqual([]);
 });
+
+describe('language pick never resolves to the playing source (W2)', () => {
+  it('drops the current source so a pick always switches or says none', async () => {
+    const { languageSwitchCandidates } = await import('../lib/player/languageSources');
+    const castle = source('castletv-0', ['Telugu', 'Hindi'], { selectableAudio: true });
+    const va = source('vaplayer-0', ['Hindi']);
+    expect(languageSwitchCandidates([castle, va], 'Hindi', 'castletv-0').map(s => s.id)).toEqual(['vaplayer-0']);
+    expect(languageSwitchCandidates([castle], 'Hindi', 'castletv-0')).toEqual([]);
+    // Telugu order is kept for the other servers.
+    const a = source('A', ['Telugu']), b = source('B', ['te']);
+    expect(languageSwitchCandidates([castle, a, b], 'Telugu', 'castletv-0').map(s => s.id)).toEqual(['A', 'B']);
+    expect(languageSwitchCandidates([a, b, source('U', ['Telugu'], { unsupported: true })], 'Telugu', null).map(s => s.id)).toEqual(['A', 'B']);
+  });
+});

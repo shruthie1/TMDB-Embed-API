@@ -44,3 +44,12 @@ export function languageSourceIndex(sources = []) {
 export function languageCandidates(sources, language) {
   return languageSourceIndex(sources).byLanguage.get(audioLanguageKey(language))?.sources || [];
 }
+
+/**
+ * Servers a language pick may switch to: never the playing source. Its own
+ * tracks were already tried as a rendition switch; switching to it again is a
+ * silent no-op (switchSource returns on the same row), so the pick looked dead.
+ */
+export function languageSwitchCandidates(sources, language, currentId) {
+  return languageCandidates(sources, language).filter(s => !s.unsupported && (currentId == null || s.id !== currentId));
+}

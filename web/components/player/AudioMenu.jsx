@@ -1,4 +1,5 @@
 'use client';
+import { Fragment } from 'react';
 import Icon from '../Icon';
 import MenuRow from './MenuRow';
 import PlayerMenu from './PlayerMenu';
@@ -21,6 +22,19 @@ import SyncBar from './SyncBar';
  * ambiguous between "one language" and "the player is broken". It is marked
  * disabled so it reads as informational rather than inviting a dead tap.
  */
+const IN_STREAM = 'In this stream';
+const OTHER_SERVERS = 'Other servers';
+/** In-stream rows first (stable), each group headed once. */
+function grouped(tracks, currentAudio) {
+  const inStream = (t) => t.kind === 'muxed' || t.kind === 'in-file' || t.id === currentAudio;
+  const rows = [...tracks.filter(inStream), ...tracks.filter(t => !inStream(t))];
+  return rows.map((t, i) => {
+    const group = inStream(t) ? IN_STREAM : OTHER_SERVERS;
+    const prev = i ? (inStream(rows[i - 1]) ? IN_STREAM : OTHER_SERVERS) : null;
+    return { t, head: group !== prev ? group : null };
+  });
+}
+
 export default function AudioMenu({
   audioTracks = [], currentAudio, onPickAudio,
   open, onToggle, onTouch,
@@ -65,9 +79,14 @@ export default function AudioMenu({
 
       {open && !only && (
         <PlayerMenu title="Audio" icon="audio" onClose={onToggle} onTouch={onTouch}>
-          {audioTracks.map(t => (
-            <MenuRow key={t.id} label={t.name} meta={t.meta} selected={t.id === currentAudio}
-                     onClick={() => onPickAudio?.(t.id)} />
+          {/* Same grouping as the APK: tracks this stream carries, then
+              languages that need another server. */}
+          {grouped(audioTracks, currentAudio).map(({ t, head }) => (
+            <Fragment key={t.id}>
+              {head && <p className="pmenu-group" role="presentation">{head}</p>}
+              <MenuRow label={t.name} meta={t.meta} selected={t.id === currentAudio}
+                       onClick={() => onPickAudio?.(t.id)} />
+            </Fragment>
           ))}
           {/* Timing lives WITH the language list: picking a dubbed track is
               what knocks lip sync out, so the fix belongs where the cause is

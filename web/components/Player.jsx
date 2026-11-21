@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import PlayerControls from './PlayerControls';
 import VideoMenu from './player/VideoMenu';
-import { audioLanguageKey, isKnownAudioLanguage, languageCandidates, sourceAudioLanguages, trackAudioLanguage } from '../lib/player/languageSources';
+import { audioLanguageKey, isKnownAudioLanguage, languageSwitchCandidates, sourceAudioLanguages, trackAudioLanguage } from '../lib/player/languageSources';
 import { Loading, NextUp, PlayerError } from './player/overlays';
 import TvBar from './player/TvBar';
 import Icon from './Icon';
@@ -1565,7 +1565,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     // the SAME provider - and that is a real case here: NetMirror returns
     // three variants on movie/1440735, only one of which carries the Kannada
     // and Telugu audio renditions. Compare identity when we have it.
-    if (!src?.masterUrl) return;
+    if (!src?.masterUrl) { setNotice(`${rowLabel(src?.id, src?.provider) || 'This server'} has no playable stream.`); return; }
     const sameRow = src.id != null && currentSourceId != null
       ? src.id === currentSourceId
       : src.provider === currentSource;
@@ -1643,7 +1643,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     recovery.clearStall();
     resolve.switchSource(src);
   }, [currentSource, currentSourceId, recovery, resolve, wantLang, sources,
-      hls.audioTracks, hls.currentAudio, startSourceSwitch, rowLabel, videoRef]);
+      hls.audioTracks, hls.currentAudio, startSourceSwitch, rowLabel, videoRef, setNotice]);
 
   // Let the recovery path above reach switchSource without reordering hooks.
   switchSourceRef.current = switchSource;
@@ -1663,7 +1663,8 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     const track = hls.audioTracks?.find(t => audioLanguageKey(trackAudioLanguage(t)) === audioLanguageKey(language));
     setWantLang(language);
     if (track && hls.pickAudio(track.id) !== false) return;
-    const candidates = languageCandidates(sourceListRef.current, language).filter(s => !s.unsupported);
+    // W2: the playing source is never a candidate; its tracks were tried above.
+    const candidates = languageSwitchCandidates(sourceListRef.current, language, currentSourceIdRef.current);
     let next = nextAlive(candidates, deadSources.current, { lang: language });
     // An explicit language click retries its failed sources without reviving unrelated rows.
     if (!next && candidates.length) {
@@ -1677,7 +1678,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
         lang: hls.audioTracks?.find(t => t.id === hls.currentAudio)?.name || wantLang,
         at: videoRef.current?.currentTime || 0 },
     } });
-    else setNotice(`No playable ${language} stream has been found yet.`);
+    else setNotice(`No other ${language} stream found`);
   }, [hls.audioTracks, hls.currentAudio, hls.pickAudio, switchSource, wantLang, videoRef]);
 
 
