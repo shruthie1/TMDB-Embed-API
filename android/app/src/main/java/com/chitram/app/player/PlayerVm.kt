@@ -30,6 +30,10 @@ import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.Renderer
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
+import androidx.media3.exoplayer.video.MediaCodecVideoRenderer
+import androidx.media3.exoplayer.video.VideoRendererEventListener
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.MediaSession
 import com.chitram.app.data.Api
@@ -132,7 +136,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
 
     val player: ExoPlayer = ExoPlayer.Builder(
         app,
-        DefaultRenderersFactory(app).setEnableDecoderFallback(true),
+        (if (Device.isTv(app)) NoKeyframeSkipRenderersFactory(app) else DefaultRenderersFactory(app)).setEnableDecoderFallback(true),
     )
         .setMediaSourceFactory(DefaultMediaSourceFactory(OkHttpDataSource.Factory(g.api.client)))
         // Smaller buffer than the default: the 2018 stick has 1.5 GB RAM.
@@ -833,13 +837,17 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         guardJob = viewModelScope.launch {
             var basePos = -1L
             var movingSince = 0L
+            var lastFrames = -1
             while (isActive) {
                 delay(1000)
                 if (current !== s) return@launch
                 if (!player.isPlaying) { movingSince = 0; continue }
                 val counters = player.videoDecoderCounters?.also { it.ensureUpdated() }
                 val frames = counters?.renderedOutputBufferCount ?: 0
-                if (videoSize.width > 0 || frames > 0) return@launch
+                // A picture is playing once frames keep coming. One forced first frame
+                // followed by none (Fire TV 1.2.19: decoder flushed, 0 fps) is still no picture.
+                if (frames >= PICTURE_FRAMES) return@launch
+                if (frames != lastFrames) { lastFrames = frames; basePos = -1; movingSince = 0; continue }
                 val p = player.currentPosition
                 if (basePos < 0) { basePos = p; continue }
                 if (p - basePos <= 500) { movingSince = 0; continue }
@@ -1254,4 +1262,35 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             return name.ifEmpty { code }
         }
     }
+}
+
+/** Rendered frames that prove a picture (about 2 s of video); the no-picture guard stops there. */
+private const val PICTURE_FRAMES = 50
+
+/**
+ * TV only. media3 flushes the video decoder and skips to the next keyframe when
+ * an output frame is over 500 ms late (MediaCodecVideoRenderer.maybeDropBuffersToKeyframe).
+ * On the Fire TV Stick 4K (API 25 MediaTek AVC) each flush leaves the next output
+ * late again, so the decoder flushes about 20 times a second and renders 0 fps
+ * while audio plays (1.2.19, CastleTV Telugu). Late frames are still dropped one
+ * by one (shouldDropOutputBuffer), so the picture catches up without a flush.
+ */
+private class NoKeyframeSkipRenderersFactory(context: android.content.Context) : DefaultRenderersFactory(context) {
+    override fun buildVideoRenderers(
+        context: android.content.Context, extensionRendererMode: Int, mediaCodecSelector: MediaCodecSelector,
+        enableDecoderFallback: Boolean, eventHandler: android.os.Handler, eventListener: VideoRendererEventListener,
+        allowedVideoJoiningTimeMs: Long, out: ArrayList<Renderer>,
+    ) {
+        val start = out.size
+        super.buildVideoRenderers(context, extensionRendererMode, mediaCodecSelector, enableDecoderFallback, eventHandler, eventListener, allowedVideoJoiningTimeMs, out)
+        val i = (start until out.size).firstOrNull { out[it] is MediaCodecVideoRenderer } ?: return
+        out[i] = NoKeyframeSkipVideoRenderer(context, codecAdapterFactory, mediaCodecSelector, allowedVideoJoiningTimeMs, enableDecoderFallback, eventHandler, eventListener)
+    }
+}
+
+private class NoKeyframeSkipVideoRenderer(
+    context: android.content.Context, factory: androidx.media3.exoplayer.mediacodec.MediaCodecAdapter.Factory,
+    selector: MediaCodecSelector, joiningMs: Long, fallback: Boolean, handler: android.os.Handler, listener: VideoRendererEventListener,
+) : MediaCodecVideoRenderer(context, factory, selector, joiningMs, fallback, handler, listener, DefaultRenderersFactory.MAX_DROPPED_VIDEO_FRAME_COUNT_TO_NOTIFY) {
+    public override fun shouldDropBuffersToKeyframe(earlyUs: Long, elapsedRealtimeUs: Long, isLastBuffer: Boolean): Boolean = false
 }

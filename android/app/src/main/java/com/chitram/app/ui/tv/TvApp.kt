@@ -14,6 +14,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusGroup
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.BringIntoViewSpec
 import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -910,7 +911,10 @@ private fun TvDetail(nav: Nav, type: String, id: Long) {
                     // Web .facts: Genres, Director, Writers, Country, under a hairline.
                     val facts = listOf("Genres" to t.genres.joinToString(" · "), "Director" to t.director.joinToString(", "),
                         "Writers" to t.writers.joinToString(", "), "Country" to t.country.joinToString(", ")).filter { it.second.isNotEmpty() }
-                    if (facts.isNotEmpty()) Column(Modifier.padding(start = GUTTER, end = GUTTER, top = 40f.px).widthIn(max = 430.dp)) {
+                    // Nothing in the facts block takes focus, and the list scrolls only to
+                    // the focused item, so Down from the last row never reached it (1.2.19).
+                    // One plain focus stop brings the block, with its bottom room, into view.
+                    if (facts.isNotEmpty()) Column(Modifier.focusable().padding(start = GUTTER, end = GUTTER, top = 40f.px, bottom = 48.dp).widthIn(max = 430.dp)) {
                         Box(Modifier.fillMaxWidth().height(0.5.dp).background(Tok.border))
                         FlowRow(Modifier.padding(top = 24f.px), horizontalArrangement = Arrangement.spacedBy(32f.px), verticalArrangement = Arrangement.spacedBy(22f.px)) {
                             facts.forEach { (k, v) ->
