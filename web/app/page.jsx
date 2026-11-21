@@ -8,27 +8,39 @@ import { getList } from '../lib/list';
 import { warmContinueWatching } from '../lib/prefetch';
 import { getPrefs, prefsQuery, effectiveLangs, PREFS_EVENT } from '../lib/prefs';
 import { homeRows, dedupeRows } from '../lib/homeRows';
+import { readHome, patchHome, clearHome } from '../lib/homeCache';
 
 export default function Home() {
+  // Read the stored prefs synchronously on first render (not in an effect), so
+  // the in-tab home cache can be looked up by its query before the first paint.
+  // On the server there is no localStorage; getPrefs() returns the defaults.
+  const [prefs, setPrefs] = useState(() => {
+    try { return getPrefs(); } catch { return null; }
+  });
+  const query = prefs ? prefsQuery(prefs) : '';
+  // Seed from the in-tab cache so Back to home shows the last rows at once
+  // instead of skeletons + a full re-fetch (the carousel used to reload).
+  const cached = typeof window !== 'undefined' ? readHome(query) : null;
   // Each row owns its loading state, so rows appear as they arrive
   // instead of the page blocking on the slowest one.
-  const [data, setData] = useState({});
-  const [rowErrors, setRowErrors] = useState({});
+  const [data, setData] = useState(() => cached?.data ?? {});
+  const [rowErrors, setRowErrors] = useState(() => cached?.rowErrors ?? {});
   // Personalised rows, derived from what has actually been watched. Kept
   // separate from the discovery rows because their labels and count depend on history.
-  const [recs, setRecs] = useState([]);
-  // Defaults on the server render; the stored choice after mount.
-  // null until mounted: the stored choice lives in localStorage, and fetching
-  // rows for the defaults first would load every rail twice.
-  const [prefs, setPrefs] = useState(null);
+  const [recs, setRecs] = useState(() => cached?.recs ?? []);
   const rows = useMemo(() => (prefs ? homeRows(effectiveLangs(prefs)) : []), [prefs]);
-  const query = prefs ? prefsQuery(prefs) : '';
 
   useEffect(() => {
+    // Re-sync from storage once mounted (covers an SSR default that differed
+    // from the stored choice).
     setPrefs(getPrefs());
-    // A save in the header modal refreshes the rails in place.
+    // A save in the header modal refreshes the rails in place. The cached rows
+    // no longer match the new languages, so drop the cache too.
     const onSave = () => {
+      clearHome();
       setData(d => ({ continue: d.continue, list: d.list }));
+      setRecs([]);
+      setRowErrors({});
       setPrefs(getPrefs());
     };
     window.addEventListener(PREFS_EVENT, onSave);
@@ -38,8 +50,13 @@ export default function Home() {
   useEffect(() => {
     if (!prefs) return undefined;
     let alive = true;
+    // Local rows (continue/list) are cheap and must stay current (a title just
+    // watched), so always refresh them from local storage. Remote rows already
+    // in the in-tab cache for this query are reused, so Back does not re-fetch.
+    const fresh = readHome(query);
     const cw = getContinueWatching(3);
     setData(d => ({ ...d, continue: cw, list: getList() }));
+    patchHome(query, { data: { ...(fresh?.data || {}), continue: cw, list: getList() } });
 
     // Season lists let the rail respect season/series boundaries (S1E7 ->
     // S2E1, and a finished show drops off). Fetched only for shows already
@@ -71,18 +88,21 @@ export default function Home() {
                 label: `Because you watched ${sd.title}`, titles: d.titles }
             : null))
           .catch(() => null)))
-        .then(rows => { if (alive) setRecs(rows.filter(Boolean)); });
+        .then(rows => { if (alive) { const r = rows.filter(Boolean); setRecs(r); patchHome(query, { recs: r }); } });
     }
 
     for (const { kind } of rows) {
       if (kind === 'continue' || kind === 'list') continue;
+      // Already fetched for this query and still fresh: keep it, don't re-fetch.
+      if (fresh?.data && Array.isArray(fresh.data[kind])) continue;
       fetchRow(kind, { query }).then(res => {
         if (!alive) return;
         const titles = res.ok ? (res.body?.titles || []) : [];
-        setRowErrors(errors => ({
-          ...errors,
-          [kind]: res.ok ? null : (res.error || `Request failed${res.status ? ` (${res.status})` : ''}`),
-        }));
+        setRowErrors(errors => {
+          const next = { ...errors, [kind]: res.ok ? null : (res.error || `Request failed${res.status ? ` (${res.status})` : ''}`) };
+          patchHome(query, { rowErrors: next });
+          return next;
+        });
         if (process.env.NODE_ENV !== 'production') {
           console.info('[chitram home] row', kind, {
             ok: res.ok,
@@ -91,7 +111,11 @@ export default function Home() {
             error: res.error || res.body?.error || null,
           });
         }
-        setData(d => ({ ...d, [kind]: titles }));
+        setData(d => {
+          const next = { ...d, [kind]: titles };
+          patchHome(query, { data: next });
+          return next;
+        });
       });
     }
     return () => { alive = false; };
