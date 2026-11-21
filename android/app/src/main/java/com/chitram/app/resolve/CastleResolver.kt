@@ -14,6 +14,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.put
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -38,15 +39,27 @@ import javax.crypto.spec.SecretKeySpec
  */
 class CastleResolver(
     client: OkHttpClient,
-    private val base: String = BASE,
+    base: String = BASE,
+    /** Remembers the API host that last answered (7 days); a throwaway book when null. */
+    hosts: HostBook? = null,
+    /** Host list (VM heal first) and key suffix from resolve-config; [base] alone by default. */
+    private val config: () -> CastleConfig = { CastleConfig(bases = listOf(base)) },
 ) {
     private val http = client.newBuilder().callTimeout(STEP_TIMEOUT_MS, TimeUnit.MILLISECONDS).build()
+    /** The key call is the host probe: a cross-origin 3xx is a move to follow, not a page to read. */
+    private val probeHttp = http.newBuilder().followRedirects(false).followSslRedirects(false).build()
+    private val hosts = hosts ?: HostBook(com.chitram.app.data.MemoryKeyValue())
+
+    /** The session on one API host: its base and its security key. */
+    private class Session(val base: String, val sec: String, val suffix: String)
 
     /** null: Castle has no confident match. Throws when the chain failed. */
     suspend fun resolve(type: String, title: String, year: Int?, season: Int, episode: Int, preferred: String, alternates: List<String> = emptyList()): Resolved? {
         if (title.isBlank()) return null
         val series = type == "tv" || type == "series"
-        val sec = securityKey()
+        val cfg = config()
+        val (base, key) = hosts.heal(NAME, cfg.bases) { b -> keyProbe(b) }
+        val sec = Session(base, key, cfg.keySuffix)
         // Year guard for films only: a series row can carry a later season's date.
         val guardYear = if (series) null else year
         var rows: List<Row> = emptyList()
@@ -111,7 +124,7 @@ class CastleResolver(
 
     private class Track(val id: String?, val name: String?, val default: Boolean)
 
-    private fun req(url: String) = Request.Builder().url(url).apply { API_HEADERS.forEach { (k, v) -> header(k, v) } }.header("Referer", base)
+    private fun req(base: String, url: String) = Request.Builder().url(url).apply { API_HEADERS.forEach { (k, v) -> header(k, v) } }.header("Referer", base)
 
     private suspend fun cipher(r: Request, step: String): String {
         val reply = http.fetch(r)
@@ -122,23 +135,31 @@ class CastleResolver(
             .getOrNull() ?: text
     }
 
-    private suspend fun securityKey(): String {
-        val reply = http.fetch(req("$base/v0.1/system/getSecurityKey/1?channel=$CHANNEL&clientType=$CLIENT&lang=$LANG").build())
-        if (!reply.ok) throw StepException("castle key", reply.code, "HTTP ${reply.code}")
+    /** getSecurityKey on [base]: Ok(key), Moved(origin) on a cross-origin redirect, Dead otherwise. */
+    private suspend fun keyProbe(base: String): HostBook.Probe<String> {
+        val url = "$base/v0.1/system/getSecurityKey/1?channel=$CHANNEL&clientType=$CLIENT&lang=$LANG"
+        val reply = probeHttp.fetch(req(base, url).build())
+        if (reply.code in 300..399) {
+            val origin = reply.location()?.let { originOf(url, it) }
+            return if (origin != null && origin != base) HostBook.Probe.Moved(origin)
+            else HostBook.Probe.Dead(StepException("castle key", reply.code, "redirect without a new host"))
+        }
+        if (!reply.ok) return HostBook.Probe.Dead(StepException("castle key", reply.code, "HTTP ${reply.code}"))
         val o = MappleResolver.obj(reply.body)
-        if (o == null || num(o, "code") != 200) throw StepException("castle key", reply.code, "bad answer")
-        return str(o, "data") ?: throw StepException("castle key", reply.code, "no key")
+        if (o == null || num(o, "code") != 200) return HostBook.Probe.Dead(StepException("castle key", reply.code, "bad answer"))
+        val key = str(o, "data") ?: return HostBook.Probe.Dead(StepException("castle key", reply.code, "no key"))
+        return HostBook.Probe.Ok(key)
     }
 
-    private suspend fun search(sec: String, keyword: String): String {
+    private suspend fun search(sec: Session, keyword: String): String {
         val q = "channel=$CHANNEL&clientType=$CLIENT&keyword=${enc(keyword)}&lang=$LANG&mode=1&packageName=$PKG&page=1&size=30"
-        return decrypt(cipher(req("$base/film-api/v1.1.0/movie/searchByKeyword?$q").build(), "search"), sec)
+        return decrypt(cipher(req(sec.base, "${sec.base}/film-api/v1.1.0/movie/searchByKeyword?$q").build(), "search"), sec.sec, sec.suffix)
     }
 
-    private suspend fun details(sec: String, id: String): String =
-        decrypt(cipher(req("$base/film-api/v1.9.9/movie?channel=$CHANNEL&clientType=$CLIENT&lang=$LANG&movieId=$id&packageName=$PKG").build(), "details"), sec)
+    private suspend fun details(sec: Session, id: String): String =
+        decrypt(cipher(req(sec.base, "${sec.base}/film-api/v1.9.9/movie?channel=$CHANNEL&clientType=$CLIENT&lang=$LANG&movieId=$id&packageName=$PKG").build(), "details"), sec.sec, sec.suffix)
 
-    private suspend fun video(sec: String, movieId: String, episodeId: String, languageId: String?, resolution: Int): JsonObject {
+    private suspend fun video(sec: Session, movieId: String, episodeId: String, languageId: String?, resolution: Int): JsonObject {
         val body = buildJsonObject {
             put("mode", "1"); put("appMarket", "GuanWang"); put("clientType", CLIENT); put("woolUser", "false")
             put("apkSignKey", "ED0955EB04E67A1D9F3305B95454FED485261475"); put("androidVersion", "13")
@@ -146,8 +167,8 @@ class CastleResolver(
             if (languageId != null) put("languageId", languageId)
             put("isNewUser", "true"); put("resolution", resolution.toString()); put("packageName", PKG)
         }.toString().toRequestBody("application/json".toMediaType())
-        val url = "$base/film-api/v2.0.1/movie/getVideo2?clientType=$CLIENT&packageName=$PKG&channel=$CHANNEL&lang=$LANG"
-        return unwrap(parse(decrypt(cipher(req(url).post(body).build(), "video"), sec)))
+        val url = "${sec.base}/film-api/v2.0.1/movie/getVideo2?clientType=$CLIENT&packageName=$PKG&channel=$CHANNEL&lang=$LANG"
+        return unwrap(parse(decrypt(cipher(req(sec.base, url).post(body).build(), "video"), sec.sec, sec.suffix)))
     }
 
     /** `year` from publishTime (epoch ms, UTC); null when absent. */
@@ -157,6 +178,10 @@ class CastleResolver(
 
     companion object {
         const val BASE = "https://api.hlowb.com"
+        /** HostBook name; the same key the backend heals under. */
+        const val NAME = "castletv"
+        /** Appended to base64(secKey) before the 16-byte AES key is cut (providers/castletv.js). */
+        const val KEY_SUFFIX = "T!BgJB"
         private const val PKG = "com.external.castle"
         private const val CHANNEL = "IndiaA"
         private const val CLIENT = "1"
@@ -182,8 +207,15 @@ class CastleResolver(
         private fun log(m: String) = android.util.Log.i("Chitram", "[castle] $m")
         private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
 
-        fun decrypt(cipherText: String, secKey: String): String {
-            val k = Base64.getDecoder().decode(secKey) + "T!BgJB".toByteArray()
+        /** scheme://host[:port] of [location] resolved against [url]; null when unreadable. */
+        internal fun originOf(url: String, location: String): String? {
+            val u = url.toHttpUrlOrNull()?.resolve(location) ?: return null
+            val port = if (u.port == okhttp3.HttpUrl.defaultPort(u.scheme)) "" else ":${u.port}"
+            return "${u.scheme}://${u.host}$port"
+        }
+
+        fun decrypt(cipherText: String, secKey: String, suffix: String = KEY_SUFFIX): String {
+            val k = Base64.getDecoder().decode(secKey) + suffix.toByteArray()
             val key = k.copyOf(16)
             val c = Cipher.getInstance("AES/CBC/PKCS5Padding")
             c.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(key))

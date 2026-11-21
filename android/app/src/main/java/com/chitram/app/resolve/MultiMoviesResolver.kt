@@ -26,10 +26,20 @@ import java.util.concurrent.TimeUnit
  */
 class MultiMoviesResolver(
     client: OkHttpClient,
-    private val origin: String = ORIGIN,
+    origin: String = ORIGIN,
     /** Per-master cap (server MASTER_TIMEOUT_MS): a slow master drops only its own row. */
     private val masterTimeoutMs: Long = MASTER_TIMEOUT_MS,
+    /** Remembers the VidBolt host that last answered (7 days); a throwaway book when null. */
+    hosts: HostBook? = null,
+    /**
+     * VidBolt hosts and resolvePath from resolve-config: the VM puts a verified
+     * heal first in `bases`, so the device needs no title-page or scraper trail.
+     * [origin] alone by default.
+     */
+    private val config: () -> MultiMoviesConfig = { MultiMoviesConfig(bases = listOf(origin)) },
 ) {
+    private val hosts = hosts ?: HostBook(com.chitram.app.data.MemoryKeyValue())
+
     /**
      * 8 s connect (review I1): covers the measured 7.6 s connect to a live
      * Cloudflare host. The resolver has no proxy fallback, so no 3 s here.
@@ -58,13 +68,33 @@ class MultiMoviesResolver(
      * generic rendition. `originalLang`: the title's TMDB original language,
      * for an "Original" source. Throws when no ask got a 2xx answer.
      */
-    suspend fun resolveAll(type: String, tmdbId: Long, season: Int, episode: Int, originalLang: String? = null, budgetMs: Long = Long.MAX_VALUE): List<Resolved> = coroutineScope {
+    suspend fun resolveAll(type: String, tmdbId: Long, season: Int, episode: Int, originalLang: String? = null, budgetMs: Long = Long.MAX_VALUE): List<Resolved> {
+        val t0 = System.currentTimeMillis()
+        val cfg = config()
+        fun left() = if (budgetMs == Long.MAX_VALUE) Long.MAX_VALUE else budgetMs - (System.currentTimeMillis() - t0)
+        // Host probe = the resolve itself (no extra request): a host is Dead only
+        // when no ask got a 2xx JSON answer. A 2xx with no source, or masters with
+        // no audio rendition, is the title, not the host: asking the next host
+        // would double the calls VidBolt rate-limits (429 after ~16 in 15 s).
+        // A 429 means the host is alive: kept, and the error goes to the caller.
+        val (_, out) = hosts.heal(NAME, cfg.bases) { base ->
+            if (left() <= BUDGET_MARGIN_MS) return@heal HostBook.Probe.Dead(StepException("multimovies resolve", 0, "budget spent before $base"))
+            try {
+                HostBook.Probe.Ok(Result.success(resolveAt(base, cfg.resolvePath, type, tmdbId, season, episode, originalLang, left())))
+            } catch (x: StepException) {
+                if (x.code == 429) HostBook.Probe.Ok(Result.failure(x)) else HostBook.Probe.Dead(x)
+            }
+        }
+        return out.getOrThrow()
+    }
+
+    private suspend fun resolveAt(origin: String, resolvePath: String, type: String, tmdbId: Long, season: Int, episode: Int, originalLang: String?, budgetMs: Long): List<Resolved> = coroutineScope {
         val t0 = System.currentTimeMillis()
         val tv = type == "tv" || type == "series"
         val s = season.coerceAtLeast(1)
         val e = episode.coerceAtLeast(1)
         val path = if (tv) "tv/$tmdbId/$s/$e" else "movie/$tmdbId"
-        val api = if (tv) "$origin/api/resolve?type=tv&id=$tmdbId&season=$s&episode=$e" else "$origin/api/resolve?type=movie&id=$tmdbId"
+        val api = if (tv) "$origin$resolvePath?type=tv&id=$tmdbId&season=$s&episode=$e" else "$origin$resolvePath?type=movie&id=$tmdbId"
         val referer = "$origin/$path"
         fun left() = if (budgetMs == Long.MAX_VALUE) Long.MAX_VALUE else budgetMs - (System.currentTimeMillis() - t0) - BUDGET_MARGIN_MS
         val headers = streamHeaders(origin)
@@ -247,6 +277,8 @@ class MultiMoviesResolver(
 
     companion object {
         const val ORIGIN = "https://vidbolt.xyz"
+        /** HostBook name; the same key the backend heals under. */
+        const val NAME = "multimovies"
         const val UA = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36"
         private const val API_TIMEOUT_MS = 10_000L
         const val MASTER_TIMEOUT_MS = 8_000L

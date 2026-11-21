@@ -6,6 +6,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
@@ -53,12 +54,26 @@ class VaplayerResolver(
         // 2. The player page carries the single-use apiToken.
         val page = http.fetch(Request.Builder().url(src).header("User-Agent", cfg.userAgent).header("Referer", "$wrapper/").build())
         if (!page.ok) throw StepException("vaplayer player", page.code, "player page HTTP ${page.code}")
-        val apiToken = Regex(cfg.apiTokenRegex).find(page.body)?.groupValues?.getOrNull(1)
+        // The page's `const CONFIG = {...}` (server twin: lib/selfheal/keys.js parseVaConfig)
+        // backs up the regex and names api.php; rateLimited:true is an IP gate.
+        val conf = parseConfig(page.body)
+        if ((conf?.get("rateLimited") as? JsonPrimitive)?.booleanOrNull == true) {
+            android.util.Log.i("Chitram", "vaplayer: player page says rateLimited:true for $imdb")
+            throw StepException("vaplayer", 429, "rateLimited")
+        }
+        val fromRegex = Regex(cfg.apiTokenRegex).find(page.body)?.groupValues?.getOrNull(1)
+        val fromConf = (conf?.get("apiToken") as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull?.takeIf { it.isNotEmpty() }
+        if (fromRegex == null && fromConf != null) android.util.Log.i("Chitram", "vaplayer: token via CONFIG for $imdb (regex missed)")
+        val apiToken = fromRegex ?: fromConf
             ?: throw StepException("vaplayer player", page.code, "no apiToken on the player page (IP blocked?)")
 
-        // 3. api.php. After a wrapper heal it lives on streamdata.<new host>.
-        val api = if (wrapper == cfg.wrapperBases.first().trimEnd('/')) cfg.apiUrl
-                  else "https://streamdata.${wrapper.toHttpUrlOrNull()!!.host}/api.php"
+        // 3. api.php: the page's CONFIG.streamDataApiUrl when it names one; else the
+        // configured url, or streamdata.<new host> after a wrapper heal.
+        val pageApi = (conf?.get("streamDataApiUrl") as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
+            ?.takeIf { Regex("^https://[^/\\s]+/\\S*$").matches(it) }
+        val api = pageApi
+            ?: if (wrapper == cfg.wrapperBases.first().trimEnd('/')) cfg.apiUrl
+               else "https://streamdata.${wrapper.toHttpUrlOrNull()!!.host}/api.php"
         val qs = buildString {
             append("imdb=").append(enc(imdb)).append("&type=").append(apiType)
             if (tv) append("&season=$season&episode=$episode")
@@ -179,6 +194,51 @@ class VaplayerResolver(
 
     companion object {
         const val NAME = "VaPlayer"
+
+        /**
+         * Body of `<const|let|var> CONFIG = {...}` on the player page as JSON, or
+         * null. Port of lib/selfheal/keys.js parseVaConfig: brace match outside
+         * strings, then JSON, then a plain object literal (bare keys quoted,
+         * single-quoted strings converted, trailing commas dropped). No code runs.
+         */
+        fun parseConfig(html: String): JsonObject? {
+            val m = Regex("""\b(?:const|let|var)\s+CONFIG\s*=\s*\{""").find(html) ?: return null
+            val start = m.range.last
+            var depth = 0
+            var quote: Char? = null
+            var end = -1
+            var i = start
+            while (i < html.length) {
+                val c = html[i]
+                if (quote != null) { if (c == '\\') i++ else if (c == quote) quote = null }
+                else if (c == '"' || c == '\'' || c == '`') quote = c
+                else if (c == '{') depth++
+                else if (c == '}' && --depth == 0) { end = i; break }
+                i++
+            }
+            if (end < 0) return null
+            val src = html.substring(start, end + 1)
+            runCatching { Json.parseToJsonElement(src) as? JsonObject }.getOrNull()?.takeIf(::strictJson)?.let { return it }
+            return runCatching {
+                val json = Regex(""""(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^"']+""").findAll(src).joinToString("") { t ->
+                    val v = t.value
+                    when (v[0]) {
+                        '"' -> v
+                        '\'' -> kotlinx.serialization.json.JsonPrimitive(v.substring(1, v.length - 1).replace("\\'", "'")).toString()
+                        else -> v.replace(Regex("""([{,]\s*)([A-Za-z_$][\w$]*)\s*:"""), "$1\"$2\":").replace(Regex(""",(\s*[}\]])"""), "$1")
+                    }
+                }
+                Json.parseToJsonElement(json) as? JsonObject
+            }.getOrNull()?.takeIf(::strictJson)
+        }
+
+        /** kotlinx reads an unquoted `fn()` as a literal; JSON.parse (the server) rejects it. */
+        private fun strictJson(e: kotlinx.serialization.json.JsonElement): Boolean = when (e) {
+            is JsonObject -> e.values.all(::strictJson)
+            is JsonArray -> e.all(::strictJson)
+            is JsonPrimitive -> e.isString || e is kotlinx.serialization.json.JsonNull || e.content == "true" || e.content == "false" ||
+                Regex("""-?(0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)?""").matches(e.content)
+        }
         private const val CACHE_MAX = 4
         private val cache = LinkedHashMap<String, WasmModule>()
 

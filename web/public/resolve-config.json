@@ -1,0 +1,163 @@
+{
+  "version": 2,
+  "ttlSec": 21600,
+  "mapple": {
+    "enabled": true,
+    "bases": [
+      "https://mapple.fun"
+    ],
+    "watchPath": "/watch/{type}/{id}",
+    "sessionPath": "/api/ui/session",
+    "mediaSessionPath": "/api/media-session",
+    "encryptPath": "/api/encrypt",
+    "encryptEndpoint": "stream-encrypted",
+    "fronts": [
+      "s25",
+      "mapple",
+      "s2",
+      "s28",
+      "s27",
+      "s10",
+      "s19",
+      "s4",
+      "s12",
+      "s6",
+      "s7",
+      "s8",
+      "s16"
+    ],
+    "frontTimeoutMs": {
+      "mapple": 8000,
+      "s10": 12000,
+      "s2": 22000,
+      "s25": 24000,
+      "s28": 25000
+    },
+    "defaultFrontTimeoutMs": 8000,
+    "frontParallelism": 4,
+    "frontCooldownMs": 60000,
+    "betterWaitMs": 2500,
+    "stepTimeoutMs": 8000,
+    "budgetMs": 25000,
+    "sessionTtlMs": 18000000,
+    "unavailableMarker": "playback-unavailable",
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+    "powMaxIterations": 20000000,
+    "betterWaitMaxMs": 12000
+  },
+  "vaplayer": {
+    "enabled": true,
+    "wrapperBases": [
+      "https://vaplayer.ru"
+    ],
+    "vaSrcPath": "/embed/va_src.php",
+    "embedMoviePath": "/embed/movie/{imdb}",
+    "embedTvPath": "/embed/tv/{imdb}/{season}/{episode}",
+    "apiUrl": "https://streamdata.vaplayer.ru/api.php",
+    "playerOrigin": "https://nextgencloudfabric.com",
+    "apiTokenRegex": "\"apiToken\":\"([^\"]+)\"",
+    "generatePath": "/generate.php",
+    "tokenPlaceholder": "__TOKEN__",
+    "plaintextOffset": 12,
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "stepTimeoutMs": 8000,
+    "budgetMs": 20000,
+    "probeSegment": true
+  },
+  "netmirror": {
+    "enabled": true,
+    "domains": [
+      "https://mobiledetects.com",
+      "https://mobiledetect.app",
+      "https://mobidetect.art",
+      "https://mobidetect.cc",
+      "https://mobidetect.click",
+      "https://mobidetect.ink",
+      "https://mobidetect.live",
+      "https://mobidetect.pro",
+      "https://mobidetect.shop",
+      "https://mobidetect.site",
+      "https://mobidetect.space",
+      "https://mobidetect.store",
+      "https://mobidetect.vip",
+      "https://mobidetect.wiki",
+      "https://mobidetect.xyz",
+      "https://mobidetects.art",
+      "https://mobidetects.cc",
+      "https://mobidetects.info",
+      "https://mobidetects.ink",
+      "https://mobidetects.live",
+      "https://mobidetects.pro",
+      "https://mobidetects.store",
+      "https://mobidetects.top",
+      "https://mobidetects.xyz"
+    ],
+    "budgetMs": 50000,
+    "maxCalls": 24,
+    "budgetWindowMs": 300000,
+    "cooldownMs": 600000,
+    "apiTtlMs": 600000,
+    "sessionTtlMs": 1800000,
+    "metadataTtlMs": 604800000,
+    "playerTtlMs": 30000
+  },
+  "castletv": {
+    "bases": [
+      "https://api.hlowb.com"
+    ],
+    "keySuffix": "T!BgJB",
+    "apiVersions": {
+      "search": "v1.1.0",
+      "details": "v1.9.9",
+      "video": "v2.0.1"
+    }
+  },
+  "multimovies": {
+    "bases": [
+      "https://vidbolt.xyz",
+      "https://vidbolt.pro"
+    ],
+    "resolvePath": "/api/resolve",
+    "playerPath": "/movie/{id}",
+    "sites": [
+      "https://multimovies.wtf"
+    ],
+    "scrapers": [
+      "https://raw.githubusercontent.com/mayurgj/nama/main/providers/multimovies.js"
+    ]
+  },
+  "vidrock": {
+    "bases": [
+      "https://vidrock.net"
+    ],
+    "key": "7f3e9c2a8b5d1f4e6a9c3b7d2e5f8a1c4b6d9e2f5a8c1b4d7e9f2a5c8b1d4e7f"
+  },
+  "vidrift": {
+    "bases": [
+      "https://embed.vidrift.net",
+      "https://embed.vidrift.in"
+    ],
+    "moviePath": "/embed/movie/{id}",
+    "tvPath": "/embed/tv/{id}/{s}/{e}"
+  },
+  "onetouchtv": {
+    "bases": [
+      "https://api3.devcorp.me"
+    ],
+    "front": "https://onetouchtv.xyz",
+    "key": "im72charPasswordofdInitVectorStm",
+    "iv": "im72charPassword"
+  },
+  "showsst": {
+    "mirrors": [
+      {
+        "api": "https://api.vidqueen.st",
+        "player": "https://player.vidqueen.st"
+      },
+      {
+        "api": "https://api.vidmario.net",
+        "player": "https://player.vidmario.net"
+      }
+    ]
+  }
+}

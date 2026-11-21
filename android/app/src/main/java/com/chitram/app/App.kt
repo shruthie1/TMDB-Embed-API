@@ -55,14 +55,18 @@ class App : Application(), ImageLoaderFactory {
         isTv = Device.isTv(this)
         // mapple and vaplayer resolve from this device; their hosts, paths and
         // fronts can be overridden by the backend (fetched now, cached with a TTL).
-        resolveConfig = ResolveConfigStore(api.client, Api.BASE + ResolveConfigStore.PATH, kv)
+        // VM merged view first; the static web copy when the VM fails or is paused.
+        resolveConfig = ResolveConfigStore(
+            api.client, Api.BASE + ResolveConfigStore.PATH, kv,
+            remoteUrl = Api.BASE + ResolveConfigStore.REMOTE_PATH, vmUp = { api.vmUp },
+        )
         val hosts = HostBook(kv)
         onDevice = OnDeviceResolver(
             api, resolveConfig,
             MappleResolver(api.client, hosts, kv),
             VaplayerResolver(api.client, hosts) { runCatching { assets.open("va.wasm").use { it.readBytes() } }.getOrNull() },
-            castle = com.chitram.app.resolve.CastleResolver(api.client),
-            multimovies = com.chitram.app.resolve.MultiMoviesResolver(api.client),
+            castle = com.chitram.app.resolve.CastleResolver(api.client, hosts = hosts, config = { resolveConfig.current().castletv }),
+            multimovies = com.chitram.app.resolve.MultiMoviesResolver(api.client, hosts = hosts, config = { resolveConfig.current().multimovies }),
             netmirror = com.chitram.app.resolve.NetmirrorResolver(api.client, otp = { kv.get("netmirror.otp") ?: "111111" }),
         )
         appScope.launch { resolveConfig.get() }

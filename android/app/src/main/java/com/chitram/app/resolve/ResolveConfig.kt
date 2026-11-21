@@ -103,12 +103,28 @@ data class NetmirrorConfig(
     val playerTtlMs: Long = 30_000,
 )
 
+/** CastleTV API host list (VM heal first when the VM served it) and the AES key suffix. */
+data class CastleConfig(
+    val bases: List<String> = listOf(CastleResolver.BASE),
+    val keySuffix: String = CastleResolver.KEY_SUFFIX,
+)
+
+/** VidBolt hosts (VM heal first when the VM served it) and the JSON resolve path. */
+data class MultiMoviesConfig(
+    val bases: List<String> = listOf(MultiMoviesResolver.ORIGIN, "https://vidbolt.pro"),
+    val resolvePath: String = "/api/resolve",
+)
+
 data class ResolveConfig(
     val version: Int = 1,
     val ttlSec: Long = 6 * 3600L,
     val mapple: MappleConfig = MappleConfig(),
     val vaplayer: VaplayerConfig = VaplayerConfig(),
     val netmirror: NetmirrorConfig = NetmirrorConfig(),
+    val castletv: CastleConfig = CastleConfig(),
+    val multimovies: MultiMoviesConfig = MultiMoviesConfig(),
+    /** routes.<provider>.apk: off | direct | proxy | device. Invalid or missing entries are left out. */
+    val routes: Map<String, String> = emptyMap(),
 ) {
     companion object {
         private val json = Json { ignoreUnknownKeys = true; isLenient = true }
@@ -123,8 +139,22 @@ data class ResolveConfig(
                 mapple = (root["mapple"] as? JsonObject)?.let { mapple(it) } ?: d.mapple,
                 vaplayer = (root["vaplayer"] as? JsonObject)?.let { vaplayer(it) } ?: d.vaplayer,
                 netmirror = (root["netmirror"] as? JsonObject)?.let { netmirror(it) } ?: d.netmirror,
+                castletv = (root["castletv"] as? JsonObject)?.let { o ->
+                    CastleConfig(bases = o.hosts("bases") ?: d.castletv.bases, keySuffix = o.str("keySuffix") ?: d.castletv.keySuffix)
+                } ?: d.castletv,
+                multimovies = (root["multimovies"] as? JsonObject)?.let { o ->
+                    MultiMoviesConfig(bases = o.hosts("bases") ?: d.multimovies.bases, resolvePath = o.path("resolvePath") ?: d.multimovies.resolvePath)
+                } ?: d.multimovies,
+                routes = (root["routes"] as? JsonObject)?.let { routes(it) } ?: d.routes,
             )
         }
+
+        /** Spec words and the server's code words both accepted (none = off, on-device = device). */
+        private val APK_ROUTE = mapOf("off" to "off", "none" to "off", "direct" to "direct", "proxy" to "proxy", "device" to "device", "on-device" to "device")
+
+        private fun routes(o: JsonObject): Map<String, String> = o.mapNotNull { (p, v) ->
+            (v as? JsonObject)?.str("apk")?.let { APK_ROUTE[it.lowercase()] }?.let { p to it }
+        }.toMap()
 
         private fun mapple(o: JsonObject): MappleConfig {
             val d = MappleConfig()
@@ -207,14 +237,19 @@ data class ResolveConfig(
 
 /**
  * The override config: fetched from the backend, kept in KeyValue with its TTL,
- * defaults when nothing was ever fetched. A failed fetch keeps the last good copy
- * (even if stale) and is not retried for RETRY_MS, so a down backend never adds
- * its timeout to every play.
+ * defaults when nothing was ever fetched. Order: the VM merged view at [url]
+ * (built-in + remote + VM heals), then the static copy at [remoteUrl] (no heals)
+ * when the VM fetch fails or the VM breaker is open ([vmUp] false). When both
+ * fail the last good copy stays (even if stale) and no fetch is retried for
+ * RETRY_MS, so a down backend never adds its timeout to every play.
  */
 class ResolveConfigStore(
     client: OkHttpClient,
     private val url: String,
     private val kv: KeyValue,
+    private val remoteUrl: String? = null,
+    private val vmUp: () -> Boolean = { true },
+    /** Last, so existing callers keep their trailing-lambda clock. */
     private val now: () -> Long = System::currentTimeMillis,
 ) {
     private val http = client.newBuilder().callTimeout(FETCH_TIMEOUT_MS, TimeUnit.MILLISECONDS).build()
@@ -233,22 +268,31 @@ class ResolveConfigStore(
 
     suspend fun refresh(): ResolveConfig {
         lastAttempt = now()
-        return try {
-            val req = Request.Builder().url(url).cacheControl(CacheControl.Builder().noStore().noCache().build()).build()
-            val r = http.fetch(req)
-            if (!r.ok) throw StepException("resolve-config", r.code, "HTTP ${r.code}")
-            val cfg = ResolveConfig.parse(r.body)
-            val at = now()
-            mem = cfg to at
-            kv.put(KEY, r.body)
-            kv.put(KEY_AT, at.toString())
-            android.util.Log.i("Chitram", "resolve-config: fetched v${cfg.version}")
-            cfg
-        } catch (e: Exception) {
-            if (e is kotlinx.coroutines.CancellationException) throw e
-            android.util.Log.i("Chitram", "resolve-config: fetch failed (${e.message}); using ${if (cached() != null) "cached" else "defaults"}")
-            current()
+        val vm = vmUp()
+        val tries = listOfNotNull(url.takeIf { vm }?.let { "vm" to it }, remoteUrl?.let { "remote" to it })
+        val why = mutableListOf<String>()
+        if (!vm) why += "vm paused"
+        for ((from, u) in tries) {
+            try {
+                val req = Request.Builder().url(u).cacheControl(CacheControl.Builder().noStore().noCache().build()).build()
+                val r = http.fetch(req)
+                if (!r.ok) throw StepException("resolve-config", r.code, "HTTP ${r.code}")
+                // An error page with 200 is not a config: the next url is tried.
+                if (!r.body.trimStart().startsWith("{")) throw StepException("resolve-config", r.code, "not a JSON object")
+                val cfg = ResolveConfig.parse(r.body)
+                val at = now()
+                mem = cfg to at
+                kv.put(KEY, r.body)
+                kv.put(KEY_AT, at.toString())
+                android.util.Log.i("Chitram", "resolve-config: fetched v${cfg.version} from $from")
+                return cfg
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                why += "$from ${e.message}"
+            }
         }
+        android.util.Log.i("Chitram", "resolve-config: fetch failed (${why.joinToString("; ")}); using ${if (cached() != null) "cached" else "defaults"}")
+        return current()
     }
 
     private fun cached(): Pair<ResolveConfig, Long>? {
@@ -261,6 +305,11 @@ class ResolveConfigStore(
     companion object {
         /** Proposed backend route; until it exists the fetch 404s and defaults apply. */
         const val PATH = "/api/resolve-config"
+        /**
+         * Static copy of the remote resolve-config on the chtrm web host (web/public,
+         * served by Vercel, so it answers with the VM down). Path relative to Api.BASE.
+         */
+        const val REMOTE_PATH = "/resolve-config.json"
         const val KEY = "resolve.config"
         const val KEY_AT = "resolve.config.at"
         const val RETRY_MS = 10 * 60 * 1000L
