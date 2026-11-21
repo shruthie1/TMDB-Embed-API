@@ -760,12 +760,11 @@ private fun TvDetail(nav: Nav, type: String, id: Long) {
     val t = vm.full
     val playFocus = remember { FocusRequester() }
     Box(Modifier.fillMaxSize()) {
-        // The art sits lower than the screen edge (owner, 2026-11-20, same as the
-        // web detail hero: about 14% of the hero), and a top fade runs from the page
-        // colour at its edge through 70% to clear, so the edge never shows.
-        val artTop = 96.dp
-        Art(t?.backdrop, "w1280", Modifier.align(Alignment.TopEnd).padding(top = artTop).fillMaxWidth(0.72f).fillMaxHeight(0.8f), alignment = Alignment.TopCenter)
-        Box(Modifier.padding(top = artTop).fillMaxWidth().fillMaxHeight(0.3f).background(Brush.verticalGradient(0f to Tok.bg, 0.2f to Tok.bg.copy(alpha = 0.7f), 1f to Color.Transparent)))
+        // The art starts at the screen top with one short top fade (owner,
+        // 2026-11-21, same as the web detail hero): page colour at the edge, eased
+        // to clear by 10% of the art (web stops 0/3/6/10%), so no dark band.
+        Art(t?.backdrop, "w1280", Modifier.align(Alignment.TopEnd).fillMaxWidth(0.72f).fillMaxHeight(0.8f), alignment = Alignment.TopCenter)
+        Box(Modifier.fillMaxWidth().fillMaxHeight(0.08f).background(Brush.verticalGradient(0f to Tok.bg, 0.3f to Tok.bg.copy(alpha = 0.6f), 0.6f to Tok.bg.copy(alpha = 0.25f), 1f to Color.Transparent)))
         Box(Modifier.fillMaxSize().background(Tok.scrimLeft))
         Box(Modifier.fillMaxSize().background(Tok.scrimBottom))
         if (t == null) {
