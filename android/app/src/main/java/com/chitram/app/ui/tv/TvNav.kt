@@ -98,6 +98,8 @@ internal object TvWeb {
     const val HERO_TITLE = 68f
     const val HERO_META = 20f
     const val HERO_OVERVIEW = 22f
+    /** .actions margin-top --space-6 24px: gap between the hero copy and its buttons. */
+    const val HERO_ACTIONS_TOP = 24f
     /** .home-hero margin-bottom --space-9 36px. */
     const val HERO_BOTTOM = 36f
     /** Hero.jsx ROTATE_MS; six titles. */

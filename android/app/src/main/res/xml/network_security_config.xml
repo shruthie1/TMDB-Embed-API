@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  image.tmdb.org (every poster and backdrop) chains to ISRG Root X1 since its
+  2026-11-18 certificate (Let's Encrypt YR2 -> Root YR -> X1). Older Fire OS
+  trust stores can lack X1, so images failed while the API (GTS -> GlobalSign)
+  loaded. X1 is added next to the system roots; nothing is removed.
+  Cleartext stays off (this file overrides android:usesCleartextTraffic).
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="@raw/isrg_root_x1" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

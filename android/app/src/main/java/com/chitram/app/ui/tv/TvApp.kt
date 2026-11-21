@@ -104,6 +104,7 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
@@ -200,6 +201,19 @@ private fun Modifier.cardLift(focused: Boolean) = lift(focused, TvWeb.CARD_SCALE
 
 @Composable
 private fun Modifier.controlLift(focused: Boolean) = lift(focused, TvWeb.CONTROL_SCALE, TvWeb.CONTROL_MS, ControlEase, TvWeb.CONTROL_RISE.px)
+
+/**
+ * Focus this requester once its node is attached. A requester on a lazy item
+ * is not attached until a later frame, and requestFocus() throws until then.
+ * Tries for up to [frames] frames; false when the node never appeared.
+ */
+private suspend fun FocusRequester.focusWhenAttached(frames: Int = 30): Boolean {
+    repeat(frames) {
+        withFrameNanos { }
+        if (runCatching { requestFocus() }.isSuccess) return true
+    }
+    return false
+}
 
 /** Give a lazy row's focus padding back to the layout (web .rail padding + negative margin). */
 private fun Modifier.bleedVertical(pad: Dp) = layout { m, c ->
@@ -427,11 +441,17 @@ private fun TvHero(pool: List<Title>, at: Int, onIndex: (Int) -> Unit, nav: Nav,
     }
     val myList = App.instance.myList
     var saved by remember(t.key) { mutableStateOf(myList.contains(t)) }
+    val density = LocalDensity.current
+    var actionsH by remember { mutableStateOf(0.dp) }
     Box(Modifier.fillMaxWidth().height(TvWeb.HERO_H.px).onFocusChanged { paused = it.hasFocus }) {
         Brand(Modifier.padding(start = GUTTER, top = 9.dp))
         Crossfade(t, animationSpec = tween(400, easing = ControlEase), label = "hero-copy", modifier = Modifier.align(Alignment.BottomStart)) { shown ->
+            // The copy ends above the button row: its measured height (at least
+            // the web .btn min-height) plus the web .actions margin-top. A fixed
+            // guess left the overview drawn through the buttons (Fire TV, 1.2.17).
             Column(
-                Modifier.padding(start = GUTTER, end = GUTTER, top = TvWeb.HERO_PAD_TOP.px, bottom = TvWeb.HERO_PAD_BOTTOM.px + 12.dp)
+                Modifier.padding(start = GUTTER, end = GUTTER, top = TvWeb.HERO_PAD_TOP.px,
+                    bottom = TvWeb.HERO_PAD_BOTTOM.px + actionsH.coerceAtLeast(TvWeb.BTN_H.px) + TvWeb.HERO_ACTIONS_TOP.px)
                     .widthIn(max = TvWeb.HERO_MAX_W.px),
             ) {
                 Text(shown.title, style = TextStyle(color = Tok.text, fontSize = TvWeb.HERO_TITLE.pxSp, lineHeight = TvWeb.HERO_TITLE.pxSp, fontWeight = FontWeight.Light),
@@ -441,12 +461,12 @@ private fun TvHero(pool: List<Title>, at: Int, onIndex: (Int) -> Unit, nav: Nav,
                     Text(it, style = TextStyle(color = Tok.textSecondary, fontSize = TvWeb.HERO_OVERVIEW.pxSp, lineHeight = (TvWeb.HERO_OVERVIEW * 1.45f).pxSp),
                         maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 7.dp))
                 }
-                Spacer(Modifier.height(11.dp))
             }
         }
         // Buttons outside the crossfade so focus is never torn down by a slide change.
         Row(
             Modifier.align(Alignment.BottomStart).padding(start = GUTTER, bottom = TvWeb.HERO_PAD_BOTTOM.px)
+                .onSizeChanged { actionsH = with(density) { it.height.toDp() } }
                 .onPreviewKeyEvent { e ->
                     if (e.type != KeyEventType.KeyDown) false
                     else when (e.key) {
@@ -737,7 +757,10 @@ private fun TvDetail(nav: Nav, type: String, id: Long) {
         val scope = rememberCoroutineScope()
         // Focus Play, then pin the list to the top: focusing scrolls Play into
         // view and would otherwise clip the title.
-        LaunchedEffect(t.tmdbId) { runCatching { playFocus.requestFocus() }; detailList.scrollToItem(0) }
+        // Play lives in a lazy item, composed during the first measure pass, after
+        // this effect starts: a bare requestFocus() threw (swallowed), nothing held
+        // focus and the next D-pad press fell to the rail's first item (Search).
+        LaunchedEffect(t.tmdbId) { playFocus.focusWhenAttached(); detailList.scrollToItem(0) }
         // Compose's TV default pivots the focused item to 30% of the height,
         // which pushed the title off the top. Scroll only as far as needed and
         // return to the very top when Play takes focus.

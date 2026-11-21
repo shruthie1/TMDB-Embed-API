@@ -22,8 +22,8 @@ android {
         applicationId = "com.chitram.app"
         minSdk = 25
         targetSdk = 35
-        versionCode = 30
-        versionName = "1.2.17"
+        versionCode = 31
+        versionName = "1.2.18"
         // Only ship the locales and densities we use.
         resourceConfigurations += listOf("en")
     }
@@ -54,6 +54,10 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        // minSdk 25 (Fire OS 6 is Android 7.1, API 25): java.util.Base64 (CastleResolver)
+        // is API 26. Without desugaring it throws NoClassDefFoundError, an Error that
+        // escapes the resolvers' catch (e: Exception) and kills the app on Play.
+        isCoreLibraryDesugaringEnabled = true
     }
     kotlinOptions { jvmTarget = "17" }
     buildFeatures {
@@ -89,6 +93,8 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("io.coil-kt:coil-compose:2.7.0")
+
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
