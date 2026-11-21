@@ -197,6 +197,10 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
     var fit by remember { mutableStateOf(playerPrefs.fitFor(isTv)) }
     val playFocus = remember { FocusRequester() }
     val rootFocus = remember { FocusRequester() }
+    // TV: each sheet's button, so closing a sheet hands focus back to the button
+    // that opened it, not to Play/Pause.
+    val menuFocus = remember { Menu.entries.associateWith { FocusRequester() } }
+    var returnTo by remember { mutableStateOf<Menu?>(null) }
     // Loading-screen Details panel (LoadingModel rows).
     var details by remember { mutableStateOf(false) }
     // Before the first frame the loading screen owns the screen, also in Playing.
@@ -213,6 +217,13 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
     LaunchedEffect(controls, menu, vm.phase, vm.framed) {
         if (vm.phase !is PlayerVm.Phase.Playing || !vm.framed) return@LaunchedEffect
         details = false
+        if (isTv && controls && menu == null) {
+            // A sheet just closed: back to its button. Otherwise (bar shown) Play/Pause.
+            val back = returnTo?.let { menuFocus.getValue(it) }
+            returnTo = null
+            (back ?: playFocus).focusWhenAttached()
+            return@LaunchedEffect
+        }
         runCatching { if (controls && menu == null) playFocus.requestFocus() else if (!controls) rootFocus.requestFocus() }
     }
     LaunchedEffect(seekHint, lastInput) { if (seekHint != 0) { delay(600); seekHint = 0 } }
@@ -339,7 +350,7 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
         // The control row cannot fit that width, so wait for landscape before drawing it.
         val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
         if (controls && (isTv || landscape) && vm.phase is PlayerVm.Phase.Playing && vm.framed && vm.nextUp == null) {
-            Controls(vm, now, isTv, playFocus, fit, onFit = { fit = fit.next(); playerPrefs.fit = fit; poke() }, onMenu = { menu = it; serverProvider = null; poke() }, onBack = onBack, poke = ::poke,
+            Controls(vm, now, isTv, playFocus, menuFocus, fit, onFit = { fit = fit.next(); playerPrefs.fit = fit; poke() }, onMenu = { menu = it; returnTo = it; serverProvider = null; poke() }, onBack = onBack, poke = ::poke,
                 onAnchor = { k, r -> if (menuAnchors[k] != r) menuAnchors[k] = r })
         }
 
@@ -364,7 +375,10 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
                         MenuTap.Check -> vm.checkNetmirror()
                         // A2: the selected row is already playing; just close.
                         MenuTap.Close -> menu = null
-                        MenuTap.Choose -> { vm.choose(key); menu = null }
+                        // TV, sheet opened from the bar: apply and stay in the sheet; focus
+                        // follows the new selection (MenuPanel). Re-tap closes (A2 above).
+                        // Phones, and a server picked on the loading screen, close as before.
+                        MenuTap.Choose -> { vm.choose(key); if (!(isTv && vm.phase is PlayerVm.Phase.Playing && vm.framed)) menu = null }
                     }
                     poke()
                 })
@@ -546,12 +560,13 @@ private fun CenterNote(text: String, sub: String) {
 @Composable
 private fun Controls(
     vm: PlayerVm, r: PlayRequest, isTv: Boolean, playFocus: FocusRequester,
+    menuFocus: Map<Menu, FocusRequester>,
     fit: VideoFit, onFit: () -> Unit,
     onMenu: (Menu) -> Unit, onBack: () -> Unit, poke: () -> Unit,
     onAnchor: (Menu, Rect) -> Unit = { _, _ -> },
 ) {
     val m = CtlMetrics.of(isTv)
-    fun anchor(k: Menu) = Modifier.onGloballyPositioned { onAnchor(k, it.boundsInRoot()) }
+    fun anchor(k: Menu) = Modifier.onGloballyPositioned { onAnchor(k, it.boundsInRoot()) }.focusRequester(menuFocus.getValue(k))
     val next = vm.nextEpisode
     // Buttons carry their own padding round the glyph, so the row starts that
     // much further out: glyph edges then line up with the time text.
@@ -803,7 +818,12 @@ private fun MenuPanel(menu: Menu, items: List<MenuItem>, isTv: Boolean, anchor: 
     var scrolledTo by remember(title) { mutableStateOf(false) }
     // TV only: on touch a focused row pulls the list back to it when late rows arrive (dead scroll).
     // No rows (empty level): focus the close button so focus never stays on the control behind the scrim.
-    LaunchedEffect(title, items.isEmpty()) { if (isTv) runCatching { if (items.isEmpty()) closeFocus.requestFocus() else first.requestFocus() } }
+    LaunchedEffect(title, items.isEmpty()) { if (isTv) { if (items.isEmpty()) closeFocus.focusWhenAttached() else first.focusWhenAttached() } }
+    // TV: a pick keeps the sheet open; when the selection moves, focus the new
+    // selected row, so it never falls to the controls behind the scrim.
+    var picks by remember(title) { mutableIntStateOf(0) }
+    val selectedKey = items.firstOrNull { it.selected }?.key
+    LaunchedEffect(selectedKey) { if (isTv && picks > 0 && selectedKey != null) first.focusWhenAttached() }
     // Registered last, so the open sheet takes Back before the player does, whatever holds focus.
     BackHandler {
         android.util.Log.i("Chitram", "[back] menupanel up=${onUp != null}")
@@ -890,7 +910,7 @@ private fun MenuPanel(menu: Menu, items: List<MenuItem>, isTv: Boolean, anchor: 
                             .clip(Tok.radiusMd)
                             .background(if (focused) Focus.fill else if (item.selected) Tok.fill2 else Color.Transparent)
                             // Press feedback on touch only; TV keeps the white focus fill.
-                            .clickable(interactionSource = src, indication = if (isTv) null else ripple(color = Color.White)) { onPick(item.key) }
+                            .clickable(interactionSource = src, indication = if (isTv) null else ripple(color = Color.White)) { picks++; onPick(item.key) }
                             .semantics { stateDescription = if (item.selected) "Selected" else "Not selected" }
                             .heightIn(min = if (isTv) 56.dp else 40.dp)
                             .padding(horizontal = if (isTv) 12.dp else 10.dp, vertical = if (isTv) 10.dp else 4.dp),

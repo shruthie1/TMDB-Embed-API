@@ -168,3 +168,22 @@ fun langName(code: String?): String? = when {
 
 fun metaLine(year: Int?, rating: Double?, extra: String? = null): String =
     listOfNotNull(year?.toString(), rating?.takeIf { it > 0 }?.let { "★ %.1f".format(it) }, extra).joinToString("  ·  ")
+
+/**
+ * TV: focus this requester once its node is attached, and keep asking until
+ * focus has landed. A requester on a lazy item is not attached until a later
+ * frame (requestFocus() throws until then), and a single try lost the race to
+ * whatever took focus first (Fire TV: the rail's Search item, 1.2.18).
+ * [landed] says whether the target holds focus; without it, the first request
+ * that does not throw counts. Tries for up to [frames] frames.
+ */
+suspend fun androidx.compose.ui.focus.FocusRequester.focusWhenAttached(frames: Int = 30, landed: (() -> Boolean)? = null): Boolean {
+    repeat(frames) {
+        androidx.compose.runtime.withFrameNanos { }
+        if (landed?.invoke() == true) return true
+        val asked = runCatching { requestFocus() }.isSuccess
+        if (asked && landed == null) return true
+    }
+    androidx.compose.runtime.withFrameNanos { }
+    return landed?.invoke() == true
+}

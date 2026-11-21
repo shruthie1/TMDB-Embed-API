@@ -144,6 +144,7 @@ import com.chitram.app.ui.common.Art
 import com.chitram.app.ui.common.BrowseVm
 import com.chitram.app.ui.common.DetailVm
 import com.chitram.app.ui.common.Focus
+import com.chitram.app.ui.common.focusWhenAttached
 import com.chitram.app.ui.common.Glyphs
 import com.chitram.app.ui.common.HomeVm
 import com.chitram.app.ui.common.Nav
@@ -202,19 +203,6 @@ private fun Modifier.cardLift(focused: Boolean) = lift(focused, TvWeb.CARD_SCALE
 @Composable
 private fun Modifier.controlLift(focused: Boolean) = lift(focused, TvWeb.CONTROL_SCALE, TvWeb.CONTROL_MS, ControlEase, TvWeb.CONTROL_RISE.px)
 
-/**
- * Focus this requester once its node is attached. A requester on a lazy item
- * is not attached until a later frame, and requestFocus() throws until then.
- * Tries for up to [frames] frames; false when the node never appeared.
- */
-private suspend fun FocusRequester.focusWhenAttached(frames: Int = 30): Boolean {
-    repeat(frames) {
-        withFrameNanos { }
-        if (runCatching { requestFocus() }.isSuccess) return true
-    }
-    return false
-}
-
 /** Give a lazy row's focus padding back to the layout (web .rail padding + negative margin). */
 private fun Modifier.bleedVertical(pad: Dp) = layout { m, c ->
     val p = pad.roundToPx()
@@ -240,11 +228,35 @@ fun TvApp(nav: Nav) {
             // Web AppNav is on every page; only the full-screen player and the
             // first-run language picker are drawn without it.
             val rail = s !is Screen.Player && !(s is Screen.Langs && s.firstRun)
+            // Initial focus belongs to the page, never the rail. The rail is
+            // composed from frame 0 while a page's controls arrive later (lazy
+            // items, network), so any focus search in that gap (a key press, a
+            // window-focus change) landed on the rail's first item, Search
+            // (Fire TV, intermittent on Home). The rail stays unfocusable on each
+            // screen entry until the page has held focus (Left then reaches it
+            // as before) or the page gave up claiming it (an empty page).
+            val content = remember { FocusRequester() }
+            var contentHas by remember { mutableStateOf(false) }
+            var railArmed by remember(s) { mutableStateOf(false) }
+            LaunchedEffect(s) {
+                if (!rail) return@LaunchedEffect
+                // The page claims its own main control first (Home: Watch now,
+                // Detail: Play, Search: the field). Home waits on the network.
+                delay(if (s == Screen.Home) 4000 else 500)
+                // Nothing claimed: the page's first control, retried until it lands.
+                if (!contentHas) content.focusWhenAttached(landed = { contentHas })
+                railArmed = true
+            }
             CompositionLocalProvider(
                 LocalLastFocus provides remember { mutableStateOf<FocusRequester?>(null) },
                 LocalRailEntry provides remember { mutableStateOf<FocusRequester?>(null) },
             ) {
-                Box(Modifier.fillMaxSize().padding(start = if (rail) RAIL_W else 0.dp)) {
+                Box(
+                    Modifier.fillMaxSize().padding(start = if (rail) RAIL_W else 0.dp)
+                        .focusRequester(content)
+                        .onFocusChanged { contentHas = it.hasFocus; if (it.hasFocus) railArmed = true }
+                        .focusGroup(),
+                ) {
                     when (s) {
                         Screen.Home -> TvHome(nav, restore, homeList)
                         Screen.Search -> TvSearch(nav)
@@ -256,7 +268,7 @@ fun TvApp(nav: Nav) {
                         is Screen.Player -> PlayerScreen(s.req, isTv = true, onBack = { nav.pop() })
                     }
                 }
-                if (rail) TvRail(nav, s)
+                if (rail) TvRail(nav, s, railArmed)
             }
         }
     }
@@ -478,7 +490,10 @@ private fun TvHero(pool: List<Title>, at: Int, onIndex: (Int) -> Unit, nav: Nav,
             horizontalArrangement = Arrangement.spacedBy(TvWeb.ACTION_GAP.px),
         ) {
             val watch = remember { geo.requester(HERO, "watch") }
-            if (restore.value == "$HERO|watch") LaunchedEffect(Unit) { withFrameNanos { }; runCatching { watch.requestFocus() } }
+            // The hero is a lazy item: one requestFocus() a frame after composing
+            // could throw (not attached yet, swallowed) and nothing retried, so the
+            // next focus search took the rail. Retry each frame until Watch now holds it.
+            if (restore.value == "$HERO|watch") LaunchedEffect(Unit) { watch.focusWhenAttached(landed = { geo.at == "$HERO|watch" }) }
             TvButton("Watch now", primary = true, modifier = Modifier.navSlot(geo, HERO, "watch"), icon = Icons.Filled.PlayArrow) {
                 restore.value = "$HERO|watch"
                 nav.push(Screen.Detail(t.mediaType, t.tmdbId))
@@ -534,7 +549,7 @@ private fun TvRow(
             Text(row.label, style = TextStyle(color = Tok.textSecondary, fontSize = TvWeb.ROW_LABEL.pxSp, fontWeight = FontWeight.Medium),
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(bottom = TvWeb.ROW_LABEL_BOTTOM.px))
             if (hasMore && !row.loading && row.titles.isNotEmpty()) {
-                if (restore.value == "${row.kind}|see-all") LaunchedEffect(Unit) { runCatching { seeAll.requestFocus() } }
+                if (restore.value == "${row.kind}|see-all") LaunchedEffect(Unit) { seeAll.focusWhenAttached() }
                 TvLink("See all", TvWeb.SEE_ALL,
                     Modifier.focusRequester(seeAll).navSlot(geo, "see-all", row.kind, target = false).onPreviewKeyEvent { e ->
                         if (e.type != KeyEventType.KeyDown) false
@@ -583,7 +598,7 @@ private fun TvRow(
                 itemsIndexed(row.titles, key = { _, t -> t.key }) { i, t ->
                     val rk = "${row.kind}|${t.key}"
                     val fr = remember(rk) { geo.requester(row.kind, t.key) }
-                    if (restore.value == rk) LaunchedEffect(rk) { runCatching { fr.requestFocus() } }
+                    if (restore.value == rk) LaunchedEffect(rk) { fr.focusWhenAttached() }
                     val last = i == row.titles.lastIndex
                     val mod = Modifier.navSlot(geo, row.kind, t.key).onPreviewKeyEvent { e ->
                         // Right from the last card reaches the row's "See all".
@@ -961,7 +976,7 @@ private fun TvPerson(nav: Nav, id: Long, name: String) {
     LaunchedEffect(id) { vm.load(id) }
     val d = vm.data
     val first = remember { FocusRequester() }
-    LaunchedEffect(d) { if (d?.titles?.isNotEmpty() == true) { withFrameNanos { }; runCatching { first.requestFocus() } } }
+    LaunchedEffect(d) { if (d?.titles?.isNotEmpty() == true) first.focusWhenAttached() }
     LazyVerticalGrid(
         GridCells.Adaptive(CARD_W), Modifier.fillMaxSize(),
         contentPadding = PaddingValues(start = GUTTER, end = GUTTER, top = TvWeb.DETAIL_TOP.px, bottom = 32.dp),
@@ -1053,7 +1068,7 @@ private fun TvSearch(nav: Nav) {
     val kb = LocalSoftwareKeyboardController.current
     // Set by the IME action or D-pad Down: focus the first card once results are in.
     var toResults by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) { runCatching { field.requestFocus() } }
+    LaunchedEffect(Unit) { field.focusWhenAttached() }
     LaunchedEffect(toResults, vm.resultsFor, vm.loading, vm.results) {
         if (SearchFocus.ready(toResults, vm.query, vm.resultsFor, vm.loading, vm.results.size)) {
             grid.scrollToItem(0)
@@ -1161,7 +1176,7 @@ private fun TvLangs(firstRun: Boolean, onDone: () -> Unit) {
     // standing default, so a first-time viewer lands on it without hunting.
     val chosen = remember { mutableStateListOf<String>().apply { if (firstRun) add("te") else addAll(prefs.langs()) } }
     val first = remember { FocusRequester() }
-    LaunchedEffect(Unit) { runCatching { first.requestFocus() } }
+    LaunchedEffect(Unit) { first.focusWhenAttached() }
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         // Web .lang-modal on TV: min(760px,90vw) wide, --space-8 padding, 34px title, 20px hint.
         Column(Modifier.widthIn(max = 380.dp).background(Tok.surface, Tok.radiusLg).padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -1241,7 +1256,7 @@ private fun RailDest.matches(s: Screen) = when (screen) {
  */
 @Composable
 @OptIn(ExperimentalComposeUiApi::class)
-private fun TvRail(nav: Nav, top: Screen) {
+private fun TvRail(nav: Nav, top: Screen, armed: Boolean) {
     var open by remember { mutableStateOf(false) }
     val railTween = tween<Dp>(TvWeb.RAIL_MS, easing = ControlEase)
     val width by animateDpAsState(if (open) RAIL_OPEN_W else RAIL_W, railTween, label = "rail")
@@ -1290,7 +1305,11 @@ private fun TvRail(nav: Nav, top: Screen) {
         ) {
             RAIL.forEachIndexed { i, d ->
                 RailButton(d, selected = i == current, openness = openness, open = open,
-                    modifier = Modifier.focusRequester(reqs[i]).onFocusChanged { if (it.isFocused) at = i }) {
+                    // Never a default focus target: focusable once the page has held
+                    // focus (see TvApp), and while the rail already holds it, so a
+                    // tab switch does not tear focus out from under the viewer.
+                    modifier = Modifier.focusProperties { canFocus = armed || open }
+                        .focusRequester(reqs[i]).onFocusChanged { if (it.isFocused) at = i }) {
                     if (i != current) nav.tab(d.screen)
                     // Hand focus to the new screen once it has composed, unless
                     // the screen already took it (Home restores, Search focuses its field).
