@@ -6,6 +6,7 @@ import MenuRow from './player/MenuRow';
 import QualityMenu from './player/QualityMenu';
 import AudioMenu from './player/AudioMenu';
 import VideoMenu from './player/VideoMenu';
+import { SheetScrim, useAnchoredSheet } from './player/popover';
 import { audioOptions } from '../lib/player/audioOptions';
 import { videoChoices, audioChoices, pairingFor, videoIdOf } from '../lib/player/trackChoices';
 import { SIZES } from '../lib/subtitles';
@@ -241,6 +242,13 @@ export default function PlayerControls({
   // (useControlVisibility) - a single writer, because two of them racing is
   // what made the controls flash, auto-hide and ignore taps three times.
   const [menu, setMenu] = useState(null);
+  // The Server sheet's drilled provider lives here so Back can go up a level.
+  const [videoProvider, setVideoProviderState] = useState(null);
+  const wentUp = useRef(false);
+  const setVideoProvider = useCallback((next) => {
+    setVideoProviderState((prev) => { if (prev && !next) wentUp.current = true; return next; });
+  }, []);
+  const sheetRef = useRef(null);
 
   // Languages, however they arrive. See web/lib/player/audioOptions.js.
   const audioMenu = useMemo(
@@ -292,9 +300,20 @@ export default function PlayerControls({
    * flag the sheet stayed on screen after Back, and the next Back left the
    * film with the sheet still drawn.
    */
+  // APK back(): a drilled Server sheet goes up to the server list first; only
+  // the top level closes. The sheet's own Escape handler may already have gone
+  // up in the same event (wentUp); either way the sheet stays open.
   useEffect(() => {
-    if (menuOpen === false && menu) setMenu(null);
-  }, [menuOpen, menu]);
+    const up = wentUp.current;
+    wentUp.current = false;
+    if (menuOpen !== false || !menu) return;
+    if (menu === 'video' && (up || videoProvider)) {
+      setVideoProvider(null);
+      onMenuChange?.(true);
+      return;
+    }
+    setMenu(null);
+  }, [menuOpen, menu, videoProvider]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /**
    * Focus follows the menu on a remote.
@@ -575,6 +594,8 @@ export default function PlayerControls({
   // settings sheet. `back` is where closing Quality returns to.
   const back = compact ? 'all' : null;
   const sheetOpen = menu === 'all' || (compact && menu === 'quality');
+  // Settings sheet: above the gear in landscape, like the other sheets.
+  useAnchoredSheet(sheetRef, [sheetOpen]);
   const qualityPick = (
     <>
           {/* Quality and audio, each its own control showing its current value.
@@ -605,6 +626,7 @@ export default function PlayerControls({
                        else if (c?.source) onPickSource?.(c.source);
                      }}
                      open={menu === 'video'} onTouch={touchSheet}
+                     provider={videoProvider} onProvider={setVideoProvider}
                      onToggle={() => openMenu(menu === 'video' ? null : 'video')} />
 
           {/* One Audio button regardless of how the provider ships languages.
@@ -765,8 +787,9 @@ export default function PlayerControls({
                     onClick={e => { e.stopPropagation(); openMenu(sheetOpen ? null : 'all'); }}>
               <Icon name="settings" size={18} />
             </button>
+            {sheetOpen && <SheetScrim onClose={() => openMenu(null)} />}
             {sheetOpen && (
-              <div className="pmenu pmenu-sheet" role="menu" data-focus-group=""
+              <div className="pmenu pmenu-sheet" role="menu" data-focus-group="" ref={sheetRef}
                    onClick={e => { e.stopPropagation(); touchSheet(); }}
                    onPointerDown={touchSheet}
                    onKeyDown={touchSheet}

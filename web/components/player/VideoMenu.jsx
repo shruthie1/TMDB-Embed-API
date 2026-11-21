@@ -1,5 +1,5 @@
 'use client';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { sourceAudioLanguages } from '../../lib/player/languageSources';
 import Icon from '../Icon';
 import MenuRow from './MenuRow';
@@ -25,13 +25,39 @@ import { videoIdOf, videoLabels } from '../../lib/player/trackChoices';
  * resolutions duplicated it and hid the thing that actually differs between
  * rows - which server is serving. Asked for 2026-09-22.
  */
+/** APK PlayerVm.streamCount: "1 stream", "N streams". */
+export const streamCount = (n) => (n === 1 ? '1 stream' : `${n} streams`);
+
+/**
+ * APK netmirrorCheck: what a finished NetMirror check found, so the tap is
+ * never silent. `before`/`after` are NetMirror row counts around the check.
+ */
+export function netmirrorNote(before, after) {
+  if (!after) return 'No NetMirror streams for this title';
+  return after > before ? `${after - before} added` : 'No new streams';
+}
+
 export default function VideoMenu({
   choices = [], currentId, currentSource = null, onPick,
   open, onToggle, onTouch, onCheckSources, checkingSources = false,
+  provider: providerProp, onProvider,
 }) {
-  const [provider, setProvider] = useState(null);
+  // The drilled provider can be owned by the parent (PlayerControls), so the
+  // player's Back goes up one level before it closes the sheet (APK back()).
+  const [ownProvider, setOwnProvider] = useState(null);
+  const controlled = typeof onProvider === 'function';
+  const provider = controlled ? (providerProp ?? null) : ownProvider;
+  const setProvider = controlled ? onProvider : setOwnProvider;
   const [focusLabel, setFocusLabel] = useState(null);
-  useEffect(() => { if (!open) { setProvider(null); } }, [open]);
+  useEffect(() => { if (!open) { setProvider(null); } }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Result line under "Check for more streams" (APK netmirrorNote).
+  const netmirrorCount = choices.filter(c => (c.source?.provider || c.label || '').toLowerCase() === 'netmirror').length;
+  const checkStart = useRef(null);
+  const [note, setNote] = useState(null);
+  useEffect(() => {
+    if (checkingSources) { checkStart.current = netmirrorCount; setNote(null); }
+    else if (checkStart.current != null) { setNote(netmirrorNote(checkStart.current, netmirrorCount)); checkStart.current = null; }
+  }, [checkingSources]); // eslint-disable-line react-hooks/exhaustive-deps
   if (!choices.length) return null;
 
   // Name and ceiling, nothing else. The ceiling used to carry the language
@@ -42,8 +68,8 @@ export default function VideoMenu({
   const maxOf = (c) => {
     if (c.embed) return 'Their player';
     if (c.unsupported) return 'Not supported on this device';
-    const quality = c.quality && c.quality !== 'Auto' ? `up to ${c.quality}` : 'Auto quality';
-    return c.source?.incomplete ? `${quality} · More sources pending` : quality;
+    const quality = c.quality && c.quality !== 'Auto' ? c.quality : 'Auto quality';
+    return c.source?.incomplete ? `${quality} · More streams pending` : quality;
   };
   const labels = videoLabels(choices);
 
@@ -74,7 +100,9 @@ export default function VideoMenu({
   const goBack = () => { setFocusLabel(provider); setProvider(null); };
   const describe = rows => {
     const languages = [...new Set(rows.flatMap(c => sourceAudioLanguages(c.source)))].slice(0, 3).join(', ');
-    return [rows.length === 1 ? maxOf(rows[0]) : `${rows.length} streams`, languages, rows.some(c => c.source?.incomplete) ? 'More sources pending' : '', !rows.length ? 'Check on demand' : ''].filter(Boolean).join(' · ');
+    // APK serverItems: count · up to three languages; NetMirror before a check says so.
+    if (!rows.length) return 'Check streams on demand';
+    return [rows.length === 1 && rows[0].embed ? maxOf(rows[0]) : streamCount(rows.length), languages, rows.some(c => c.source?.incomplete) ? 'More streams pending' : ''].filter(Boolean).join(' · ');
   };
 
   return (
@@ -96,18 +124,25 @@ export default function VideoMenu({
         <PlayerMenu title={provider || 'Server'} icon="server" onClose={onToggle} onBack={provider ? goBack : null} focusLabel={focusLabel} onTouch={onTouch}>
           {!provider && [...groups].map(([name, rows]) => (
             <MenuRow key={name} label={name} meta={describe(rows)} selected={rows.some(c => choices.indexOf(c) === selectedIndex)}
-              onClick={() => { if (rows.length === 1 && rows[0].embed) onPick?.(rows[0]); else { setFocusLabel(null); setProvider(name); if (!rows.length && name.toLowerCase() === 'netmirror') onCheckSources?.(); } }} />
+              onClick={() => { if (rows.length === 1 && rows[0].embed) { if (choices.indexOf(rows[0]) === selectedIndex) onToggle?.(); else onPick?.(rows[0]); } else { setFocusLabel(null); setProvider(name); if (!rows.length && name.toLowerCase() === 'netmirror') onCheckSources?.(); } }} />
           ))}
           {provider && providerRows.map(c => {
             const i = choices.indexOf(c);
-            return <MenuRow key={`${c.id}-${i}`} label={labels[i]} meta={[c.source?.netmirrorCatalog, maxOf(c), sourceAudioLanguages(c.source).join(', ')].filter(Boolean).join(' · ')} selected={i === selectedIndex} dim={c.unsupported} onClick={() => onPick?.(c)} />;
+            return <MenuRow key={`${c.id}-${i}`} label={labels[i]} meta={[c.source?.netmirrorCatalog, maxOf(c), c.embed ? '' : (sourceAudioLanguages(c.source).join(', ') || 'Unknown audio')].filter(Boolean).join(' · ')} selected={i === selectedIndex} dim={c.unsupported}
+              // APK A2: the playing row only closes the sheet.
+              onClick={() => (i === selectedIndex ? onToggle?.() : onPick?.(c))} />;
           })}
           {provider && !providerRows.length && <p className="pmenu-note">No streams found in current results.</p>}
           {(incomplete || isNetmirror) && onCheckSources && (
             <button role="menuitem" className="pmenu-item focusable" data-focus=""
                     disabled={checkingSources} aria-busy={checkingSources || undefined}
+                    aria-label={checkingSources ? 'Checking sources…' : 'Check for more streams'}
                     onClick={onCheckSources}>
-              <span className="pmenu-text">{checkingSources ? 'Checking sources…' : 'Check for more sources'}</span>
+              <span className="pmenu-marker" aria-hidden="true">{checkingSources && <span className="pmenu-spin" />}</span>
+              <span className="pmenu-copy">
+                <span className="pmenu-text">{checkingSources ? 'Checking sources…' : 'Check for more streams'}</span>
+                <span className="pmenu-meta">{note || 'Current playback continues'}</span>
+              </span>
             </button>
           )}
         </PlayerMenu>

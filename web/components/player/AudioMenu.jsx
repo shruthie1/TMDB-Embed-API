@@ -40,7 +40,14 @@ export default function AudioMenu({
   open, onToggle, onTouch,
   sync = null, allowSingleSelection = false,
 }) {
-  if (!audioTracks.length) return null;
+  // APK: the Audio button is always there. With no language known for this
+  // stream (RRR 2026-11-21: multimovies/showsst/NetMirror/vidrock all ship no
+  // language tag) the sheet says so with one "Default" row instead of the
+  // button vanishing.
+  if (!audioTracks.length) {
+    audioTracks = [{ id: 'cur', name: 'Default', meta: 'this server', kind: 'in-file' }];
+    currentAudio = 'cur';
+  }
 
   // NO `|| audioTracks[0]` fallback.
   //
@@ -85,7 +92,8 @@ export default function AudioMenu({
             <Fragment key={t.id}>
               {head && <p className="pmenu-group" role="presentation">{head}</p>}
               <MenuRow label={t.name} meta={t.meta} selected={t.id === currentAudio}
-                       onClick={() => onPickAudio?.(t.id)} />
+                       // APK A2: the playing language only closes the sheet.
+                       onClick={() => (t.id === currentAudio ? onToggle?.() : onPickAudio?.(t.id))} />
             </Fragment>
           ))}
           {/* Timing lives WITH the language list: picking a dubbed track is

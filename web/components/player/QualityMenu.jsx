@@ -44,12 +44,15 @@ export default function QualityMenu({
         <PlayerMenu title="Quality" icon="quality" onClose={onToggle} onTouch={onTouch}>
           {/* Auto stays first and stays selectable: someone who pinned 480p on
               a bad line needs an obvious way back to adaptive. */}
-          <MenuRow label="Auto" meta={autoLevel} selected={currentLevel === -1}
-                   onClick={() => onPickLevel?.(-1)} />
+          {/* APK qualityItems: Auto explains itself; the button badge already
+              names the rung Auto settled on. Re-tapping the active row only
+              closes the sheet (APK A2). */}
+          <MenuRow label="Auto" meta="adapts to your connection" selected={currentLevel === -1}
+                   onClick={() => (currentLevel === -1 ? onToggle?.() : onPickLevel?.(-1))} />
           {levels.map(l => (
             <MenuRow key={l.index} label={l.label} meta={l.bitrate}
                      selected={currentLevel === l.index}
-                     onClick={() => onPickLevel?.(l.index)} />
+                     onClick={() => (currentLevel === l.index ? onToggle?.() : onPickLevel?.(l.index))} />
           ))}
         </PlayerMenu>
       )}

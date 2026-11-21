@@ -153,9 +153,12 @@ describe('quality and audio are their own controls', () => {
     expect(container.querySelector('.pmenu-pick')).toBeNull();
   });
 
-  it('no audio tracks at all renders no audio button', () => {
+  // APK: the Audio button never vanishes. No known language reads "Default".
+  it('no audio tracks at all still shows an informational Default audio button', () => {
     const { container } = mount({ audioTracks: [] });
-    expect(audioBtn(container)).toBeNull();
+    const btn = audioBtn(container);
+    expect(btn.textContent).toContain('Default');
+    expect(btn.getAttribute('aria-disabled')).toBe('true');
   });
 });
 

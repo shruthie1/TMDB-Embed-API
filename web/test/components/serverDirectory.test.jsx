@@ -21,7 +21,7 @@ describe('compact provider stream list', () => {
     const view=render(<VideoMenu open choices={[{id:'ct',label:'CastleTV',source:{provider:'CastleTV'}}]} onCheckSources={check}/>);
     fireEvent.click(view.getByRole('menuitemradio',{name:/NetMirror/}));
     expect(check).toHaveBeenCalledTimes(1);
-    fireEvent.click(view.getByRole('menuitem',{name:'Check for more sources'}));
+    fireEvent.click(view.getByRole('menuitem',{name:'Check for more streams'}));
     expect(check).toHaveBeenCalledTimes(2);
   });
 });

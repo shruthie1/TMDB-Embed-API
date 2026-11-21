@@ -75,7 +75,7 @@ describe('settings sheet rows are clickable across their whole width', () => {
     });
     const rows = [...container.querySelectorAll('.pmenu-pick .pmenu-item')]
       .map((r) => r.textContent);
-    expect(rows.some((t) => t.includes('vidking') && t.includes('up to 1080p'))).toBe(true);
+    expect(rows.some((t) => t.includes('vidking') && t.includes('1 stream'))).toBe(true);
     // No codec tail and no audio-track count: both belong to the settings
     // sheet, which has the width for them.
     expect(container.textContent).not.toContain('HEVC');
@@ -100,8 +100,8 @@ describe('settings sheet rows are clickable across their whole width', () => {
     const rows = [...container.querySelectorAll('.pmenu-pick .pmenu-item')]
       .map((r) => r.textContent);
     // Every CastleTV row is numbered, once, across the WHOLE list.
-    expect(rows.some((t) => t.includes('CastleTV 1') && t.includes('up to 720p'))).toBe(true);
-    expect(rows.some((t) => t.includes('CastleTV 2') && t.includes('up to 720p'))).toBe(true);
+    expect(rows.some((t) => t.includes('CastleTV 1') && t.includes('720p'))).toBe(true);
+    expect(rows.some((t) => t.includes('CastleTV 2') && t.includes('720p'))).toBe(true);
     // The 480p row gets the next ordinal rather than restarting at 1.
     // Numbering per ceiling made the counter reset, so a provider with rows at
     // two ceilings showed "CastleTV 1" twice and the ordinal stopped telling
@@ -163,7 +163,7 @@ describe('settings sheet rows are clickable across their whole width', () => {
       .map((r) => r.textContent);
     const va = rows.find((t) => t.includes('VaPlayer'));
     expect(va).toBeTruthy();
-    expect(va).toContain('Auto quality');
+    expect(va).toContain('1 stream');
     expect(va).not.toMatch(/·\s*$/);
     expect(va).not.toContain('· ·');
   });
@@ -266,7 +266,7 @@ describe('picture fit in the settings sheet', () => {
 describe('partial NetMirror source coverage', () => {
   it('lets even one partial source open its menu and states that more sources are pending', () => {
     const { container } = openServers({ sources: [{ id: 'nm-1', provider: 'NetMirror', masterUrl: 'https://x/nm.m3u8', quality: '720p', languages: ['Telugu'], incomplete: true }], currentSourceId: 'nm-1' });
-    expect(container.textContent).toContain('More sources pending');
+    expect(container.textContent).toContain('More streams pending');
     expect(container.querySelector('[aria-label^="Server:"]').getAttribute('aria-disabled')).not.toBe('true');
     expect(container.querySelectorAll('.pmenu-pick [aria-checked="true"]')).toHaveLength(1);
   });
@@ -275,7 +275,7 @@ describe('partial NetMirror source coverage', () => {
 it('offers explicit continuation without picking a source and disables it while checking', () => {
   const onCheckSources=vi.fn(),onPickSource=vi.fn();
   const props={sources:[{id:'nm-1',provider:'NetMirror',masterUrl:'https://x/nm.mp4',quality:'720p',incomplete:true}],currentSourceId:'nm-1',onCheckSources,onPickSource};
-  let view=openServers(props);fireEvent.click(view.getByRole('menuitem',{name:'Check for more sources'}));
+  let view=openServers(props);fireEvent.click(view.getByRole('menuitem',{name:'Check for more streams'}));
   expect(onCheckSources).toHaveBeenCalledTimes(1);expect(onPickSource).not.toHaveBeenCalled();
   view.unmount();view=openServers({...props,checkingSources:true});expect(view.getByRole('menuitem',{name:'Checking sources…'}).disabled).toBe(true);
 });

@@ -56,7 +56,7 @@ describe('shared player menus', () => {
     const pick = vi.fn();
     const { container, getByRole } = render(<Fixture onPick={pick} />);
     fireEvent.click(container.querySelector('[aria-label^="Video quality:"]'));
-    const auto = getByRole('menuitemradio', { name: 'Auto' });
+    const auto = getByRole('menuitemradio', { name: 'Auto adapts to your connection' });
     expect(auto.getAttribute('aria-checked')).toBe('true');
     const row = getByRole('menuitemradio', { name: '720p 2 Mbps' });
     expect(row.querySelector('.pmenu-marker')).toBeTruthy();

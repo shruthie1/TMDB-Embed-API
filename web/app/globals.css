@@ -3253,16 +3253,21 @@ html .pctl-scrub:focus-visible,html .sync-bar:focus-visible{outline:none}
   .pctl .sheet-picks .pmenu-unified::before{content:none}
   .pmenu-unified .pmenu-picker-body{padding-bottom:calc(var(--space-3) + var(--safe-b))}
 }
-@media (pointer:coarse) and (max-height:500px) and (min-width:640px){
-  /* Phone landscape: a content-sized card at the bottom right, not a
-     full-height rail. */
-  .pctl .pmenu-unified,.pctl .pmenu-sheet,.embed-stage .pmenu-unified{
-    position:fixed;left:auto;top:auto;bottom:var(--space-2);right:calc(var(--safe-r,0px) + var(--space-2));
-    width:max-content;min-width:200px;max-width:min(320px,50vw);
-    max-height:calc(100svh - var(--safe-t,0px) - var(--space-4));border-radius:var(--radius-md);
-  }
-  .pctl .sheet-picks .pmenu-unified{position:static;width:auto;min-width:0;max-width:none;max-height:none;border-radius:0}
+/* Landscape (APK 1.2.15): the sheet opens just above the button that opened
+   it, centred on it and clamped inside the screen. components/player/popover.jsx
+   sets left/top/max-height and the data-anchored flag. */
+.pctl .pmenu[data-anchored]{
+  position:fixed;right:auto;bottom:auto;
+  width:max-content;min-width:200px;max-width:min(360px,calc(100vw - 32px));
+  border-radius:var(--radius-md);border-bottom:1px solid var(--color-border);
 }
+.pctl .pmenu[data-anchored]::before{content:none}
+.pctl .pmenu[data-anchored] .pmenu-picker-body,.pctl .pmenu[data-anchored] .pmenu-sheet-body{padding-bottom:var(--space-1)}
+/* Dim behind an open sheet: 0.2 over a popover, 0.4 over a docked sheet (APK). */
+.pmenu-scrim{display:none}
+.pctl .pmenu-scrim{display:block;position:fixed;inset:0;z-index:5;background:rgb(var(--rgb-black) / .4);animation:fade-in .16s var(--ease) both}
+.pctl .pmenu-scrim[data-anchored]{background:rgb(var(--rgb-black) / .2)}
+.pctl .sheet-picks .pmenu-scrim,html[data-tv="true"] .pmenu-scrim{display:none}
 html[data-tv="true"] .pctl .pmenu-unified,html[data-tv="true"] .pctl .pmenu-sheet,
 html[data-tv="true"] .embed-stage .pmenu-unified{
   position:fixed;left:auto;right:0;top:0;bottom:0;width:min(400px,50vw);max-width:none;max-height:none;
