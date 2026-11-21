@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   loadingView, labelRows, advanceNotice, reasonFor, reasonFromText, retryPlan, langOf,
-  Phase, RowState, Reason, CHECK_SERVER,
+  Phase, RowState, Reason, CHECK_SERVER, Copy, LOADING_SLOW_HINT_MS,
+  ADD_AUDIO_MAX_TRIES, ADD_AUDIO_TRY_MS, ADD_AUDIO_TOTAL_MS,
 } from '../lib/player/loadingModel';
 
 // Loading-ux spec section 8, web case 1. Same table as the APK's
@@ -83,7 +84,7 @@ describe('loadingModel copy per phase', () => {
     const adv = loadingView(input(34000, { listReady: true, attempts: [
       A('c1', 9000, 29000, RowState.FAILED, Reason.NO_PICTURE), A('c2', 29000)] }));
     expect(adv.phase).toBe(Phase.ADVANCING);
-    expect(adv.headline).toBe('CastleTV 1 is slow. Trying CastleTV 2.');
+    expect(adv.headline).toBe("CastleTV 1 didn't start. Trying CastleTV 2.");
     expect(adv.detail).toBe('Telugu · 1080p · 2 of 5 tried');
     expect(adv.footer).toBe('Started 34s ago · 2 of 5 tried');
 
@@ -160,7 +161,7 @@ describe('loadingModel labels and notices', () => {
     expect(less.a).not.toBe(less.c);
   });
   it('advanceNotice names two different servers (regression: "showsst 1 … playing showsst 1")', () => {
-    expect(advanceNotice('CastleTV 1', 'CastleTV 2')).toBe('CastleTV 1 is slow. Trying CastleTV 2.');
+    expect(advanceNotice('CastleTV 1', 'CastleTV 2')).toBe("CastleTV 1 didn't start. Trying CastleTV 2.");
     expect(advanceNotice('showsst', 'NetMirror', true)).toBe("showsst won't play on this device. Trying NetMirror.");
     const two = labelRows({}, [src('s1', 'showsst'), src('s2', 'showsst')]);
     expect(two.s1).not.toBe(two.s2);
@@ -185,5 +186,102 @@ describe('loadingModel labels and notices', () => {
   it('Try again during the search does not refresh', () => {
     expect(retryPlan(false)).toEqual({ refresh: false, keepDevice: true });
     expect(retryPlan(true)).toEqual({ refresh: true, keepDevice: false });
+  });
+});
+
+// Task 6 (2026-11-21): the owner read "slow" on almost every server switch
+// while the server was fine. The words must say what is really happening.
+describe('loadingModel honest switch vs slow copy', () => {
+  const late = LOADING_SLOW_HINT_MS + 5000;
+  it('a switch in flight reads "Switching server…", not the slow text, even past the slow hint', () => {
+    const v = loadingView(input(late, { switching: true }));
+    expect(v.phase).toBe(Phase.SWITCHING);
+    expect(v.headline).toBe('Switching server…');
+    expect(v.headline).not.toMatch(/slow|Still finding/i);
+  });
+  it('no switch in flight past the slow hint is the slow source-list text', () => {
+    const v = loadingView(input(late, { switching: false }));
+    expect(v.phase).toBe(Phase.FINDING_SLOW);
+    expect(v.headline).toBe('Still finding sources…');
+  });
+  it('a viewer pick from the loading screen is a switch, not "X is slow. Trying Y"', () => {
+    const a = [A('c1', 1000, 9000, RowState.FAILED, Reason.STOPPED), A('o1', 9000)];
+    const v = loadingView(input(late, { listReady: true, attempts: a, switching: true }));
+    expect(v.phase).toBe(Phase.SWITCHING);
+    expect(v.headline).toBe('Switching server…');
+    expect(v.detail).toBe('Telugu · 720p · 2 of 5 tried');
+  });
+  it('an automatic move after a failed start names the failure, never "slow"', () => {
+    for (const reason of [Reason.NO_ANSWER, Reason.NO_PICTURE, Reason.NO_PICTURE_STARTUP, Reason.NOT_FOUND, Reason.SERVER]) {
+      const a = [A('c1', 1000, 9000, RowState.FAILED, reason), A('c2', 9000)];
+      const v = loadingView(input(late, { listReady: true, attempts: a }));
+      expect(v.phase).toBe(Phase.ADVANCING);
+      expect(v.headline).toBe("CastleTV 1 didn't start. Trying CastleTV 2.");
+    }
+  });
+  it('a failed list still ends on the end card while a switch flag is stale', () => {
+    const v = loadingView(input(late, { listReady: true, failed: true, switching: true,
+      attempts: [A('c1', 0, 1, RowState.FAILED, Reason.NO_ANSWER)] }));
+    expect(v.phase).toBe(Phase.FAILED);
+  });
+  it('a playing source that died mid-film "stopped", it did not fail to start', () => {
+    expect(advanceNotice('CastleTV 1', 'CastleTV 2', false, true)).toBe('CastleTV 1 stopped. Trying CastleTV 2.');
+    expect(advanceNotice('CastleTV 1', 'CastleTV 2', true, true)).toBe("CastleTV 1 won't play on this device. Trying CastleTV 2.");
+  });
+  it('no copy string says "slow"', () => {
+    const all = [Copy.SWITCHING_SERVER, Copy.FINDING, Copy.FINDING_SLOW, Copy.FINDING_SLOW_DETAIL,
+      Copy.didntStart('A', 'B'), Copy.stopped('A', 'B'), Copy.wontPlay('A', 'B')];
+    for (const t of all) {
+      expect(t).not.toMatch(/slow/i);
+      expect(t).not.toMatch(/[\u2013\u2014!]/);
+    }
+  });
+});
+
+// Fix round 1: a row the viewer left by picking another server is neutral.
+describe('loadingModel row left by the viewer', () => {
+  const left = [A('c1', 1000, 9000, RowState.LEFT, null), A('o1', 9000)];
+  it('reads "Left", not a failure, and stays pickable', () => {
+    const v = loadingView(input(12000, { listReady: true, attempts: left, switching: true }));
+    const row = v.rows.find((r) => r.id === 'c1');
+    expect(row.state).toBe(RowState.LEFT);
+    expect(row.status).toBe('Left');
+    expect(row.status).not.toMatch(/Failed|stopped/i);
+    expect(row.clickable).toBe(true);
+  });
+  it('is not counted as tried', () => {
+    const v = loadingView(input(12000, { listReady: true, attempts: left, switching: true }));
+    expect(v.detail).toBe('Telugu · 720p · 1 of 5 tried');
+    expect(v.footer).toBe('Started 12s ago · 1 of 5 tried');
+  });
+  it('is not counted on the end card', () => {
+    const v = loadingView(input(90000, { listReady: true, failed: true, attempts: [
+      A('c1', 0, 1, RowState.LEFT, null), A('o1', 1, 2, RowState.FAILED, Reason.NO_ANSWER)] }));
+    expect(v.detail).toBe('We tried 1 sources. None of them played.');
+  });
+  it('a left row before the current one is not a failure line once the switch flag clears', () => {
+    const v = loadingView(input(12000, { listReady: true, attempts: left }));
+    expect(v.phase).toBe(Phase.STARTING);
+    expect(v.headline).toBe('Starting OneTouchTV');
+  });
+  it('the row word lives in Copy', () => {
+    expect(Copy.ROW_LEFT).toBe('Left');
+  });
+});
+
+// Step 2 Task 2 (2026-11-21): the "Add <L> audio from another server" journey.
+// Owner-approved lines, verbatim; the APK's SwitchCopyGuardTest mirrors them.
+describe('add-audio copy and caps', () => {
+  it('has the five owner-approved lines', () => {
+    expect(Copy.ADD_AUDIO_GROUP).toBe('Add audio from another server');
+    expect(Copy.addAudio('Telugu')).toBe('Add Telugu audio from another server');
+    expect(Copy.checkingAudio('Telugu', 'CastleTV', 1, 3)).toBe('Checking CastleTV for Telugu audio (1 of 3)\u2026');
+    expect(Copy.audioAdded('Telugu', 'CastleTV')).toBe('Telugu audio added from CastleTV.');
+    expect(Copy.noWorkingAudio('Telugu')).toBe('No server has working Telugu audio. Playback is unchanged.');
+  });
+  it('caps: 3 donors, 15s per try, 30s total', () => {
+    expect(ADD_AUDIO_MAX_TRIES).toBe(3);
+    expect(ADD_AUDIO_TRY_MS).toBe(15000);
+    expect(ADD_AUDIO_TOTAL_MS).toBe(30000);
   });
 });

@@ -97,5 +97,5 @@ export function advanceTarget(sources, dead, failed, ctx = {}) {
 }
 
 // The advance copy lives in loadingModel.js, shared with the APK's
-// LoadingModel.kt: "{from} is slow. Trying {to}."
+// LoadingModel.kt: "{from} didn't start. Trying {to}."
 export { advanceNotice } from './loadingModel';

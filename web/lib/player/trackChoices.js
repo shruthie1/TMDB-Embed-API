@@ -1,3 +1,5 @@
+import { audioLanguageKey, displayLanguage, isResolvedLanguage, singleAudioLanguage, withLanguageFloor, languageFromTrackName, sourceAudioRenditions } from './languageSources';
+
 /**
  * Video and audio as two INDEPENDENT choices.
  *
@@ -78,8 +80,14 @@ export function audioChoices(sources = [], videoSourceId = null, inFileTracks = 
   // 1. Tracks already inside the chosen picture - the cheapest kind.
   for (const t of inFileTracks || []) {
     const name = String(t?.name || '').trim();
-    if (!name || seen.has(name.toLowerCase())) continue;
-    seen.add(name.toLowerCase());
+    if (!name) continue;
+    // Key by the language the label names ('Telugu 5.1' -> telugu), so a source
+    // carrying 'te' does not add a second Telugu row. Unresolved labels keep their name.
+    const named = languageFromTrackName(name);
+    const resolved = isResolvedLanguage(named) ? named : null;
+    const key = resolved ? audioLanguageKey(resolved) : name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
     out.push({ id: `track:${t.id}`, language: name, kind: 'in-file', trackId: t.id });
   }
 
@@ -91,11 +99,14 @@ export function audioChoices(sources = [], videoSourceId = null, inFileTracks = 
     // languages. A single-language source gives up only its own.
     // Offer the master's real audio renditions when the backend sends them:
     // NetMirror's post.php list can name languages the master does not carry.
-    const real = Array.isArray(s.audio) ? s.audio.map((a) => a && a.language).filter(Boolean) : [];
-    const offered = s.selectableAudio ? (real.length ? real : langs) : langs.slice(0, 1);
-    for (const lang of offered) {
-      const key = String(lang).toLowerCase();
-      if (seen.has(key)) continue;
+    const real = sourceAudioRenditions(s).map((r) => r.language);
+    const offered = s.selectableAudio
+      ? (real.length ? withLanguageFloor(real, langs) : langs)
+      : singleAudioLanguage(real, langs);
+    for (const raw of offered) {
+      const lang = displayLanguage(raw);
+      const key = audioLanguageKey(lang);
+      if (!key || seen.has(key)) continue;
       seen.add(key);
       out.push({
         id: `src:${s.id}:${lang}`,

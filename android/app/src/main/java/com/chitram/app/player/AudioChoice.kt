@@ -3,7 +3,7 @@ package com.chitram.app.player
 import com.chitram.app.data.Source
 
 object AudioChoice {
-    fun knownLanguage(value: String?): Boolean = !value.isNullOrBlank() && !Regex("^(?:track|audio|default|unknown|und|original)(?:\\s*[-#]?\\s*\\d+)?$", RegexOption.IGNORE_CASE).matches(value.trim())
+    fun knownLanguage(value: String?): Boolean = com.chitram.app.data.Ranking.isKnownAudioLanguage(value)
     fun languages(source: Source): List<String> {
         val offered = if (source.selectableAudio) source.audioLanguages ?: source.languages else (source.audioLanguages?.takeIf { it.isNotEmpty() } ?: source.languages).take(1)
         return offered.mapNotNull(com.chitram.app.data.Ranking::languageLabel).filter(::knownLanguage).distinctBy { it.lowercase() }
@@ -15,7 +15,7 @@ object AudioChoice {
         }
     }
     fun candidates(sources: List<Source>, language: String, tried: Set<String> = emptySet()): List<Source> =
-        index(sources).entries.firstOrNull { it.key.equals(com.chitram.app.data.Ranking.languageLabel(language), true) }?.value.orEmpty()
+        index(sources).entries.firstOrNull { com.chitram.app.data.Ranking.sameLanguage(it.key, language) }?.value.orEmpty()
             .filter { !it.unsupported && it.id !in tried }
 
     fun source(key: String, sources: List<Source>): Pair<Source, String?>? {
@@ -25,7 +25,7 @@ object AudioChoice {
         val language = rest.removePrefix(source.id).removePrefix(":").takeIf { it.isNotBlank() }
         val offered = languages(source)
         val canonical = com.chitram.app.data.Ranking.languageLabel(language)
-        if (language != null && (canonical == null || offered.none { com.chitram.app.data.Ranking.languageLabel(it)?.equals(canonical, true) == true })) return null
+        if (language != null && (canonical == null || offered.none { com.chitram.app.data.Ranking.sameLanguage(it, canonical) })) return null
         return source to canonical
     }
 }

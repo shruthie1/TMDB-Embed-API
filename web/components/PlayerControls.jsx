@@ -11,6 +11,7 @@ import { audioOptions } from '../lib/player/audioOptions';
 import { videoChoices, audioChoices, pairingFor, videoIdOf } from '../lib/player/trackChoices';
 import { SIZES } from '../lib/subtitles';
 import { toggleFullscreen } from '../lib/player/useRotateFullscreen';
+import { addAudioLanguages } from './player/addAudioJourney';
 
 // How long the settings sheet stays open with no interaction; any action
 // inside it restarts the clock. 3s was too short everywhere: a remote needs
@@ -232,6 +233,9 @@ export default function PlayerControls({
   subPrefs = { scale: 1, offsetMs: 0 }, onSubPrefs,
   levels = [], currentLevel = -1, autoLevel, onPickLevel,
   audioTracks = [], currentAudio, onPickAudio, onPickPair,
+  // Step 2: "Add <L> audio from another server" entries. playingLanguages is
+  // what a pair carries when there are no audioTracks to read.
+  onAddAudio, playingLanguages = null,
   embed = null, onPickEmbed,
   cast = null,
   // True while the loading screen covers the bar (before the first frame):
@@ -293,6 +297,10 @@ export default function PlayerControls({
     }
     return [...options.values()];
   }, [audioMenu.options, audioList, audioSources, onPickLanguage]);
+  // Only with the explicit handler: a menu without it offers no pairing.
+  const addLanguages = useMemo(() => (onAddAudio
+    ? addAudioLanguages({ sources: audioSources, currentSourceId, audioTracks, playingLanguages })
+    : []), [onAddAudio, audioSources, currentSourceId, audioTracks, playingLanguages]);
   const openMenu = (next) => { setMenu(next); onMenuChange?.(Boolean(next)); };
 
   /**
@@ -675,6 +683,8 @@ export default function PlayerControls({
                        const plan = pairingFor(video, choice);
                        onPickPair?.(plan);
                      }}
+                     addAudio={addLanguages}
+                     onAddAudio={(language) => { openMenu(null); onAddAudio?.(language); }}
                      sync={audioSync}
                      open={menu === 'audio'} onTouch={touchSheet}
                      onToggle={() => openMenu(menu === 'audio' ? null : 'audio')} />

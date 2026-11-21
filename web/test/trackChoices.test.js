@@ -154,3 +154,39 @@ it('catalog display languages never become selectable audio choices', () => {
   const nm = { id: 'nm', provider: 'NetMirror', masterUrl: 'https://x/nm.m3u8', languages: ['Hindi'], catalogLanguages: ['Hindi', 'Telugu'], audio: [{ language: 'Hindi' }], selectableAudio: true };
   expect(audioChoices([SHOWSST, nm], SHOWSST.id).map(c=>c.language)).toEqual(['Hindi']);
 });
+
+describe('audioChoices language keys (fix round 1)', () => {
+  const src = (id, audio) => ({ id, provider: id, masterUrl: `http://x/${id}.m3u8`, languages: [], selectableAudio: true, audio });
+  it('te and Telugu give one choice', () => {
+    const a = audioChoices([src('A', [{ language: 'te', uri: 'a' }]), src('B', [{ language: 'Telugu', uri: 'b' }])], SHOWSST.id, []);
+    expect(a.map((c) => c.language)).toEqual(['Telugu']);
+    expect(a[0].sourceId).toBe('A');
+  });
+  it('und plus a Telugu 5.1 name gives a Telugu choice', () => {
+    const a = audioChoices([src('C', [{ language: 'und', name: 'Telugu 5.1', uri: 'c' }])], SHOWSST.id, []);
+    expect(a).toHaveLength(1);
+    expect(a[0]).toMatchObject({ language: 'Telugu', kind: 'pairable', sourceId: 'C' });
+  });
+});
+
+describe('audioChoices in-file keys (fix round 3)', () => {
+  const src = (id, languages, extra) => ({ id, provider: id, masterUrl: `http://x/${id}.m3u8`, languages, ...extra });
+  it('a commentary rendition does not hide Telugu from languages[]', () => {
+    const audio = [{ language: 'und', name: 'Director Commentary', uri: 'd' }];
+    const pairable = audioChoices([src('S', ['te'], { selectableAudio: true, audio })], SHOWSST.id, []);
+    expect(pairable.map((c) => c.language)).toEqual(['Director Commentary', 'Telugu']);
+    const whole = audioChoices([src('W', ['te'], { selectableAudio: false, audio })], SHOWSST.id, []);
+    expect(whole.map((c) => c.language)).toEqual(['Telugu']);
+  });
+  it('a single-language source shows exactly one language (fix round 5)', () => {
+    const probe = src('P', ['hi'], { selectableAudio: false, audio: [{ language: 'und', name: 'Director Commentary' }, { language: 'te' }] });
+    expect(audioChoices([probe], SHOWSST.id, []).map((c) => c.language)).toEqual(['Telugu']);
+    const q = src('Q', ['Director Commentary', 'te'], { selectableAudio: false, audio: [] });
+    expect(audioChoices([q], SHOWSST.id, []).map((c) => c.language)).toEqual(['Telugu']);
+  });
+  it('an in-file Telugu 5.1 track and a source carrying te give one Telugu row', () => {
+    const a = audioChoices([src('T', ['te'], { selectableAudio: false })], SHOWSST.id, [{ id: 1, name: 'Telugu 5.1' }]);
+    expect(a).toHaveLength(1);
+    expect(a[0]).toMatchObject({ language: 'Telugu 5.1', kind: 'in-file', trackId: 1 });
+  });
+});

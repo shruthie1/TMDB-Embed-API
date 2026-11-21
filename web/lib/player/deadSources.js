@@ -42,8 +42,8 @@ export function qualityHeight(q) {
  *
  * `opts.lang`   the language PLAYING now (name or code). Ranks rows:
  *               carries it (a hybrid row lists its paired audio languages, so
- *               it counts), then rows that declare no languages (may carry it,
- *               and switchSource re-pairs from a donor when they do not), then
+ *               it counts), then rows that declare no languages (may carry it;
+ *               a server switch never pairs, owner rule 2026-11-21), then
  *               rows that declare only other languages.
  * `opts.height` the height playing now; nearer heights first within a rank.
  * List order breaks ties. With no opts this is the first alive row, as before.

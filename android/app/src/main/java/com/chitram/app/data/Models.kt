@@ -94,9 +94,20 @@ data class Level(val height: Int = 0, val quality: String? = null, val bandwidth
 @Serializable
 data class SubtitleRef(val url: String = "", val lang: String? = null, val id: String? = null)
 
-/** One measured audio track/rendition; other provider-specific fields stay optional. */
+/**
+ * One measured audio track/rendition (utils/streamSchema.js audio[]). Every field
+ * is optional so cached JSON with only `language` still parses.
+ */
 @Serializable
-data class RawAudio(val language: String? = null)
+data class RawAudio(
+    val language: String? = null,
+    val languageCode: String? = null,
+    val name: String? = null,
+    val uri: String? = null,
+    val channels: Double? = null,
+    val codec: String? = null,
+    @kotlinx.serialization.SerialName("default") val isDefault: Boolean = false,
+)
 
 /** One stream in /api/streams. Canonical shape from utils/streamSchema.js. */
 @Serializable

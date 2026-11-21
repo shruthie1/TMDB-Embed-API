@@ -505,6 +505,7 @@ private fun LoadingDetails(v: LoadingModel.View, isTv: Boolean, focusId: String?
                     LoadingModel.RowState.PLAYING -> "✓"
                     LoadingModel.RowState.SKIPPED -> "-"
                     LoadingModel.RowState.FAILED -> "✕"
+                    LoadingModel.RowState.LEFT -> "○"
                 }
                 Column(
                     Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp)

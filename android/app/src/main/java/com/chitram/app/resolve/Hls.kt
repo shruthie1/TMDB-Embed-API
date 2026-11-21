@@ -1,12 +1,12 @@
 package com.chitram.app.resolve
 
 import com.chitram.app.data.Level
-import java.util.Locale
 
 /** One EXT-X-MEDIA audio rendition, in master order. */
 data class AudioTrack(val language: String?, val name: String?, val isDefault: Boolean) {
     /** "Telugu" for te/tel, else the rendition NAME. null when neither says anything. */
-    val label: String? get() = Hls.languageLabel(language) ?: name?.takeUnless { it.isBlank() || it.equals("audio", true) }
+    val label: String? get() = Hls.languageLabel(language)
+        ?: com.chitram.app.data.Ranking.languageFromTrackName(name) ?: name?.takeUnless { it.isBlank() || it.equals("audio", true) }
 }
 
 data class Master(
@@ -70,12 +70,8 @@ object Hls {
         return null
     }
 
-    fun languageLabel(code: String?): String? {
-        val c = code?.trim()?.lowercase()
-        if (c.isNullOrEmpty() || c == "und" || c == "mul") return null
-        val name = runCatching { Locale(c.substringBefore('-')).getDisplayLanguage(Locale.ENGLISH) }.getOrNull()
-        return name?.takeIf { it.isNotBlank() && !it.equals(c, true) } ?: code
-    }
+    /** Same rule as the player's: Ranking.languageLabel is the one canonicaliser. */
+    fun languageLabel(code: String?): String? = com.chitram.app.data.Ranking.languageLabel(code)
 
     /** Audio languages for ranking: default track first only if the master says so; order kept otherwise. */
     fun languages(audio: List<AudioTrack>): List<String> =

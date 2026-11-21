@@ -2,6 +2,8 @@
 import { audioLanguageKey, languageSourceIndex } from '../../lib/player/languageSources';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { audioOptions } from '../../lib/player/audioOptions';
+import { Copy } from '../../lib/player/loadingModel';
+import { addAudioLanguages } from './addAudioJourney';
 
 /**
  * Source and quality controls for a TV, rendered OUTSIDE the video element.
@@ -53,6 +55,11 @@ export default function TvBar({
   sources = [], currentSource, currentSourceId, onPickSource,
   levels = [], currentLevel, autoLevel, onPickLevel,
   audioTracks = [], currentAudio, onPickAudio, onPickLanguage, audioSources = sources,
+  // Step 2: "Add <L> audio from another server". playingLanguages is what a
+  // pair carries, read only while audioTracks is empty (hls.js has not listed
+  // the pair's tracks yet). useNative only turns on native controls; hls.js
+  // still plays the stream and fills audioTracks.
+  onAddAudio, playingLanguages = null,
   sourcesPending = false, onClose, onCheckSources, checkingSources = false,
   fit = 'width', onSetFit,
   subs = [], currentSub, onPickSub, subLoading = false,
@@ -197,6 +204,10 @@ export default function TvBar({
       return { ...base, options: [...options.values()] };
     }, [audioTracks, currentAudio, sources, currentSourceId, onPickLanguage, audioSources]);
 
+  const addLanguages = useMemo(() => (onAddAudio
+    ? addAudioLanguages({ sources: audioSources, currentSourceId, audioTracks, playingLanguages })
+    : []), [onAddAudio, audioSources, currentSourceId, audioTracks, playingLanguages]);
+
   return (
     <>
       {/* An always-visible opener.
@@ -302,6 +313,25 @@ export default function TvBar({
                         rearm.current();
                       }}>
                 {o.name}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Add audio from another server (Step 2). Its own row under Audio, so
+          it reads apart from the plain picks above: those never pair, only
+          these do. One button per missing language, Telugu first. The box
+          scrolls (max-height) and D-pad focus scrolls the focused button into
+          view (lib/dpad.js), so a long list stays reachable on a remote. */}
+      {addLanguages.length > 0 && (
+        <div className="tvbar-row" data-focus-group="">
+          <span className="tvbar-k tvbar-k-add">{Copy.ADD_AUDIO_GROUP}</span>
+          <div className="tvbar-btns tvbar-add">
+            {addLanguages.map(language => (
+              <button key={language} type="button" className="tvbar-btn focusable" data-focus=""
+                      onClick={() => { onAddAudio(language); rearm.current(); }}>
+                {Copy.addAudio(language)}
               </button>
             ))}
           </div>

@@ -102,7 +102,8 @@ class NetmirrorAudioMetadataTest {
         assertEquals(listOf("Czech", "Filipino", "Portuguese (Brazil)"), source.catalogLanguages)
         assertEquals(1, Ranking.tier(source, "ces"))
         assertTrue(Ranking.otherSourceLanguages(listOf(source), null, setOf("cs", "Filipino")).isEmpty())
-        assertEquals("Portuguese", Ranking.languageLabel("pt-BR"))
+        // Task 7: pt-BR stays apart from Portuguese, as on the server and web.
+        assertEquals("pt-BR", Ranking.languageLabel("pt-BR"))
         assertEquals("Portuguese (Brazil)", Ranking.languageLabel("Portuguese (Brazil)"))
         assertNull(Ranking.languageLabel("und"))
         assertNull(Ranking.languageLabel("mul"))

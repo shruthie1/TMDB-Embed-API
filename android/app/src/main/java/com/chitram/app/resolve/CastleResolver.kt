@@ -255,11 +255,11 @@ class CastleResolver(
             val by = LinkedHashMap<String, Pair<Hit, MutableList<String>>>()
             for (h in hits) {
                 val e = by.getOrPut(mediaIdentity(h.url)) { h to mutableListOf() }
-                if (e.second.none { it.equals(h.lang, true) }) e.second += h.lang
+                if (e.second.none { it.equals(h.lang, true) || com.chitram.app.data.Ranking.sameLanguage(it, h.lang) }) e.second += h.lang
             }
             return by.values.map { (h, langs) ->
-                Group(h.url, langs.sortedBy { if (it.equals(preferred, true)) 0 else 1 }, h.quality)
-            }.sortedWith(compareBy<Group> { g -> if (g.languages.any { it.equals(preferred, true) }) 0 else 1 }.thenByDescending { height(it.quality) })
+                Group(h.url, langs.sortedBy { if (com.chitram.app.data.Ranking.sameLanguage(it, preferred)) 0 else 1 }, h.quality)
+            }.sortedWith(compareBy<Group> { g -> if (g.languages.any { com.chitram.app.data.Ranking.sameLanguage(it, preferred) }) 0 else 1 }.thenByDescending { height(it.quality) })
         }
     }
 }

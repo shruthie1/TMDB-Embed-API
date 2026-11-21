@@ -53,22 +53,156 @@ object Ranking {
     private val iso3ToIso2: Map<String, String> = java.util.Locale.getISOLanguages().mapNotNull { code ->
         runCatching { java.util.Locale(code).isO3Language to code }.getOrNull()
     }.toMap()
-    private val LANGUAGE_CODE = Regex("^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$")
+    private val LANGUAGE_CODE = Regex("^[a-z]{2,3}$")
+    // BCP-47 region or script subtag: IN, Hant, 419. Anything else (Telugu-Hindi, eng-sub) is not stripped.
+    private val SUBTAG = Regex("^(?:[a-z]{2}|[a-z]{4}|\\d{3})$")
+    // A regional variety the web player names apart from its base language.
+    private val KEEP_REGION = setOf("pt-br")
+    /** Lower-case English display name -> display name, for every ISO 639 language. */
+    private val knownNames: Map<String, String> = java.util.Locale.getISOLanguages().mapNotNull { code ->
+        codeName(code)?.let { it.lowercase(java.util.Locale.ROOT) to it }
+    }.toMap()
+    private val WORD = Regex("[A-Za-z]+")
+    private val INDEX_PREFIX = Regex("^\\[\\d+]\\s*")
+    private val NOT_A_LANGUAGE = Regex("^(?:track|audio|default|unknown|und|original)(?:\\s*[-#]?\\s*\\d+)?$", RegexOption.IGNORE_CASE)
 
-    /** Provider codes and display labels share one language identity in menus. */
-    fun languageLabel(value: String?): String? {
-        val raw = value?.trim()?.takeIf(String::isNotEmpty) ?: return null
-        val code = raw.lowercase(java.util.Locale.ROOT).replace('_', '-')
-        val language = code.substringBefore('-')
-        if (language in setOf("und", "mul", "zxx", "unknown")) return null
-        if (!LANGUAGE_CODE.matches(code)) return raw
-        val iso2 = iso3ToIso2[language] ?: language
+    /** English name for a 2-3 letter lower-case ISO 639 code, or null when the JVM does not know it. */
+    private fun codeName(code: String): String? {
+        val iso2 = iso3ToIso2[code] ?: code
         val display = java.util.Locale(iso2).getDisplayLanguage(java.util.Locale.ENGLISH)
-        return display.takeUnless { it.isBlank() || it.equals(iso2, true) || it.equals(language, true) } ?: raw
+        return display.takeUnless { it.isBlank() || it.equals(iso2, true) || it.equals(code, true) }
     }
 
+    /** Display name for a bare code or full language name in any case; null when not a known language. */
+    private fun knownLanguage(key: String): String? =
+        (if (LANGUAGE_CODE.matches(key)) codeName(key) else null) ?: knownNames[key] ?: NAME_ALIASES[key]?.let(::codeName)
+
+    // CLDR (JDK 17, newer Android ICU) says "Bangla" for bn; the server and web say "Bengali".
+    private val NAME_ALIASES = mapOf("bengali" to "bn", "bangla" to "bn", "oriya" to "or", "odia" to "or")
+
+    /**
+     * Provider codes and display labels share one language identity in menus.
+     * te, tel, Telugu, TELUGU and tel-IN all give "Telugu". Mirrors the server's
+     * canonicalLanguage: a region/script subtag is stripped only when it is 2
+     * letters, 4 letters or 3 digits and the base is a known language, so
+     * Telugu-Hindi is never split. pt-BR stays as given. Unknown values are kept raw.
+     */
+    fun languageLabel(value: String?): String? {
+        val raw = value?.trim()?.takeIf(String::isNotEmpty) ?: return null
+        val key = raw.lowercase(java.util.Locale.ROOT).replace('_', '-')
+        if (key.substringBefore('-') in setOf("und", "mul", "zxx", "unknown")) return null
+        if (key in KEEP_REGION) return raw
+        knownLanguage(key)?.let { return it }
+        val sep = key.indexOf('-')
+        if (sep > 0 && SUBTAG.matches(key.substring(sep + 1))) knownLanguage(key.substring(0, sep))?.let { return it }
+        return raw
+    }
+
+    /** ISO 639-1 code for a language in any spelling (Telugu, tel, tel-IN -> te), or null. */
+    fun languageCode(value: String?): String? {
+        val name = languageLabel(value) ?: return null
+        return java.util.Locale.getISOLanguages().firstOrNull { codeName(it)?.equals(name, true) == true }
+    }
+
+    /** The one audio-language comparison key: lower-case canonical label, null for unknown/und. */
+    fun canonLang(value: String?): String? = languageLabel(value)?.lowercase(java.util.Locale.ROOT)?.replace('_', '-')
+
+    /** True when both values name the same known language (te == Telugu == tel-IN). */
+    fun sameLanguage(a: String?, b: String?): Boolean {
+        val x = canonLang(a) ?: return false
+        return x == canonLang(b)
+    }
+
+    /** False for placeholders such as "Audio", "Track 2", "und" or "Original". */
+    fun isKnownAudioLanguage(value: String?): Boolean = !value.isNullOrBlank() && !NOT_A_LANGUAGE.matches(value.trim())
+
+    /**
+     * Language named in a track label (web languageFromTrackName): 'Telugu 5.1',
+     * 'TEL - Stereo', '[2] Telugu (AAC)', 'HE-AAC Telugu'. Pass 1: the first word
+     * that is a full language name in any case wins, anywhere in the label.
+     * Pass 2, only when pass 1 found nothing: an ALL-CAPS 2-3 letter code that is
+     * not an audio/codec word (HE, AAC, DD, CH ...). Lower-case short words such as
+     * 'per', 'it' or 'de' never count. With no such word the cleaned label is kept
+     * when it is not a placeholder.
+     */
+    fun languageFromTrackName(name: String?): String? {
+        val cleaned = name.orEmpty().replace(INDEX_PREFIX, "").trim()
+        val tokens = WORD.findAll(cleaned).map { it.value }.toList()
+        for (token in tokens) {
+            val word = token.lowercase(java.util.Locale.ROOT)
+            (knownNames[word] ?: NAME_ALIASES[word]?.let(::codeName))?.let { return it }
+        }
+        for (token in tokens) {
+            if (token.length in 2..3 && token == token.uppercase(java.util.Locale.ROOT) && token !in CODEC_WORDS) {
+                codeName(token.lowercase(java.util.Locale.ROOT))?.let { return it }
+            }
+        }
+        return cleaned.takeIf(::isKnownAudioLanguage)
+    }
+
+    // ALL-CAPS label words that are audio/codec/accessibility terms, never language codes.
+    private val CODEC_WORDS = setOf("HE", "LC", "AAC", "AC", "EAC", "DD", "DDP", "DTS", "ATMOS", "CH", "SD", "HD",
+        "SDH", "DV", "PCM", "HI", "AD", "VO", "ORI", "LAT", "ALT", "BR", "IN", "MA")
+
+    // Words a label may carry beside its language and still name only that
+    // language: codec, channel and track words. Not BR, LAT or IN: those qualify
+    // the language (Portuguese BR, Spanish LAT). Same list as server streamSchema.js
+    // and web languageSources.js TRACK_WORDS.
+    private val TRACK_WORDS = setOf("he", "lc", "aac", "ac", "eac", "dd", "ddp", "dts", "atmos", "ch", "sd", "hd", "sdh",
+        "dv", "pcm", "hi", "ad", "vo", "ori", "alt", "ma", "e", "stereo", "mono", "surround", "audio", "track",
+        "dolby", "digital", "plus", "original", "main", "default", "kbps")
+
+    /**
+     * The ONE language a label names ('Telugu 5.1', 'Hindi AAC 2.0', 'TEL'), or null.
+     * Strict form of languageFromTrackName, same as server and web trackNameLanguage:
+     * a word is a language when it is a full name in any case, or an ALL-CAPS 2-3
+     * letter code not in CODEC_WORDS. Null when the label names two languages or
+     * carries any other word ('Portuguese (Brazil)'), so nothing is lost.
+     */
+    fun trackNameLanguage(name: String?): String? {
+        val cleaned = name.orEmpty().replace(INDEX_PREFIX, "").trim()
+        val found = LinkedHashSet<String>()
+        for (token in WORD.findAll(cleaned).map { it.value }) {
+            val word = token.lowercase(java.util.Locale.ROOT)
+            val lang = knownNames[word] ?: NAME_ALIASES[word]?.let(::codeName)
+                ?: if (token.length in 2..3 && token == token.uppercase(java.util.Locale.ROOT) && token !in CODEC_WORDS) codeName(word) else null
+            if (lang != null) found += lang else if (word !in TRACK_WORDS) return null
+        }
+        return found.singleOrNull()
+    }
+
+    /** A label that names a real language (Telugu, tel-IN, pt-BR); false for raw text such as 'Telugu 5.1'. */
+    private fun resolved(label: String?): Boolean =
+        label != null && (languageCode(label) != null || label.lowercase(java.util.Locale.ROOT).replace('_', '-') in KEEP_REGION)
+
+    /**
+     * Final-review I1 (2026-11-21): providers copy an und rendition's NAME into the
+     * tag ('Telugu 5.1'). A tag that is a real language wins; else the tag read as a
+     * label; else the label. Null when none names one.
+     */
+    private fun tagOrNameLanguage(language: String?, label: String?): String? {
+        val tag = languageLabel(language)?.takeIf(::isKnownAudioLanguage)
+        if (resolved(tag)) return tag
+        return tag?.let(::trackNameLanguage) ?: trackNameLanguage(label)
+    }
+
+    /** Language of one player track: tag, then tag and label read as labels (I1), then the raw tag, then the label. */
+    fun trackLanguage(language: String?, label: String?): String? =
+        tagOrNameLanguage(language, label)
+            ?: languageLabel(language)?.takeIf(::isKnownAudioLanguage) ?: languageFromTrackName(label)
+
+    /**
+     * Preference matching only: a track is in [want] when its tag OR the language
+     * read from its label is [want]. Display keeps tag-wins (trackLanguage).
+     */
+    fun trackMatches(language: String?, label: String?, want: String?): Boolean =
+        sameLanguage(languageLabel(language)?.takeIf(::isKnownAudioLanguage), want) || sameLanguage(languageFromTrackName(label), want) ||
+            sameLanguage(tagOrNameLanguage(language, label), want)
+
+    // A languages[] entry such as 'Telugu 5.1' (I1) resolves through its text.
     private fun languageLabels(values: List<String>): List<String> =
-        values.mapNotNull(::languageLabel).distinctBy { it.lowercase() }
+        values.mapNotNull { v -> languageLabel(v)?.let { l -> if (resolved(l)) l else trackNameLanguage(l) ?: l } }
+            .distinctBy { it.lowercase() }
 
     /** Decided by `container`, not the url: every url is proxy-wrapped. */
     fun isHls(s: RawStream): Boolean {
@@ -82,8 +216,15 @@ object Ranking {
         val url = s.url
         if (url.isNullOrEmpty()) return null
         val provider = s.provider ?: s.name ?: "Unknown"
-        val audioLanguages = s.audio?.mapNotNull { languageLabel(it.language) }
-            ?.distinctBy { it.lowercase() }
+        // Tag first (language, then languageCode). A tag that is not a real language
+        // ('Telugu 5.1', a name copied in by the provider, I1) is read as a label, then
+        // the name is; only then does the raw tag stand, as before. A name-only value
+        // counts only when it is a real ISO language, so 'Commentary' never becomes one.
+        val audioLanguages = s.audio?.mapNotNull { t ->
+            tagOrNameLanguage(t.language, t.name) ?: tagOrNameLanguage(t.languageCode, null)
+                ?: trackLanguage(t.language, null) ?: trackLanguage(t.languageCode, null)
+                ?: languageFromTrackName(t.name)?.takeIf { languageCode(it) != null }
+        }?.distinctBy { it.lowercase() }
         val languages = when {
             !audioLanguages.isNullOrEmpty() -> audioLanguages
             s.selectableAudio && audioLanguages != null -> emptyList()
@@ -124,8 +265,7 @@ object Ranking {
 
     fun tier(s: Source, preferred: String): Int {
         val playable = if (s.selectableAudio) s.audioLanguages ?: s.languages else s.languages
-        val want = languageLabel(preferred)
-        val pref = want != null && playable.any { languageLabel(it)?.equals(want, ignoreCase = true) == true }
+        val pref = playable.any { sameLanguage(it, preferred) }
         return when {
             s.hybrid -> 0
             pref && s.selectableAudio -> 1

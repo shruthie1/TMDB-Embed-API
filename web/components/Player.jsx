@@ -17,7 +17,7 @@ import useSwitchGuard from '../lib/player/useSwitchGuard';
 import useStaleRefresh from '../lib/player/staleRefresh';
 import { videoChoices, videoIdOf } from '../lib/player/trackChoices';
 import {
-  CHECK_SERVER, Reason, RowState, labelRows, loadingView, reasonFromText,
+  CHECK_SERVER, Copy, Reason, RowState, labelRows, loadingView, reasonFromText,
 } from '../lib/player/loadingModel';
 import EmbedStage from './player/EmbedStage';
 import useFocusTrap from './useFocusTrap';
@@ -33,6 +33,8 @@ import useNoPictureGuard from '../lib/player/useNoPictureGuard';
 import { pairSources, listSources as listBackendSources } from '../lib/backend';
 import { canCast, castBody, prepareCast } from '../lib/cast';
 import { pairDecodable } from '../lib/player/codecSupport';
+import { pairDonors } from '../lib/player/addAudio';
+import { createAddAudioJourney, makeCheckPair, pairedStream, resumePoint, streamKey } from './player/addAudioJourney';
 import {
   useResolve, useHls, useRecovery, useControlVisibility, HIDE_MS, HIDE_TV_MS,
   useSubtitles, useEpisodeProgress, useDeviceCapability, useCueOverlay,
@@ -163,6 +165,20 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     },
     onRevert: setNotice,
   });
+  // "Add <L> audio from another server" (Step 2). One journey object for the
+  // player's life; its deps are filled below (addAudioDeps) once applyPair and
+  // snapshot exist. onFatal and the frame listener reach it from here.
+  const addAudioDeps = useRef({});
+  const [addAudioJourney] = useState(() => createAddAudioJourney({
+    checkPair: (...a) => addAudioDeps.current.checkPair(...a),
+    applyPair: (...a) => addAudioDeps.current.applyPair(...a),
+    snapshot: () => addAudioDeps.current.snapshot(),
+    position: () => addAudioDeps.current.position(),
+    restore: (snap) => addAudioDeps.current.restore(snap),
+    notice: (text) => addAudioDeps.current.notice(text),
+    label: (donor) => addAudioDeps.current.label(donor),
+  }));
+  useEffect(() => () => addAudioJourney.cancel(), [addAudioJourney]);
   // A pick whose signed url expired while the page sat open gets one fresh
   // url from its provider before the guard reverts. See staleRefresh.js.
   const staleRefresh = useStaleRefresh({
@@ -232,13 +248,18 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     const last = list[list.length - 1];
     if (!last || last.endedAt != null) return;
     putAttempts([...list.slice(0, -1), { ...last, endedAt: Date.now(), state,
-      reason: state === RowState.PLAYING ? null : (reason || Reason.STOPPED) }]);
+      reason: state === RowState.PLAYING || state === RowState.LEFT ? null : (reason || Reason.STOPPED) }]);
   }, [putAttempts]);
-  const beginAttempt = useCallback((id) => {
+  // `asked`: the viewer picked another server, so the row being left closes
+  // as LEFT (neutral, not counted as tried), never as a failure.
+  const beginAttempt = useCallback((id, asked = false) => {
     if (id == null) return;
     const last = attemptsRef.current[attemptsRef.current.length - 1];
     if (last && last.endedAt == null && last.id === id) return;
-    if (last && last.endedAt == null) closeAttempt(pendingReasonRef.current);
+    if (last && last.endedAt == null) {
+      if (asked) closeAttempt(null, RowState.LEFT);
+      else closeAttempt(pendingReasonRef.current);
+    }
     pendingReasonRef.current = null;
     putAttempts([...attemptsRef.current,
       { id, startedAt: Date.now(), endedAt: null, state: RowState.STARTING, reason: null }]);
@@ -395,6 +416,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   }, [title.runtimeMin, reportMetrics]);
 
   const onFatal = useCallback((data, hls) => {
+    if (addAudioJourney.deviceFailed()) return; // add-audio: restore, check next
     // A viewer's own pick failed: put back what they were watching instead of
     // jumping to the first source in the list or covering the picture.
     // An expired signed url on the viewer's own pick: renew it once before
@@ -431,8 +453,9 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     if (alt) {
       // Before the first frame the loading card already says this.
       if (framedOnceRef.current) {
+        // It was playing, so it stopped; it did not fail to start.
         setNotice(advanceNotice(whoLabel, rowLabel(alt.id, alt.provider),
-          action.kind === 'novideo' || action.kind === 'codecs'));
+          action.kind === 'novideo' || action.kind === 'codecs', true));
       }
       return;
     }
@@ -442,7 +465,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     resolve.setError({ message: action.kind === 'unreachable'
       ? `${who} is not responding, and no other server is left. Try again in a moment.`
       : action.message });
-  }, [resolve, recoverBySwitching, switchGuard, staleRefresh, setNotice, rowLabel]);
+  }, [resolve, recoverBySwitching, switchGuard, staleRefresh, setNotice, rowLabel, addAudioJourney]);
 
   // Declared before useHls, which captures it in onHlsReady.
   const hlsInstance = useRef(null);
@@ -1314,11 +1337,13 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
    * silently no-ops cannot leave the spinner up for the rest of the film.
    */
   const [switching, setSwitching] = useState(null);   // label | null
+  // True while the switch in flight is one the VIEWER asked for (a menu or
+  // loading-screen pick). The loading card then reads "Switching server…"
+  // rather than a slow or failed-server line. An automatic advance is false.
+  const [switchAsked, setSwitchAsked] = useState(false);
   const switchTimer = useRef(null);
   // The video+audio pair currently fused, so an offset change can rebuild it.
   const lastPair = useRef(null);
-  // pickPair is declared after switchSource but a server switch may need it.
-  const pickPairRef = useRef(null);
   const audioSyncState = useAudioSync(videoRef);
   // Set when /hybrid/pair accepted a pairing only because TMDB's runtime
   // vouched for both halves - the two are the same film cut with different
@@ -1472,28 +1497,33 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     srcSwitch.current = null;
     setSourceLocked(false);
     setSwitching(null);
+    setSwitchAsked(false);
   }, []);
+  // A new title or episode ends any switch still being judged, so its
+  // "Switching server…" and its verdict cannot carry over.
+  useEffect(() => { endSourceSwitch(); }, [titleKey, endSourceSwitch]);
 
   /**
    * Show "Switching to X…" at once, lock the server list, and judge the new
    * stream on its own frames: landed, or dead after SWITCH_NO_LIFE_MS (nothing
    * at all) / SWITCH_HARD_MS (something, but no frame). Dead advances.
    */
-  const startSourceSwitch = useCallback((src, label, at, ctx) => {
+  const startSourceSwitch = useCallback((src, label, at, ctx, asked = false) => {
     clearTimeout(switchTimer.current);
     switchTimer.current = null;
     clearInterval(srcTick.current);
     warm.stop();
     srcSwitch.current = beginSourceSwitch({ target: src, label, at, ctx, streamKey: streamRef.current });
-    beginAttempt(src?.id);
+    beginAttempt(src?.id, asked);
     setSourceLocked(true);
     setSwitching(`Switching to ${label}…`);
+    setSwitchAsked(Boolean(asked));
     srcTick.current = setInterval(() => {
       const pending = srcSwitch.current;
       if (pending?.ctx.strictLanguage && streamRef.current !== pending.streamKey && playedStreamRef.current === streamRef.current) {
         const known = (discoveredTracksRef.current?.tracks || []).map(trackAudioLanguage).filter(isKnownAudioLanguage);
         if (known.length && !known.some(name => audioLanguageKey(name) === audioLanguageKey(pending.ctx.lang))) {
-          failSwitchRef.current?.(`${pending.ctx.lang} audio missing`);
+          failSwitchRef.current?.(`${pending.ctx.lang} audio missing`, null, pending.ctx.lang);
           return;
         }
       }
@@ -1515,7 +1545,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   // The server being switched to failed (timeout or a fatal error). Mark it
   // dead, take it out of the menus, and play the next alive row in the
   // language that was playing at the click. Returns true when it handled it.
-  failSwitchRef.current = (reason, uiReason = null) => {
+  failSwitchRef.current = (reason, uiReason = null, missingLang = null) => {
     const m = srcSwitch.current;
     if (!m) return false;
     closeAttempt(uiReason || pendingReasonRef.current || reasonFromText(reason));
@@ -1542,9 +1572,10 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       return true;
     }
     // Before the first frame the loading card already names both servers.
-    if (framedOnceRef.current) {
+    // `missingLang`: the target played, but without the picked language (I2).
+    if (framedOnceRef.current || missingLang) {
       setNotice(advanceNotice(m.label, rowLabel(alt.id, alt.provider),
-        attemptsRef.current[attemptsRef.current.length - 1]?.reason === Reason.UNSUPPORTED));
+        attemptsRef.current[attemptsRef.current.length - 1]?.reason === Reason.UNSUPPORTED, false, missingLang));
     }
     switchSourceRef.current?.(alt, m.ctx.strictLanguage ? m.ctx.lang : null, { at: m.at, ctx: m.ctx });
     return true;
@@ -1570,66 +1601,15 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       : src.provider === currentSource;
     if (sameRow) return;
     // Feedback first, before any network: the click must change the screen
-    // NOW, even when a language pairing has to run before the new stream.
+    // NOW, before the new stream attaches.
     const at = opts.at ?? (videoRef.current?.currentTime || 0);
     startSourceSwitch(src, rowLabel(src.id, src.provider), at,
-      opts.ctx || { ...failoverCtxRef.current, ...(lang ? { lang, strictLanguage: true } : {}) });
-    // Keeping the language across a SERVER change.
-    //
-    // A server row carries only the picture. When the viewer has a standing
-    // language and the new source cannot supply it from inside its own file,
-    // playing it plainly drops them onto that provider's default audio -
-    // reported as "moving to default audio" and measured on 1408162, where
-    // showsst and VaPlayer ship languages:[] and no audio renditions at all.
-    //
-    // So: keep the picture they just asked for, and re-attach the language by
-    // pairing it with whichever source does carry it. Only when the new source
-    // genuinely lacks the language - a source that has it in-file needs no
-    // help, initialAudioTrack picks it up on attach.
-    // Fall back to the language that is PLAYING, not only one the viewer
-    // explicitly picked. initialAudioTrack auto-selects Telugu on attach and
-    // never goes through pickAudio, so wantLang stays null on a title the
-    // viewer never touched the Audio menu on - and the language was dropped
-    // anyway. Measured 2026-09-22 on 1408162: want=null at the switch.
-    const playing = hls.audioTracks?.find((t) => t.id === hls.currentAudio)?.name || null;
-    const want = lang || wantLang || playing;
-    if (want && src?.id !== currentSourceId) {
-      const owns = sourceAudioLanguages(src).some(l => audioLanguageKey(l) === audioLanguageKey(want));
-      if (!owns) {
-        // Prefer a donor that can hand over ONE language on its own.
-        //
-        // Several rows may list the language while only some can actually
-        // supply it separately: on 1408162 three CastleTV rows all list
-        // Telugu, but only the castle-demux row has selectableAudio, and the
-        // backend refuses the rest with 409 "not pairable" because they carry
-        // no switchable renditions. Taking the first match sent the unpairable
-        // row and the switch silently did nothing.
-        const carries = (s) => (Array.isArray(s.languages) ? s.languages : [])
-          .some((l) => String(l).toLowerCase() === String(want).toLowerCase());
-        const donor = sources.find((s) => s.id !== src.id && s.selectableAudio && carries(s))
-          || sources.find((s) => s.id !== src.id && carries(s));
-        if (donor) {
-          // Keeping the language is a BEST EFFORT, never a veto on the server
-          // the viewer picked. The pairing can legitimately fail - the backend
-          // refuses combinations whose runtimes disagree, and it cannot even
-          // measure a provider that is down (VaPlayer's origin returns
-          // Cloudflare 522, so describeStream yields null and /hybrid/pair
-          // answers 409). Returning here left the click doing nothing at all,
-          // with no message and the old server still selected. So fall through
-          // to the plain switch when pairing does not work out.
-          const ok = await pickPairRef.current?.({
-            mode: 'pair',
-            // Superseded while pairing (timed out and advanced): do nothing.
-            stale: () => srcSwitch.current?.target !== src,
-            video: { id: src.id, source: src },
-            audio: { id: `src:${donor.id}:${want}`, language: want, source: donor,
-                     kind: donor.selectableAudio ? 'pairable' : 'whole-source' },
-          });
-          if (ok) return;
-          if (srcSwitch.current?.target !== src) return;
-        }
-      }
-    }
+      opts.ctx || { ...failoverCtxRef.current, ...(lang ? { lang, strictLanguage: true } : {}) },
+      Boolean(opts.asked));
+    // A server switch never starts audio pairing (owner rule 2026-11-21).
+    // Pairing is only the viewer's explicit pick in the Audio menu. A standing
+    // language that the new source carries in-file is picked on attach by
+    // useHls (preferredLanguage = wantLang -> initialAudioTrack).
     // Manual and recovery switches also count as the startup escape. Do not
     // immediately replace the chosen source again after another 8 seconds.
     startupFallbackUsedRef.current = true;
@@ -1641,8 +1621,8 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     resumeAt.current = at;
     recovery.clearStall();
     resolve.switchSource(src);
-  }, [currentSource, currentSourceId, recovery, resolve, wantLang, sources,
-      hls.audioTracks, hls.currentAudio, startSourceSwitch, rowLabel, videoRef, setNotice]);
+  }, [currentSource, currentSourceId, recovery, resolve,
+      startSourceSwitch, rowLabel, videoRef, setNotice]);
 
   // Let the recovery path above reach switchSource without reordering hooks.
   switchSourceRef.current = switchSource;
@@ -1657,28 +1637,6 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     resolve.replaceSource(source.id, { ...source, languages: names, audio: names.map(language => ({ language })), selectableAudio: names.length > 1 });
   }, [started, stream, hls.audioTracks, sources, currentSourceId, resolve.replaceSource]);
 
-  const pickLanguage = useCallback((language) => {
-    if (srcSwitch.current) { setNotice(`Still switching to ${srcSwitch.current.label}…`); return; }
-    const track = hls.audioTracks?.find(t => audioLanguageKey(trackAudioLanguage(t)) === audioLanguageKey(language));
-    setWantLang(language);
-    if (track && hls.pickAudio(track.id) !== false) return;
-    // W2: the playing source is never a candidate; its tracks were tried above.
-    const candidates = languageSwitchCandidates(sourceListRef.current, language, currentSourceIdRef.current);
-    let next = nextAlive(candidates, deadSources.current, { lang: language });
-    // An explicit language click retries its failed sources without reviving unrelated rows.
-    if (!next && candidates.length) {
-      for (const source of candidates) deadSources.current.delete(source.id ?? source.provider);
-      setFailedUrls(prev => new Set([...prev].filter(url => !candidates.some(s => s.masterUrl === url))));
-      next = nextAlive(candidates, deadSources.current, { lang: language });
-    }
-    if (next) switchSource(next, language, { ctx: {
-      ...failoverCtxRef.current, lang: language, strictLanguage: true,
-      fallback: { source: sourceListRef.current.find(s => s.id === currentSourceIdRef.current),
-        lang: hls.audioTracks?.find(t => t.id === hls.currentAudio)?.name || wantLang,
-        at: videoRef.current?.currentTime || 0 },
-    } });
-    else setNotice(`No other ${language} stream found`);
-  }, [hls.audioTracks, hls.currentAudio, hls.pickAudio, switchSource, wantLang, videoRef]);
 
 
   /**
@@ -1696,6 +1654,25 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
    * means they are two different films. Leaving playback untouched is the
    * correct response.
    */
+  // Put a server pair answer on screen: `video` picture, `audio` donor sound.
+  // The wanted language changes HERE, only once a pair is accepted, so a
+  // refused pair leaves it as it was (Step 2: the old code set it before the
+  // pair call and kept it on failure).
+  // `at`: the add-audio run's position, used when the element has no live
+  // position yet (a restored stream still loading reads 0, RI1).
+  const applyPair = useCallback((video, audio, language, paired, at) => {
+    resumeAt.current = resumePoint(videoRef.current, at);
+    recovery.clearStall();
+    // Kept so the Audio timing bar can rebuild this exact pairing with a
+    // different offset without the viewer re-picking the language.
+    lastPair.current = { video, audio };
+    setPairPadding(paired.padded ? { deltaSeconds: paired.delta } : null);
+    // The fused master carries this language; remember it so a later server
+    // change keeps it rather than reverting to that provider's default.
+    if (language) setWantLang(language);
+    resolve.switchSource(pairedStream(video, audio, paired));
+  }, [recovery, resolve, videoRef]);
+
   // Returns TRUE only when it actually put something new on screen, so a
   // caller that was merely TRYING to keep the language can fall back.
   const pickPair = useCallback(async (plan) => {
@@ -1705,15 +1682,13 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       // Record it before switching: the substituted file becomes the picture
       // too, and its own DEFAULT track may not be the language just asked for.
       if (plan.audio?.language) setWantLang(plan.audio.language);
-      switchSource(plan.audio?.source);
+      // The viewer asked for this in the Audio menu: "Switching server…".
+      switchSource(plan.audio?.source, null, { asked: true });
       return true;
     }
     const video = plan.video?.source;
     const audio = plan.audio?.source;
     if (!video || !audio) return false;
-    // The fused master carries this language; remember it so a later server
-    // change keeps it rather than reverting to that provider's default.
-    if (plan.audio?.language) setWantLang(plan.audio.language);
     const pairTimer = beginSwitch(`Pairing ${audio.provider} audio…`, null, { replacesStream: true });
     const paired = await pairSources(video, audio,
       { tmdbId: title.tmdbId, mediaType: title.mediaType });
@@ -1733,33 +1708,25 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       endSwitch(pairTimer);
       return false;
     }
-    resumeAt.current = videoRef.current?.currentTime || 0;
-    recovery.clearStall();
-    // Kept so the Audio timing bar can rebuild this exact pairing with a
-    // different offset without the viewer re-picking the language.
-    lastPair.current = { video, audio };
-    setPairPadding(paired.padded ? { deltaSeconds: paired.delta } : null);
-    resolve.switchSource({
-      ...video,
-      id: `pair-${video.id}-${audio.id}`,
-      provider: `${video.provider}+${audio.provider}`,
-      masterUrl: paired.url,
-      hybrid: true,
-      languages: audio.languages || [],
-      selectableAudio: true,
-    });
+    applyPair(video, audio, plan.audio?.language, paired);
     return true;
-  }, [switchSource, beginSwitch, endSwitch, recovery, resolve, title.tmdbId, title.mediaType]);
-  pickPairRef.current = pickPair;
+  }, [switchSource, beginSwitch, endSwitch, applyPair, title.tmdbId, title.mediaType]);
 
   // What the menus call. Same switch, but remembered first so a failure can
   // go back: `stream` is the playable shape of what is on screen now.
-  const snapshot = useCallback(() => (stream ? {
+  // Before the first frame there is nothing to go back to: null, so every
+  // pre-frame failure moves on through failSwitch and no revert can put the
+  // viewer back on a source that never gave a picture.
+  // M5: while an add-audio pair is on screen but has not landed, "what is on
+  // screen" for a revert is the stream from before that run, not the pair.
+  const snapshot = useCallback(() => addAudioJourney.unsettled()?.stream || (stream && framedOnceRef.current ? {
     ...stream, id: currentSourceId, provider: currentSource,
     label: rowLabel(currentSourceId, currentSource),
     at: videoRef.current?.currentTime || 0,
-  } : null), [stream, currentSourceId, currentSource, rowLabel]);
-  const pickSource = useCallback((src, lang = null) => {
+  } : null), [stream, currentSourceId, currentSource, rowLabel, addAudioJourney]);
+  // Also the server branch of pickLanguage, so a failed language switch goes
+  // back the same way a failed server pick does. `opts` reaches switchSource.
+  const pickSource = useCallback((src, lang = null, opts = undefined) => {
     // The list is locked while a server switch runs: it ends in a frame, or
     // in a bounded timeout that moves on by itself.
     if (srcSwitch.current) {
@@ -1769,16 +1736,94 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     if (src?.id == null || src.id !== currentSourceId) {
       switchGuard.begin(snapshot(), rowLabel(src?.id, src?.provider));
     }
-    return switchSource(src, lang);
-  }, [switchSource, switchGuard, snapshot, rowLabel, currentSourceId, setNotice]);
+    // A plain pick ends any add-audio run; it never starts one. After the
+    // guard, so the guard's snapshot can still see the run (M5).
+    addAudioJourney.cancel();
+    // `asked`: the viewer picked this, so the loading card says "Switching
+    // server…" and not that the old server was slow.
+    opts = { ...opts, asked: true };
+    return switchSource(src, lang, opts);
+  }, [switchSource, switchGuard, snapshot, rowLabel, currentSourceId, setNotice, addAudioJourney]);
+  const pickLanguage = useCallback((language) => {
+    if (srcSwitch.current) { setNotice(`Still switching to ${srcSwitch.current.label}…`); return; }
+    const track = hls.audioTracks?.find(t => audioLanguageKey(trackAudioLanguage(t)) === audioLanguageKey(language));
+    setWantLang(language);
+    if (track && hls.pickAudio(track.id) !== false) { addAudioJourney.cancel(); return; }
+    // W2: the playing source is never a candidate; its tracks were tried above.
+    const candidates = languageSwitchCandidates(sourceListRef.current, language, currentSourceIdRef.current);
+    let next = nextAlive(candidates, deadSources.current, { lang: language });
+    // An explicit language click retries its failed sources without reviving unrelated rows.
+    if (!next && candidates.length) {
+      for (const source of candidates) deadSources.current.delete(source.id ?? source.provider);
+      setFailedUrls(prev => new Set([...prev].filter(url => !candidates.some(s => s.masterUrl === url))));
+      next = nextAlive(candidates, deadSources.current, { lang: language });
+    }
+    // Guarded like a manual server pick (pickSource): a failed switch returns
+    // to the previous server and position.
+    if (next) pickSource(next, language, { ctx: {
+      ...failoverCtxRef.current, lang: language, strictLanguage: true,
+      fallback: { source: sourceListRef.current.find(s => s.id === currentSourceIdRef.current),
+        lang: hls.audioTracks?.find(t => t.id === hls.currentAudio)?.name || wantLang,
+        at: videoRef.current?.currentTime || 0 },
+    } });  // pickSource ends any add-audio run.
+    else { addAudioJourney.cancel(); setNotice(`No other ${language} stream found`); }
+  }, [hls.audioTracks, hls.currentAudio, hls.pickAudio, pickSource, wantLang, videoRef, addAudioJourney]);
   const pickPairGuarded = useCallback((plan) => {
     if (srcSwitch.current) {
       setNotice(`Still switching to ${srcSwitch.current.label}…`);
       return false;
     }
     switchGuard.begin(snapshot(), plan?.audio?.language || 'That language');
+    addAudioJourney.cancel();
     return pickPair(plan);
-  }, [pickPair, switchGuard, snapshot, setNotice]);
+  }, [pickPair, switchGuard, snapshot, setNotice, addAudioJourney]);
+
+  // "Add <L> audio from another server": the explicit journey (Step 2). Only
+  // the menu entry calls this; nothing starts it automatically. During a
+  // pair the playing id is `pair-<video>-<audio>`, so the picture is the
+  // video half (videoIdOf), which is also what the donor audio joins.
+  addAudioDeps.current = {
+    checkPair: makeCheckPair({ pairSources, pairDecodable, tmdbId: title.tmdbId, mediaType: title.mediaType }),
+    applyPair,
+    // Taken once, at the run's first switch: stream, position, wanted
+    // language, and the pair the timing bar would rebuild.
+    snapshot: () => {
+      const prev = snapshot();
+      return prev ? { key: streamKey(prev), at: prev.at, stream: prev, wantLang, lastPair: lastPair.current, padding: pairPadding } : null;
+    },
+    restore: (snap) => {
+      switchGuard.begin(snap.stream, snap.wantLang || 'That language');
+      switchGuard.fail();
+      setWantLang(snap.wantLang);
+      lastPair.current = snap.lastPair;
+      setPairPadding(snap.padding);
+    },
+    notice: setNotice,
+    position: () => resumePoint(videoRef.current),
+    label: (donor) => rowLabel(donor.id, donor.provider),
+  };
+  const addAudio = useCallback((language) => {
+    if (srcSwitch.current) { setNotice(`Still switching to ${srcSwitch.current.label}…`); return; }
+    const list = sourceListRef.current;
+    const videoId = videoIdOf(currentSourceIdRef.current, list);
+    const video = list.find(s => s.id === videoId);
+    const donors = video ? pairDonors(list, language, video) : [];
+    if (!donors.length) { setNotice(Copy.noWorkingAudio(language)); return; }
+    addAudioJourney.start({ language, video, donors });
+  }, [addAudioJourney, setNotice]);
+  // I1: every stream change reaches the journey. A change the run did not
+  // make (failover, stall recovery, a pick, a stale-url refresh) ends it.
+  useEffect(() => {
+    addAudioJourney.streamChanged(streamKey({ id: currentSourceId, masterUrl: stream?.masterUrl }));
+  }, [addAudioJourney, stream, currentSourceId]);
+  // A new title or episode: the run belongs to the old one.
+  useEffect(() => {
+    addAudioJourney.cancel();
+  }, [addAudioJourney, title.tmdbId, title.mediaType, season, episode]);
+  // Languages a pair carries, for the menus' "missing" test on the native path
+  // where audioTracks is empty and the pair id is no row.
+  const pairLanguages = String(currentSourceId ?? '').startsWith('pair-')
+    ? (lastPair.current?.audio?.languages || null) : null;
 
   // VaPlayer's own page in an iframe, the last Servers row. See
   // lib/player/vaEmbed.js. `embedOn` is the one switch: while it is set the
@@ -1831,10 +1876,12 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   useEffect(() => {
     const v = videoRef.current;
     if (!v || !stream) return;
-    const landed = () => { switchGuard.landed(); staleRefresh.reset(); };
+    // The key of THIS stream: the journey counts only its own pair's frame.
+    const key = streamKey({ id: currentSourceId, masterUrl: stream.masterUrl });
+    const landed = () => { switchGuard.landed(); staleRefresh.reset(); addAudioJourney.landed(key); };
     v.addEventListener('loadeddata', landed);
     return () => v.removeEventListener('loadeddata', landed);
-  }, [stream, switchGuard, staleRefresh]);
+  }, [stream, currentSourceId, switchGuard, staleRefresh, addAudioJourney]);
 
   // Commit an audio offset. The browser absorbs small POSITIVE shifts with a
   // DelayNode and nothing else has to happen; anything it cannot do (audio
@@ -1931,8 +1978,8 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     firstListSize: firstListSizeRef.current, attempts,
     // One request answers the whole search, so one honest row.
     checks: [{ id: CHECK_SERVER, label: 'Chitram server', startedAt: searchAtRef.current, endedAt: null }],
-    framed: framedOnce, failed: Boolean(error),
-  }), [loadNow, title.title, listReady, sources, rowLabels, attempts, framedOnce, error]);
+    framed: framedOnce, failed: Boolean(error), switching: switchAsked,
+  }), [loadNow, title.title, listReady, sources, rowLabels, attempts, framedOnce, error, switchAsked]);
   // Search-phase Try again (only offered at 30s with no list): ask again
   // WITHOUT the refresh path. A non-refresh ask joins the /api/streams
   // request still running (lib/backend.js fetchStreamsShared) rather than
@@ -1950,15 +1997,16 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     putAttempts([]);
     resolve.load(true);
   }, [resolve, putAttempts]);
-  // A row picked in Details plays at once, like the Servers menu. Before the
-  // first frame there is nothing to go back to, so it bypasses the guard and
-  // ends a switch still being judged.
+  // A row picked in Details plays at once, like the Servers menu. It ends a
+  // switch still being judged (the viewer's pick wins over an automatic
+  // advance), then goes through pickSource like every other manual pick, so
+  // a failed pick goes back through switchGuard.
   const pickFromLoading = useCallback((id) => {
     const src = sources.find((s) => s.id === id);
     if (!src) return;
     if (srcSwitch.current) endSourceSwitch();
-    switchSource(src);
-  }, [sources, endSourceSwitch, switchSource]);
+    pickSource(src);
+  }, [sources, endSourceSwitch, pickSource]);
 
   return (
     <div className="player" ref={playerRef} role="dialog" aria-modal="true"
@@ -2022,6 +2070,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
           currentAudio={hls.currentAudio}
           onPickAudio={hls.pickAudio}
           onPickLanguage={pickLanguage} audioSources={sources}
+          onAddAudio={addAudio} playingLanguages={pairLanguages}
           levels={hls.levels}
           currentLevel={hls.currentLevel}
           autoLevel={hls.autoLevel}
@@ -2080,6 +2129,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
           onPickAudio={hls.pickAudio}
           onPickLanguage={pickLanguage} audioSources={sources}
           onPickPair={pickPairGuarded}
+          onAddAudio={addAudio} playingLanguages={pairLanguages}
           audioSync={{
             value: audioSyncState.offset,
             onPreview: audioSyncState.preview,

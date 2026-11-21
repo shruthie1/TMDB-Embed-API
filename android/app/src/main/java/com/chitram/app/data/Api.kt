@@ -47,6 +47,23 @@ data class PlaybackReport(
 
 class HttpException(val code: Int) : IOException("HTTP $code")
 
+/** `codecs` of a /hybrid/pair answer: the fused master's video CODECS and its audio codec. */
+@kotlinx.serialization.Serializable
+data class PairCodecs(val video: List<String> = emptyList(), val audio: String? = null)
+
+@kotlinx.serialization.Serializable
+internal data class PairResponse(val url: String? = null, val delta: Double = 0.0, val padded: Boolean = false, val codecs: PairCodecs? = null)
+
+/** POST /hybrid/pair (Step 2 Task 1, with `language`). */
+sealed interface PairOutcome {
+    /** 200: the server fused the picture with the donor's `language` audio. */
+    data class Ok(val url: String, val codecs: PairCodecs?, val padded: Boolean, val delta: Double) : PairOutcome
+    /** 4xx: 409 'not pairable' (the donor lacks the language, a different cut, unreadable) or another client error. */
+    data class Refused(val reason: String?) : PairOutcome
+    /** IO error, timeout (call or per-try), 5xx or an unreadable 2xx. Task 6 falls back to the device here. */
+    data class Unreachable(val detail: String) : PairOutcome
+}
+
 /**
  * Client for the web app's API (https://chtrm2.vercel.app). The same routes the
  * site uses: /api/rows, /api/search, /api/title, /api/season, and /api/streams,
@@ -143,6 +160,16 @@ class Api(
             put("stallCount", r.stallCount); put("stallMs", r.stallMs); put("recoveryCount", r.recoveryCount)
             put("audioLang", r.audioLang); put("langOk", null as Boolean?)
             put("device", r.device); put("connection", null as String?)
+        }.toString()
+
+        /** /hybrid/pair body: same sides as web pairSources, plus the asked `language`. */
+        fun pairBody(video: Source, audio: Source, language: String, tmdbId: Long, type: String): String = buildJsonObject {
+            fun side(s: Source) = buildJsonObject {
+                put("url", s.url); put("provider", s.provider); put("quality", s.quality)
+                if (!s.codecString.isNullOrBlank()) put("codecs", s.codecString)
+            }
+            put("video", side(video)); put("audio", side(audio)); put("language", language)
+            if (tmdbId > 0) { put("tmdbId", tmdbId); put("type", if (type == "tv" || type == "series") "series" else "movie") }
         }.toString()
 
         fun httpCache(cacheDir: File): Cache = Cache(File(cacheDir, "http"), HTTP_CACHE_BYTES)
@@ -242,6 +269,56 @@ class Api(
             })
         } catch (e: Exception) {
             android.util.Log.i("Chitram", "[report] not sent: ${e.javaClass.simpleName}")
+        }
+    }
+
+    /**
+     * POST /hybrid/pair on the VM (web/lib/backend.js pairSources, plus Step 2
+     * `language`): [video]'s picture with [audio]'s [language] track, fused on
+     * the server. No headers are sent: the server knows them from its own
+     * resolve. Never throws (cancellation aside).
+     */
+    suspend fun pair(video: Source, audio: Source, language: String, tmdbId: Long, type: String): PairOutcome {
+        if (vm?.allow() == false) return PairOutcome.Unreachable("vm paused")
+        val body = pairBody(video, audio, language, tmdbId, type).toRequestBody("application/json".toMediaType())
+        val req = Request.Builder().url("$vmBase/hybrid/pair").post(body)
+            .cacheControl(CacheControl.Builder().noStore().noCache().build()).build()
+        return try {
+            val (code, text) = exchange(vmClient, req)
+            when {
+                // Only the network, a timeout or a 5xx is Unreachable; any 4xx is the server's answer.
+                code >= 500 -> PairOutcome.Unreachable("HTTP $code")
+                code in 400..499 -> PairOutcome.Refused(runCatching { json.parseToJsonElement(text).let { (it as? kotlinx.serialization.json.JsonObject)?.get("reason")?.let { r -> (r as? kotlinx.serialization.json.JsonPrimitive)?.content } } }.getOrNull() ?: "HTTP $code")
+                code !in 200..299 -> PairOutcome.Unreachable("HTTP $code")
+                else -> {
+                    val d = json.decodeFromString(PairResponse.serializer(), text)
+                    if (d.url.isNullOrBlank()) PairOutcome.Unreachable("no url") else PairOutcome.Ok(d.url, d.codecs, d.padded, d.delta)
+                }
+            }
+        } catch (e: IOException) {
+            PairOutcome.Unreachable("${e.javaClass.simpleName} ${e.message ?: ""}".trim())
+        } catch (e: kotlinx.serialization.SerializationException) {
+            PairOutcome.Unreachable("unreadable")
+        } catch (e: IllegalArgumentException) {
+            PairOutcome.Unreachable("unreadable")
+        }
+    }
+
+    /** Status and body of any answer (a 409 carries its reason in the body). */
+    private suspend fun exchange(c: OkHttpClient, req: Request): Pair<Int, String> {
+        val call = c.newCall(req)
+        return withContext(Dispatchers.IO) {
+            suspendCancellableCoroutine { cont ->
+                cont.invokeOnCancellation { call.cancel() }
+                call.enqueue(object : Callback {
+                    override fun onFailure(call: Call, e: IOException) { cont.resumeWithException(e) }
+                    override fun onResponse(call: Call, response: Response) {
+                        response.use {
+                            try { cont.resume(it.code to (it.body?.string() ?: "")) } catch (e: IOException) { cont.resumeWithException(e) }
+                        }
+                    }
+                })
+            }
         }
     }
 

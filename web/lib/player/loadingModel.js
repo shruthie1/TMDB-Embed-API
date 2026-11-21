@@ -13,16 +13,28 @@ export const LOADING_SLOW_HINT_MS = 15000;
 export const LOADING_CHOOSER_MS = 30000;
 export const LOADING_RETRY_MS = 30000;
 
+/**
+ * Caps for "Add <L> audio from another server" (Step 2, 2026-11-21): at most
+ * 3 donor servers, 15s per try, 30s for the whole journey. Same names and
+ * values in the APK's LoadingModel.kt.
+ */
+export const ADD_AUDIO_MAX_TRIES = 3;
+export const ADD_AUDIO_TRY_MS = 15000;
+export const ADD_AUDIO_TOTAL_MS = 30000;
+
 export const CHECK_SERVER = 'check:server';
 
 export const Phase = {
   FINDING: 'finding', FINDING_SLOW: 'finding-slow', FOUND: 'found', STARTING: 'starting',
-  ADVANCING: 'advancing', ADVANCING_SKIP: 'advancing-skip', FAILED: 'failed',
+  SWITCHING: 'switching', ADVANCING: 'advancing', ADVANCING_SKIP: 'advancing-skip', FAILED: 'failed',
 };
 
 export const RowState = {
   WAITING: 'waiting', CHECKING: 'checking', STARTING: 'starting',
   PLAYING: 'playing', SKIPPED: 'skipped', FAILED: 'failed',
+  // The viewer picked another server while this row was starting. Neutral:
+  // not a failure, and not counted in "N of M tried" or "We tried N".
+  LEFT: 'left',
 };
 
 /** The fixed set of reasons a row did not play. */
@@ -44,10 +56,56 @@ export function retryPlan(failed) {
   return failed ? { refresh: true, keepDevice: false } : { refresh: false, keepDevice: true };
 }
 
-export function advanceNotice(from, to, skip = false) {
+/**
+ * Every loading and switch line the viewer reads, in one place so the APK's
+ * LoadingModel.kt can mirror them word for word (Task 6, 2026-11-21).
+ *
+ * No line says "slow": the player cannot tell a slow source from a dead one
+ * (it sees no throughput, only "no answer in 8s" or "no picture in 20s"), and
+ * the owner read "slow" on almost every switch while the server was fine.
+ */
+export const Copy = {
+  /** A server switch the viewer asked for is in flight. */
+  SWITCHING_SERVER: 'Switching server…',
+  /** The source list is still on its way. */
+  FINDING: 'Finding sources…',
+  /** The source list took longer than LOADING_SLOW_HINT_MS, with no switch in flight. */
+  FINDING_SLOW: 'Still finding sources…',
+  FINDING_SLOW_DETAIL: 'First play of a title can take up to a minute.',
+  /** A source gave no picture in time and the player moves on by itself. */
+  didntStart: (from, to) => `${from} didn't start. Trying ${to}.`,
+  /** A source that was playing failed mid-film and the player moves on. */
+  stopped: (from, to) => `${from} stopped. Trying ${to}.`,
+  /** The device cannot decode the source. */
+  wontPlay: (from, to) => `${from} won't play on this device. Trying ${to}.`,
+  /** A language pick landed on a server that plays, but without that language (I2). */
+  noLanguage: (from, lang, to) => `${from} has no ${lang} audio. Trying ${to}.`,
+  /** Row status: the viewer picked another server while this one was starting. */
+  ROW_LEFT: 'Left',
+  /** Add <L> audio from another server (Step 2): the Details group heading. */
+  ADD_AUDIO_GROUP: 'Add audio from another server',
+  /** One row per missing language under ADD_AUDIO_GROUP. */
+  addAudio: (lang) => `Add ${lang} audio from another server`,
+  /** A donor server is being checked; n of total donors (total <= ADD_AUDIO_MAX_TRIES). */
+  checkingAudio: (lang, server, n, total) => `Checking ${server} for ${lang} audio (${n} of ${total})…`,
+  /** The pair plays: the language now comes from the donor server. */
+  audioAdded: (lang, server) => `${lang} audio added from ${server}.`,
+  /** Every donor failed or the caps ran out; the previous stream is back. */
+  noWorkingAudio: (lang) => `No server has working ${lang} audio. Playback is unchanged.`,
+};
+
+/**
+ * The one-line notice when the player moves from one source to the next by
+ * itself. `skip`: the device cannot decode it. `missingLang`: it played, but
+ * not in the language the viewer picked. `stopped`: it was playing and died
+ * mid-film. Otherwise it failed to start.
+ */
+export function advanceNotice(from, to, skip = false, stopped = false, missingLang = null) {
   const a = from || 'That server';
   const b = to || 'the next server';
-  return skip ? `${a} won't play on this device. Trying ${b}.` : `${a} is slow. Trying ${b}.`;
+  if (skip) return Copy.wontPlay(a, b);
+  if (missingLang) return Copy.noLanguage(a, missingLang, b);
+  return stopped ? Copy.stopped(a, b) : Copy.didntStart(a, b);
 }
 
 export function reasonFor(httpCode, decoder) {
@@ -131,6 +189,9 @@ const secs1 = (ms) => (Math.max(0, ms) / 1000).toFixed(1);
  *   labels       { [id]: label } from labelRows
  *   firstListSize, attempts [{id, startedAt, endedAt, state, reason}],
  *   checks [{id, label, startedAt, endedAt, found}], framed, failed, failMessage
+ *   switching    true while a server switch the VIEWER asked for is in flight.
+ *                It wins over the slow hint and over the advance notice: the
+ *                wait is the switch, not a slow or failed server.
  */
 export function loadingView(i) {
   const preferred = i.preferred || PREFERRED_LANGUAGE;
@@ -138,10 +199,12 @@ export function loadingView(i) {
   const list = i.sources || null;
   const labels = i.labels || {};
   const attempts = i.attempts || [];
+  // A row the viewer left by picking another server was not tried.
+  const triedAttempts = attempts.filter((a) => a.state !== RowState.LEFT);
   const label = (id) => labels[id] ?? list?.find((s) => s.id === id)?.provider ?? String(id);
   const n = i.firstListSize > 0 ? i.firstListSize : (list?.length || 0);
   const more = (list?.length || 0) - n;
-  const k = attempts.length;
+  const k = triedAttempts.length;
   const tried = `${k} of ${n} tried${more > 0 ? ` · ${more} more found` : ''}`;
 
   const rows = list == null ? checkRows(i) : sourceRows(i, list, label, preferred);
@@ -150,21 +213,27 @@ export function loadingView(i) {
     ({ phase, headline, detail, showChooser, showTryAgain, rows, footer });
 
   if (i.failed) {
-    const distinct = new Set(attempts.map((a) => a.id)).size;
+    const distinct = new Set(triedAttempts.map((a) => a.id)).size;
     const detail = distinct > 0
       ? `We tried ${distinct} sources. None of them played.`
       : (i.failMessage || 'No playable source found.');
     return view(Phase.FAILED, `Couldn't start ${i.title}`, detail, false, true);
   }
+  const chooser = list != null && !i.framed && t >= LOADING_CHOOSER_MS;
+  const cur = attempts[attempts.length - 1];
+  if (i.switching) {
+    const target = cur && list?.find((x) => x.id === cur.id);
+    const facts = [target && langOf(target, preferred), target && qualityOf(target)].filter(Boolean);
+    return view(Phase.SWITCHING, Copy.SWITCHING_SERVER,
+      [...facts, ...(list != null && k > 0 ? [tried] : [])].join(' · '), chooser, false);
+  }
   if (list == null) {
     const slow = t >= LOADING_SLOW_HINT_MS;
-    const detail = slow ? 'First play of a title can take up to a minute.'
+    const detail = slow ? Copy.FINDING_SLOW_DETAIL
       : `${preferred} first${t >= 5000 ? ` · ${secs(t)}s` : ''}`;
     return view(slow ? Phase.FINDING_SLOW : Phase.FINDING,
-      slow ? 'Still finding sources…' : 'Finding sources…', detail, false, t >= LOADING_RETRY_MS);
+      slow ? Copy.FINDING_SLOW : Copy.FINDING, detail, false, t >= LOADING_RETRY_MS);
   }
-  const chooser = !i.framed && t >= LOADING_CHOOSER_MS;
-  const cur = attempts[attempts.length - 1];
   if (!cur) {
     const inLang = list.filter((s) => (s.languages || []).some(
       (l) => langName(l).toLowerCase() === preferred.toLowerCase())).length;
@@ -173,7 +242,7 @@ export function loadingView(i) {
   const s = list.find((x) => x.id === cur.id);
   const facts = [s && langOf(s, preferred), s && qualityOf(s)].filter(Boolean);
   const prev = attempts[attempts.length - 2];
-  if (!prev) return view(Phase.STARTING, `Starting ${label(cur.id)}`, facts.join(' · '), chooser, false);
+  if (!prev || prev.state === RowState.LEFT) return view(Phase.STARTING, `Starting ${label(cur.id)}`, facts.join(' · '), chooser, false);
   const skip = prev.reason === Reason.UNSUPPORTED;
   return view(skip ? Phase.ADVANCING_SKIP : Phase.ADVANCING,
     advanceNotice(label(prev.id), label(cur.id), skip),
@@ -211,10 +280,11 @@ function sourceRows(i, list, label, preferred) {
     else if (!a) { state = RowState.WAITING; status = 'Waiting'; }
     else if (a.endedAt == null) { state = RowState.STARTING; status = `Starting… ${secs(i.now - a.startedAt)}s`; }
     else if (a.state === RowState.PLAYING) { state = RowState.PLAYING; status = `Playing · ${secs1(a.endedAt - a.startedAt)}s to start`; }
+    else if (a.state === RowState.LEFT) { state = RowState.LEFT; status = Copy.ROW_LEFT; }
     else if (a.state === RowState.SKIPPED) { state = RowState.SKIPPED; status = `Skipped: ${a.reason || Reason.UNSUPPORTED}`; }
     else { state = RowState.FAILED; status = `Failed: ${a.reason || Reason.STOPPED} · ${secs(a.endedAt - a.startedAt)}s`; }
     let clickable = false;
-    if (state === RowState.WAITING || state === RowState.FAILED) clickable = !s.unsupported;
+    if (state === RowState.WAITING || state === RowState.FAILED || state === RowState.LEFT) clickable = !s.unsupported;
     else if (state === RowState.SKIPPED) clickable = !s.unsupported && a?.reason !== Reason.UNSUPPORTED;
     return { id, title, status, state, clickable, description: describe(title, status) };
   });

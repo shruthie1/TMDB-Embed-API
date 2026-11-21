@@ -43,6 +43,7 @@
 const crypto = require('crypto');
 // The provider-agnostic sync primitives. See utils/ptsRebase.js.
 const ptsRebase = require('./ptsRebase');
+const { canonicalLanguage, trackNameLanguage, LANG_CANON } = require('./streamSchema');
 
 const DURATION_TOLERANCE_SECONDS = Number(process.env.AUDIO_MERGE_TOLERANCE_SECONDS) || 15;
 
@@ -666,13 +667,50 @@ function withPts(url, ptsOffset, opts = {}) {
     return `${url}${sep}pts=${ptsOffset}${remote}`;
 }
 
-// The rendition hls.js should start on: PREFERRED_AUDIO_LANGUAGE by name or
-// language code, else index 0. Shared with the cast route so both agree.
-function defaultAudioIndex(renditions) {
-    const preferred = PREFERRED_LANGUAGE.toLowerCase();
-    const i = (renditions || []).findIndex((r) =>
-        String(r.name || '').toLowerCase() === preferred
-        || String(r.language || '').toLowerCase().startsWith(preferred.slice(0, 3)));
+// Canonical names of every language the schema knows ('Telugu', 'Hindi', ...).
+const KNOWN_LANGUAGES = new Set(Object.values(LANG_CANON));
+
+// The known language a value names ('te', 'tel-IN', 'Hindi'), or null. Unlike
+// canonicalLanguage, an unrecognised value is NOT title-cased into a language.
+function knownLanguageName(value) {
+    const canon = canonicalLanguage(value);
+    return canon && KNOWN_LANGUAGES.has(canon) ? canon : null;
+}
+
+// One rendition's language, Step 1's rule as on web (languageSources.js
+// renditionLanguage) and APK: the LANGUAGE tag first. The name is read only
+// when the tag is empty, 'und' or not a language, so {name:'Hindi',
+// language:'tel'} is Telugu, and an und track named 'Hindi AAC 2.0' is Hindi.
+function renditionLanguage(r) {
+    return knownLanguageName(r.language)
+        || knownLanguageName(r.name)
+        || trackNameLanguage(r.name);
+}
+
+// The index of the first rendition in `language` (any name or code), or -1.
+// opts.byTrackName (an ASKED language): tag first, then the name, via
+// renditionLanguage. Without it, the old exact LANGUAGE/NAME match, so the
+// no-language default stays exactly as it was for APK 1.2.37 and the web.
+function languageRenditionIndex(renditions, language, opts = {}) {
+    const list = renditions || [];
+    if (opts.byTrackName) {
+        const wanted = knownLanguageName(language);
+        return wanted ? list.findIndex((r) => renditionLanguage(r) === wanted) : -1;
+    }
+    const wanted = canonicalLanguage(language);
+    if (!wanted) return -1;
+    return list.findIndex((r) =>
+        canonicalLanguage(r.language) === wanted
+        || canonicalLanguage(r.name) === wanted);
+}
+
+// The rendition hls.js should start on: `language` (the viewer's explicit pick
+// from /hybrid/pair), else PREFERRED_AUDIO_LANGUAGE, by name or language code,
+// else index 0. Shared with the cast route so both agree.
+function defaultAudioIndex(renditions, language = null) {
+    const i = language
+        ? languageRenditionIndex(renditions, language, { byTrackName: true })
+        : languageRenditionIndex(renditions, PREFERRED_LANGUAGE);
     return i < 0 ? 0 : i;
 }
 
@@ -692,7 +730,9 @@ function buildMaster(plan, serverUrl, videoCodec, ptsOffset = 0, audioCodec = nu
     // provider happened to list first, which has nothing to do with the film's
     // language: on Devara (811941), a Telugu original, Castle's track 0 is
     // Kannada. Honour PREFERRED_AUDIO_LANGUAGE and fall back to 0.
-    const defaultIndex = defaultAudioIndex(renditions);
+    // plan.language is the viewer's explicit "Add <L> audio" pick; without
+    // one this is the PREFERRED_AUDIO_LANGUAGE default, as before.
+    const defaultIndex = defaultAudioIndex(renditions, plan.language || null);
 
     const lines = ['#EXTM3U', '#EXT-X-VERSION:3'];
     renditions.forEach((r, i) => {
@@ -839,9 +879,13 @@ function planId(plan) {
     // The nudge is part of the identity. Without it two different manual
     // offsets hash to the same id and the second one silently serves the
     // first one's cached master.
+    // The asked language is too: the same two urls with a different default
+    // rendition are a different master. Appended only when set, so every
+    // no-language id (APK 1.2.37, web) hashes exactly as before.
     const nudge = Number(plan.nudge) || 0;
+    const lang = plan.language ? `|${plan.language}` : '';
     return crypto.createHash('sha1')
-        .update(`${plan.video.stream.url}|${plan.audio.stream.url}|${nudge}`)
+        .update(`${plan.video.stream.url}|${plan.audio.stream.url}|${nudge}${lang}`)
         .digest('hex').slice(0, 24);
 }
 
@@ -893,6 +937,8 @@ function describePlansAsStreams(plans, serverUrl) {
 
 module.exports.buildMaster = buildMaster;
 module.exports.defaultAudioIndex = defaultAudioIndex;
+module.exports.languageRenditionIndex = languageRenditionIndex;
+module.exports.knownLanguageName = knownLanguageName;
 module.exports.realisePlan = realisePlan;
 module.exports.masterCodecs = masterCodecs;
 module.exports.planId = planId;

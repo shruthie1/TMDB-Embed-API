@@ -182,7 +182,7 @@ class MappleResolver(
         if (cooling.isNotEmpty()) android.util.Log.i("Chitram", "mapple: cooling fronts tried last: $cooling")
         val answered = java.util.concurrent.atomic.AtomicInteger()
         val failed = java.util.concurrent.atomic.AtomicInteger()
-        fun wanted(m: Master) = Hls.languages(m.audio).any { it.equals(preferred, ignoreCase = true) }
+        fun wanted(m: Master) = Hls.languages(m.audio).any { com.chitram.app.data.Ranking.sameLanguage(it, preferred) }
         val hit: Hit? = raceFronts(
             order, cfg.frontParallelism, cfg.betterWaitMs, cfg.betterWaitMaxMs,
             wanted = { wanted(it.master) },

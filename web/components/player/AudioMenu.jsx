@@ -4,6 +4,7 @@ import Icon from '../Icon';
 import MenuRow from './MenuRow';
 import PlayerMenu from './PlayerMenu';
 import SyncBar from './SyncBar';
+import { Copy } from '../../lib/player/loadingModel';
 
 /**
  * Audio language, as its own control.
@@ -39,6 +40,7 @@ export default function AudioMenu({
   audioTracks = [], currentAudio, onPickAudio,
   open, onToggle, onTouch,
   sync = null, allowSingleSelection = false,
+  addAudio = [], onAddAudio,
 }) {
   // APK: the Audio button is always there. With no language known for this
   // stream (RRR 2026-11-21: multimovies/showsst/NetMirror/vidrock all ship no
@@ -67,7 +69,7 @@ export default function AudioMenu({
   // bar still needs somewhere to live - and a single paired language is
   // exactly the case most likely to need nudging. So the menu stays openable
   // whenever there is a sync control to show.
-  const only = audioTracks.length === 1 && !sync && !allowSingleSelection;
+  const only = audioTracks.length === 1 && !sync && !allowSingleSelection && !addAudio.length;
 
   return (
     <div className="pmenu-wrap">
@@ -96,6 +98,18 @@ export default function AudioMenu({
                        onClick={() => (t.id === currentAudio ? onToggle?.() : onPickAudio?.(t.id))} />
             </Fragment>
           ))}
+          {/* Step 2: languages this stream lacks that another server can
+              lend. Their own group, after every plain pick: a plain pick
+              never pairs, only these rows do. */}
+          {addAudio.length > 0 && (
+            <>
+              <p className="pmenu-group pmenu-group-add" role="presentation">{Copy.ADD_AUDIO_GROUP}</p>
+              {addAudio.map(language => (
+                <MenuRow key={`add:${language}`} label={Copy.addAudio(language)}
+                         onClick={() => onAddAudio?.(language)} />
+              ))}
+            </>
+          )}
           {/* Timing lives WITH the language list: picking a dubbed track is
               what knocks lip sync out, so the fix belongs where the cause is
               rather than behind the settings gear. */}

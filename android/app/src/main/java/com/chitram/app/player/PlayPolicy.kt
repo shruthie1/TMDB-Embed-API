@@ -60,7 +60,7 @@ object PlayPolicy {
         fun langRank(s: Source): Int {
             if (want.isEmpty()) return 0
             val langs = s.languages.filter { it.isNotBlank() }
-            if (langs.any { it.trim().lowercase() == want }) return 0
+            if (langs.any { Ranking.sameLanguage(it, lang) }) return 0
             return if (langs.isEmpty()) 1 else 2
         }
         fun dist(s: Source): Int {

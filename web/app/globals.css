@@ -2196,6 +2196,15 @@ kbd{
   white-space:nowrap;
 }
 .tvbar-btn.on{ color:var(--paper);border-color:var(--paper) }
+/* "Add <L> audio from another server" (Step 2): a vertical list that scrolls.
+   Fire TV Silk can be Chrome 70, so no flex gap, :has() or min() here: the
+   box is a plain block and margins space the buttons. dpad.js scrolls the
+   focused button into view. */
+.tvbar-add{ display:block;max-height:136px;overflow-y:auto }
+.tvbar-add .tvbar-btn{ display:block;margin:0 0 var(--tvbar-u) 0;text-align:left }
+.tvbar-add .tvbar-btn:last-child{ margin-bottom:0 }
+/* The group name is long: let it wrap in the label column. */
+.tvbar-k.tvbar-k-add{ white-space:normal }
 /* A TV is read from across the room, so focus is an unmistakable ring.
    box-shadow, NOT the scale the rest of the app uses: at 1.09 a focused button
    grew 12px wider and ate the gap to its neighbour - measured, the 7px gap fell
@@ -3295,6 +3304,8 @@ body:has(.hero-art) .topbar::before{opacity:0}
 .pmenu .pmenu-item:active{background:rgb(var(--rgb-white) / .12)}
 .pmenu-group{margin:var(--space-2) var(--space-3) var(--space-1);font-size:var(--text-xs);font-weight:var(--weight-medium);color:var(--color-text-muted)}
 .pmenu-group:first-child{margin-top:var(--space-1)}
+/* "Add audio from another server" (Step 2): set apart from the plain picks. */
+.pmenu-group.pmenu-group-add{border-top:1px solid var(--color-border);padding-top:var(--space-2)}
 .pmenu-marker{width:18px;flex:0 0 18px;display:flex;align-items:center;justify-content:center;color:var(--color-text-primary)}
 .pmenu-copy{display:flex;flex:1;min-width:0;flex-direction:column;gap:0;align-items:stretch}
 .pmenu-copy .pmenu-text{flex:none;display:block;font-size:var(--text-sm);line-height:1.25}

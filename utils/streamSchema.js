@@ -17,7 +17,9 @@
 //   quality    string   one of QUALITIES. "Auto" when the manifest decides.
 //   languages  string[] display names, e.g. ["Telugu","Hindi"]. [] = unknown.
 //                       NOT a joined string: joining forced the UI to re-split.
-//   audio      object[] {language, codec, channels} per known audio track.
+//   audio      object[] {language, languageCode, name, uri, channels, codec, default}
+//                       per known audio track. language = canonical display; languageCode,
+//                       name, uri = null when unknown; default = false when unknown.
 //   subtitles  object[] {url, lang, id}
 //   size       string   human readable, e.g. "10.1 GB". null when unknown.
 //   headers    object   request headers the URL needs.
@@ -57,13 +59,95 @@ const LANG_CANON = {
 
 // `und` and `unknown` are deliberately absent: an untagged track is NOT a
 // language, and mapping it to a name invents information we do not have.
+// `mul` (several) and `zxx` (no speech) say nothing about which language is
+// spoken; the APK's languageLabel already hides them (Ranking.kt:93).
+const NOT_A_LANGUAGE = new Set(['und', 'unknown', 'original', 'mul', 'zxx']);
+
+// The known language a value names, or null. No title-case fallback.
+function knownLanguage(value) {
+    if (!value) return null;
+    const key = String(value).trim().toLowerCase();
+    if (!key || NOT_A_LANGUAGE.has(key)) return null;
+    if (LANG_CANON[key]) return LANG_CANON[key];
+    // Region or script subtag (tel-IN, en_US, zh-Hant, es-419): look up the
+    // base code. Only a BCP-47 region/script suffix strips, so a compound tag
+    // like Telugu-Hindi or eng-sub keeps both parts.
+    const sep = key.search(/[-_]/);
+    if (sep > 0) {
+        const base = key.slice(0, sep);
+        const suffix = key.slice(sep + 1);
+        if (/^(?:[a-z]{2}|[a-z]{4}|\d{3})$/i.test(suffix) && LANG_CANON[base]) return LANG_CANON[base];
+    }
+    return null;
+}
+
 function canonicalLanguage(value) {
     if (!value) return null;
     const key = String(value).trim().toLowerCase();
-    if (!key || key === 'und' || key === 'unknown' || key === 'original') return null;
-    if (LANG_CANON[key]) return LANG_CANON[key];
+    if (!key || NOT_A_LANGUAGE.has(key)) return null;
+    const known = knownLanguage(key);
+    if (known) return known;
     // Unrecognised but non-empty: title-case it rather than drop it.
     return key.charAt(0).toUpperCase() + key.slice(1);
+}
+
+// Full language names (Telugu, hindi) as opposed to codes, for track labels.
+const LANG_NAMES = new Set(Object.values(LANG_CANON).map((n) => n.toLowerCase()));
+// Codec, channel and caption words that collide with ISO codes. Same 24 words
+// as web languageSources.js CODE_STOPLIST and APK Ranking.kt CODEC_WORDS.
+const CODE_STOPLIST = new Set(['HE', 'LC', 'AAC', 'AC', 'EAC', 'DD', 'DDP', 'DTS', 'ATMOS', 'CH', 'SD', 'HD', 'SDH',
+    'DV', 'PCM', 'HI', 'AD', 'VO', 'ORI', 'LAT', 'ALT', 'BR', 'IN', 'MA']);
+
+// Words a label may carry beside its language and still name only that
+// language: codec, channel and track words. Not BR, LAT or IN: those qualify
+// the language (Portuguese BR, Spanish LAT), so such a label is left as given.
+// Same list as web languageSources.js TRACK_WORDS and APK Ranking.kt TRACK_WORDS.
+const TRACK_WORDS = new Set(['he', 'lc', 'aac', 'ac', 'eac', 'dd', 'ddp', 'dts', 'atmos', 'ch', 'sd', 'hd', 'sdh',
+    'dv', 'pcm', 'hi', 'ad', 'vo', 'ori', 'alt', 'ma', 'e', 'stereo', 'mono', 'surround', 'audio', 'track',
+    'dolby', 'digital', 'plus', 'original', 'main', 'default', 'kbps']);
+
+/**
+ * The ONE language a track label names ('Telugu 5.1', 'Hindi AAC 2.0', 'TEL'),
+ * or null. Server mirror of web/APK trackNameLanguage. A word is a language when
+ * it is a full name in any case, or an ALL-CAPS 2-3 letter code not in the
+ * stoplist. Null when the label names two languages ('Telugu-Hindi') or carries
+ * any other word ('Portuguese (Brazil)', 'Telugu Commentary'), so nothing is lost.
+ */
+function trackNameLanguage(text) {
+    const cleaned = String(text || '').replace(/^\[\d+\]\s*/, '').trim();
+    const found = new Set();
+    for (const token of cleaned.match(/[A-Za-z]+/g) || []) {
+        const lower = token.toLowerCase();
+        const lang = (LANG_NAMES.has(lower) && LANG_CANON[lower])
+            || (token.length <= 3 && token.length >= 2 && token === token.toUpperCase() && !CODE_STOPLIST.has(token) && LANG_CANON[lower]);
+        if (lang) found.add(lang);
+        else if (!TRACK_WORDS.has(lower)) return null;
+    }
+    return found.size === 1 ? [...found][0] : null;
+}
+
+/**
+ * A provider `language` value: a known language as is; else the one language
+ * its text names (a rendition NAME copied into language, I1 2026-11-21); else
+ * the title-cased raw value, as before.
+ */
+function resolveLanguage(value) {
+    const canon = canonicalLanguage(value);
+    if (!canon) return null;
+    return knownLanguage(value) || trackNameLanguage(value) || canon;
+}
+
+/** One audio[] entry's language and name: tag, then tag text, then name. */
+function audioLanguageAndName(t) {
+    const tag = t && (t.language || t.lang);
+    const name = (t && t.name) || null;
+    const known = knownLanguage(tag);
+    if (known) return { language: known, name };
+    const canon = canonicalLanguage(tag);
+    const parsed = (canon && trackNameLanguage(tag)) || trackNameLanguage(name);
+    // The raw tag text moves to `name` when name was empty, so nothing is lost.
+    if (parsed) return { language: parsed, name: name || (canon ? String(tag) : null) };
+    return { language: canon, name };
 }
 
 function canonicalQuality(value, fallbackText) {
@@ -147,8 +231,8 @@ function normaliseStream(raw) {
     // Precedence: an explicit structured field beats anything parsed from a
     // display string, because a label is a guess and a field is a statement.
     let languages = [];
-    if (Array.isArray(raw.languages)) languages = raw.languages.map(canonicalLanguage).filter(Boolean);
-    else if (raw.language) languages = String(raw.language).split(/[\/,|]/).map(canonicalLanguage).filter(Boolean);
+    if (Array.isArray(raw.languages)) languages = raw.languages.map(resolveLanguage).filter(Boolean);
+    else if (raw.language) languages = String(raw.language).split(/[\/,|]/).map(resolveLanguage).filter(Boolean);
     if (!languages.length) languages = languagesFromLabel(label);
     // Last resort: a bare language token in a scene release name.
     //
@@ -163,9 +247,12 @@ function normaliseStream(raw) {
 
     const audio = Array.isArray(raw.audio)
         ? raw.audio.map((t) => ({
-            language: canonicalLanguage(t && (t.language || t.lang)),
-            codec: (t && t.codec) || null,
+            ...audioLanguageAndName(t),
+            languageCode: (t && (t.languageCode || t.lang || t.language)) || null,
+            uri: (t && (t.uri || t.url)) || null,
             channels: (t && Number(t.channels)) || null,
+            codec: (t && t.codec) || null,
+            default: Boolean(t && (t.default ?? t.isDefault)),
         }))
         : [];
 
@@ -261,6 +348,6 @@ function normaliseStreams(list) {
 
 module.exports = {
     QUALITIES, LANG_CANON,
-    canonicalLanguage, canonicalQuality, languagesFromLabel, languagesFromReleaseName,
+    canonicalLanguage, trackNameLanguage, canonicalQuality, languagesFromLabel, languagesFromReleaseName,
     inferContainer, stripLangBracket, normaliseStream, normaliseStreams,
 };

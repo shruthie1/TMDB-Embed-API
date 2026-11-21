@@ -10,6 +10,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.MergingMediaSource
 import com.chitram.app.data.CodecSupport
+import com.chitram.app.data.Ranking
 import com.chitram.app.data.Source
 
 /**
@@ -41,12 +42,12 @@ object HybridPair {
      */
     fun candidate(current: Source, sources: List<Source>, want: String, codecs: CodecSupport, audioDecoders: Set<String>?): Source? {
         if (current.hybrid || current.unsupported) return null
-        if (current.languages.any { it.equals(want, true) }) return null
+        if (current.languages.any { Ranking.sameLanguage(it, want) }) return null
         if (codecs.supports(current.videoCodec, current.codecString) == false) return null
         return sources.asSequence()
             .filter { it.id != current.id && !it.unsupported && !it.hybrid }
             .filter { !it.provider.equals(current.provider, true) }
-            .filter { s -> s.languages.any { it.equals(want, true) } }
+            .filter { s -> s.languages.any { Ranking.sameLanguage(it, want) } }
             .filter { audioDecodes(it.codecString, audioDecoders) }
             .mapNotNull { s -> AUDIO_HALVES.indexOf(s.provider.lowercase()).takeIf { it >= 0 }?.let { it to s } }
             .sortedBy { it.first }
@@ -72,17 +73,15 @@ object HybridPair {
      * audio track. Null until both halves have their tracks.
      */
     fun overrides(t: Tracks, want: List<String>): Pair<TrackSelectionOverride, TrackSelectionOverride>? {
-        val w = want.map { it.lowercase() }
+        val w = want.mapNotNull(Ranking::canonLang).toSet()
         val video = t.groups.firstOrNull { it.type == C.TRACK_TYPE_VIDEO && it.mediaTrackGroup.id.startsWith("0:") } ?: return null
         val vIdx = (0 until video.length).filter { video.isTrackSupported(it) }.ifEmpty { return null }
         val audio = t.groups.filter { it.type == C.TRACK_TYPE_AUDIO && it.mediaTrackGroup.id.startsWith("1:") }
         if (audio.isEmpty()) return null
         fun matches(g: Tracks.Group, i: Int): Boolean {
             val f = g.getTrackFormat(i)
-            // media3 normalises "tel" to "te": compare the code, its English name and the label.
-            val code = f.language?.lowercase()?.substringBefore('-')
-            val name = code?.let { java.util.Locale(it).getDisplayLanguage(java.util.Locale.ENGLISH).lowercase() }
-            return code in w || name in w || f.label?.lowercase() in w
+            // media3 normalises "tel" to "te": tag or label language, one canonical key (Ranking.trackMatches).
+            return w.any { Ranking.trackMatches(f.language, f.label, it) }
         }
         val hit = audio.firstNotNullOfOrNull { g -> (0 until g.length).firstOrNull { g.isTrackSupported(it) && matches(g, it) }?.let { g to it } }
             ?: audio.firstNotNullOfOrNull { g -> (0 until g.length).firstOrNull { g.isTrackSupported(it) }?.let { g to it } }

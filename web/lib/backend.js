@@ -487,6 +487,9 @@ export async function pairSources(video, audio, opts = {}) {
   // A manual offset from the Audio timing bar, ADDED to whatever the automatic
   // PTS probe works out. Positive means the viewer wants the audio later.
   if (Number(opts.nudge)) body.nudge = Number(opts.nudge);
+  // Step 2: the language the viewer asked to add. The server answers 409
+  // 'not pairable' when the donor does not carry it (null here).
+  if (opts.language) body.language = opts.language;
   try {
     const r = await fetch(`${BASE}/hybrid/pair`, {
       method: 'POST',

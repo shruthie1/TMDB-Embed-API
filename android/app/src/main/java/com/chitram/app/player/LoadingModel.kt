@@ -17,16 +17,70 @@ object LoadingModel {
     const val LOADING_CHOOSER_MS = 30_000L
     const val LOADING_RETRY_MS = 30_000L
 
+    /**
+     * Caps for "Add <L> audio from another server" (Step 2, 2026-11-21): at most
+     * 3 donor servers, 15s per try, 30s for the whole journey. Same names and
+     * values in web/lib/player/loadingModel.js.
+     */
+    const val ADD_AUDIO_MAX_TRIES = 3
+    const val ADD_AUDIO_TRY_MS = 15_000L
+    const val ADD_AUDIO_TOTAL_MS = 30_000L
+
     const val CHECK_SERVER = "check:server"
     const val CHECK_MAPPLE = "check:mapple"
     const val CHECK_VAPLAYER = "check:vaplayer"
 
     enum class Phase(val key: String) {
         FINDING("finding"), FINDING_SLOW("finding-slow"), FOUND("found"), STARTING("starting"),
-        ADVANCING("advancing"), ADVANCING_SKIP("advancing-skip"), FAILED("failed"),
+        SWITCHING("switching"), ADVANCING("advancing"), ADVANCING_SKIP("advancing-skip"), FAILED("failed"),
     }
 
-    enum class RowState { WAITING, CHECKING, STARTING, PLAYING, SKIPPED, FAILED }
+    /**
+     * LEFT: the viewer picked another server while this row was starting.
+     * Neutral: not a failure, not counted in "N of M tried" or "We tried N".
+     */
+    enum class RowState { WAITING, CHECKING, STARTING, PLAYING, SKIPPED, FAILED, LEFT }
+
+    /**
+     * Every loading and switch line the viewer reads, word for word the same as
+     * web `Copy` in web/lib/player/loadingModel.js (Task 9, 2026-11-21).
+     *
+     * No line says "slow": the player cannot tell a slow source from a dead one
+     * (it sees only "no answer in 8s" or "no picture in 20s"), and the owner read
+     * "slow" on almost every switch while the server was fine.
+     */
+    object Copy {
+        /** A server switch the viewer asked for is in flight. */
+        const val SWITCHING_SERVER = "Switching server…"
+        /** The source list is still on its way. */
+        const val FINDING = "Finding sources…"
+        /** The source list took longer than LOADING_SLOW_HINT_MS, with no switch in flight. */
+        const val FINDING_SLOW = "Still finding sources…"
+        const val FINDING_SLOW_DETAIL = "First play of a title can take up to a minute."
+        /** Row status: the viewer picked another server while this one was starting. */
+        const val ROW_LEFT = "Left"
+        /** Names used when a row has no label. */
+        const val FROM_FALLBACK = "That server"
+        const val TO_FALLBACK = "the next server"
+        /** A source gave no picture in time and the player moves on by itself. */
+        fun didntStart(from: String, to: String) = "$from didn't start. Trying $to."
+        /** A source that was playing failed mid-film and the player moves on. */
+        fun stopped(from: String, to: String) = "$from stopped. Trying $to."
+        /** The device cannot decode the source. */
+        fun wontPlay(from: String, to: String) = "$from won't play on this device. Trying $to."
+        /** A language pick landed on a server that plays, but without that language (I2). */
+        fun noLanguage(from: String, lang: String, to: String) = "$from has no $lang audio. Trying $to."
+        /** Add <L> audio from another server (Step 2): the Details group heading. */
+        const val ADD_AUDIO_GROUP = "Add audio from another server"
+        /** One row per missing language under ADD_AUDIO_GROUP. */
+        fun addAudio(lang: String) = "Add $lang audio from another server"
+        /** A donor server is being checked; n of total donors (total <= ADD_AUDIO_MAX_TRIES). */
+        fun checkingAudio(lang: String, server: String, n: Int, total: Int) = "Checking $server for $lang audio ($n of $total)…"
+        /** The pair plays: the language now comes from the donor server. */
+        fun audioAdded(lang: String, server: String) = "$lang audio added from $server."
+        /** Every donor failed or the caps ran out; the previous stream is back. */
+        fun noWorkingAudio(lang: String) = "No server has working $lang audio. Playback is unchanged."
+    }
 
     /** The fixed set of reasons a row did not play. */
     object Reason {
@@ -61,6 +115,11 @@ object LoadingModel {
         val failed: Boolean,
         /** End-card detail when nothing was tried (no list, server unreachable). */
         val failMessage: String = "",
+        /**
+         * True while a server switch the VIEWER asked for is in flight. It wins
+         * over the slow hint and the advance notice: the wait is the switch.
+         */
+        val switching: Boolean = false,
     )
 
     data class Row(
@@ -88,8 +147,33 @@ object LoadingModel {
     /** Search-phase Try again re-asks the server only; on the end card it is a full refresh. */
     fun retryPlan(failed: Boolean): RetryPlan = if (failed) RetryPlan(refresh = true, keepDevice = false) else RetryPlan(refresh = false, keepDevice = true)
 
-    fun advanceNotice(from: String, to: String, skip: Boolean): String =
-        if (skip) "$from won't play on this device. Trying $to." else "$from is slow. Trying $to."
+    /**
+     * The one-line notice when the player moves from one source to the next by
+     * itself. `skip`: the device cannot decode it. `missingLang`: it played, but
+     * not in the language the viewer picked. `stopped`: it was playing and died
+     * mid-film. Otherwise it failed to start.
+     */
+    fun advanceNotice(from: String?, to: String?, skip: Boolean, stopped: Boolean = false, missingLang: String? = null): String {
+        val a = from?.takeIf { it.isNotEmpty() } ?: Copy.FROM_FALLBACK
+        val b = to?.takeIf { it.isNotEmpty() } ?: Copy.TO_FALLBACK
+        return when {
+            skip -> Copy.wontPlay(a, b)
+            missingLang != null -> Copy.noLanguage(a, missingLang, b)
+            stopped -> Copy.stopped(a, b)
+            else -> Copy.didntStart(a, b)
+        }
+    }
+
+    /**
+     * The notice when the failed row `failedId` gives way to the next one.
+     * "stopped" only when that row's latest attempt rendered a frame (ended
+     * PLAYING); otherwise it failed to start. Looks up the row by id, so an
+     * attempt for the next row added after it does not change the answer.
+     */
+    fun failNotice(attempts: List<Attempt>, failedId: String?, from: String?, to: String?, skip: Boolean, missingLang: String? = null): String {
+        val stopped = failedId != null && attempts.lastOrNull { it.id == failedId }?.state == RowState.PLAYING
+        return advanceNotice(from, to, skip, stopped, missingLang)
+    }
 
     fun reasonFor(httpCode: Int?, decoder: Boolean): String = when {
         decoder -> Reason.UNSUPPORTED
@@ -118,7 +202,7 @@ object LoadingModel {
 
     /** The language that will play: the preferred one when the row has it, else its first. */
     fun langOf(s: Source, preferred: String): String? =
-        s.languages.firstOrNull { it.equals(preferred, true) } ?: s.languages.firstOrNull { it.isNotBlank() }
+        s.languages.firstOrNull { Ranking.sameLanguage(it, preferred) } ?: s.languages.firstOrNull { it.isNotBlank() }
 
     private fun qualityOf(s: Source): String? = Ranking.height(s).takeIf { it > 0 }?.let { "${it}p" }
 
@@ -132,36 +216,44 @@ object LoadingModel {
         fun label(id: String) = labels[id] ?: list?.firstOrNull { it.id == id }?.provider ?: id
         val n = if (i.firstListSize > 0) i.firstListSize else list?.size ?: 0
         val more = (list?.size ?: 0) - n
-        val k = i.attempts.size
+        // A row the viewer left by picking another server was not tried.
+        val triedAttempts = i.attempts.filter { it.state != RowState.LEFT }
+        val k = triedAttempts.size
         val tried = "$k of $n tried" + if (more > 0) " · $more more found" else ""
 
         val rows = if (list == null) checkRows(i) else sourceRows(i, list, ::label)
         val footer = "Started ${secs(t)}s ago" + if (list != null) " · $k of $n tried" else ""
 
         if (i.failed) {
-            val distinct = i.attempts.map { it.id }.distinct().size
+            val distinct = triedAttempts.map { it.id }.distinct().size
             val detail = if (distinct > 0) "We tried $distinct sources. None of them played." else i.failMessage.ifEmpty { "No playable source found." }
             return View(Phase.FAILED, "Couldn't start ${i.title}", detail, showChooser = false, showTryAgain = true, rows = rows, footer = footer)
         }
+        val chooser = list != null && !i.framed && t >= LOADING_CHOOSER_MS
+        val cur = i.attempts.lastOrNull()
+        if (i.switching) {
+            val target = cur?.let { c -> list?.firstOrNull { it.id == c.id } }
+            val facts = listOfNotNull(target?.let { langOf(it, i.preferred) }, target?.let { qualityOf(it) })
+            val detail = (facts + if (list != null && k > 0) listOf(tried) else emptyList()).joinToString(" · ")
+            return View(Phase.SWITCHING, Copy.SWITCHING_SERVER, detail, chooser, false, rows, footer)
+        }
         if (list == null) {
             val slow = t >= LOADING_SLOW_HINT_MS
-            val detail = if (slow) "First play of a title can take up to a minute." else "${i.preferred} first" + if (t >= 5_000) " · ${secs(t)}s" else ""
+            val detail = if (slow) Copy.FINDING_SLOW_DETAIL else "${i.preferred} first" + if (t >= 5_000) " · ${secs(t)}s" else ""
             return View(
                 if (slow) Phase.FINDING_SLOW else Phase.FINDING,
-                if (slow) "Still finding sources…" else "Finding sources…",
+                if (slow) Copy.FINDING_SLOW else Copy.FINDING,
                 detail, showChooser = false, showTryAgain = t >= LOADING_RETRY_MS, rows = rows, footer = footer,
             )
         }
-        val chooser = !i.framed && t >= LOADING_CHOOSER_MS
-        val cur = i.attempts.lastOrNull()
         if (cur == null) {
-            val inLang = list.count { s -> s.languages.any { it.equals(i.preferred, true) } }
+            val inLang = list.count { s -> s.languages.any { Ranking.sameLanguage(it, i.preferred) } }
             return View(Phase.FOUND, "Found ${list.size} sources", "$inLang in ${i.preferred}", chooser, false, rows, footer)
         }
         val s = list.firstOrNull { it.id == cur.id }
         val facts = listOfNotNull(s?.let { langOf(it, i.preferred) }, s?.let { qualityOf(it) })
         val prev = i.attempts.dropLast(1).lastOrNull()
-        if (prev == null) return View(Phase.STARTING, "Starting ${label(cur.id)}", facts.joinToString(" · "), chooser, false, rows, footer)
+        if (prev == null || prev.state == RowState.LEFT) return View(Phase.STARTING, "Starting ${label(cur.id)}", facts.joinToString(" · "), chooser, false, rows, footer)
         val skip = prev.reason == Reason.UNSUPPORTED
         return View(
             if (skip) Phase.ADVANCING_SKIP else Phase.ADVANCING,
@@ -195,11 +287,12 @@ object LoadingModel {
                 a == null -> RowState.WAITING to "Waiting"
                 a.endedAt == null -> RowState.STARTING to "Starting… ${secs(i.now - a.startedAt)}s"
                 a.state == RowState.PLAYING -> RowState.PLAYING to "Playing · ${secs1(a.endedAt - a.startedAt)}s to start"
+                a.state == RowState.LEFT -> RowState.LEFT to Copy.ROW_LEFT
                 a.state == RowState.SKIPPED -> RowState.SKIPPED to "Skipped: ${a.reason ?: Reason.UNSUPPORTED}"
                 else -> RowState.FAILED to "Failed: ${a.reason ?: Reason.STOPPED} · ${secs(a.endedAt - a.startedAt)}s"
             }
             val clickable = when (state) {
-                RowState.WAITING, RowState.FAILED -> !s.unsupported
+                RowState.WAITING, RowState.FAILED, RowState.LEFT -> !s.unsupported
                 RowState.SKIPPED -> !s.unsupported && a?.reason != Reason.UNSUPPORTED
                 else -> false
             }

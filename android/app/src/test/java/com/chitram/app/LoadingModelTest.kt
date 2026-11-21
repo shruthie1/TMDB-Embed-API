@@ -28,11 +28,11 @@ class LoadingModelTest {
     )
     private val labels = LoadingModel.labelRows(emptyMap(), list)
 
-    private fun input(now: Long, listReady: Boolean = false, attempts: List<Attempt> = emptyList(), framed: Boolean = false, failed: Boolean = false, checks: List<Check> = emptyList()) =
+    private fun input(now: Long, listReady: Boolean = false, attempts: List<Attempt> = emptyList(), framed: Boolean = false, failed: Boolean = false, checks: List<Check> = emptyList(), switching: Boolean = false) =
         Input(
             now = now, playAt = 0, title = "Devara Part 1", preferred = "Telugu",
             sources = if (listReady) list else null, labels = labels, firstListSize = if (listReady) list.size else 0,
-            attempts = attempts, checks = checks, framed = framed, failed = failed,
+            attempts = attempts, checks = checks, framed = framed, failed = failed, switching = switching,
         )
 
     // ---- Timing rules (section 3) ------------------------------------------
@@ -99,7 +99,7 @@ class LoadingModelTest {
             Attempt("c1", 9_000, 29_000, RowState.FAILED, Reason.NO_PICTURE), Attempt("c2", 29_000),
         )))
         assertEquals(Phase.ADVANCING, adv.phase)
-        assertEquals("CastleTV 1 is slow. Trying CastleTV 2.", adv.headline)
+        assertEquals("CastleTV 1 didn't start. Trying CastleTV 2.", adv.headline)
         assertEquals("Telugu · 1080p · 2 of 5 tried", adv.detail)
         assertEquals("Started 34s ago · 2 of 5 tried", adv.footer)
 
@@ -182,8 +182,102 @@ class LoadingModelTest {
     }
 
     @Test fun advanceNoticeNamesTwoServers() {
-        assertEquals("CastleTV 1 is slow. Trying CastleTV 2.", LoadingModel.advanceNotice("CastleTV 1", "CastleTV 2", skip = false))
+        assertEquals("CastleTV 1 didn't start. Trying CastleTV 2.", LoadingModel.advanceNotice("CastleTV 1", "CastleTV 2", skip = false))
         assertEquals("showsst won't play on this device. Trying NetMirror.", LoadingModel.advanceNotice("showsst", "NetMirror", skip = true))
+    }
+
+    // ---- Task 9: honest switch copy (web Copy, byte for byte) -----------------
+
+    @Test fun copyMatchesWebByteForByte() {
+        assertEquals("Switching server\u2026", LoadingModel.Copy.SWITCHING_SERVER)
+        assertEquals("Finding sources\u2026", LoadingModel.Copy.FINDING)
+        assertEquals("Still finding sources\u2026", LoadingModel.Copy.FINDING_SLOW)
+        assertEquals("First play of a title can take up to a minute.", LoadingModel.Copy.FINDING_SLOW_DETAIL)
+        assertEquals("Left", LoadingModel.Copy.ROW_LEFT)
+        assertEquals("A didn't start. Trying B.", LoadingModel.Copy.didntStart("A", "B"))
+        assertEquals("A stopped. Trying B.", LoadingModel.Copy.stopped("A", "B"))
+        assertEquals("A won't play on this device. Trying B.", LoadingModel.Copy.wontPlay("A", "B"))
+    }
+
+    @Test fun switchingWinsOverSlowHint() {
+        val v = LoadingModel.view(input(20_000, switching = true))
+        assertEquals(Phase.SWITCHING, v.phase)
+        assertEquals("Switching server…", v.headline)
+        assertEquals("", v.detail)
+        assertFalse(v.showTryAgain)
+    }
+
+    @Test fun slowOnlyWithNoSwitch() {
+        assertEquals("Still finding sources…", LoadingModel.view(input(15_000)).headline)
+        assertEquals("Finding sources…", LoadingModel.view(input(14_999)).headline)
+        assertNotEquals("Still finding sources…", LoadingModel.view(input(15_000, switching = true)).headline)
+    }
+
+    @Test fun switchingWinsOverAdvanceNotice() {
+        val a = listOf(Attempt("c1", 9_000, 29_000, RowState.FAILED, Reason.NO_PICTURE), Attempt("c2", 29_000))
+        val v = LoadingModel.view(input(34_000, listReady = true, attempts = a, switching = true))
+        assertEquals(Phase.SWITCHING, v.phase)
+        assertEquals("Switching server…", v.headline)
+        assertEquals("Telugu · 1080p · 2 of 5 tried", v.detail)
+    }
+
+    @Test fun leftRowIsNeutralAndPickable() {
+        val a = listOf(Attempt("c1", 9_000, 12_000, RowState.LEFT), Attempt("o1", 12_000))
+        val v = LoadingModel.view(input(14_000, listReady = true, attempts = a))
+        // The row left by a viewer pick is no failure: the new row is just starting.
+        assertEquals(Phase.STARTING, v.phase)
+        assertEquals("Starting OneTouchTV", v.headline)
+        assertEquals("Started 14s ago · 1 of 5 tried", v.footer)
+        val left = v.rows.first { it.id == "c1" }
+        assertEquals(RowState.LEFT, left.state)
+        assertEquals("Left", left.status)
+        assertTrue(left.clickable)
+        assertTrue(v.rows.none { "slow" in it.status })
+    }
+
+    @Test fun leftRowsAreNotCountedOnTheEndCard() {
+        val a = listOf(Attempt("c1", 9_000, 12_000, RowState.LEFT), Attempt("o1", 12_000, 30_000, RowState.FAILED, Reason.NO_PICTURE))
+        val v = LoadingModel.view(input(31_000, listReady = true, attempts = a, failed = true, switching = true))
+        assertEquals(Phase.FAILED, v.phase)
+        assertEquals("We tried 1 sources. None of them played.", v.detail)
+    }
+
+    @Test fun eachTryingLine() {
+        assertEquals("CastleTV 1 didn't start. Trying CastleTV 2.", LoadingModel.advanceNotice("CastleTV 1", "CastleTV 2", skip = false))
+        assertEquals("CastleTV 1 stopped. Trying CastleTV 2.", LoadingModel.advanceNotice("CastleTV 1", "CastleTV 2", skip = false, stopped = true))
+        assertEquals("CastleTV 1 won't play on this device. Trying CastleTV 2.", LoadingModel.advanceNotice("CastleTV 1", "CastleTV 2", skip = true, stopped = true))
+        assertEquals("That server didn't start. Trying the next server.", LoadingModel.advanceNotice(null, "", skip = false))
+        assertEquals("That server stopped. Trying OneTouchTV.", LoadingModel.advanceNotice("", "OneTouchTV", skip = false, stopped = true))
+    }
+
+    @Test fun failNoticeStoppedWhenTheFailedRowHadFramed() {
+        // c1 framed, then died mid-film; play(c2) already appended c2's attempt.
+        val a = listOf(Attempt("c1", 1_000, 4_000, RowState.PLAYING), Attempt("c2", 90_000))
+        assertEquals("CastleTV 1 stopped. Trying CastleTV 2.", LoadingModel.failNotice(a, "c1", "CastleTV 1", "CastleTV 2", skip = false))
+        // Same list without the new row: same answer.
+        assertEquals("CastleTV 1 stopped. Trying CastleTV 2.", LoadingModel.failNotice(a.take(1), "c1", "CastleTV 1", "CastleTV 2", skip = false))
+    }
+
+    @Test fun failNoticeDidntStartWhenTheFailedRowNeverFramed() {
+        val a = listOf(Attempt("c1", 1_000, 21_000, RowState.FAILED, Reason.NO_PICTURE), Attempt("c2", 21_000))
+        assertEquals("CastleTV 1 didn't start. Trying CastleTV 2.", LoadingModel.failNotice(a, "c1", "CastleTV 1", "CastleTV 2", skip = false))
+        // An earlier framed attempt of the same row does not count: its latest attempt failed to start.
+        val again = listOf(Attempt("c1", 0, 1_000, RowState.PLAYING), Attempt("o1", 5_000, 6_000, RowState.PLAYING),
+            Attempt("c1", 7_000, 27_000, RowState.FAILED, Reason.NO_PICTURE), Attempt("c2", 27_000))
+        assertEquals("CastleTV 1 didn't start. Trying CastleTV 2.", LoadingModel.failNotice(again, "c1", "CastleTV 1", "CastleTV 2", skip = false))
+        assertEquals("That server didn't start. Trying CastleTV 2.", LoadingModel.failNotice(a, null, null, "CastleTV 2", skip = false))
+        val framed = listOf(Attempt("c1", 1_000, 4_000, RowState.PLAYING), Attempt("c2", 90_000))
+        assertEquals("CastleTV 1 won't play on this device. Trying CastleTV 2.", LoadingModel.failNotice(framed, "c1", "CastleTV 1", "CastleTV 2", skip = true))
+    }
+
+    @Test fun noLineSaysSlow() {
+        val lines = listOf(LoadingModel.Copy.SWITCHING_SERVER, LoadingModel.Copy.FINDING, LoadingModel.Copy.FINDING_SLOW,
+            LoadingModel.Copy.FINDING_SLOW_DETAIL, LoadingModel.Copy.didntStart("a", "b"), LoadingModel.Copy.stopped("a", "b"),
+            LoadingModel.Copy.wontPlay("a", "b"))
+        assertTrue(lines.none { " slow" in it.lowercase() || it.lowercase().startsWith("slow") })
+        val adv = LoadingModel.view(input(34_000, listReady = true, attempts = listOf(
+            Attempt("c1", 9_000, 29_000, RowState.FAILED, Reason.NO_ANSWER), Attempt("c2", 29_000))))
+        assertFalse("slow" in adv.headline.lowercase())
     }
 
     @Test fun reasonsFromErrors() {

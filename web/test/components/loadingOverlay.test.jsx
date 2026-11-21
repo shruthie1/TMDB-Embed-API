@@ -31,7 +31,7 @@ describe('Loading overlay', () => {
     const live = container.querySelectorAll('[aria-live="polite"]');
     expect(live.length).toBe(1);
     expect(live[0].getAttribute('aria-atomic')).toBe('true');
-    expect(live[0].textContent).toBe('CastleTV 1 is slow. Trying CastleTV 2.');
+    expect(live[0].textContent).toBe("CastleTV 1 didn't start. Trying CastleTV 2.");
     expect(container.querySelector('.ov-load-detail').textContent).toBe('Telugu · 1080p · 2 of 3 tried');
   });
 
