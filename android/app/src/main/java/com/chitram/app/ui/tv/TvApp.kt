@@ -380,14 +380,20 @@ private fun TvHome(nav: Nav, restore: MutableState<String?>, listState: LazyList
                 Crossfade(pool!![heroAt % pool.size], animationSpec = tween(700, easing = ControlEase), label = "hero") { t ->
                     Box(Modifier.fillMaxSize()) {
                         Art(t.backdrop, "w1280", Modifier.fillMaxSize(), alignment = BiasAlignment(0f, -0.64f))
-                        // One bottom-weighted scrim (web .home-hero-art::after).
+                        // Web --hero-scrim / --hero-wash (globals.css "Home hero: ONE
+                        // treatment"), same stops on phone, desktop, TV and here.
+                        // Left wash behind the copy column.
+                        Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(
+                            0f to Tok.bg.copy(alpha = 0.7f), 0.38f to Tok.bg.copy(alpha = 0.3f), 0.6f to Color.Transparent,
+                        )))
+                        // Bottom fade into the page.
                         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(
                             0f to Color.Transparent, 0.22f to Color.Transparent, 0.45f to Tok.bg.copy(alpha = 0.12f),
                             0.70f to Tok.bg.copy(alpha = 0.5f), 0.88f to Tok.bg.copy(alpha = 0.9f), 1f to Tok.bg,
                         )))
-                        // Left wash so the copy reads over bright art.
-                        Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(
-                            0f to Tok.bg.copy(alpha = 0.55f), 0.45f to Tok.bg.copy(alpha = 0.18f), 0.7f to Color.Transparent,
+                        // Top fade: bg .85 -> 0 over the top 21%.
+                        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(
+                            0f to Tok.bg.copy(alpha = 0.85f), 0.21f to Color.Transparent,
                         )))
                     }
                 }
@@ -1265,13 +1271,20 @@ private fun TvRail(nav: Nav, top: Screen, armed: Boolean) {
     val railTween = tween<Dp>(TvWeb.RAIL_MS, easing = ControlEase)
     val width by animateDpAsState(if (open) RAIL_OPEN_W else RAIL_W, railTween, label = "rail")
     val openness by animateFloatAsState(if (open) 1f else 0f, tween(TvWeb.RAIL_MS, easing = ControlEase), label = "rail-open")
-    val current = RAIL.indexOfFirst { it.matches(top) }.coerceAtLeast(0)
+    // Which rail item is the current destination, or -1 on a screen that is not a
+    // rail destination (Detail, Person). `current` drives the highlight and the
+    // onClick navigate-guard; `entryIdx` (never -1) is only where focus lands when
+    // the rail is entered. Conflating the two made Search unclickable from Detail:
+    // current coerced to 0 (= Search), so `i != current` was false and the Search
+    // tap never navigated.
+    val current = RAIL.indexOfFirst { it.matches(top) }
+    val entryIdx = current.coerceAtLeast(0)
     val reqs = remember { List(RAIL.size) { FocusRequester() } }
-    var at by remember { mutableIntStateOf(current) }
+    var at by remember { mutableIntStateOf(entryIdx) }
     val scope = rememberCoroutineScope()
     val last = LocalLastFocus.current
     val entry = LocalRailEntry.current
-    SideEffect { entry.value = reqs[current] }
+    SideEffect { entry.value = reqs[entryIdx] }
     val focusManager = LocalFocusManager.current
     // Back to the item that had focus before the rail; if it is gone (a new
     // screen), the nearest item to the right.
@@ -1289,7 +1302,7 @@ private fun TvRail(nav: Nav, top: Screen, armed: Boolean) {
         Column(
             Modifier.fillMaxSize()
                 .onFocusChanged { open = it.hasFocus }
-                .focusProperties { enter = { reqs[current] } }
+                .focusProperties { enter = { reqs[entryIdx] } }
                 .focusGroup()
                 .onPreviewKeyEvent { e ->
                     if (e.type != KeyEventType.KeyDown) false
@@ -1314,6 +1327,9 @@ private fun TvRail(nav: Nav, top: Screen, armed: Boolean) {
                     // tab switch does not tear focus out from under the viewer.
                     modifier = Modifier.focusProperties { canFocus = armed || open }
                         .focusRequester(reqs[i]).onFocusChanged { if (it.isFocused) at = i }) {
+                    // Navigate whenever the tapped item is not already the current
+                    // destination. On a non-rail screen (Detail) current is -1, so
+                    // every rail tap navigates, Search included.
                     if (i != current) nav.tab(d.screen)
                     // Hand focus to the new screen once it has composed, unless
                     // the screen already took it (Home restores, Search focuses its field).

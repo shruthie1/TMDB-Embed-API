@@ -90,9 +90,9 @@ internal object TvWeb {
     // Home hero (tokens.css TV --hero-height 70vh; globals.css .home-hero-in).
     /** 70vh of 1080 = 756px. */
     const val HERO_H = 756f
-    /** .home-hero-in padding --space-14 56px top, --space-8 32px bottom; max-width 620px. */
+    /** .home-hero-in padding --space-14 56px top; bottom --hero-pad-bottom = bars 24px + 3px + 16px = 43px; max-width 620px. */
     const val HERO_PAD_TOP = 56f
-    const val HERO_PAD_BOTTOM = 32f
+    const val HERO_PAD_BOTTOM = 43f
     const val HERO_MAX_W = 620f
     /** .home-hero-title clamp(44px,3.6vw,68px) = 68px; meta 20px; overview 22px / 1.45, 2 lines. */
     const val HERO_TITLE = 68f
