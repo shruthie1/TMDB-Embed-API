@@ -89,8 +89,8 @@ const BYPASS_EXTENSIONS = /\.(ts|m4s|mp4|m3u8|mpd|webm|mkv|m4a|aac|vtt|srt|key)(
 /*
  * Artwork hosts the SW may cache. Both send `access-control-allow-origin: *`
  * to a request that carries Origin (checked 2026-11-21; tmdb omits it for a
- * plain <img> request), so the SW refetches in CORS mode and stores a real,
- * readable response. images.metahub.space sends no CORS header: its response
+ * plain <img> request, see cacheFirstImage), so the SW refetches in CORS mode
+ * and stores a real, readable response. images.metahub.space sends no CORS header: its response
  * would be opaque, which Chrome pads to ~7MB of quota each, so it is left to
  * the browser's HTTP cache (it sends max-age=5184000).
  */
@@ -285,14 +285,17 @@ async function cacheFirstImage(event) {
   const hit = await cache.match(url);
   if (hit && ageOf(hit) < IMAGE_TTL_MS) return hit;
   try {
-    // Use the browser HTTP cache (no cache:'reload'). image.tmdb.org sends
-    // cache-control max-age ~1 year AND access-control-allow-origin:* on every
-    // response, Origin or not, so a CORS fetch served from the HTTP cache does
-    // not fail. 'reload' forced the network on every Cache-API miss, which
-    // blanked posters on low-memory TVs (an image evicted from memory re-hit
-    // the network instead of the year-long HTTP cache). The CORS doubling the
-    // old comment feared does not happen: the header is always present.
-    const response = await fetch(url, { mode: 'cors', credentials: 'omit' });
+    // cache:'no-cache' revalidates the browser HTTP cache entry. image.tmdb.org
+    // sends access-control-allow-origin ONLY when the request carries Origin,
+    // and no Vary: Origin (curl, 2026-11-22). An entry stored by a plain <img>
+    // (first visit before the SW, or a cache-evicted poster) has no header, so
+    // a default CORS fetch served from it fails ("blocked by CORS policy",
+    // reproduced in clean Chrome) and the entry stays poisoned for a year.
+    // The revalidation 304 carries the header and keeps the cached body, so
+    // this is one small round trip per Cache-API miss, not a re-download.
+    // Not 'reload': that re-downloaded every miss and blanked posters on
+    // low-memory TVs.
+    const response = await fetch(url, { mode: 'cors', credentials: 'omit', cache: 'no-cache' });
     if (cacheable(response)) {
       event.waitUntil(store(IMAGE_CACHE, url, response.clone(), IMAGE_MAX_ENTRIES));
       return response;

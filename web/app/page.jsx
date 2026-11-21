@@ -10,17 +10,26 @@ import { getPrefs, prefsQuery, effectiveLangs, PREFS_EVENT } from '../lib/prefs'
 import { homeRows, dedupeRows } from '../lib/homeRows';
 import { readHome, patchHome, clearHome } from '../lib/homeCache';
 
+// True once a Home has mounted in this tab. The first Home render is a
+// hydration of server HTML, and the server has no localStorage, so that render
+// must not read storage: a stored language choice changed the row hrefs and
+// labels, React threw #418/#423/#425 and re-rendered the whole document on the
+// client, dropping taps on poster cards. Later mounts (Back to home) are plain
+// client renders and read storage at once, so the in-tab cache still seeds the
+// first paint.
+let mountedOnce = false;
+
 export default function Home() {
-  // Read the stored prefs synchronously on first render (not in an effect), so
-  // the in-tab home cache can be looked up by its query before the first paint.
-  // On the server there is no localStorage; getPrefs() returns the defaults.
+  // null on the server and during hydration; the stored prefs on a client
+  // re-mount. The mount effect below fills it in either way.
   const [prefs, setPrefs] = useState(() => {
+    if (!mountedOnce || typeof window === 'undefined') return null;
     try { return getPrefs(); } catch { return null; }
   });
   const query = prefs ? prefsQuery(prefs) : '';
   // Seed from the in-tab cache so Back to home shows the last rows at once
   // instead of skeletons + a full re-fetch (the carousel used to reload).
-  const cached = typeof window !== 'undefined' ? readHome(query) : null;
+  const cached = prefs && typeof window !== 'undefined' ? readHome(query) : null;
   // Each row owns its loading state, so rows appear as they arrive
   // instead of the page blocking on the slowest one.
   const [data, setData] = useState(() => cached?.data ?? {});
@@ -31,8 +40,8 @@ export default function Home() {
   const rows = useMemo(() => (prefs ? homeRows(effectiveLangs(prefs)) : []), [prefs]);
 
   useEffect(() => {
-    // Re-sync from storage once mounted (covers an SSR default that differed
-    // from the stored choice).
+    mountedOnce = true;
+    // Read storage once mounted: the hydration render used null (see above).
     setPrefs(getPrefs());
     // A save in the header modal refreshes the rails in place. The cached rows
     // no longer match the new languages, so drop the cache too.

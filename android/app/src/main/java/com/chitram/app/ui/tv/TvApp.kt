@@ -1303,7 +1303,10 @@ private fun TvLangs(firstRun: Boolean, onDone: () -> Unit) {
     // standing default, so a first-time viewer lands on it without hunting.
     val chosen = remember { mutableStateListOf<String>().apply { if (firstRun) add("te") else addAll(prefs.langs()) } }
     val first = remember { FocusRequester() }
-    LaunchedEffect(Unit) { first.focusWhenAttached() }
+    val done = remember { FocusRequester() }
+    // First run lands on Done so one OK accepts the Telugu default. The Languages
+    // screen keeps focus on the first chip. D-pad up from Done reaches the chips.
+    LaunchedEffect(Unit) { (if (firstRun) done else first).focusWhenAttached() }
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         // Web .lang-modal on TV: min(760px,90vw) wide, --space-8 padding, 34px title, 20px hint.
         Column(Modifier.widthIn(max = 380.dp).background(Tok.surface, Tok.radiusLg).padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -1319,7 +1322,7 @@ private fun TvLangs(firstRun: Boolean, onDone: () -> Unit) {
             }
             Spacer(Modifier.height(14.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(TvWeb.ACTION_GAP.px)) {
-                TvButton(if (chosen.isEmpty()) "Done" else "Done (${chosen.size})", primary = true) {
+                TvButton(if (chosen.isEmpty()) "Done" else "Done (${chosen.size})", primary = true, modifier = Modifier.focusRequester(done)) {
                     prefs.save(chosen.toList()); onDone()
                 }
                 if (firstRun) TvButton("Skip", primary = false) { prefs.save(emptyList()); onDone() }

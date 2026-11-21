@@ -156,11 +156,13 @@ fun PhoneApp(nav: Nav) {
     ) {
         BackHandler(enabled = nav.stack.size > 1) { nav.pop() }
         val top = nav.top
+        // Remember the Home list before the Player return: state remembered after it
+        // leaves the composition while the player is up, and Home came back at the top.
+        val homeList = rememberLazyListState()
         if (top is Screen.Player) {
             PlayerScreen(top.req, isTv = false, onBack = { nav.pop() })
             return@MaterialTheme
         }
-        val homeList = rememberLazyListState()
         val showBar = top == Screen.Home || top == Screen.Search || top == Screen.MyList || top is Screen.Browse || (top is Screen.Langs && !top.firstRun)
         // Edge to edge: each screen owns its top inset (the backdrop runs under
         // the status bar). Scaffold adds none, so nothing is padded twice.

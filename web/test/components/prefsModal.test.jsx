@@ -113,4 +113,22 @@ describe('PrefsModal', () => {
     expect(te.getAttribute('aria-pressed')).toBe('false');
     expect(screen.getByText('1 selected')).toBeTruthy();
   });
+  it('on a TV first visit focuses Save, so one OK accepts Telugu; the header reopen focuses the first tile', () => {
+    const tv = () => localStorage.setItem('chitram.tv', JSON.stringify({ v: '1', until: Date.now() + 3600e3 }));
+    tv();
+    const first = render(<PrefsButton />);
+    firstVisit();
+    const save = screen.getByRole('button', { name: 'Save' });
+    expect(chip('Telugu').getAttribute('aria-pressed')).toBe('true');
+    expect(document.activeElement).toBe(save);
+    act(() => { fireEvent.click(save); });
+    expect(JSON.parse(localStorage.getItem('chitram:prefs:v1'))).toEqual({ langs: ['te'] });
+    first.unmount();
+
+    tv();
+    render(<PrefsButton />);
+    firstVisit();
+    fireEvent.click(screen.getByRole('button', { name: 'Your languages' }));
+    expect(document.activeElement).toBe(chip('Telugu'));
+  });
 });

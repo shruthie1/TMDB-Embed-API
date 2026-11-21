@@ -18,6 +18,8 @@ const FOCUSABLE = 'button:not([disabled]), [href], [tabindex]:not([tabindex="-1"
 export function PrefsModal({ open, onClose, firstVisit = false }) {
   const [langs, setLangs] = useState([]);
   const cardRef = useRef(null);
+  // TV first visit: focus Save once it is enabled, so one OK accepts Telugu.
+  const saveFirst = useRef(false);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -28,8 +30,10 @@ export function PrefsModal({ open, onClose, firstVisit = false }) {
     const card = cardRef.current;
     const returnTo = document.activeElement;
     // Focus the dialog itself, so no tile looks different on open. A TV has no
-    // pointer: there the first tile takes focus and shows the ring.
-    if (isTv()) card?.querySelector('.lang-opt')?.focus();
+    // pointer: there the first tile takes focus and shows the ring. On a TV
+    // first visit Save takes it instead (effect below), as Telugu is chosen.
+    if (isTv() && firstVisit) saveFirst.current = true;
+    else if (isTv()) card?.querySelector('.lang-opt')?.focus();
     else card?.focus();
     // Keep Tab inside the dialog; arrows are scoped by lib/dpad.js.
     const onKey = (e) => {
@@ -55,9 +59,17 @@ export function PrefsModal({ open, onClose, firstVisit = false }) {
       window.removeEventListener('keydown', onKey, true);
       window.removeEventListener('keydown', onAnyKey, true);
       window.removeEventListener('pointerdown', onPointer, true);
+      saveFirst.current = false;
       if (returnTo instanceof HTMLElement) returnTo.focus({ focusVisible: viaKeys || isTv() });
     };
   }, [open, firstVisit, onClose]);
+
+  // Save is disabled on the open render (langs not yet set), so wait for it.
+  useEffect(() => {
+    if (!open || !saveFirst.current) return;
+    const save = cardRef.current?.querySelector('.lang-modal-actions .btn.primary');
+    if (save && !save.disabled) { saveFirst.current = false; save.focus(); }
+  }, [open, langs]);
 
   if (!open) return null;
 

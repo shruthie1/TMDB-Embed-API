@@ -13,7 +13,7 @@ const root = resolve(__dirname, '..');
  * catch the shipped file losing its bypass, and a copied predicate in the test
  * file would happily keep passing while sw.js regressed.
  */
-function loadSw(origin = 'https://chtrm.vercel.app') {
+function loadSw(origin = 'https://chtrm.vercel.app', fetchImpl = null) {
   const src = readFileSync(resolve(root, 'public/sw.js'), 'utf8');
   const listeners = {};
   const sandbox = {
@@ -29,7 +29,7 @@ function loadSw(origin = 'https://chtrm.vercel.app') {
       delete: async () => true,
     },
     __puts: [],
-    fetch: async () => new Response('x', { status: 200 }),
+    fetch: fetchImpl || (async () => new Response('x', { status: 200 })),
     URL,
     Headers,
     Response,
@@ -253,6 +253,34 @@ describe('service worker: artwork and catalogue strategies', () => {
       expect(sw.self.classify(url, method, mode)).toBe(want);
     });
   }
+});
+
+describe('service worker: artwork refetch survives a no-cors HTTP cache entry', () => {
+  // image.tmdb.org sends access-control-allow-origin only when the request
+  // carries Origin, and sends no Vary: Origin (curl, 2026-11-22). A plain <img>
+  // stores an entry without the header; a later CORS fetch served from that
+  // entry fails ("blocked by CORS policy", reproduced in clean Chrome).
+  // 'no-cache' revalidates: the 304 carries the header, the body stays cached.
+  it('refetches tmdb artwork in CORS mode with cache: no-cache', async () => {
+    const calls = [];
+    const sw = loadSw('https://chtrm.vercel.app', async (input, init) => {
+      calls.push({ url: typeof input === 'string' ? input : input.url, init });
+      return new Response('img', { status: 200 });
+    });
+    let responded;
+    const url = 'https://image.tmdb.org/t/p/w342/a.jpg';
+    sw.listeners.fetch({
+      request: { url, method: 'GET', mode: 'no-cors', destination: 'image', headers: { get: () => null } },
+      respondWith: (p) => { responded = p; },
+      waitUntil: () => {},
+    });
+    expect(responded).toBeDefined();
+    const res = await responded;
+    expect(res.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe(url);
+    expect(calls[0].init).toMatchObject({ mode: 'cors', credentials: 'omit', cache: 'no-cache' });
+  });
 });
 
 describe('web app manifest', () => {
