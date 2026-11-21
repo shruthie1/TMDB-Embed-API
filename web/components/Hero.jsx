@@ -1,7 +1,8 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import { poster } from '../lib/api';
+import { heroBackdrop } from '../lib/api';
+import TitleLogo, { useHeroLogo } from './TitleLogo';
 import { Badge, Skeleton } from './ui';
 import { inList, toggleList } from '../lib/list';
 import { languageName } from '../lib/subtitles';
@@ -38,6 +39,9 @@ export default function Hero({ titles = [], loading }) {
       });
     }
   }, [loading, titles, pool.length]);
+
+  // Row titles carry no logo; the full record has it (text title until then).
+  const heroLogo = useHeroLogo(current);
 
   // Saved state belongs to the title on screen, so it must follow rotation.
   useEffect(() => {
@@ -121,10 +125,10 @@ export default function Hero({ titles = [], loading }) {
       aria-roledescription="carousel"
     >
       <div className="home-hero-art page-backdrop" key={t.tmdbId}
-           style={{ '--bg-lg': `url(${poster(t.backdrop, 'w1280')})`, '--bg-sm': `url(${poster(t.backdrop, 'w780')})` }}
+           style={{ '--bg-lg': `url(${heroBackdrop(t.backdrop, false)})`, '--bg-sm': `url(${heroBackdrop(t.backdrop, true)})` }}
            aria-hidden="true" />
       <div className="home-hero-in">
-        <h1 className="home-hero-title">{t.title}</h1>
+        <h1 className={`home-hero-title${heroLogo ? ' has-logo' : ''}`}><TitleLogo title={t.title} logo={heroLogo} /></h1>
         <div className="detail-meta">
           {meta.map((m, k) => <span key={k}>{m}</span>)}
           {t.originalLang && <span><Badge>{languageName(t.originalLang)}</Badge></span>}

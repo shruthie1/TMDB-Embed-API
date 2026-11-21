@@ -344,10 +344,28 @@ export async function listSources(type, id, opts = {}) {
  */
 export function resolveLive(type, id, {
   season = 0, episode = 0, provider = null, refresh = false,
-  onEvent, onDone, onFail, onMore,
+  onEvent, onDone, onFail, onMore, clientFallback = null,
 } = {}) {
   const ac = new AbortController();
   let settled = false;
+
+  // The VM failed or had nothing: rows the browser can resolve itself
+  // (lib/oneTouchClient.js) before the failure reaches the viewer. Rows come
+  // in the server's shape, so they map exactly like server rows.
+  const failOrFallback = (err) => {
+    if (typeof clientFallback !== 'function') { onFail?.(err); return; }
+    emit({ type: 'wave-start', providers: ['browser-side providers'] });
+    Promise.resolve()
+      .then(() => clientFallback(type, id, { season, episode, signal: ac.signal }))
+      .then((rows) => {
+        if (ac.signal.aborted) return;
+        const sources = sourcesFromResponse({ streams: Array.isArray(rows) ? rows : [] });
+        if (!sources.length) { onFail?.(err); return; }
+        for (const p of new Set(sources.map((s) => s.provider))) emit({ type: 'extract-ok', provider: p, ms: 0 });
+        onDone?.({ ...sources[0], sources });
+      })
+      .catch(() => { if (!ac.signal.aborted) onFail?.(err); });
+  };
 
   const emit = (e) => { if (!settled && onEvent) onEvent({ ...e, at: Date.now() }); };
 
@@ -415,7 +433,7 @@ export function resolveLive(type, id, {
       }
 
       settled = true;
-      if (!sources.length) { onFail?.(new Error('No playable source found.')); return; }
+      if (!sources.length) { failOrFallback(new Error('No playable source found.')); return; }
       onDone?.({ ...sources[0], sources });
       // A partial answer went out while slower providers were still running
       // (backend PRIMARY_PROVIDERS). Ask once more for the complete list; the
@@ -439,7 +457,7 @@ export function resolveLive(type, id, {
     .catch((err) => {
       if (settled || ac.signal.aborted) return;
       settled = true;
-      onFail?.(err);
+      failOrFallback(err);
     });
 
   return () => { settled = true; ac.abort(abortReason('resolve superseded or unmounted')); };

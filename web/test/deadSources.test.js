@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { markDead, nextAlive } from '../lib/player/deadSources';
+import { failoverLanguage, markDead, nextAlive } from '../lib/player/deadSources';
 
 // GET /api/streams/movie/811941 (Devara), 2026-11-16: five CastleTV rows.
 const CASTLE = [0, 1, 2, 3, 4].map((i) => ({
@@ -85,5 +85,34 @@ describe('a failover keeps the spoken language', () => {
 
   it('with no playing language, keeps the old first-alive order', () => {
     expect(nextAlive(RRR, new Set())?.id).toBe('A-hi-1080');
+  });
+});
+
+describe('failover language for a generic rendition name (multimovies, vidrift NAME="Audio")', () => {
+  const ROWS = [
+    { id: 'mm-0', provider: 'multimovies', languages: ['Telugu'], masterUrl: 'https://m/0' },
+    { id: 'x-1', provider: 'x', languages: ['Hindi'], masterUrl: 'https://x/1' },
+    { id: 'mm-2', provider: 'multimovies', languages: ['Telugu'], masterUrl: 'https://m/2' },
+  ];
+  const track = { id: 0, name: 'Audio', lang: null };
+
+  it('uses the row language when the track name is not a language', () => {
+    expect(failoverLanguage({ track, row: ROWS[0] })).toBe('Telugu');
+  });
+
+  it('failover prefers another Telugu row', () => {
+    const lang = failoverLanguage({ track, row: ROWS[0] });
+    const dead = markDead(new Set(), ROWS[0]);
+    expect(nextAlive(ROWS, dead, { lang })?.id).toBe('mm-2');
+  });
+
+  it('keeps a real track language and the viewer pick', () => {
+    expect(failoverLanguage({ track: { name: 'Hindi', lang: 'hi' }, row: ROWS[0] })).toBe('Hindi');
+    expect(failoverLanguage({ track: { name: 'Audio', lang: 'ta' }, row: ROWS[0] })).toBe('Tamil');
+    expect(failoverLanguage({ wantLang: 'Hindi', track, row: ROWS[0] })).toBe('Hindi');
+  });
+
+  it('is null with no track language and no row language', () => {
+    expect(failoverLanguage({ track, row: { languages: [] } })).toBe(null);
   });
 });

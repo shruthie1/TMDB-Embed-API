@@ -115,6 +115,9 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.chitram.app.App
 import com.chitram.app.ui.common.prefetchArt
+import com.chitram.app.ui.common.HeroTitle
+import com.chitram.app.ui.common.rememberHeroLogo
+import com.chitram.app.data.Api
 import com.chitram.app.data.BrowseFilters
 import com.chitram.app.data.BrowseOptions
 import com.chitram.app.data.Credit
@@ -208,11 +211,11 @@ fun PhoneApp(nav: Nav) {
 private data class Tab(val screen: Screen, val label: String, val on: ImageVector, val off: ImageVector)
 
 private fun Nav.open(t: Title) {
-    // The detail header shows the poster (w342) and backdrop (w780) only after
+    // The detail header shows the poster (w500) and backdrop (w1280) only after
     // the title API answers, which takes seconds. Fetch both now, at the same
     // URLs, so they are cache hits by then. A title opened from the hero has
     // only its backdrop cached, which is why the small poster used to lag.
-    prefetchArt(App.instance, t.poster to "w342", t.backdrop to "w780")
+    prefetchArt(App.instance, t.poster to Api.POSTER_PHONE, t.backdrop to Api.BACKDROP_PHONE)
     push(Screen.Detail(t.mediaType, t.tmdbId, t.poster))
 }
 
@@ -267,10 +270,12 @@ private fun HeroCarousel(titles: List<Title>?, nav: Nav) {
         HorizontalPager(pager, Modifier.fillMaxSize(), key = { titles[it].key }) { i ->
             val t = titles[i]
             Box(Modifier.fillMaxSize().clickable { nav.open(t) }) {
-                Art(t.backdrop, "w780", Modifier.fillMaxSize(), alignment = BiasAlignment(0f, -0.6f))
+                Art(t.backdrop, Api.BACKDROP_PHONE, Modifier.fillMaxSize(), alignment = BiasAlignment(0f, -0.6f))
                 Box(Modifier.fillMaxSize().background(Brush.verticalGradient(0.35f to Color.Transparent, 0.75f to Tok.bg.copy(alpha = 0.75f), 1f to Tok.bg)))
                 Column(Modifier.align(Alignment.BottomStart).padding(start = GUTTER, end = GUTTER, bottom = 34.dp)) {
-                    Text(t.title, fontSize = 30.sp, lineHeight = 34.sp, fontWeight = FontWeight.Bold, color = Tok.text, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    HeroTitle(rememberHeroLogo(t), t.title, maxW = 260.dp, maxH = 88.dp) {
+                        Text(t.title, fontSize = 30.sp, lineHeight = 34.sp, fontWeight = FontWeight.Bold, color = Tok.text, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
                     MetaRow(t.year, null, t.rating, t.originalLang, Modifier.padding(top = 8.dp))
                     t.overview?.let { Text(it, color = Tok.textSecondary, fontSize = 14.sp, lineHeight = 20.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 8.dp)) }
                     Row(Modifier.padding(top = 14.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -368,7 +373,7 @@ private fun CardSkeleton(width: Dp) {
 private fun PosterCard(t: Title, modifier: Modifier = Modifier, progress: Progress? = null, rank: Int? = null, showType: Boolean = false, onClick: () -> Unit) {
     Column(modifier.clickable(onClick = onClick)) {
         Box(Modifier.fillMaxWidth().aspectRatio(2f / 3f).clip(Tok.radiusMd)) {
-            Art(t.poster, "w342", Modifier.fillMaxSize(), t.title)
+            Art(t.poster, Api.POSTER_PHONE, Modifier.fillMaxSize(), t.title)
             if (t.poster == null) Text(t.title, color = Tok.textSecondary, fontSize = 12.sp, modifier = Modifier.padding(8.dp))
             if (showType && t.mediaType == "tv") Text("Series", color = Tok.text, fontSize = 10.sp, fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.align(Alignment.TopStart).padding(6.dp).background(Tok.bg.copy(alpha = 0.75f), RoundedCornerShape(4.dp)).padding(horizontal = 5.dp, vertical = 1.dp))
@@ -436,18 +441,20 @@ private fun PhoneDetail(nav: Nav, type: String, id: Long, rowPoster: String? = n
                     // edge never shows. The block height is unchanged.
                     val drop = artH * 0.15f
                     Box(Modifier.fillMaxWidth().height(topInset + artH + 96.dp)) {
-                        Art(t.backdrop, "w780", Modifier.padding(top = topInset + drop).fillMaxWidth().height(artH), alignment = BiasAlignment(0f, -0.85f))
+                        Art(t.backdrop, Api.BACKDROP_PHONE, Modifier.padding(top = topInset + drop).fillMaxWidth().height(artH), alignment = BiasAlignment(0f, -0.85f))
                         Box(Modifier.padding(top = topInset + drop).fillMaxWidth().height(artH).background(Brush.verticalGradient(0f to Tok.bg, 0.06f to Tok.bg.copy(alpha = 0.7f), 0.3f to Color.Transparent, 0.7f to Tok.bg.copy(alpha = 0.6f), 1f to Tok.bg)))
                         Row(Modifier.align(Alignment.BottomStart).padding(horizontal = GUTTER), verticalAlignment = Alignment.Bottom) {
                             Box(Modifier.width(104.dp).aspectRatio(2f / 3f).clip(Tok.radiusMd).border(1.dp, Tok.border, Tok.radiusMd)) {
                                 // The title API sends the metahub small poster here; it is a cache
-                                // miss at open time (measured 0.6-0.8 s). The row's TMDB w342 path
+                                // miss at open time (measured 0.6-0.8 s). The row's TMDB w500 path
                                 // is already in Coil's cache, so it shows at once; metahub is the
                                 // fallback, and the only source when the opener had no poster.
-                                Art(rowPoster ?: t.poster, "w342", Modifier.fillMaxSize(), fallback = t.poster.takeIf { rowPoster != null })
+                                Art(rowPoster ?: t.poster, Api.POSTER_PHONE, Modifier.fillMaxSize(), fallback = t.poster.takeIf { rowPoster != null })
                             }
                             Column(Modifier.padding(start = 14.dp).weight(1f)) {
-                                Text(t.title, fontSize = 24.sp, lineHeight = 28.sp, fontWeight = FontWeight.Bold, color = Tok.text, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                                HeroTitle(t.logo, t.title, maxW = 220.dp, maxH = 80.dp) {
+                                    Text(t.title, fontSize = 24.sp, lineHeight = 28.sp, fontWeight = FontWeight.Bold, color = Tok.text, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                                }
                                 t.tagline?.takeIf { it.isNotBlank() }?.let { Text(it, color = Tok.textMuted, fontSize = 13.sp, maxLines = 2, modifier = Modifier.padding(top = 4.dp)) }
                             }
                         }

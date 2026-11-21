@@ -1,10 +1,10 @@
 'use client';
 import { useEffect, useState } from 'react';
-import { poster } from '../lib/api';
+import { heroBackdrop } from '../lib/api';
 
-/** Phones get w780, everything else w1280 (matches the .page-backdrop media rule). */
+/** Phones get w1280, everything else `original` (matches the .page-backdrop media rule). */
 export function backdropUrl(path, narrow) {
-  return path ? poster(path, narrow ? 'w780' : 'w1280') : null;
+  return path ? heroBackdrop(path, narrow) : null;
 }
 
 /**

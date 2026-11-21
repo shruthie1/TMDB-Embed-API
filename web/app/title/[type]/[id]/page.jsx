@@ -3,6 +3,7 @@ import { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'react
 import { useParams, useRouter } from 'next/navigation';
 import { fetchTitle, fetchTitleFull, poster } from '../../../../lib/api';
 import { posterSources } from '../../../../lib/posterSources';
+import TitleLogo from '../../../../components/TitleLogo';
 import Player from '../../../../components/Player';
 import ErrorBoundary from '../../../../components/ErrorBoundary';
 import CastRow, { CastRowSkeleton } from '../../../../components/CastRow';
@@ -243,7 +244,7 @@ export default function TitlePage() {
             <HeroPoster key={`${type}/${id}`} title={t} />
           )}
           <div className="hero-text">
-            <h1 className="detail-title">{t.title}</h1>
+            <h1 className={`detail-title${t.logo ? ' has-logo' : ''}`}><TitleLogo title={t.title} logo={t.logo} /></h1>
             {/* Always rendered: the line is reserved on desktop/TV so the
                 tagline, which only the full record carries, lands in place. */}
             <p className="tagline">

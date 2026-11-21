@@ -297,10 +297,10 @@ class DetailVm : ViewModel() {
 
     fun playRequest(ep: Episode? = null, fromStart: Boolean = false): PlayRequest? {
         val t = full ?: return null
-        if (t.mediaType != "tv") return PlayRequest("movie", t.tmdbId, t.title, poster = t.poster, backdrop = t.backdrop, overview = t.overview, fromStart = fromStart, imdbId = t.imdbId, runtimeMin = t.runtimeMin)
+        if (t.mediaType != "tv") return PlayRequest("movie", t.tmdbId, t.title, poster = t.poster, backdrop = t.backdrop, overview = t.overview, fromStart = fromStart, imdbId = t.imdbId, runtimeMin = t.runtimeMin, originalLang = t.originalLang)
         val e = ep ?: resume?.let { r -> Episode(r.episode, r.season, r.epTitle ?: episodes.firstOrNull { it.season == r.season && it.episode == r.episode }?.title ?: "") }
             ?: episodes.firstOrNull() ?: Episode(1, season)
-        return PlayRequest("tv", t.tmdbId, t.title, e.season, e.episode, t.poster, t.backdrop, e.title.ifEmpty { null }, t.seasonList, t.overview, fromStart = fromStart, imdbId = t.imdbId, runtimeMin = e.runtimeMin ?: t.runtimeMin)
+        return PlayRequest("tv", t.tmdbId, t.title, e.season, e.episode, t.poster, t.backdrop, e.title.ifEmpty { null }, t.seasonList, t.overview, fromStart = fromStart, imdbId = t.imdbId, runtimeMin = e.runtimeMin ?: t.runtimeMin, originalLang = t.originalLang)
     }
 }
 

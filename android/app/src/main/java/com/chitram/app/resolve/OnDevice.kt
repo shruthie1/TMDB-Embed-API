@@ -11,7 +11,8 @@ import kotlinx.coroutines.withTimeoutOrNull
 /**
  * mapple, vaplayer, CastleTV and MultiMovies, resolved from the device's own
  * (residential) IP. Castle runs on every start (it is the Telugu workhorse and
- * must not depend on the VM); MultiMovies only when the VM is down or failed.
+ * must not depend on the VM); MultiMovies, showsst and OneTouchTV only when the
+ * VM is down or failed.
  * Every other provider stays on the backend. Each resolve is bounded by its config
  * budget and never throws: a failure is a missing row, so the player simply has
  * one source fewer and moves on.
@@ -28,6 +29,21 @@ class OnDeviceResolver(
     private val castle: CastleResolver? = null,
     private val multimovies: MultiMoviesResolver? = null,
     private val netmirror: NetmirrorResolver? = null,
+    /** showsst and OneTouchTV: VM down/failed only, like MultiMovies. Built from the app's client when an Api is given. */
+    private val showsst: ShowsstResolver? = api?.let { ShowsstResolver(it.client) },
+    private val onetouch: OneTouchTvResolver? = api?.let { OneTouchTvResolver(it.client) },
+    /**
+     * TMDB id for OneTouchTV's matched title (the server's IMDB cross-check,
+     * utils/tmdbTitleToImdb.js, on TMDB ids). Default asks /api/search; null
+     * (no answer, no confident match) passes, as on the server.
+     */
+    private val tmdbIdFor: suspend (title: String, year: Int?, series: Boolean) -> Long? = { t, y, series ->
+        api?.search(t, emptyList())?.filter { (it.mediaType == "tv") == series }?.let { rows ->
+            val same = if (y == null) rows else rows.filter { it.year == null || it.year == y }
+            TitleMatch.find(same.ifEmpty { rows }, t) { it.title }?.tmdbId
+        }
+    },
+    // Last: callers pass the clock as a trailing lambda.
     private val now: () -> Long = System::currentTimeMillis,
 ) {
 
@@ -44,17 +60,19 @@ class OnDeviceResolver(
 
     /** The providers [launch] starts, in its order. MultiMovies only when the VM is not expected to answer. */
     fun names(vmDown: Boolean): List<String> =
-        listOf(MAPPLE, VAPLAYER) + listOfNotNull(NETMIRROR.takeIf { netmirror != null }, CASTLE.takeIf { castle != null }, MULTIMOVIES.takeIf { vmDown && multimovies != null })
+        listOf(MAPPLE, VAPLAYER) + listOfNotNull(NETMIRROR.takeIf { netmirror != null }, CASTLE.takeIf { castle != null }, MULTIMOVIES.takeIf { vmDown && multimovies != null },
+            SHOWSST.takeIf { vmDown && showsst != null }, ONETOUCH.takeIf { vmDown && onetouch != null })
 
     fun launch(scope: CoroutineScope, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, preferred: String = "Telugu", title: String? = null, vmDown: Boolean = false): List<Deferred<Source?>> =
         names(vmDown).map { n -> scope.async { resolveOne(n, type, id, season, episode, codecs, preferred, fresh = false, title = title) } }
 
     /** Providers may return several distinct catalogs/dubs; keep every row. */
-    fun launchAll(scope: CoroutineScope, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, preferred: String = "Telugu", title: String? = null, vmDown: Boolean = false): List<Deferred<List<Source>>> =
-        names(vmDown).map { n -> scope.async { resolveAll(n, type, id, season, episode, codecs, preferred, title = title) } }
+    fun launchAll(scope: CoroutineScope, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, preferred: String = "Telugu", title: String? = null, vmDown: Boolean = false, originalLang: String? = null): List<Deferred<List<Source>>> =
+        names(vmDown).map { n -> scope.async { resolveAll(n, type, id, season, episode, codecs, preferred, title = title, originalLang = originalLang) } }
 
-    suspend fun resolveAll(name: String, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, preferred: String = "Telugu", fresh: Boolean = false, title: String? = null): List<Source> {
-        if (name == MULTIMOVIES) return resolveMultiMovies(type, id, season, episode, codecs, fresh)
+    suspend fun resolveAll(name: String, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, preferred: String = "Telugu", fresh: Boolean = false, title: String? = null, originalLang: String? = null): List<Source> {
+        if (name == MULTIMOVIES) return resolveMultiMovies(type, id, season, episode, codecs, fresh, originalLang)
+        if (name == SHOWSST || name == ONETOUCH) return resolveRows(name, type, id, season, episode, codecs, fresh, title)
         if (name != NETMIRROR) return listOfNotNull(resolveOne(name, type, id, season, episode, codecs, preferred, fresh, title))
         if (!fresh && isOpen(name)) return emptyList()
         return guarded(name) {
@@ -80,14 +98,40 @@ class OnDeviceResolver(
     }
 
     /** Every VidBolt source as its own row (one per language master): never only the first. */
-    private suspend fun resolveMultiMovies(type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, fresh: Boolean): List<Source> {
+    private suspend fun resolveMultiMovies(type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, fresh: Boolean, originalLang: String?): List<Source> {
         val m = multimovies ?: return emptyList()
         if (!fresh && isOpen(MULTIMOVIES)) return emptyList()
         return guarded(MULTIMOVIES) {
             var timedOut = true
-            val r = withTimeoutOrNull(MULTIMOVIES_BUDGET_MS) { m.resolveAll(type, id, season, episode).also { timedOut = false } }
+            // The resolver keeps its masters inside the budget and returns what finished;
+            // this outer cap is only a backstop (review I5).
+            val r = withTimeoutOrNull(MULTIMOVIES_BUDGET_MS + 2_000) { m.resolveAll(type, id, season, episode, originalLang, budgetMs = MULTIMOVIES_BUDGET_MS).also { timedOut = false } }
             if (timedOut) throw StepException(MULTIMOVIES, 0, "budget ${MULTIMOVIES_BUDGET_MS}ms spent")
             r.orEmpty().map { toSource(it, codecs) }
+        }.orEmpty()
+    }
+
+    /**
+     * showsst / OneTouchTV: every row, bounded by its budget, never throws. A
+     * progressive (MP4) row stays progressive, or media3 would parse it as HLS.
+     */
+    private suspend fun resolveRows(name: String, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, fresh: Boolean, title: String?): List<Source> {
+        if (!fresh && isOpen(name)) return emptyList()
+        return guarded(name) {
+            val budget = if (name == SHOWSST) SHOWSST_BUDGET_MS else ONETOUCH_BUDGET_MS
+            var timedOut = true
+            val rows = withTimeoutOrNull(budget) {
+                val out = if (name == SHOWSST) showsst?.resolveAll(type, id, season, episode).orEmpty() else {
+                    val t = withTimeoutOrNull(TITLE_WAIT_MS) { runCatching { titleFor(type, id) }.getOrNull() }
+                        ?.takeIf { it.first.isNotBlank() } ?: title?.let { Triple(it, null, null) }
+                    val imdb = if (type == "tv") withTimeoutOrNull(TITLE_WAIT_MS) { runCatching { imdbFor(type, id) }.getOrNull() }?.takeIf { it.startsWith("tt") } else null
+                    if (t == null) emptyList() else onetouch?.resolveAll(type, id, t.first, t.second, imdb, season, episode, tmdbIdFor).orEmpty()
+                }
+                timedOut = false
+                out
+            }
+            if (timedOut) throw StepException(name, 0, "budget ${budget}ms spent")
+            rows.orEmpty().map { toSource(it.resolved, codecs).copy(progressive = it.progressive, quality = it.quality) }
         }.orEmpty()
     }
 
@@ -96,7 +140,7 @@ class OnDeviceResolver(
      * playback error: a new mapple session, a new vaplayer token for the current IP.
      */
     suspend fun resolveOne(name: String, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, preferred: String = "Telugu", fresh: Boolean = false, title: String? = null): Source? {
-        if (name == NETMIRROR || name == MULTIMOVIES) return com.chitram.app.data.Ranking.rank(resolveAll(name, type, id, season, episode, codecs, preferred, fresh, title), preferred).firstOrNull()
+        if (name == NETMIRROR || name == MULTIMOVIES || name == SHOWSST || name == ONETOUCH) return com.chitram.app.data.Ranking.rank(resolveAll(name, type, id, season, episode, codecs, preferred, fresh, title), preferred).firstOrNull()
         if (!fresh && isOpen(name)) {
             android.util.Log.i("Chitram", "on-device $name: skipped, breaker open")
             return null
@@ -174,6 +218,10 @@ class OnDeviceResolver(
         const val CASTLE = "castletv"
         const val MULTIMOVIES = "multimovies"
         const val NETMIRROR = "netmirror"
+        const val SHOWSST = "showsst"
+        const val ONETOUCH = "onetouchtv"
+        const val SHOWSST_BUDGET_MS = 15_000L
+        const val ONETOUCH_BUDGET_MS = 20_000L
         const val CASTLE_BUDGET_MS = 25_000L
         const val MULTIMOVIES_BUDGET_MS = 15_000L
         private const val TITLE_WAIT_MS = 4_000L
@@ -185,6 +233,8 @@ class OnDeviceResolver(
             CASTLE -> CASTLE
             MULTIMOVIES -> MULTIMOVIES
             NETMIRROR -> NETMIRROR
+            SHOWSST -> SHOWSST
+            ONETOUCH -> ONETOUCH
             else -> null
         }
         const val BREAKER_FAILS = 3

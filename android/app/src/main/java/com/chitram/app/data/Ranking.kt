@@ -81,6 +81,8 @@ object Ranking {
     private fun codeName(code: String): String? {
         val iso2 = iso3ToIso2[code] ?: code
         val display = java.util.Locale(iso2).getDisplayLanguage(java.util.Locale.ENGLISH)
+            // CLDR (JDK 17, newer Android ICU) names bn "Bangla"; the server and web say "Bengali" (review R2-M1).
+            .let { if (it.equals("Bangla", true)) "Bengali" else it }
         return display.takeUnless { it.isBlank() || it.equals(iso2, true) || it.equals(code, true) }
     }
 
@@ -107,6 +109,20 @@ object Ranking {
         val sep = key.indexOf('-')
         if (sep > 0 && SUBTAG.matches(key.substring(sep + 1))) knownLanguage(key.substring(0, sep))?.let { return it }
         return raw
+    }
+
+    /**
+     * The known language a value names, or null (server streamSchema
+     * knownLanguage): no raw fallback, so "Hindi dubbed" or "Dual" is null.
+     */
+    fun knownLanguageName(value: String?): String? {
+        val raw = value?.trim()?.takeIf(String::isNotEmpty) ?: return null
+        val key = raw.lowercase(java.util.Locale.ROOT).replace('_', '-')
+        if (key in setOf("und", "unknown", "original", "mul", "zxx")) return null
+        knownLanguage(key)?.let { return it }
+        val sep = key.indexOf('-')
+        if (sep > 0 && SUBTAG.matches(key.substring(sep + 1))) knownLanguage(key.substring(0, sep))?.let { return it }
+        return null
     }
 
     /** ISO 639-1 code for a language in any spelling (Telugu, tel, tel-IN -> te), or null. */

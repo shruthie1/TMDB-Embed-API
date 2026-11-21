@@ -252,6 +252,88 @@ test('"Original" streamFromMaster without TMDB language: title keeps Original, n
     assert.match(row.name, /Original/);
 });
 
+// Round 2 N1: a hung TMDB call must not eat the budget and drop every row.
+test('TMDB hangs: masters still fetched, rows survive, Original unlabelled, wait capped', async () => {
+    vidrift._config.budgetMs = 800;
+    vidrift._config.tmdbWaitMs = 100;
+    stubFetch([[isPage('embed.vidrift.net'), () => text(RRR_PAGE)], [isMaster, () => text(MASTER_TE)]]);
+    vidrift._deps.originalLanguage = () => new Promise(() => {});
+    const t0 = Date.now();
+    const rows = await vidrift.getVidriftStreams('579974', 'movie');
+    assert.ok(Date.now() - t0 < 600, `took ${Date.now() - t0}ms`);
+    assert.equal(rows.length, 4);
+    const orig = rows.find((r) => r.url.includes('36c0c00732d43d2df373f8c4e10e971b'));
+    assert.deepEqual(orig.languages, []);
+    assert.match(orig.title, /Original/);
+    assert.deepEqual(rows.find((r) => r.url.includes('4160f9215437e11c789d19d826048e8b')).languages, ['Telugu']);
+});
+
+test('TMDB wait also ends with the budget (budget 300 ms < 2 s wait)', async () => {
+    vidrift._config.budgetMs = 300;
+    stubFetch([[isPage('embed.vidrift.net'), () => text(RRR_PAGE)], [isMaster, () => text(MASTER_TE)]]);
+    vidrift._deps.originalLanguage = () => new Promise(() => {});
+    const t0 = Date.now();
+    const rows = await vidrift.getVidriftStreams('579974', 'movie');
+    assert.ok(Date.now() - t0 < 600, `took ${Date.now() - t0}ms`);
+    assert.equal(rows.length, 4);
+});
+
+test('default TMDB wait is 2 s', () => {
+    assert.equal(vidrift._config.tmdbWaitMs, 2000);
+});
+
+test('N3: the TMDB wait timer is cleared once TMDB answers', async () => {
+    vidrift._config.tmdbWaitMs = 60000;
+    vidrift._config.budgetMs = 10 * 60000; // so the wait is exactly tmdbWaitMs
+    stubFetch([[isPage('embed.vidrift.net'), () => text(RRR_PAGE)], [isMaster, () => text(MASTER_TE)]]);
+    const realSet = global.setTimeout; const realClear = global.clearTimeout;
+    const waits = new Set(); const cleared = new Set();
+    global.setTimeout = (fn, ms, ...a) => { const h = realSet(fn, ms, ...a); if (ms === 60000) waits.add(h); return h; };
+    global.clearTimeout = (h) => { cleared.add(h); return realClear(h); };
+    try {
+        await vidrift.getVidriftStreams('579974', 'movie');
+    } finally {
+        global.setTimeout = realSet; global.clearTimeout = realClear;
+    }
+    assert.equal(waits.size, 1, 'one capped TMDB wait');
+    for (const h of waits) assert.ok(cleared.has(h), 'wait timer cleared');
+});
+
+test('N4: an unknown TMDB code keeps "Original" (no title-cased guess)', async () => {
+    stubFetch([[isPage('embed.vidrift.net'), () => text(RRR_PAGE)], [isMaster, () => text(MASTER_TE)]],
+        { originalLanguage: 'xx' });
+    const rows = await vidrift.getVidriftStreams('579974', 'movie');
+    const orig = rows.find((r) => r.url.includes('36c0c00732d43d2df373f8c4e10e971b'));
+    assert.deepEqual(orig.languages, []);
+    assert.match(orig.title, /Original/);
+});
+
+test('subtitles: HLS playlist URLs are not emitted, real vtt is kept', () => {
+    const withSubs = MASTER_TE.replace('#EXT-X-INDEPENDENT-SEGMENTS',
+        '#EXT-X-INDEPENDENT-SEGMENTS\n#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="s",NAME="English",LANGUAGE="en",URI="s_en.m3u8"\n'
+        + '#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="s",NAME="Telugu",LANGUAGE="te",URI="s_te.vtt"');
+    const row = vidrift.streamFromMaster({ name: 'Orion · Telugu' }, withSubs, MURL, BASE, null);
+    assert.deepEqual(row.subtitles.map((s) => s.url.replace(/^.*\//, '')), ['s_te.vtt']);
+});
+
+test('R1: "Original" with TMDB bn / mr is Bengali / Marathi (not left as Original)', async () => {
+    for (const [code, name] of [['bn', 'Bengali'], ['mr', 'Marathi']]) {
+        stubFetch([[isPage('embed.vidrift.net'), () => text(RRR_PAGE)], [isMaster, () => text(MASTER_TE)]],
+            { originalLanguage: code });
+        const rows = await vidrift.getVidriftStreams('579974', 'movie');
+        const orig = rows.find((r) => r.url.includes('36c0c00732d43d2df373f8c4e10e971b'));
+        assert.deepEqual(normaliseStream(orig).languages, [name], code);
+    }
+});
+
+test('R1: knownLanguage covers 2- and 3-letter Indian codes', () => {
+    const { knownLanguage } = require('../utils/streamSchema');
+    const want = { bn: 'Bengali', ben: 'Bengali', mr: 'Marathi', mar: 'Marathi', pa: 'Punjabi', pan: 'Punjabi',
+        gu: 'Gujarati', guj: 'Gujarati', or: 'Odia', ori: 'Odia', oriya: 'Odia', as: 'Assamese', asm: 'Assamese',
+        ur: 'Urdu', urd: 'Urdu' };
+    for (const [k, v] of Object.entries(want)) assert.equal(knownLanguage(k), v, k);
+});
+
 test('tv embed path', () => {
     assert.equal(vidrift.embedUrl(BASE, '1396', 'tv', 2, 3), `${BASE}/embed/tv/1396/2/3`);
     assert.equal(vidrift.embedUrl(BASE, '579974', 'movie'), `${BASE}/embed/movie/579974`);

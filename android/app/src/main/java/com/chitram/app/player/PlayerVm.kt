@@ -74,6 +74,8 @@ data class PlayRequest(
     val imdbId: String? = null,
     /** TMDB runtime: the episode's when known, else the title's (runtime check). */
     val runtimeMin: Int? = null,
+    /** TMDB original language ("te") from the title details already loaded: a MultiMovies "Original" source takes it. */
+    val originalLang: String? = null,
 )
 
 /** [group]: a sheet sub-heading ("In this stream" / "Other servers"); rows with the same group sit under one label. */
@@ -441,10 +443,10 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             val pin = keepProvider ?: saved?.provider
             val manualPin = keepProvider != null || saved?.manual == true
             val preferred = g.prefs.preferredAudio()
-            // VM breaker open: no VM call, MultiMovies resolves on the device instead.
+            // VM breaker open: no VM call, MultiMovies, showsst and OneTouchTV resolve on the device instead.
             val vmDown = !g.api.vmUp
             val names = g.onDevice.names(vmDown)
-            val device = if (keep) deviceJobs else g.onDevice.launchAll(viewModelScope, r.type, r.id, r.season, r.episode, g.codecs, preferred, r.title, vmDown).also { d ->
+            val device = if (keep) deviceJobs else g.onDevice.launchAll(viewModelScope, r.type, r.id, r.season, r.episode, g.codecs, preferred, r.title, vmDown, r.originalLang).also { d ->
                 deviceNames = names
                 d.zip(names).forEach { (job, n) -> watchCheck(job, n, t0) }
             }
@@ -466,7 +468,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             val backendError = first.backendError
             if (!first.backendPending) {
                 endCheck(LoadingModel.CHECK_SERVER, backend.size)
-                if (vm == null || backendError != null) launchMultiMovies(r, preferred, pin, manualPin, t0)
+                if (vm == null || backendError != null) launchVmDownOnly(r, preferred, pin, manualPin, t0)
             }
             // Same provider from both sides: the VM row shows, the device row waits as its twin.
             val (shown, twinMap) = StartRace.splitTwins(backend, first.device)
@@ -503,15 +505,19 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { val got = runCatching { job.await() }.getOrNull(); endCheck(id, got?.size ?: 0) }
     }
 
-    /** The VM is down or failed: resolve MultiMovies on the device (once per start) and let it join late. */
-    private fun launchMultiMovies(r: PlayRequest, preferred: String, pin: String?, manualPin: Boolean, t0: Long) {
-        val n = com.chitram.app.resolve.OnDeviceResolver.MULTIMOVIES
-        if (n in deviceNames || !g.onDevice.names(vmDown = true).contains(n)) return
-        deviceNames = deviceNames + n
-        val d = viewModelScope.async { g.onDevice.resolveAll(n, r.type, r.id, r.season, r.episode, g.codecs, preferred, title = r.title) }
-        deviceJobs = deviceJobs + d
-        watchCheck(d, n, t0)
-        lateJobs = lateJobs + viewModelScope.launch { joinLate(r, d, preferred, pin, manualPin) }
+    /**
+     * The VM is down or failed: start every VM-down-only on-device provider
+     * (MultiMovies, showsst, OneTouchTV) not already running, once per start.
+     * Each joins late on its own; nothing here waits, so the first row is not delayed.
+     */
+    private fun launchVmDownOnly(r: PlayRequest, preferred: String, pin: String?, manualPin: Boolean, t0: Long) {
+        for (n in vmDownExtras(g.onDevice.names(vmDown = true), g.onDevice.names(vmDown = false), deviceNames)) {
+            deviceNames = deviceNames + n
+            val d = viewModelScope.async { g.onDevice.resolveAll(n, r.type, r.id, r.season, r.episode, g.codecs, preferred, title = r.title, originalLang = r.originalLang) }
+            deviceJobs = deviceJobs + d
+            watchCheck(d, n, t0)
+            lateJobs = lateJobs + viewModelScope.launch { joinLate(r, d, preferred, pin, manualPin) }
+        }
     }
 
     /** VM rows that came after the film started from a device row: join without interrupting. */
@@ -523,7 +529,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         }
         if (request != r) return
         endCheck(LoadingModel.CHECK_SERVER, rows?.size ?: 0)
-        if (rows == null) { launchMultiMovies(r, preferred, pin, manualPin, t0); return }
+        if (rows == null) { launchVmDownOnly(r, preferred, pin, manualPin, t0); return }
         putSources(Ranking.merge(sources, rows, preferred, pin, manualPin))
         android.util.Log.i("Chitram", "[vm] ${rows.size} row(s) joined late")
         if (phase is Phase.Failed && rows.isNotEmpty()) { play(sources.first(), g.progress.resumeMs(r.type, r.id, r.season, r.episode)); notice = "" }
@@ -658,8 +664,8 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     private fun sourceFor(s: Source, item: MediaItem): androidx.media3.exoplayer.source.MediaSource {
         val swap = if (TsAudioSwap.wanted(s)) TsAudioSwap(desiredAudio()) else null
         // A backend row playing direct (DirectRoute) carries the provider's headers.
-        if (s.onDevice == null && swap == null && s.headers.isEmpty() && s.segmentToken == null) return DefaultMediaSourceFactory(OkHttpDataSource.Factory(g.api.client)).createMediaSource(item)
-        val streamClient = StreamInterceptor.playerClient(g.api.client, s.headers, s.segmentToken)
+        if (PlayPolicy.usesBaseClient(s, swap != null)) return DefaultMediaSourceFactory(OkHttpDataSource.Factory(g.api.client)).createMediaSource(item)
+        val streamClient = StreamInterceptor.playerClient(g.api.client, s.headers, s.segmentToken, PlayPolicy.connectTimeoutMs(s))
             .let { c -> if (swap == null) c else c.newBuilder().addInterceptor(swap).build() }
         if (swap != null) android.util.Log.i("Chitram", "[tsaudio] ${s.provider}: swapping in ${g.prefs.preferredAudio()} from ${s.languages.joinToString("/")}")
         val http = OkHttpDataSource.Factory(okhttp3.Call.Factory { req ->
@@ -829,7 +835,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         resolveJob?.cancel()
         resolveJob = viewModelScope.launch {
             val key = OnDeviceResolver.nameFor(name) ?: OnDeviceResolver.VAPLAYER
-            val rows = g.onDevice.resolveAll(key, r.type, r.id, r.season, r.episode, g.codecs, desiredAudio(), fresh = true, title = r.title)
+            val rows = g.onDevice.resolveAll(key, r.type, r.id, r.season, r.episode, g.codecs, desiredAudio(), fresh = true, title = r.title, originalLang = r.originalLang)
             val eligible = languageTrial?.let { AudioChoice.candidates(rows, it, tried) } ?: rows
             val fresh = eligible.find { it.id == s.id } ?: Ranking.rank(eligible, desiredAudio()).firstOrNull { it.id !in tried }
             if (request != r) return@launch
@@ -882,7 +888,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         player.stop()
         resolveJob?.cancel()
         resolveJob = viewModelScope.launch {
-            val rows = g.onDevice.resolveAll(name, r.type, r.id, r.season, r.episode, g.codecs, desiredAudio(), fresh = true, title = r.title)
+            val rows = g.onDevice.resolveAll(name, r.type, r.id, r.season, r.episode, g.codecs, desiredAudio(), fresh = true, title = r.title, originalLang = r.originalLang)
             val eligible = languageTrial?.let { AudioChoice.candidates(rows, it, tried) } ?: rows
             val fresh = Ranking.rank(eligible, desiredAudio()).firstOrNull { it.id !in tried }
             if (request != r) return@launch
@@ -1349,10 +1355,13 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             val languages = rows.flatMap(AudioChoice::languages).distinct().take(3).joinToString(", ")
             MenuItem("group:$name", name, listOf(streamCount(rows.size), languages).filter { it.isNotEmpty() }.joinToString(" · "), rows.any { it.id == current?.id })
         } + if (sources.none { it.provider.equals("netmirror", true) }) listOf(MenuItem("group:NetMirror", "NetMirror", "Check streams on demand")) else emptyList()
-        return Ranking.menuOrder(sources.filter { it.provider.equals(provider, true) }).map { source ->
+        val rows = Ranking.menuOrder(sources.filter { it.provider.equals(provider, true) })
+        // Owner: nested rows of one provider are told apart by a short host tag (ServerTag).
+        val tags = ServerTag.tags(rows)
+        return rows.map { source ->
             val languages = AudioChoice.languages(source).joinToString(", ").ifEmpty { "Unknown audio" }
             val quality = Ranking.height(source).takeIf { it > 0 }?.let { "${it}p" } ?: source.quality
-            val detail = listOfNotNull(source.netmirrorCatalog, quality, languages,
+            val detail = listOfNotNull(source.netmirrorCatalog, quality, languages, tags[source.id],
                 if (source.incomplete) "More streams pending" else null,
                 if (source.unsupported) "Not supported here" else null).joinToString(" · ")
             MenuItem("src:${source.id}", label(source), detail, source.id == current?.id, source.unsupported)
@@ -1514,7 +1523,11 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         const val OFFLINE_TEXT = "You're offline. Playback will resume when the connection returns."
 
         /** After the backend answers, how long on-device rows may still join the first ranking. */
-        private val CHECK_LABELS = mapOf("mapple" to "Mapple", "vaplayer" to "VaPlayer", "castletv" to "CastleTV", "multimovies" to "MultiMovies", "netmirror" to "NetMirror")
+        /** VM-down-only names ([down] minus [up]) not yet started ([running]), in [down] order. */
+        internal fun vmDownExtras(down: List<String>, up: List<String>, running: List<String>): List<String> =
+            down.filter { it !in up && it !in running }
+
+        private val CHECK_LABELS = mapOf("mapple" to "Mapple", "vaplayer" to "VaPlayer", "castletv" to "CastleTV", "multimovies" to "MultiMovies", "netmirror" to "NetMirror", "showsst" to "showsst", "onetouchtv" to "OneTouchTV")
         const val DEVICE_GRACE_MS = 3_000L
         /** When the backend gave nothing: wait for on-device rows up to their own budgets. */
         const val DEVICE_WAIT_MS = 30_000L

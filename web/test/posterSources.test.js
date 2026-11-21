@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { posterSources } from '../lib/posterSources';
 
-const tmdb = 'https://image.tmdb.org/t/p/w342/a.jpg';
+// w500: the size a phone card's srcset picks, so the detail poster is a cache hit.
+const tmdb = 'https://image.tmdb.org/t/p/w500/a.jpg';
 const mh = 'https://images.metahub.space/poster/small/tt0903747/img';
 
 describe('posterSources', () => {

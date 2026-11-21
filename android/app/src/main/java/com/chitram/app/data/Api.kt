@@ -120,13 +120,32 @@ class Api(
         /** The VM origin (Vercel rewrites /api/streams here). */
         const val VM = "https://tmdb-187-127-137-163.sslip.io"
         const val VM_CONNECT_TIMEOUT_MS = 3_000L
-        /** Connect timeout for provider hosts the phone fetches itself (multimovies-slow-rca.md fix 5). */
+        /**
+         * Connect timeout for a VM row playing direct: it has the proxied url to
+         * fall back to (DirectRoute), so a dead host may fail fast.
+         */
         const val DIRECT_CONNECT_TIMEOUT_MS = 3_000L
+        /**
+         * Connect timeout for on-device rows and the MultiMovies resolver: no
+         * proxy fallback, and a live Cloudflare host once took 7.6 s to connect
+         * (multimovies-slow-rca.md section 2), so 8 s, not 3 s (review I1).
+         */
+        const val DEVICE_CONNECT_TIMEOUT_MS = 8_000L
         /** Was readTimeout 120s + callTimeout 125s with 2 retries. */
         const val STREAMS_CALL_TIMEOUT_MS = 22_000L
         /** A9 follow-up, same as web/lib/backend.js. */
         const val STREAMS_FULL_TIMEOUT_MS = 60_000L
         const val IMG = "https://image.tmdb.org/t/p"
+        /** Phone card and detail poster: 112-104 dp x 3 = 312-336 px; w500 leaves headroom (owner 2026-11-21). */
+        const val POSTER_PHONE = "w500"
+        /** TV card: 219 px at 1080p, so w342 is already sharp. */
+        const val POSTER_TV = "w342"
+        /** Phone hero/detail backdrop: full width 1080-1440 px. */
+        const val BACKDROP_PHONE = "w1280"
+        /** Fire TV hero/detail backdrop: TMDB has no 1920 size, so `original`, decoded down (see [decodeBound]). */
+        const val BACKDROP_TV = "original"
+        /** Hero title logo (transparent png). */
+        const val LOGO = "w500"
         val json = Json { ignoreUnknownKeys = true; coerceInputValues = true; explicitNulls = false; isLenient = true }
 
         /** How long a catalog response stays fresh on the device. */
@@ -191,12 +210,27 @@ class Api(
                 .build()
         }
 
-        /** TMDB image url sized for the surface. Never `original`. */
+        /**
+         * TMDB image url sized for the surface. The old rule was "never
+         * `original`". Owner 2026-11-21: the Fire TV hero uses `original`
+         * (3640 px, ~1.5 MB) because w1280 upscales 1.5x on a 1920 screen.
+         * `original` is safe only because Art() decodes it down to the screen
+         * ([decodeBound]): a full 3640x2048 ARGB bitmap is ~30 MB of Fire TV heap.
+         */
         fun image(path: String?, size: String): String? = when {
             path.isNullOrEmpty() -> null
             path.startsWith("http") -> path
             else -> "$IMG/$size$path"
         }
+
+        /**
+         * Decode bound (px) for an image of this TMDB size on a screen of
+         * [screenW] x [screenH]: the screen for `original`, else null (the
+         * view's own constraints, Coil's default). Never more than the screen,
+         * so Fire TV memory never holds a 3640 px bitmap.
+         */
+        fun decodeBound(size: String, screenW: Int, screenH: Int): Pair<Int, Int>? =
+            if (size == "original" && screenW > 0 && screenH > 0) screenW to screenH else null
     }
 
     /** Request for `path`. Non-catalog paths (streams) carry no-store. */

@@ -54,6 +54,8 @@ data class TitleFull(
     val country: List<String> = emptyList(),
     /** For providers keyed by imdb (vaplayer resolves on the device). */
     val imdbId: String? = null,
+    /** TMDB title logo path (server pickLogo: original language, en, none); null shows the text title. */
+    val logo: String? = null,
 ) {
     fun asTitle() = Title(tmdbId, mediaType, title, poster, backdrop, year, rating, originalLang, overview)
 }

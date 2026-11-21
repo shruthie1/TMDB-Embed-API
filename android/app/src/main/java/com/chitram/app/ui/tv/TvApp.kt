@@ -142,6 +142,9 @@ import com.chitram.app.data.LanguagePrefs
 import com.chitram.app.data.Progress
 import com.chitram.app.data.Title
 import com.chitram.app.ui.common.Art
+import com.chitram.app.data.Api
+import com.chitram.app.ui.common.HeroTitle
+import com.chitram.app.ui.common.rememberHeroLogo
 import com.chitram.app.ui.common.BrowseVm
 import com.chitram.app.ui.common.DetailVm
 import com.chitram.app.ui.common.Focus
@@ -165,6 +168,9 @@ import kotlinx.coroutines.launch
 
 // ── Sizes: web TV CSS px -> dp/sp (see TvWeb in TvNav.kt for every source value).
 private val Float.px: Dp get() = (this * TvWeb.CSS_PX_DP).dp
+/** Hero title logo box in web CSS px (globals.css .title-logo at 1080p). */
+private const val LOGO_MAX_W = 416f
+private const val LOGO_MAX_H = 140f
 private val Float.pxSp: TextUnit get() = (this * TvWeb.CSS_PX_DP).sp
 
 private val RAIL_W = TvWeb.RAIL_W.px
@@ -421,7 +427,7 @@ private fun TvHome(nav: Nav, restore: MutableState<String?>, listState: LazyList
                 // Web .home-hero-art fades in over .7s per slide.
                 Crossfade(pool!![heroAt % pool.size], animationSpec = tween(700, easing = ControlEase), label = "hero") { t ->
                     Box(Modifier.fillMaxSize()) {
-                        Art(t.backdrop, "w1280", Modifier.fillMaxSize(), alignment = BiasAlignment(0f, -0.64f))
+                        Art(t.backdrop, Api.BACKDROP_TV, Modifier.fillMaxSize(), alignment = BiasAlignment(0f, -0.64f))
                         // Web --hero-scrim / --hero-wash (globals.css "Home hero: ONE
                         // treatment"), same stops on phone, desktop, TV and here.
                         // Left wash behind the copy column.
@@ -515,8 +521,11 @@ private fun TvHero(pool: List<Title>, at: Int, onIndex: (Int) -> Unit, nav: Nav,
                     bottom = TvWeb.HERO_PAD_BOTTOM.px + actionsH.coerceAtLeast(TvWeb.BTN_H.px) + TvWeb.HERO_ACTIONS_TOP.px)
                     .widthIn(max = TvWeb.HERO_MAX_W.px),
             ) {
-                Text(shown.title, style = TextStyle(color = Tok.text, fontSize = TvWeb.HERO_TITLE.pxSp, lineHeight = TvWeb.HERO_TITLE.pxSp, fontWeight = FontWeight.Light),
-                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                // Web .title-logo: max 26rem x 140px at 1080p.
+                HeroTitle(rememberHeroLogo(shown), shown.title, maxW = LOGO_MAX_W.px, maxH = LOGO_MAX_H.px) {
+                    Text(shown.title, style = TextStyle(color = Tok.text, fontSize = TvWeb.HERO_TITLE.pxSp, lineHeight = TvWeb.HERO_TITLE.pxSp, fontWeight = FontWeight.Light),
+                        maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
                 MetaLine(shown.year, shown.rating, null, shown.originalLang, TvWeb.HERO_META, Modifier.padding(top = 7.dp))
                 shown.overview?.takeIf { it.isNotBlank() }?.let {
                     Text(it, style = TextStyle(color = Tok.textSecondary, fontSize = TvWeb.HERO_OVERVIEW.pxSp, lineHeight = (TvWeb.HERO_OVERVIEW * 1.45f).pxSp),
@@ -717,7 +726,7 @@ fun PosterCard(t: Title, modifier: Modifier = Modifier, rank: Int? = null, showT
             interactionSource = src,
         ) {
             Box(Modifier.fillMaxSize()) {
-                Art(t.poster, "w342", Modifier.fillMaxSize(), t.title)
+                Art(t.poster, Api.POSTER_TV, Modifier.fillMaxSize(), t.title)
                 if (t.poster == null) Text(t.title, color = Tok.textSecondary, fontSize = TvWeb.CARD_TITLE.pxSp, modifier = Modifier.padding(6.dp))
                 if (showType && t.mediaType == "tv") Text("Series", color = Tok.text, fontSize = 16f.pxSp, fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.align(Alignment.TopStart).padding(4.dp).background(Tok.bg.copy(alpha = 0.75f), RADIUS).padding(horizontal = 4.dp, vertical = 1.dp))
@@ -834,7 +843,7 @@ private fun TvDetail(nav: Nav, type: String, id: Long) {
         // the art's top edge into the page so there is no hard cut. scrimBottom fades
         // the bottom, scrimLeft keeps the poster/text column legible. The art fills
         // most of the height so its bottom edge lands deep in scrimBottom's opaque zone.
-        Art(t?.backdrop, "w1280", Modifier.align(Alignment.TopEnd).fillMaxWidth().fillMaxHeight(0.92f), alignment = Alignment.TopCenter)
+        Art(t?.backdrop, Api.BACKDROP_TV, Modifier.align(Alignment.TopEnd).fillMaxWidth().fillMaxHeight(0.92f), alignment = Alignment.TopCenter)
         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(
             0f to Tok.bg.copy(alpha = 0.85f), 0.26f to Color.Transparent,
         )))
@@ -883,10 +892,12 @@ private fun TvDetail(nav: Nav, type: String, id: Long) {
                         Box(Modifier.fillMaxWidth().heightIn(min = (TvWeb.HERO_H - TvWeb.BTN_H - TvWeb.DETAIL_PAD_BOTTOM - 66f).px), contentAlignment = Alignment.BottomStart) {
                             Row(Modifier.padding(top = TvWeb.DETAIL_PAD_TOP.px), verticalAlignment = Alignment.Bottom) {
                                 if (t.poster != null) Box(Modifier.size(TvWeb.DETAIL_POSTER_W.px, (TvWeb.DETAIL_POSTER_W * 1.5f).px).clip(RADIUS).border(0.5.dp, Tok.border, RADIUS)) {
-                                    Art(t.poster, "w342", Modifier.fillMaxSize(), t.title)
+                                    Art(t.poster, Api.POSTER_TV, Modifier.fillMaxSize(), t.title)
                                 }
                                 Column(Modifier.padding(start = TvWeb.DETAIL_POSTER_GAP.px).fillMaxWidth(0.7f)) {
-                                    Text(t.title, style = TextStyle(color = Tok.text, fontSize = TvWeb.DETAIL_TITLE.pxSp, lineHeight = TvWeb.DETAIL_TITLE.pxSp, fontWeight = FontWeight.Light), maxLines = 2)
+                                    HeroTitle(t.logo, t.title, maxW = LOGO_MAX_W.px, maxH = LOGO_MAX_H.px) {
+                                        Text(t.title, style = TextStyle(color = Tok.text, fontSize = TvWeb.DETAIL_TITLE.pxSp, lineHeight = TvWeb.DETAIL_TITLE.pxSp, fontWeight = FontWeight.Light), maxLines = 2)
+                                    }
                                     // Always reserved, so the lines below do not jump when it lands.
                                     Text(t.tagline.orEmpty(), color = Tok.textMuted, fontSize = TvWeb.TAGLINE.pxSp, fontStyle = FontStyle.Italic, lineHeight = (TvWeb.TAGLINE * 1.4f).pxSp,
                                         maxLines = 1, modifier = Modifier.padding(top = 5.dp))

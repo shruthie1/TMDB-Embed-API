@@ -60,7 +60,33 @@ object PlayPolicy {
 
     // ---- Provider captions ------------------------------------------------------
 
-    private val HLS_CAPTION = Regex("""\.m3u8|m3u8-proxy""", RegexOption.IGNORE_CASE)
+    /**
+     * Player connect timeout for a row (review I1/I2): 3 s only for a VM row
+     * playing direct (it falls back to the proxied url); 8 s for an on-device
+     * row (no fallback); null keeps the base client for VM-proxied rows.
+     */
+    fun connectTimeoutMs(s: Source): Long? = when {
+        DirectRoute.isDirect(s) -> com.chitram.app.data.Api.DIRECT_CONNECT_TIMEOUT_MS
+        s.onDevice != null -> com.chitram.app.data.Api.DEVICE_CONNECT_TIMEOUT_MS
+        else -> null
+    }
+
+    /**
+     * True when the player can use the shared base client as is: a VM row
+     * with no headers, token or TS swap AND no connect override. A VM row
+     * playing direct has no headers when the provider needs none, but still
+     * needs its short connect timeout (review R2-M6): before, that row took
+     * the base 15 s client.
+     */
+    fun usesBaseClient(s: Source, tsSwap: Boolean): Boolean =
+        s.onDevice == null && !tsSwap && s.headers.isEmpty() && s.segmentToken == null && connectTimeoutMs(s) == null
+
+    /** True when the url's target (after any `?url=` wrapper) is an HLS playlist path. */
+    private fun hlsTarget(url: String): Boolean {
+        val inner = com.chitram.app.resolve.MultiMoviesResolver.unwrap(url)
+        val path = runCatching { java.net.URI(inner).path }.getOrNull() ?: inner.substringBefore('?')
+        return path.endsWith(".m3u8", ignoreCase = true)
+    }
 
     /**
      * Captions the player may sideload as one file. An HLS subtitle playlist
@@ -69,7 +95,7 @@ object PlayPolicy {
      * SUBTITLES rendition still reaches the player through the HLS source.
      */
     fun sideloadable(subs: List<com.chitram.app.data.SubtitleRef>): List<com.chitram.app.data.SubtitleRef> =
-        subs.filter { it.url.isNotBlank() && !HLS_CAPTION.containsMatchIn(it.url) }
+        subs.filter { it.url.isNotBlank() && !hlsTarget(it.url) }
 
     // ---- Auto-advance (switchFlow.advanceTarget, deadSources.nextAlive) --------
 

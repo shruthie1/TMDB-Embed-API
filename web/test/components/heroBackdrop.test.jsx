@@ -39,7 +39,7 @@ describe('HeroBackdrop', () => {
     expect(first.getAttribute('data-src')).toBe('https://a.example/fast.jpg');
     await load(images[1]);
     expect(art(container)).toBe(first);
-    expect(first.getAttribute('data-src')).toBe('https://image.tmdb.org/t/p/w1280/full.jpg');
+    expect(first.getAttribute('data-src')).toBe('https://image.tmdb.org/t/p/original/full.jpg');
   });
 
   it('keeps the shown image when a later one fails, and stops shimmering when the first fails', async () => {
@@ -51,6 +51,15 @@ describe('HeroBackdrop', () => {
     await load(images[1]);
     rerender(<HeroBackdrop path="/bad2.jpg" />);
     act(() => images[2].onerror());
-    expect(art(container).getAttribute('data-src')).toBe('https://image.tmdb.org/t/p/w1280/good.jpg');
+    expect(art(container).getAttribute('data-src')).toBe('https://image.tmdb.org/t/p/original/good.jpg');
+  });
+});
+
+describe('backdropUrl', () => {
+  it('gives phones w1280 and wider screens original', async () => {
+    const { backdropUrl } = await import('../../components/HeroBackdrop');
+    expect(backdropUrl('/b.jpg', true)).toBe('https://image.tmdb.org/t/p/w1280/b.jpg');
+    expect(backdropUrl('/b.jpg', false)).toBe('https://image.tmdb.org/t/p/original/b.jpg');
+    expect(backdropUrl(null, true)).toBe(null);
   });
 });

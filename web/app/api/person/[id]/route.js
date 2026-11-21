@@ -1,4 +1,5 @@
 import { personCredits, personInfo } from '../../../../lib/catalog';
+import { cachedJson, errorJson } from '../../../../lib/edgeCache';
 
 export const revalidate = 604800; // a filmography changes rarely
 
@@ -7,6 +8,6 @@ export async function GET(_req, { params }) {
     personInfo(params.id),
     personCredits(params.id),
   ]);
-  if (!person) return Response.json({ error: 'not found' }, { status: 404 });
-  return Response.json({ person, titles: credits.titles });
+  if (!person) return errorJson({ error: 'not found' }, 404);
+  return cachedJson({ person, titles: credits.titles });
 }

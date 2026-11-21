@@ -123,14 +123,17 @@ Same file shape as `routes/resolve-config.json` (`version`, `ttlSec`, one object
     "multimovies": { "web": "proxy",  "apk": "direct" },
     "mapple":      { "web": "off",    "apk": "device" },
     "vaplayer":    { "web": "off",    "apk": "device" },
-    "vidrock":     { "web": "proxy",  "apk": "proxy" }
+    "vidrock":     { "web": "proxy",  "apk": "proxy" },
+    "vidrift":     { "web": "proxy",  "apk": "direct" }
   },
   "castletv":    { "bases": ["https://api.hlowb.com"], "keySuffix": "T!BgJB",
                    "apiVersions": { "search": "v1.1.0", "details": "v1.9.9", "video": "v2.0.1" } },
   "multimovies": { "bases": ["https://vidbolt.xyz", "https://vidbolt.pro"], "resolvePath": "/api/resolve",
-                   "sites": ["https://multimovies.wtf"],
+                   "playerPath": "/movie/{id}", "sites": ["https://multimovies.wtf"],
                    "scrapers": ["https://raw.githubusercontent.com/mayurgj/nama/main/providers/multimovies.js"] },
   "vidrock":     { "bases": ["https://vidrock.net"], "key": "<64 hex>" },
+  "vidrift":     { "bases": ["https://embed.vidrift.net", "https://embed.vidrift.in"],
+                   "moviePath": "/embed/movie/{id}", "tvPath": "/embed/tv/{id}/{s}/{e}" },
   "onetouchtv":  { "bases": ["https://api3.devcorp.me"], "front": "https://onetouchtv.xyz",
                    "key": "<32 chars>", "iv": "<16 chars>" },
   "showsst":     { "mirrors": [{ "api": "https://api.vidqueen.st", "player": "https://player.vidqueen.st" }] },
@@ -154,15 +157,17 @@ New parsed sections: `castletv.bases`, `multimovies.bases`, `routes.*.apk`. Cast
 
 MultiMovies on the APK takes the VM-healed host: the VM merged view puts a verified heal first in `multimovies.bases`. HostBook then tries those bases in order and follows a cross-host redirect. The APK does not run the title-page or scraper trail itself (one implementation, no extra device requests). Gap: VM down and VidBolt moved at the same time heals only after a human edits the remote `bases`.
 
+vidrift has no APK resolver today: `routes.vidrift.apk = direct` means the VM resolves and the APK plays the master. Master URLs resolve against the host that served the page (`providers/vidrift.js:243-244`), so the APK gets a VM heal through the rows. No APK change. If an on-device vidrift resolver is added later, it reads `vidrift.bases` from the merged view the same way as MultiMovies.
+
 ### 4. Heal kinds
 
 | Kind | Signal | Action | Verify before apply |
 |---|---|---|---|
-| host | Connection/DNS error, 404/410 on the API root, cross-host 301/302 | Existing `rediscover` trails plus new trails: multimovies VidBolt chain (below), bundle host literals (onetouchtv), remote `bases`/`mirrors` list | Provider's own resolve of Inception 27205 returns at least 1 row. multimovies also: a source whose master has `#EXT-X-MEDIA:TYPE=AUDIO` |
+| host | Connection/DNS error, 404/410 on the API root, cross-host 301/302 | Existing `rediscover` trails plus new trails: multimovies VidBolt chain (below), bundle host literals (onetouchtv), remote `bases`/`mirrors` list | Provider's own resolve of Inception 27205 returns at least 1 row (vidrift: RRR 579974). multimovies also: a source whose master has `#EXT-X-MEDIA:TYPE=AUDIO`. vidrift also: `orionStreams` with a master that answers `#EXTM3U` |
 | key | vidrock: GCM tag fails. onetouchtv: CBC padding or JSON parse fails. 3 in a row | Fetch the front page, then its main bundle. Candidates: 64-hex literals (vidrock), 32-char literals with IV = first 16 (onetouchtv). At most 2 page requests plus 1 API call | Candidate decrypts a fresh API answer: GCM tag passes, or CBC yields JSON. Then 27205 resolves |
 | token | vaplayer: page answered, regex missed | Parse `const CONFIG = {...}` as JSON. Read `apiToken`, `streamDataApiUrl`. If `rateLimited` is true or `apiToken` empty: classify blocked | Next resolve gets rows |
 | blocked | Cloudflare "Just a moment", 403 with `cf-mitigated`, vaplayer `rateLimited` | No heal. Stop rediscover for this provider. For providers with an APK on-device resolver (`routes.apk = device`), the server skips them until a canary passes | Canary pass |
-| drift | Page or API answered 200 but the parser found nothing expected (shape change) | Record only. Config may fix it if the field is parameterised (paths, regex, versions) | Canary pass |
+| drift | Page or API answered 200 but the parser found nothing expected (shape change) | Record only. Config may fix it if the field is parameterised (paths, regex, versions). Exception: multimovies and vidrift run the title-page trail once per cooldown to learn a new path | Canary pass |
 | down | Timeouts and 5xx on every candidate | Nothing; breaker handles it. Canary retries | Canary pass |
 
 Classifier: `lib/selfheal/classify.js`, a pure function from `{error, status, body snippet}` to a kind. Tested on the real `lastErr` strings in the audit.
@@ -173,6 +178,7 @@ Classifier: `lib/selfheal/classify.js`, a pure function from `{error, status, bo
 |---|---|---|---|---|
 | castletv | Redirect + remote `bases` (server). APK: HostBook + `castletv.bases` | Security key already per session. Suffix and API versions from remote config (human edit; no public source) | Yes | Telugu-first source; canary also runs Krack 784572 |
 | multimovies | New `UPSTREAM`. VidBolt chain: redirect, remote `bases`, title-page trail, Nuvio scraper constant. APK: HostBook over the VM-healed `bases` | None needed. `resolvePath` from config | Yes | Title-page trail measured (rows 3-8): the title page names the VidBolt host |
+| vidrift | New `UPSTREAM`. `VIDRIFT_BASE` env first, then remote `bases`, then built-in `BASES`. Shared title-page trail (below). Nuvio scraper gives only a site, not a host | None. `moviePath`/`tvPath` from config | Yes, RRR 579974 | Measured offline: the saved title page (Inception) lists `Vidrift` at `https://embed.vidrift.net/embed/movie/27205` |
 | vidrock | New `UPSTREAM`. Redirect + remote `bases` | Auto-extract from `/assets/index-*.js` with GCM tag check (measured) | Yes | Switch decrypt to `aes-256-gcm` with tag so a wrong key is a clear error, not an empty answer |
 | onetouchtv | New `UPSTREAM`. Redirect + `$.xxx="https://api*"` literals in `main.dart.js` + remote `bases` | Auto-extract key and IV from `main.dart.js` (measured) | Yes | 404 flakiness keeps its last-good cache |
 | showsst | Existing redirect + bundle scan + remote `mirrors` | n/a (header gate: drift, human edit) | Yes | Bundle trail not confirmed live on vidqueen.st (3 requests) |
@@ -180,9 +186,11 @@ Classifier: `lib/selfheal/classify.js`, a pure function from `{error, status, bo
 | mapple | APK only: HostBook + remote `bases` | n/a | No (VM blocked by Cloudflare) | Server marks it blocked and stops its 30-min rediscover |
 | netmirror | Unchanged `checknewtv.php` loop. Bootstrap domains and web mirrors also read from remote config | n/a | No. Zero canary requests | Passive state only: failure count from real traffic |
 
-#### multimovies: VidBolt discovery chain
+#### multimovies (VidBolt) and vidrift: shared discovery chain
 
-Runs on classifier `host` for multimovies (for example `ENOTFOUND vidbolt.xyz`, 404/410 on `/api/resolve`). Steps run in order and stop at the first candidate that validates. Hosts already tried in this run are skipped.
+One title-page trail heals both providers. Measured offline on the saved Inception title page (`scratchpad/vb/r3.html`, 2026-11-21 18:52): `watchConfig.initialServers` has 6 entries: Cineverse, GD mirror, Nexus, `Vidrift` (`https://embed.vidrift.net/embed/movie/27205`), VIDOUT, `Vidbolt` (`https://vidbolt.xyz/movie/27205`). The saved Nuvio scraper (`r4.js`, NAMA multimovies v1.3.1) has no `vidrift` string, so the scraper gives vidrift a site only, never a host.
+
+Runs on classifier `host` for multimovies (for example `ENOTFOUND vidbolt.xyz`, 404/410 on `/api/resolve`) or vidrift (`ENOTFOUND embed.vidrift.net`, connection refused, cross-host redirect), and on `drift` for either (path change, below). Steps run in order and stop at the first candidate that validates. Hosts already tried in this run are skipped.
 
 1. Redirect: `GET <base>/movie/27205`, no auto-follow. A cross-host `Location` is a candidate (existing `rediscover`).
 2. Remote `bases`: each `multimovies.bases[]` entry in order (built-in second entry `vidbolt.pro`, measured row 7).
@@ -191,11 +199,31 @@ Runs on classifier `host` for multimovies (for example `ENOTFOUND vidbolt.xyz`, 
 5. Validation of every candidate, 1 GET: `<cand>/api/resolve?type=movie&id=27205`, Referer `<cand>/movie/27205`. Pass needs https, JSON, and at least one `stream.sources[]` with `kind:"hls"` whose master (`source.master`, else one GET of `source.url`) has `#EXT-X-MEDIA:TYPE=AUDIO`. Then the provider's own resolve of 27205 returns at least 1 row (global rule). Only then `setBase('multimovies', cand, how)` with `how` = `redirect|config|titlepage|scraper`.
 6. Caps: at most 3 candidates validated and 12 GETs per run. Cooldown 30 min (`upstreamBase` `COOLDOWN_MS`). A candidate that fails validation is logged `[heal] multimovies reject <host> <reason>` and never adopted.
 
+vidrift uses the same steps with these differences:
+
+1. Redirect: `GET <base>/embed/movie/579974`, no auto-follow. A cross-host `Location` is a candidate.
+2. Bases: `VIDRIFT_BASE` env, then remote `vidrift.bases[]`, then built-in `BASES` (`embed.vidrift.net`, `embed.vidrift.in`).
+3. Title-page trail: the same 3 GETs. `vidriftFromTitle(html)` takes the `initialServers` entry with `name` `/^vidrift$/i`. Never a host match on the string `vidrift`.
+4. Scraper: `SITE.base` only, to rerun step 3. No host regex (measured: v1.3.1 has no Vidrift).
+5. Validation, 2 GETs: `<cand><moviePath with id 579974>` with Referer `<current multimovies site>/`. Pass needs https, a 2xx page, `embedMeta.orionStreams` an array with at least 1 entry, and one GET of the first entry's master (`new URL(entry.url || entry.proxyUrl, cand)`, Vidrift's own Referer and Origin) whose body starts with `#EXTM3U`. Then the provider's own resolve of RRR 579974 returns at least 1 row. Only then `setBase('vidrift', cand, how)`.
+6. Caps, cooldown and logs as multimovies, with prefix `[heal] vidrift`.
+
+Sharing: one run fetches the title page once and reads both servers. The parsed `{ vidbolt, vidrift, site, at }` is kept in memory for 30 min (the cooldown). A heal run for either provider reads this memo first and makes no title-page GET while it is fresh. When the memo names a host that differs from the other provider's current base, that host is offered to the other provider as a `titlepage` candidate on its next heal run. It is validated by that provider's own validator and counts against that provider's caps. Nothing is adopted without validation. Each provider keeps its own cooldown and caps.
+
+Classifier note: a plain 403 on every vidrift host (seen live 2026-11-21, `test/providerFailureNotCached.test.js:103`) is not `host`. With `cf-mitigated` it is `blocked`. Without it, `down`. The trail does not run, because a moved host does not answer 403.
+
+**Path change (not only the domain).** Both providers read their paths from config at call time: multimovies `resolvePath` (`/api/resolve`) and `playerPath` (`/movie/{id}`, used for Referer), vidrift `moviePath` and `tvPath`. A path change shows as validation failure on a host that still answers: 404 on the path while `<host>/` answers 2xx or 3xx, or a 2xx page with no `embedMeta` or no `stream.sources`. The classifier calls that `drift`. For these two providers `drift` runs the title-page trail once per cooldown:
+
+- vidrift: the title page carries the full embed URL. `pathFromUrl(url, 27205)` takes the path and query and replaces the path segment equal to the title's TMDB id with `{id}`. A segment that is not the id (an IMDb id or a hash) gives no path candidate (`reject nopath`). A new template is validated as in step 5 against the same or the new host, then saved with `setField('vidrift', 'moviePath', tmpl, 'titlepage')`. `tvPath` is not learned from a movie page. A TV path change needs a human edit of `tvPath`.
+- multimovies: the title page gives the VidBolt player path (`/movie/27205`), which heals `playerPath` the same way. It does not show `resolvePath`. A `resolvePath` change on a live host is recorded as `drift` with `reject <host> resolvePath`, and a human edits `resolvePath` in the remote config.
+
+A path heal records `over` like a host heal, so a remote edit of that field drops it.
+
 ### 6. Canary loop and state store
 
 - Timer in the API process, `unref()`'d, ticks every 10 min. Each tick runs at most one provider (the most overdue). So at most 6 canary runs per hour in total.
 - Due rule: healthy, every 6 h. Not healthy (last canary failed, breaker open, or fail streak 5+), every 30 min. Blocked or drift, every 6 h (requests will not fix it).
-- A run: the provider's own resolve on Inception 27205. For castletv, multimovies and vidrock also Krack 784572, and record whether a Telugu-tagged row came back (`telugu_ok`). Same code path as a user request, so the same `streamSchema` tagging.
+- A run: the provider's own resolve on Inception 27205. For castletv, multimovies and vidrock also Krack 784572, and record whether a Telugu-tagged row came back (`telugu_ok`). vidrift runs RRR 579974 in place of 27205 (its validation title) and records `telugu_ok` from it. Same code path as a user request, so the same `streamSchema` tagging.
 - Pass: reset breaker (`recordProviderOutcome(name, 'hit')`), clear fail streak, state `ok`.
 - Fail: classify, run the heal for that kind once, then re-run 27205 once if a heal was applied.
 - Excluded: netmirror (owner rule), mapple (on-device). Disabled providers are skipped.

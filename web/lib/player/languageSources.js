@@ -228,3 +228,17 @@ export function languageCandidates(sources, language) {
 export function languageSwitchCandidates(sources, language, currentId) {
   return languageCandidates(sources, language).filter(s => !s.unsupported && (currentId == null || s.id !== currentId));
 }
+
+/**
+ * Audio menu labels. multimovies and vidrift masters carry one rendition
+ * named "Audio" with no LANGUAGE; with exactly one such track, show the row's
+ * language. Display only: id and lang stay as hls.js reported them. Several
+ * unlabelled tracks stay as they are, since the row cannot say which is which.
+ */
+export function displayAudioTracks(tracks, row) {
+  if (!Array.isArray(tracks) || tracks.length !== 1) return tracks;
+  const [t] = tracks;
+  if (isResolvedLanguage(t?.name) || isResolvedLanguage(t?.lang)) return tracks;
+  const lang = sourceAudioLanguages(row)[0] || (row?.languages || []).find(Boolean);
+  return lang ? [{ ...t, name: String(lang) }] : tracks;
+}

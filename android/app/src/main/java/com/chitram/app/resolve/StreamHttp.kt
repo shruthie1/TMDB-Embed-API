@@ -55,9 +55,9 @@ class StreamInterceptor(private val headers: Map<String, String>, private val to
         fun client(base: OkHttpClient, headers: Map<String, String>, token: String?): OkHttpClient =
             base.newBuilder().addInterceptor(StreamInterceptor(headers, token)).build()
 
-        /** The player's client for a row with its own headers (direct host): a dead host fails in 3 s, not 15 s. */
-        fun playerClient(base: OkHttpClient, headers: Map<String, String>, token: String?): OkHttpClient =
+        /** The player's client for a row with its own headers; `connectMs` null keeps [base]'s (PlayPolicy.connectTimeoutMs). */
+        fun playerClient(base: OkHttpClient, headers: Map<String, String>, token: String?, connectMs: Long?): OkHttpClient =
             base.newBuilder().addInterceptor(StreamInterceptor(headers, token))
-                .connectTimeout(com.chitram.app.data.Api.DIRECT_CONNECT_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS).build()
+                .apply { if (connectMs != null) connectTimeout(connectMs, java.util.concurrent.TimeUnit.MILLISECONDS) }.build()
     }
 }

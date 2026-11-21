@@ -3,6 +3,7 @@ import {
   WARM_DELAY_MS, REWARM_MS, warmAllowed, warmCandidates, parsePlaylist, pickVariant,
   segmentIndexAt, warmSource, createWarmScheduler,
 } from '../lib/player/warmSources';
+import { markDirectFailed, _resetDirectFailures } from '../lib/player/directRoute';
 
 const P = 'https://api.example/m3u8-proxy?url=';
 const row = (id, langs, quality = '720p', extra = {}) => ({
@@ -110,6 +111,25 @@ describe('warmSource', () => {
     const f = fakeFetch({ 'm.m3u8': '#EXTM3U\n#EXTINF:10,\n#EXT-X-BYTERANGE:100@0\nfile.ts\n' });
     const urls = await warmSource({ masterUrl: 'https://p/m.m3u8' }, { fetchImpl: f });
     expect(urls).toEqual(['https://p/m.m3u8']);
+  });
+
+  it('warms the direct url for a web-direct row, the url the player plays', async () => {
+    _resetDirectFailures();
+    const f = fakeFetch({ 'master.m3u8': MASTER, 'v720.m3u8': MEDIA });
+    const src = { id: 'D', masterUrl: 'https://p.example/d/master.m3u8', webDirectUrl: 'https://cdn.example/d/master.m3u8' };
+    const urls = await warmSource(src, { height: 720, fetchImpl: f });
+    expect(urls[0]).toBe('https://cdn.example/d/master.m3u8');
+    expect(f.calls.every((c) => c.url.startsWith('https://cdn.example/'))).toBe(true);
+  });
+
+  it('warms the proxy url once the row failed direct', async () => {
+    _resetDirectFailures();
+    const src = { id: 'D', masterUrl: 'https://p.example/d/master.m3u8', webDirectUrl: 'https://cdn.example/d/master.m3u8' };
+    markDirectFailed(src);
+    const f = fakeFetch({ 'master.m3u8': MASTER, 'v720.m3u8': MEDIA });
+    const urls = await warmSource(src, { height: 720, fetchImpl: f });
+    expect(urls[0]).toBe('https://p.example/d/master.m3u8');
+    _resetDirectFailures();
   });
 });
 

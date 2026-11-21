@@ -5,6 +5,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 // unchanged from the original.
 import { resolveLive as resolveStreamLive } from '../backend';
 import { getLastProvider } from '../lastProvider';
+import { resolveOneTouchRows } from '../oneTouchClient';
+
+// The VM failed or found nothing: OneTouchTV resolved in this browser.
+const browserFallback = (type, tmdbId, { season, episode, signal }) =>
+  resolveOneTouchRows({ type, tmdbId, season, episode, signal });
 
 /** Real server events -> human sentences. Reports fact, not a timed guess. */
 export function describe(e) {
@@ -196,6 +201,7 @@ export function useResolve({ mediaType, tmdbId, season = 0, episode = 0 }) {
       season, episode,
       provider: getLastProvider(mediaType, tmdbId, season, episode),
       refresh,
+      clientFallback: browserFallback,
       onEvent: (e) => {
         // Every validated provider is switchable: the event carries its own
         // masterUrl, so switching never costs a re-resolve.

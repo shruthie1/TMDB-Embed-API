@@ -595,6 +595,23 @@ export async function seasonEpisodes(id, season) {
   }));
 }
 
+/**
+ * The hero's title logo: the original language first (a Telugu film's
+ * Telugu logo), then English, then a logo with no language (textless art).
+ * Within a language, the best voted, then the widest. Null when none.
+ */
+export function pickLogo(logos, originalLang) {
+  if (!Array.isArray(logos) || !logos.length) return null;
+  const order = [originalLang || null, 'en', null].filter((l, i, a) => a.indexOf(l) === i);
+  for (const lang of order) {
+    const hits = logos.filter(l => l?.file_path && (l.iso_639_1 ?? null) === lang);
+    if (!hits.length) continue;
+    hits.sort((a, b) => ((b.vote_average || 0) - (a.vote_average || 0)) || ((b.width || 0) - (a.width || 0)));
+    return hits[0].file_path;
+  }
+  return null;
+}
+
 /** Full record for the detail page — merges TMDB over the fast record. */
 export async function getTitleFull(type, id) {
   // These do not depend on each other, and running them in series cost a full
@@ -610,7 +627,9 @@ export async function getTitleFull(type, id) {
       getTitle(type, id),
       new Promise(r => setTimeout(() => r(null), 1200)),
     ]),
-    j(tmdbUrl(`/${type}/${id}`, { append_to_response: 'credits' })),
+    // `images` adds the title logos in the same call (no language filter:
+    // TMDB then returns every language, and pickLogo chooses).
+    j(tmdbUrl(`/${type}/${id}`, { append_to_response: 'credits,images' })),
   ]);
   if (!rich) return fast;
   // The rich producer owns seasons/credits even when the optional fast path loses its race.
@@ -637,6 +656,8 @@ export async function getTitleFull(type, id) {
       .filter(c => c.job === 'Writer' || c.job === 'Screenplay').map(c => c.name).slice(0, 3),
     country: (rich.production_countries || []).map(c => c.name).slice(0, 2),
     tagline: rich.tagline || null,
+    // TMDB title logo path (w500 on the hero); null shows the text title.
+    logo: pickLogo(rich.images?.logos, rich.original_language),
     seasons: rich.number_of_seasons ?? null,
     seasonList: (rich.seasons || [])
       .filter(s => s.season_number > 0)

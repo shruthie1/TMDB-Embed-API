@@ -32,6 +32,7 @@
 
 const axios = require('axios');
 const hls = require('../lib/media/hlsManifest');
+const { knownLanguage } = require('../utils/streamSchema');
 
 const UA = 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) '
     + 'Chrome/124.0 Mobile Safari/537.36';
@@ -40,7 +41,17 @@ const _config = {
     budgetMs: Number(process.env.VIDRIFT_BUDGET_MS) || 15000,
     pageTimeoutMs: Number(process.env.VIDRIFT_PAGE_TIMEOUT_MS) || 5000,
     masterTimeoutMs: Number(process.env.VIDRIFT_MASTER_TIMEOUT_MS) || 5000,
+    // Longest wait for TMDB original_language, run beside the master fetches.
+    // On timeout "Original" stays unlabelled; it never costs the masters.
+    tmdbWaitMs: Number(process.env.VIDRIFT_TMDB_WAIT_MS) || 2000,
 };
+
+// `promise`, or `fallback` after `ms`. The timer is always cleared.
+function withCap(promise, ms, fallback) {
+    let timer;
+    const cap = new Promise((resolve) => { timer = setTimeout(() => resolve(fallback), ms); });
+    return Promise.race([promise, cap]).finally(() => clearTimeout(timer));
+}
 // The scraper sent MultiMovies' site as Referer on the embed page.
 const PAGE_REFERER = 'https://m1.multimovies.courses/';
 
@@ -132,7 +143,9 @@ function pageLanguage(entry, originalLang) {
     const label = String((entry && entry.name) || '').replace(/^.*·\s*/, '').replace(/\s*\(.*\)\s*$/, '').trim();
     if (!label) return { language: null, label: null };
     if (/^original$/i.test(label)) {
-        const language = langName(originalLang);
+        // TMDB codes go through knownLanguage: an unknown code ("xx") keeps
+        // "Original" rather than becoming a title-cased guess.
+        const language = knownLanguage(originalLang);
         return { language, label: language || 'Original' };
     }
     const language = langName(label);
@@ -159,6 +172,16 @@ function videoCodecOf(masterText, masterUrl) {
     return /(h265|hevc|x265|hvc1|hev1)/i.test(u) ? 'hevc' : null;
 }
 
+// An HLS playlist URL (.m3u8 in the path, or in a ?url= the bridge wraps).
+// Old APKs (1.2.40) sideload row.subtitles as VTT, and a playlist there
+// blocked start on a phone. The master already carries the HLS subtitle
+// track, so only real vtt/srt files go in row.subtitles.
+function isHlsPlaylistUrl(url) {
+    let u = String(url || '');
+    try { u += ' ' + decodeURIComponent(u); } catch { /* keep raw */ }
+    return /\.m3u8?(?=$|[?#&\s])/i.test(u);
+}
+
 // Pure: the row for one fetched master. Exported for tests.
 function streamFromMaster(entry, masterText, masterUrl, base, originalLang) {
     const levels = hls.parseLevels(masterText, masterUrl);
@@ -181,7 +204,7 @@ function streamFromMaster(entry, masterText, masterUrl, base, originalLang) {
     const quality = tierOf(levels[0]) || 'Auto';
     const label = languages.length ? languages.join('/') : (page.label || 'Unknown');
     const subtitles = hls.parseMedia(masterText, masterUrl, 'SUBTITLES')
-        .filter((s) => s.url)
+        .filter((s) => s.url && !isHlsPlaylistUrl(s.url))
         .map((s, i) => ({ url: s.url, lang: s.languageCode || s.name || `Subtitle ${i + 1}`, id: `vr-sub-${i}` }));
     return {
         name: `Vidrift | ${quality} | ${label}`,
@@ -238,7 +261,8 @@ async function fetchPage(tmdbId, type, season, episode, deadline) {
 }
 
 // One master: the page host first, then the mirrors, inside the budget.
-async function fetchMaster(entry, bases, deadline, originalLang) {
+// Returns the raw text; the row is built once the TMDB wait is over.
+async function fetchMaster(entry, bases, deadline) {
     const errors = [];
     for (const base of bases) {
         const masterUrl = new URL(entry.url || entry.proxyUrl, `${base}/`).href;
@@ -246,11 +270,9 @@ async function fetchMaster(entry, bases, deadline, originalLang) {
         try {
             const r = await fetch(masterUrl, { headers: streamHeaders(base), signal: stepSignal(_config.masterTimeoutMs, deadline) });
             if (!r.ok) throw new Error(`HTTP ${r.status}`);
-            const row = streamFromMaster(entry, await r.text(), masterUrl, base, originalLang);
-            if (!row) throw new Error('no variants');
-            console.log(`[vidrift] "${entry.name}" -> ${row.languages.join('/') || 'unlabelled'} ${row.quality} `
-                + `${row.videoCodec || '?'} audio=${row.audio.length} ${base} (${Date.now() - t0}ms)`);
-            return { row };
+            const text = await r.text();
+            if (!hls.parseLevels(text, masterUrl).length) throw new Error('no variants');
+            return { entry, text, masterUrl, base, ms: Date.now() - t0 };
         } catch (e) {
             const msg = e.name === 'TimeoutError' || e.name === 'AbortError' ? `no answer in ${Date.now() - t0}ms` : e.message;
             errors.push(`${new URL(base).host} ${msg}`);
@@ -281,16 +303,25 @@ async function getVidriftStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
         console.log(`[vidrift] page lists no orion streams for ${tmdbId}`);
         return [];
     }
-    let originalLang = null;
-    if (entries.some((e) => /·\s*original\s*$/i.test(String(e.name || '')))) {
-        const left = Math.max(0, deadline - Date.now());
-        originalLang = await Promise.race([origP, new Promise((r) => setTimeout(() => r(null), left).unref())]);
-    }
-
-    const results = await Promise.all(entries.map((e) => fetchMaster(e, bases, deadline, originalLang)));
+    // Masters and the TMDB wait run side by side; the wait is capped at
+    // tmdbWaitMs and never holds the masters (review N1).
+    const needOriginal = entries.some((e) => /·\s*original\s*$/i.test(String(e.name || '')));
+    const [results, originalLang] = await Promise.all([
+        Promise.all(entries.map((e) => fetchMaster(e, bases, deadline))),
+        needOriginal ? withCap(origP, Math.max(0, Math.min(_config.tmdbWaitMs, deadline - Date.now())), null).then((l) => {
+            if (!l) console.log(`[vidrift] TMDB original_language not known within ${_config.tmdbWaitMs}ms for ${tmdbId} - "Original" stays unlabelled`);
+            return l;
+        }) : null,
+    ]);
     const failed = results.filter((r) => r.error).map((r) => r.error);
+    const built = results.filter((r) => !r.error).map((r) => {
+        const row = streamFromMaster(r.entry, r.text, r.masterUrl, r.base, originalLang);
+        console.log(`[vidrift] "${r.entry.name}" -> ${row.languages.join('/') || 'unlabelled'} ${row.quality} `
+            + `${row.videoCodec || '?'} audio=${row.audio.length} ${r.base} (${r.ms}ms)`);
+        return row;
+    });
     const seen = new Set();
-    const out = results.map((r) => r.row).filter((r) => r && !seen.has(r.url) && seen.add(r.url));
+    const out = built.filter((r) => r && !seen.has(r.url) && seen.add(r.url));
     if (!out.length) throw new Error(`vidrift: every master failed for ${tmdbId}: ${failed.join('; ')}`);
     if (failed.length) {
         out.upstreamError = `vidrift master(s) failed: ${failed.join('; ')}`.slice(0, 300);

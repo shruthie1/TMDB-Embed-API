@@ -278,17 +278,31 @@ class V123Test {
     // ---- MultiMovies on the device ---------------------------------------------
 
     @Test fun multiMoviesResolvesTeluguFirst() = runBlocking {
+        // The resolver asks the plain /api/resolve plus `only=<server>` for every
+        // VidBolt server in parallel (all-servers fix), so answer by path, not by queue order.
+        MultiMoviesResolver.resetServerState()
         val server = MockWebServer()
         val base = server.url("").toString().trimEnd('/')
-        server.enqueue(MockResponse().setBody("""{"stream":{"server":"x","sources":[{"url":"$base/m/master.m3u8","kind":"hls","quality":"1080p"}]}}"""))
-        server.enqueue(MockResponse().setBody(
-            "#EXTM3U\n" +
-                "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",NAME=\"Hindi\",LANGUAGE=\"hin\",URI=\"a-hin.m3u8\"\n" +
-                "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",NAME=\"Telugu\",LANGUAGE=\"tel\",URI=\"a-tel.m3u8\"\n" +
-                "#EXT-X-STREAM-INF:BANDWIDTH=4000000,RESOLUTION=1920x1080,CODECS=\"avc1.640028,mp4a.40.2\",AUDIO=\"a\"\nv1080.m3u8\n",
-        ))
+        val master = "#EXTM3U\n" +
+            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",NAME=\"Hindi\",LANGUAGE=\"hin\",URI=\"a-hin.m3u8\"\n" +
+            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",NAME=\"Telugu\",LANGUAGE=\"tel\",URI=\"a-tel.m3u8\"\n" +
+            "#EXT-X-STREAM-INF:BANDWIDTH=4000000,RESOLUTION=1920x1080,CODECS=\"avc1.640028,mp4a.40.2\",AUDIO=\"a\"\nv1080.m3u8\n"
+        val paths = java.util.Collections.synchronizedList(mutableListOf<String>())
+        server.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
+            override fun dispatch(request: okhttp3.mockwebserver.RecordedRequest): MockResponse {
+                val path = request.path!!
+                paths += path
+                return when {
+                    path == "/api/resolve?type=movie&id=784572" ->
+                        MockResponse().setBody("""{"stream":{"server":"x","sources":[{"url":"$base/m/master.m3u8","kind":"hls","quality":"1080p"}]}}""")
+                    path.startsWith("/api/resolve") -> MockResponse().setBody("""{"stream":null}""")
+                    path == "/m/master.m3u8" -> MockResponse().setBody(master)
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
         val r = MultiMoviesResolver(OkHttpClient(), origin = base).resolve("movie", 784572, 0, 0)!!
-        assertEquals("/api/resolve?type=movie&id=784572", server.takeRequest().path)
+        assertTrue(paths.toString(), "/api/resolve?type=movie&id=784572" in paths)
         assertEquals("$base/m/master.m3u8", r.url)
         assertEquals("$base/", r.headers["Referer"])
         assertEquals(listOf("Hindi", "Telugu"), r.audio.mapNotNull { it.label })

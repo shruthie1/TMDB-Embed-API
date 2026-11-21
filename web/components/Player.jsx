@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import PlayerControls from './PlayerControls';
 import VideoMenu from './player/VideoMenu';
-import { audioLanguageKey, isKnownAudioLanguage, languageSwitchCandidates, sourceAudioLanguages, trackAudioLanguage } from '../lib/player/languageSources';
+import { audioLanguageKey, displayAudioTracks, isKnownAudioLanguage, languageSwitchCandidates, sourceAudioLanguages, trackAudioLanguage } from '../lib/player/languageSources';
 import { Loading, NextUp, PlayerError } from './player/overlays';
 import TvBar from './player/TvBar';
 import Icon from './Icon';
@@ -22,7 +22,7 @@ import {
 import EmbedStage from './player/EmbedStage';
 import useFocusTrap from './useFocusTrap';
 import { VA_EMBED_ID, vaEmbedChoice, shouldAutoEmbed } from '../lib/player/vaEmbed';
-import { markDead, nextAlive, qualityHeight } from '../lib/player/deadSources';
+import { failoverLanguage, markDead, nextAlive, qualityHeight } from '../lib/player/deadSources';
 import { fatalAction } from '../lib/player/fatalPolicy';
 import { canFailOver, offlineAction, retryResumeAt } from '../lib/player/offlineRecovery';
 import { runtimeVerdict } from '../lib/player/runtimeCheck';
@@ -568,14 +568,21 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     preferredLanguage: wantLang, onLanguage: setWantLang,
     onHlsReady: (h) => { hlsInstance.current = h; } });
   const hlsRouteRef = hls.routeRef;
+  // Menu labels only; failover and pairing read hls.audioTracks.
+  const currentRow = sources?.find((s) => s.id === currentSourceId) || null;
+  const menuAudioTracks = useMemo(() => displayAudioTracks(hls.audioTracks, currentRow),
+    [hls.audioTracks, currentRow]);
   const discoveredTracksRef = useRef(null);
   discoveredTracksRef.current = { tracks: hls.audioTracks, selected: hls.currentAudio };
   // Same fallback as switchSource: the viewer's pick, else the track playing
-  // (initialAudioTrack auto-picks Telugu without ever setting wantLang).
+  // (initialAudioTrack auto-picks Telugu without ever setting wantLang), else
+  // the row's language when the track name is generic ("Audio").
   failoverCtxRef.current = {
-    lang: wantLang
-      || hls.audioTracks?.find((t) => t.id === hls.currentAudio)?.name
-      || null,
+    lang: failoverLanguage({
+      wantLang,
+      track: hls.audioTracks?.find((t) => t.id === hls.currentAudio),
+      row: sources?.find((s) => s.id === currentSourceId),
+    }),
     height: qualityHeight(sources?.find((s) => s.id === currentSourceId)?.quality)
       || hls.levels?.[hls.currentLevel]?.height
       || null,
@@ -2108,7 +2115,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
           sourcesPending={sourcesPending}
           onCheckSources={netmirrorSources.check}
           checkingSources={netmirrorSources.loading}
-          audioTracks={hls.audioTracks}
+          audioTracks={menuAudioTracks}
           currentAudio={hls.currentAudio}
           onPickAudio={hls.pickAudio}
           onPickLanguage={pickLanguage} audioSources={sources}
@@ -2166,7 +2173,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
                                  : `Switching to ${l?.label ?? 'another quality'}…`);
             hls.pickLevel(i);
           }}
-          audioTracks={hls.audioTracks}
+          audioTracks={menuAudioTracks}
           currentAudio={hls.currentAudio}
           onPickAudio={hls.pickAudio}
           onPickLanguage={pickLanguage} audioSources={sources}

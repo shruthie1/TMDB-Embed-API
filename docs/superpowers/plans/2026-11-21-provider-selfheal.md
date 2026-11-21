@@ -17,7 +17,7 @@
 - NetMirror/newtv: no canary, no sweep, no benchmark, no new request path. Its `checknewtv.php` loop is unchanged. Tests stub every fetch; no test touches the network.
 - Do not disable `masterMatchesTitle` (`providers/netmirror.js:613`, called at `:934`).
 - A heal changes a host, key, token or path only. It never adds, removes or rewrites language, audio or video fields (CLAUDE.md #1). A heal is applied only after the provider's own resolve returns at least 1 row for Inception 27205.
-- Telugu first: the canary runs Krack 784572 for castletv, multimovies and vidrock and records `telugu_ok`.
+- Telugu first: the canary runs Krack 784572 for castletv, multimovies and vidrock and records `telugu_ok`. vidrift runs RRR 579974 in place of 27205 (its heal check title too) and records `telugu_ok` from it.
 - With no remote config and no heals, every provider behaves exactly as today. Today's constants become fallbacks, never deleted.
 - Knobs: one env var `RESOLVE_CONFIG_URL` (server), one constant `REMOTE_CONFIG_URL` (APK). Cadences are constants: tick 10 min, healthy 6 h, unhealthy 30 min, blocked/drift 6 h, key-fail streak 3.
 - mapple: no server heal, no server canary (APK-only by owner rule).
@@ -40,6 +40,7 @@ apk     export JAVA_HOME="/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Conte
 - Classifier must call a Cloudflare challenge `blocked` and must not start a rediscover for it (Task 4, Task 8).
 - Canary must never select netmirror or mapple, and must make at most one provider run per tick (Task 7).
 - multimovies: no VidBolt host is adopted without a master that has `#EXT-X-MEDIA:TYPE=AUDIO`; the scraper file is read as text, never run (Task 5A).
+- vidrift: no host or path is adopted unless the RRR 579974 page has `orionStreams` and a master answers `#EXTM3U`; the shared title-page memo never adopts for the other provider without that provider's own validation (Task 5B).
 - `/api/resolve-config` must stay parseable by APK 1.2.40 (`ResolveConfig.kt` ignores unknown keys; `test/resolveConfig.test.js` checks defaults) (Task 3).
 - APK with the VM down: config from the remote URL, then cache, then defaults; on-device resolvers unchanged (Task 10).
 
@@ -138,7 +139,7 @@ apk     export JAVA_HOME="/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Conte
 
 ### Task 5A: multimovies VidBolt discovery chain
 
-Spec: section 5, "multimovies: VidBolt discovery chain"; measured rows multimovies 3-8.
+Spec: section 5, "multimovies (VidBolt) and vidrift: shared discovery chain"; measured rows multimovies 3-8. Write the title-page fetch so Task 5B can share it: one function returns the parsed page, `vidboltFromTitle` reads from it.
 
 **Files:**
 - Create: `lib/selfheal/vidbolt.js`
@@ -160,6 +161,33 @@ Spec: section 5, "multimovies: VidBolt discovery chain"; measured rows multimovi
 - [ ] **Step 3: Implement** pure parsers first, then the trails, then `opts.trails` in `rediscover`.
 - [ ] **Step 4: Run, verify pass**: `node --test test/selfhealVidbolt.test.js test/upstreamBase.test.js`, then `node --test test/*.test.js`. Grep the test log for each `[heal] multimovies` prefix.
 - [ ] **Step 5: Stage**: `git add lib/selfheal/vidbolt.js utils/upstreamBase.js providers/multimovies.js test/selfhealVidbolt.test.js test/fixtures/selfheal/mm-title.html test/fixtures/selfheal/nama-mm.js`
+
+### Task 5B: vidrift on the shared title-page trail, and path heals for both
+
+Spec: section 5, "multimovies (VidBolt) and vidrift: shared discovery chain", including "Path change". Needs Task 5A.
+
+**Files:**
+- Create: `lib/selfheal/titlePage.js` (move the title-page fetch and `currentSite`/`titlePath` from `lib/selfheal/vidbolt.js`; add the 30-min memo `{ vidbolt, vidrift, site, at }` and `offer(provider, host)`)
+- Create: `lib/selfheal/vidrift.js`
+- Modify: `lib/selfheal/vidbolt.js` (read the title page through `titlePage.js`; `playerPath` heal)
+- Modify: `providers/vidrift.js:50-54,81-86` (bases per call: `VIDRIFT_BASE`, then `getBase('vidrift')` and `cfg('vidrift','bases')`, then today's `BASES`; `moviePath`/`tvPath` from config with today's strings as fallback; export `UPSTREAM = { name:'vidrift', seed, trails, verify }`)
+- Modify: `providers/multimovies.js` (`playerPath` from config for Referer)
+- Modify: `routes/resolve-config.json` (add `vidrift: { bases, moviePath, tvPath }` with today's values, so `/api/resolve-config` and the Task 13 remote file carry it; old APKs ignore the unknown key)
+- Modify: `lib/selfheal/classify.js` (404 on the path while the host root answers, or 2xx without the expected object: `drift`; plain 403 without `cf-mitigated`: `down`)
+- Test: `test/selfhealVidrift.test.js` (create), `test/fixtures/selfheal/mm-title.html` (extend: add a `Vidrift` entry to `initialServers`), `test/fixtures/selfheal/vidrift-rrr.html` (create; small synthetic `embedMeta` with 1 orion entry)
+
+**Interfaces:**
+- `vidriftFromTitle(page)`: `initialServers` entry with `name` `/^vidrift$/i`, returns `{ origin, path }`. Never matches by host string.
+- `pathFromUrl(url, tmdbId)`: path and query with the segment equal to `tmdbId` replaced by `{id}`, or null when no segment equals it.
+- `validate(cand, { fetch, moviePath, site })`: https only. GET `${cand}${moviePath('579974')}` with Referer `${site}/`. True only if `embedMeta.orionStreams` is an array with at least 1 entry and one GET of the first master (resolved against `cand`, Vidrift Referer and Origin) returns a body starting with `#EXTM3U`. Then the provider's own resolve of 579974 returns at least 1 row.
+- `trails(cfg)`: `[titlePageTrail, scraperSiteTrail]`. The scraper gives `SITE.base` only. `how` = `redirect|config|titlepage|scraper`.
+- Caps per run and per provider: 3 candidates validated, 12 GETs. Cooldown 30 min. Logs `[heal] vidrift candidate|reject|adopt <host> ...` and `[heal] vidrift path <tmpl> via titlepage`.
+
+- [ ] **Step 1: Write failing tests** with a stubbed `fetch` keyed by URL (no network): (a) `embed.vidrift.net` and `embed.vidrift.in` throw `ENOTFOUND`, title page names `https://embed.vidrift.new/embed/movie/27205`, its RRR page has `orionStreams` and the master answers `#EXTM3U`: `rediscover` applies `https://embed.vidrift.new` with `how:'titlepage'` and the next page request goes there; (b) `VIDRIFT_BASE` set: it is still tried first after a heal; (c) bad candidates rejected with a `reject` line: `orionStreams` null, empty array, master answers HTML, http:// URL, page with no `embedMeta`; (d) one shared run: a multimovies heal fetches the title page, then a vidrift heal within 30 min makes zero title-page GETs and gets `embed.vidrift.new` as a `titlepage` candidate (count stub calls); (e) the memo never adopts: with vidrift validation failing, vidrift base stays unchanged; (f) path change: host answers `/` 200 but `/embed/movie/579974` 404, title page names `https://embed.vidrift.net/e/movie/27205`: classifier `drift`, `moviePath` saved as `/e/movie/{id}`, base unchanged; (g) title page URL with an IMDb id (`/embed/movie/tt1375666`): `pathFromUrl` null, `reject nopath`, no path saved; (h) multimovies: title page gives `https://vidbolt.xyz/watch/27205`: `playerPath` `/watch/{id}` saved after VidBolt validation; `/api/resolve` 404 on a live host: `drift`, `reject <host> resolvePath`, nothing saved; (i) a remote edit of `vidrift.moviePath` drops the path heal; (j) plain 403 on every vidrift host: `down`, zero trail GETs; with `cf-mitigated`: `blocked`; (k) scraper fixture with no Vidrift entry: zero vidrift host candidates from it, its `SITE.base` still reruns the title-page trail; (l) GET count per provider run is 12 or fewer; (m) no remote, no heal, hosts alive: page URL is `https://embed.vidrift.net/embed/movie/579974`, as today, and `test/vidrift.test.js` passes unchanged.
+- [ ] **Step 2: Run, verify fail**: `node --test test/selfhealVidrift.test.js`. Expected: module not found.
+- [ ] **Step 3: Implement** `pathFromUrl` and `vidriftFromTitle` first, then `titlePage.js` with the memo, then the validator, then the provider changes.
+- [ ] **Step 4: Run, verify pass**: `node --test test/selfhealVidrift.test.js test/selfhealVidbolt.test.js test/vidrift.test.js`, then `node --test test/*.test.js`. Grep the test log for each `[heal] vidrift` prefix.
+- [ ] **Step 5: Stage**: `git add lib/selfheal/titlePage.js lib/selfheal/vidrift.js lib/selfheal/vidbolt.js lib/selfheal/classify.js providers/vidrift.js providers/multimovies.js routes/resolve-config.json test/selfhealVidrift.test.js test/fixtures/selfheal/mm-title.html test/fixtures/selfheal/vidrift-rrr.html`
 
 ### Task 6: Key and token extractors
 
@@ -190,10 +218,10 @@ Spec: section 5, "multimovies: VidBolt discovery chain"; measured rows multimovi
 
 **Interfaces:**
 - `createCanary({ providers, store, classify, heal, recordOutcome, now })` returns `{ tick() }`.
-- `tick()`: pick the enabled provider with the oldest `next_due_at` that is due, excluding `netmirror` and `mapple`. Run its resolve on 27205 (plus 784572 for castletv, multimovies, vidrock). Pass: `recordOutcome(name,'hit')`, state `ok`, due +6 h. Fail: `classify`, call `heal(kind)` for host/key/token once, re-run 27205 once if applied; state = kind; due +30 min (host, key, token, down) or +6 h (blocked, drift).
+- `tick()`: pick the enabled provider with the oldest `next_due_at` that is due, excluding `netmirror` and `mapple`. Run its resolve on 27205 (plus 784572 for castletv, multimovies, vidrock; vidrift runs 579974 in place of 27205). Pass: `recordOutcome(name,'hit')`, state `ok`, due +6 h. Fail: `classify`, call `heal(kind)` for host/key/token once, re-run 27205 once if applied; state = kind; due +30 min (host, key, token, down) or +6 h (blocked, drift).
 - Row columns as in the spec section 6.
 
-- [ ] **Step 1: Write failing tests** with a fake clock and fake providers: (a) one tick runs exactly one provider; (b) netmirror and mapple never chosen even when most overdue; (c) pass resets the breaker (recordOutcome called with 'hit'); (d) blocked failure: no heal call, due +6 h; (e) key failure: heal('key') called once, 27205 re-run once; (f) `telugu_ok` 1 when a Telugu-tagged row comes back for 784572, 0 otherwise; (g) store migration runs on an existing DB at the previous version.
+- [ ] **Step 1: Write failing tests** with a fake clock and fake providers: (a) one tick runs exactly one provider; (b) netmirror and mapple never chosen even when most overdue; (c) pass resets the breaker (recordOutcome called with 'hit'); (d) blocked failure: no heal call, due +6 h; (e) key failure: heal('key') called once, 27205 re-run once; (f) `telugu_ok` 1 when a Telugu-tagged row comes back for 784572, 0 otherwise; (g) store migration runs on an existing DB at the previous version; (h) vidrift runs 579974 only, never 27205, and `telugu_ok` is 1 when a Telugu-tagged row comes back.
 - [ ] **Step 2: Run, verify fail**: `node --test test/selfhealCanary.test.js`.
 - [ ] **Step 3: Implement**.
 - [ ] **Step 4: Run, verify pass**: `node --test test/*.test.js`.
@@ -208,7 +236,7 @@ Waits for the routing work to be committed.
 - Modify: `apiServer.js` (boot: `config.refresh()` and a refresh timer every `ttlSec`, `unref()`; canary `setInterval(tick, 10 min).unref()`; `/api/status` adds `heal: {state, kind, lastOkAt, lastRunAt, teluguOk, healHow}` per provider; skip a provider for non-web callers when its canary state is `blocked` and the config route says `apk: device`)
 - Test: `test/providerRegistry.test.js` (extend), `test/selfhealWiring.test.js` (create)
 
-- [ ] **Step 1: Write failing tests**: (a) 5 mapple failures with a Cloudflare body: zero rediscover calls; (b) 5 vidrock host errors: one rediscover; (c) `/api/status` has `heal` for each provider with a row; (d) blocked vaplayer with `apk: device` is not run for a default caller; (e) a canary pass on that provider lets it run again; (f) 5 multimovies `ENOTFOUND vidbolt.xyz` errors: one rediscover, called with `UPSTREAM.trails` and `UPSTREAM.verify` from Task 5A.
+- [ ] **Step 1: Write failing tests**: (a) 5 mapple failures with a Cloudflare body: zero rediscover calls; (b) 5 vidrock host errors: one rediscover; (c) `/api/status` has `heal` for each provider with a row; (d) blocked vaplayer with `apk: device` is not run for a default caller; (e) a canary pass on that provider lets it run again; (f) 5 multimovies `ENOTFOUND vidbolt.xyz` errors: one rediscover, called with `UPSTREAM.trails` and `UPSTREAM.verify` from Task 5A; (g) 5 vidrift `ENOTFOUND embed.vidrift.net` errors: one rediscover with the Task 5B trails and verify.
 - [ ] **Step 2: Run, verify fail**: `node --test test/selfhealWiring.test.js test/providerRegistry.test.js`.
 - [ ] **Step 3: Implement**.
 - [ ] **Step 4: Run, verify pass**: `node --test test/*.test.js` and `cd web && npx vitest run` (web reads `/api/status`).
@@ -276,7 +304,7 @@ Needs owner answer on hosting (spec open question 1) and a deploy go.
 - [ ] **Step 1**: Create the remote JSON from `GET /api/resolve-config` built-in output with `version: 2`. Owner picks the host. Record the raw URL.
 - [ ] **Step 2**: Set `RESOLVE_CONFIG_URL` in the VM `.env`; set `REMOTE_CONFIG_URL` in the APK. Full suites green: server, web, APK commands above.
 - [ ] **Step 3**: Deploy with `scripts/deploy-vm.sh` (owner go). Confirm `data/` is writable on the VM: `ls -ld /root/tmdb-embed-api/data`.
-- [ ] **Step 4**: Wait one canary cycle. Read `curl -s https://tmdb-187-127-137-163.sslip.io/api/status` and record each provider's `heal` row. Expected: mapple absent (not run), netmirror absent, vaplayer `blocked` or `ok`. Grep `~/.pm2/logs/tmdb-embed-api-out.log` for `[canary]` lines; count netmirror canary lines (must be 0).
+- [ ] **Step 4**: Wait one canary cycle. Read `curl -s https://tmdb-187-127-137-163.sslip.io/api/status` and record each provider's `heal` row. Expected: mapple absent (not run), netmirror absent, vaplayer `blocked` or `ok`, vidrift row present with `telugu_ok` from RRR 579974. Grep `~/.pm2/logs/tmdb-embed-api-out.log` for `[canary]` lines; count netmirror canary lines (must be 0).
 - [ ] **Step 5**: One remote edit test: change a harmless field (`ttlSec`), wait `ttlSec`, confirm `/api/resolve-config` shows it. Revert.
 - [ ] **Step 6**: APK: install the build, play one Telugu title (Krack 784572) with the VM reachable, then with the VM url blocked on the device network; confirm config log `resolve-config: fetched` from the remote URL and an on-device source plays.
 - [ ] **Step 7**: Label each result `verified` with the pasted output or `unverified` with the reason.

@@ -1,5 +1,6 @@
 import { deadKey, nextAlive } from './deadSources';
 import { PREFERRED_LANGUAGE } from '../backend';
+import { planPlayUrl } from './directRoute';
 
 /**
  * Warm the next 2-3 servers while the current one plays.
@@ -113,7 +114,9 @@ async function get(fetchImpl, url, signal, asText) {
  */
 export async function warmSource(src, { at = 0, height = null, signal, fetchImpl = globalThis.fetch } = {}) {
   const fetched = [];
-  let url = src.masterUrl;
+  // The url the player will play: direct for a web-direct row that has not
+  // failed direct, else the proxy (same decision as useHls).
+  let url = planPlayUrl(src).url;
   let pl = parsePlaylist(await get(fetchImpl, url, signal, true), url);
   fetched.push(url);
   if (pl.variants.length) {

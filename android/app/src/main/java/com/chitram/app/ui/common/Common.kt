@@ -5,6 +5,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -98,7 +99,18 @@ fun Modifier.controlFocus(focused: Boolean, shape: Shape, lift: Boolean = true, 
 /** Warm Coil's memory and disk caches for these (path, TMDB size) pairs. */
 fun prefetchArt(ctx: android.content.Context, vararg art: Pair<String?, String>) {
     val loader = coil.Coil.imageLoader(ctx)
-    for ((path, size) in art) Api.image(path, size)?.let { loader.enqueue(ImageRequest.Builder(ctx).data(it).build()) }
+    for ((path, size) in art) Api.image(path, size)?.let { loader.enqueue(ImageRequest.Builder(ctx).data(it).screenBound(ctx, size).build()) }
+}
+
+/**
+ * `original` (the Fire TV hero, 3640x2048) decodes down to the screen, never
+ * full size: 3640x2048 ARGB is ~30 MB, the screen (1920x1080) ~8 MB. INEXACT
+ * lets Coil sample by a power of two first, then scale to fit.
+ */
+private fun ImageRequest.Builder.screenBound(ctx: android.content.Context, size: String): ImageRequest.Builder {
+    val dm = ctx.resources.displayMetrics
+    val (w, h) = Api.decodeBound(size, dm.widthPixels, dm.heightPixels) ?: return this
+    return size(w, h).precision(coil.size.Precision.INEXACT).scale(coil.size.Scale.FILL)
 }
 
 /**
@@ -113,7 +125,7 @@ fun Art(path: String?, size: String, modifier: Modifier = Modifier, contentDescr
     Box(modifier.background(Tok.surfaceSolid)) {
         if (url != null) {
             AsyncImage(
-                model = ImageRequest.Builder(LocalContext.current).data(url).build(),
+                model = ImageRequest.Builder(LocalContext.current).data(url).screenBound(LocalContext.current, size).build(),
                 contentDescription = contentDescription,
                 contentScale = ContentScale.Crop,
                 alignment = alignment,
@@ -123,6 +135,44 @@ fun Art(path: String?, size: String, modifier: Modifier = Modifier, contentDescr
         }
     }
 }
+
+/**
+ * Hero title: the TMDB logo when there is one, else [text]. The text shows
+ * until the logo has decoded, and again if it fails, so the hero is never
+ * blank. The logo keeps its aspect inside [maxW] x [maxH], anchored bottom-left
+ * where the text starts.
+ */
+@Composable
+fun HeroTitle(logo: String?, title: String, maxW: androidx.compose.ui.unit.Dp, maxH: androidx.compose.ui.unit.Dp, text: @Composable () -> Unit) {
+    val url = Api.image(logo, Api.LOGO)
+    var shown by androidx.compose.runtime.remember(url) { androidx.compose.runtime.mutableStateOf(false) }
+    var failed by androidx.compose.runtime.remember(url) { androidx.compose.runtime.mutableStateOf(false) }
+    if (url == null || failed) { text(); return }
+    Box {
+        if (!shown) text()
+        AsyncImage(
+            // A w500 png is small: decode it whole, independent of the box size.
+            model = ImageRequest.Builder(LocalContext.current).data(url).size(coil.size.Size.ORIGINAL).build(),
+            contentDescription = title,
+            contentScale = ContentScale.Fit,
+            alignment = androidx.compose.ui.Alignment.BottomStart,
+            modifier = Modifier.sizeIn(maxWidth = maxW, maxHeight = maxH).graphicsLayer { alpha = if (shown) 1f else 0f },
+            onSuccess = { shown = true },
+            onError = { failed = true },
+        )
+    }
+}
+
+/**
+ * Logo path for a home-hero title. Row titles carry none, so read the full
+ * record: the same /full url the detail screen opens next (OkHttp catalog
+ * cache, 1 h). Null while loading, on error, or when the title has no logo.
+ */
+@Composable
+fun rememberHeroLogo(t: com.chitram.app.data.Title): String? =
+    androidx.compose.runtime.produceState<String?>(null, t.key) {
+        value = runCatching { com.chitram.app.App.instance.api.titleFull(t.mediaType, t.tmdbId).logo }.getOrNull()
+    }.value
 
 sealed interface Screen {
     data object Home : Screen

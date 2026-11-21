@@ -144,6 +144,13 @@ function isTypeCompatible(stremioType, onetouchType) {
     return allowed.has(onetouchType.toLowerCase());
 }
 
+/** "RRR (2022)" -> { title: 'RRR', year: 2022 }; no trailing "(YYYY)" -> { title, year: null }. */
+function splitTitleYear(value) {
+    const t = String(value || '');
+    const m = /^(.*\S)\s+\((\d{4})\)\s*$/.exec(t);
+    return m ? { title: m[1], year: parseInt(m[2], 10) } : { title: t, year: null };
+}
+
 function findBestOttMatch(results, title, year, stremioType, targetSeason) {
     if (results.length === 0) return null;
 
@@ -151,8 +158,13 @@ function findBestOttMatch(results, title, year, stremioType, targetSeason) {
 
     if (filtered.length === 0) return null;
 
-    const candidates = filtered.map((r) => ({
-        title: r.title,
+    // "RRR (2022)": the trailing year is not part of the title (a title under
+    // four letters must match exactly). It is stripped for comparison, and a
+    // stated year more than one off the wanted year rejects the row.
+    const candidates = filtered.map((r) => ({ r, split: splitTitleYear(r.title) }))
+        .filter(({ split }) => !split.year || !year || Math.abs(split.year - Number(year)) <= 1)
+        .map(({ r, split }) => ({
+        title: split.title,
         year: parseInt(r.year, 10) || undefined,
         type: stremioType,
         season: targetSeason ?? undefined,
@@ -305,9 +317,10 @@ async function resolveStreams(tmdbId, mediaType, seasonNum, episodeNum) {
         }
 
         if (imdbId && imdbId.startsWith('tt')) {
-            const matchedYear = matchResult.year ? parseInt(matchResult.year, 10) : undefined;
+            const split = splitTitleYear(matchResult.title);
+            const matchedYear = matchResult.year ? parseInt(matchResult.year, 10) : (split.year || undefined);
             const resolvedId = await tmdbTitleToImdbId(
-                matchResult.title,
+                split.title,
                 Number.isFinite(matchedYear) ? matchedYear : undefined,
                 type
             ).catch(() => null);
@@ -426,4 +439,4 @@ async function resolveStreams(tmdbId, mediaType, seasonNum, episodeNum) {
     }
 }
 
-module.exports = { getOnetouchtvStreams, STREAM_HEADERS, _internal: { isRetryable, cache, lastGood, timing } };
+module.exports = { getOnetouchtvStreams, STREAM_HEADERS, _internal: { isRetryable, cache, lastGood, timing, findBestOttMatch, splitTitleYear } };

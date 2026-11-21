@@ -1,7 +1,7 @@
 'use client';
 import Link from 'next/link';
 import { useState } from 'react';
-import { poster } from '../lib/api';
+import { poster, posterSrcSet, CARD_SIZES } from '../lib/api';
 import { intentProps } from '../lib/prefetch';
 
 /**
@@ -40,6 +40,7 @@ export function Card({ title, i = 0, progressPct, showType = false, rank = null 
   // is indistinguishable from a film until you open it.
   const typeTag = showType && title.mediaType === 'tv' ? 'Series' : null;
   const src = poster(title.poster, 'w342');
+  const srcSet = posterSrcSet(title.poster);
   const [imageFailed, setImageFailed] = useState(false);
   const meta = [title.year, title.runtimeMin ? `${title.runtimeMin} min` : null]
     .filter(Boolean).join(' · ');
@@ -58,7 +59,8 @@ export function Card({ title, i = 0, progressPct, showType = false, rank = null 
     >
       <div className="poster">
         {src && !imageFailed
-          ? <img src={src} alt="" loading="lazy" decoding="async" width="342" height="513"
+          ? <img src={src} srcSet={srcSet || undefined} sizes={srcSet ? CARD_SIZES : undefined}
+              alt="" loading="lazy" decoding="async" width="342" height="513"
               onError={() => setImageFailed(true)} />
           : <span className="poster-fallback">{title.title}</span>}
         {typeTag && <span className="card-type">{typeTag}</span>}

@@ -1,4 +1,5 @@
 import { languageName } from '../subtitles';
+import { displayLanguage, isResolvedLanguage, sourceAudioLanguages } from './languageSources';
 
 /**
  * Which sources died this session, by SOURCE ID.
@@ -68,4 +69,17 @@ export function nextAlive(sources = [], dead = new Set(), { lang = null, height 
     .map((r) => ({ ...r, l: langRank(r.s), d: dist(r.s) }))
     .sort((a, b) => a.l - b.l || (a.d === b.d ? 0 : a.d < b.d ? -1 : 1) || a.i - b.i);
   return ranked.length ? ranked[0].s : null;
+}
+
+/**
+ * The language failover ranks by. The viewer's pick first, then the playing
+ * track's name or lang when it is a real language. multimovies and vidrift
+ * masters name their one rendition "Audio", so those fall back to the
+ * current row's own languages (APK snapshotCtx does the same).
+ */
+export function failoverLanguage({ wantLang = null, track = null, row = null } = {}) {
+  if (wantLang) return wantLang;
+  const fromTrack = [track?.name, track?.lang].find(isResolvedLanguage);
+  if (fromTrack) return String(displayLanguage(fromTrack));
+  return sourceAudioLanguages(row)[0] || (row?.languages || []).find(Boolean) || null;
 }

@@ -48,9 +48,9 @@ const LANG_CANON = {
     mal: 'Malayalam', ml: 'Malayalam', malayalam: 'Malayalam',
     kan: 'Kannada', kn: 'Kannada', kannada: 'Kannada',
     eng: 'English', en: 'English', english: 'English',
-    ben: 'Bengali', bengali: 'Bengali', mar: 'Marathi', marathi: 'Marathi',
-    guj: 'Gujarati', gujarati: 'Gujarati', pan: 'Punjabi', punjabi: 'Punjabi',
-    urd: 'Urdu', urdu: 'Urdu', ori: 'Odia', odia: 'Odia',
+    ben: 'Bengali', bn: 'Bengali', bengali: 'Bengali', mar: 'Marathi', mr: 'Marathi', marathi: 'Marathi',
+    guj: 'Gujarati', gu: 'Gujarati', gujarati: 'Gujarati', pan: 'Punjabi', pa: 'Punjabi', punjabi: 'Punjabi',
+    urd: 'Urdu', ur: 'Urdu', urdu: 'Urdu', ori: 'Odia', odia: 'Odia', oriya: 'Odia',
     asm: 'Assamese', assamese: 'Assamese', spa: 'Spanish', fra: 'French',
     deu: 'German', ger: 'German', jpn: 'Japanese', kor: 'Korean',
     zho: 'Chinese', chi: 'Chinese', por: 'Portuguese', rus: 'Russian',
@@ -63,12 +63,19 @@ const LANG_CANON = {
 // spoken; the APK's languageLabel already hides them (Ranking.kt:93).
 const NOT_A_LANGUAGE = new Set(['und', 'unknown', 'original', 'mul', 'zxx']);
 
+// ISO 639-1 codes that are also English words. Read ONLY as a structured
+// language tag (knownLanguage: TMDB original_language, LANGUAGE="or"), never
+// from label brackets or ALL-CAPS track words, where "[as]" or "OR" is far
+// more often English than Odia/Assamese. Kept out of LANG_CANON for that.
+const TAG_ONLY_CODES = { or: 'Odia', as: 'Assamese' };
+
 // The known language a value names, or null. No title-case fallback.
 function knownLanguage(value) {
     if (!value) return null;
     const key = String(value).trim().toLowerCase();
     if (!key || NOT_A_LANGUAGE.has(key)) return null;
     if (LANG_CANON[key]) return LANG_CANON[key];
+    if (TAG_ONLY_CODES[key]) return TAG_ONLY_CODES[key];
     // Region or script subtag (tel-IN, en_US, zh-Hant, es-419): look up the
     // base code. Only a BCP-47 region/script suffix strips, so a compound tag
     // like Telugu-Hindi or eng-sub keeps both parts.

@@ -48,11 +48,42 @@ import { abortReason, isAbort } from './abortReason';
 
 export const IMG = 'https://image.tmdb.org/t/p';
 
-/** Poster sized for the surface — never `original` (design perf rule). */
+/**
+ * TMDB image url sized for the surface. The old rule was "never `original`".
+ * Owner, 2026-11-21: the desktop/TV hero uses `original` (TMDB has no 1920
+ * size; w1280 upscaled 1.5x on a 1920 screen). The browser scales it to the
+ * element box. Keep `original` to that one hero element; cards use srcset.
+ */
 export function poster(path, size = 'w342') {
   if (!path) return null;
   if (path.startsWith('http')) return path;
   return `${IMG}/${size}${path}`;
+}
+
+/** Card poster widths. The browser picks one from `sizes` and the screen DPR. */
+export const POSTER_WIDTHS = [342, 500, 780];
+
+/**
+ * Card `sizes`, from globals.css: phones (<=559px) show a 3-column grid or a
+ * 132px rail card (both about 33vw); TV rails are 290px; desktop rails are
+ * 176px and grid cells up to about 200px.
+ */
+export const CARD_SIZES = '(max-width:559px) 34vw, (min-width:1700px) 290px, 200px';
+
+/** srcset for a TMDB poster path; null for a full url (no other sizes exist). */
+export function posterSrcSet(path) {
+  if (!path || path.startsWith('http')) return null;
+  return POSTER_WIDTHS.map(w => `${IMG}/w${w}${path} ${w}w`).join(', ');
+}
+
+/** Hero backdrop: phones w1280 (400 CSS px x3), wider screens `original`. */
+export function heroBackdrop(path, narrow) {
+  return poster(path, narrow ? 'w1280' : 'original');
+}
+
+/** Title logo (transparent png), w500. */
+export function logoUrl(path) {
+  return poster(path, 'w500');
 }
 
 async function getJson(url, { timeoutMs = 15000, signal } = {}) {
