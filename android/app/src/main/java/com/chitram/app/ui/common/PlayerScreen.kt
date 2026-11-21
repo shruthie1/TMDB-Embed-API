@@ -43,6 +43,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.layout
+import kotlin.math.roundToInt
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.only
@@ -181,6 +186,8 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
     var controls by remember { mutableStateOf(true) }
     var menu by remember { mutableStateOf<Menu?>(null) }
     var serverProvider by remember { mutableStateOf<String?>(null) }
+    // Where each menu button sits, so its sheet opens just above it (phone).
+    val menuAnchors = remember { mutableStateMapOf<Menu, Rect>() }
     var lastInput by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var seekHint by remember { mutableIntStateOf(0) } // -1 back, 1 forward, for the double-tap badge
     val playerPrefs = App.instance.playerPrefs
@@ -301,7 +308,7 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
         if (vm.cues.isNotEmpty()) {
             BasicText(
                 vm.cues,
-                style = TextStyle(color = Color.White, fontSize = if (isTv) 24.sp else 18.sp, textAlign = TextAlign.Center),
+                style = TextStyle(color = Color.White, fontSize = if (isTv) 20.sp else 14.sp, textAlign = TextAlign.Center),
                 modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = if (controls) (if (isTv) 170.dp else 130.dp) else 40.dp, start = 48.dp, end = 48.dp)
                     .background(Color.Black.copy(alpha = 0.55f), Tok.radiusMd).padding(horizontal = 12.dp, vertical = 4.dp),
             )
@@ -329,7 +336,8 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
         // The control row cannot fit that width, so wait for landscape before drawing it.
         val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
         if (controls && (isTv || landscape) && vm.phase is PlayerVm.Phase.Playing && vm.framed && vm.nextUp == null) {
-            Controls(vm, now, isTv, playFocus, fit, onFit = { fit = fit.next(); playerPrefs.fit = fit; poke() }, onMenu = { menu = it; serverProvider = null; poke() }, onBack = onBack, poke = ::poke)
+            Controls(vm, now, isTv, playFocus, fit, onFit = { fit = fit.next(); playerPrefs.fit = fit; poke() }, onMenu = { menu = it; serverProvider = null; poke() }, onBack = onBack, poke = ::poke,
+                onAnchor = { k, r -> if (menuAnchors[k] != r) menuAnchors[k] = r })
         }
 
         vm.nextUp?.let { next -> NextUpCard(next, isTv, onPlay = { vm.start(next) }, onDismiss = { vm.dismissNext(); controls = true }) }
@@ -342,7 +350,7 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
                 Menu.Subtitles -> vm.subtitleItems()
             }
             val shown = if (m == Menu.Server && serverProvider.equals("netmirror", true)) items + MenuItem("check:netmirror", if (vm.checkingNetmirror) "Checking sources…" else "Check for more streams", vm.netmirrorNote ?: "Current playback continues") else items
-            MenuPanel(m, shown, isTv, titleOverride = if (m == Menu.Server) serverProvider else null,
+            MenuPanel(m, shown, isTv, anchor = if (vm.phase is PlayerVm.Phase.Playing) menuAnchors[m] else null, titleOverride = if (m == Menu.Server) serverProvider else null,
                 onUp = if (m == Menu.Server && serverProvider != null) ({ serverProvider = null }) else null,
                 onClose = { menu = null }, onPick = { key ->
                     when (menuTap(shown.firstOrNull { it.key == key })) {
@@ -449,8 +457,10 @@ private fun LoadingDetails(v: LoadingModel.View, isTv: Boolean, focusId: String?
     val target = focusId ?: v.rows.firstOrNull { it.clickable }?.id
     LaunchedEffect(Unit) { if (isTv && target != null) runCatching { first.requestFocus() } }
     // Phones: the panel ends after its last row (same height cap as the player sheets), no empty band below.
-    BoxWithConstraints(Modifier.fillMaxWidth(0.4f).fillMaxHeight(), contentAlignment = Alignment.CenterEnd) {
-    val layout = playerMenuLayout(maxWidth.value.coerceAtLeast(1f) / 0.4f, maxHeight.value.coerceAtLeast(1f), isTv)
+    // Plain Box, not BoxWithConstraints: its subcomposed content went stale on the player sheets (dead taps/back).
+    val screen = LocalConfiguration.current
+    Box(Modifier.fillMaxWidth(0.4f).fillMaxHeight(), contentAlignment = Alignment.Center) {
+    val layout = playerMenuLayout(screen.screenWidthDp.toFloat().coerceAtLeast(1f), screen.screenHeightDp.toFloat().coerceAtLeast(1f), isTv)
     Column(
         Modifier.fillMaxWidth()
             .then(if (isTv) Modifier.fillMaxHeight() else Modifier.padding(vertical = layout.inset.dp).heightIn(max = layout.height.dp).clip(Tok.radiusLg))
@@ -535,8 +545,10 @@ private fun Controls(
     vm: PlayerVm, r: PlayRequest, isTv: Boolean, playFocus: FocusRequester,
     fit: VideoFit, onFit: () -> Unit,
     onMenu: (Menu) -> Unit, onBack: () -> Unit, poke: () -> Unit,
+    onAnchor: (Menu, Rect) -> Unit = { _, _ -> },
 ) {
     val m = CtlMetrics.of(isTv)
+    fun anchor(k: Menu) = Modifier.onGloballyPositioned { onAnchor(k, it.boundsInRoot()) }
     val next = vm.nextEpisode
     // Buttons carry their own padding round the glyph, so the row starts that
     // much further out: glyph edges then line up with the time text.
@@ -610,10 +622,10 @@ private fun Controls(
                     CtlButton(Glyphs.seekFwd, "Forward 10 seconds", m, numeral = "10") { vm.seekBy(10_000); poke() }
                     Spacer(Modifier.weight(1f))
                     if (next != null) CtlButton(Glyphs.next, "Next episode", m, label = "Next") { vm.start(next) }
-                    CtlButton(Glyphs.server, "Server", m, label = if (labels) "Server" else null) { onMenu(Menu.Server) }
-                    CtlButton(Glyphs.audio, "Audio", m, label = if (labels) "Audio" else null) { onMenu(Menu.Audio) }
-                    CtlButton(Glyphs.quality, "Quality", m, label = if (labels) "Quality" else null) { onMenu(Menu.Quality) }
-                    CtlButton(Glyphs.subtitles, "Subtitles", m, label = if (labels) "Subtitles" else null) { onMenu(Menu.Subtitles) }
+                    CtlButton(Glyphs.server, "Server", m, modifier = anchor(Menu.Server), label = if (labels) "Server" else null) { onMenu(Menu.Server) }
+                    CtlButton(Glyphs.audio, "Audio", m, modifier = anchor(Menu.Audio), label = if (labels) "Audio" else null) { onMenu(Menu.Audio) }
+                    CtlButton(Glyphs.quality, "Quality", m, modifier = anchor(Menu.Quality), label = if (labels) "Quality" else null) { onMenu(Menu.Quality) }
+                    CtlButton(Glyphs.subtitles, "Subtitles", m, modifier = anchor(Menu.Subtitles), label = if (labels) "Subtitles" else null) { onMenu(Menu.Subtitles) }
                     // Picture fit: one press cycles Fit, Fill, Stretch; the label names the current mode.
                     // Phone only (owner, 1.1.3): a TV is already full screen and the remote has no use for it.
                     if (!isTv) CtlButton(
@@ -776,7 +788,7 @@ fun PillButton(text: String, modifier: Modifier = Modifier, primary: Boolean = f
 }
 
 @Composable
-private fun MenuPanel(menu: Menu, items: List<MenuItem>, isTv: Boolean, titleOverride: String? = null, onUp: (() -> Unit)? = null, onClose: () -> Unit, onPick: (String) -> Unit) {
+private fun MenuPanel(menu: Menu, items: List<MenuItem>, isTv: Boolean, anchor: Rect? = null, titleOverride: String? = null, onUp: (() -> Unit)? = null, onClose: () -> Unit, onPick: (String) -> Unit) {
     val title = titleOverride ?: menu.title
     val icon = when (menu) { Menu.Server -> Glyphs.server; Menu.Audio -> Glyphs.audio; Menu.Quality -> Glyphs.quality; Menu.Subtitles -> Glyphs.subtitles }
     val first = remember(title) { FocusRequester() }
@@ -791,19 +803,34 @@ private fun MenuPanel(menu: Menu, items: List<MenuItem>, isTv: Boolean, titleOve
         android.util.Log.i("Chitram", "[back] menupanel up=${onUp != null}")
         (onUp ?: onClose)()
     }
-    BoxWithConstraints(
-        Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.4f))
+    // Plain Box, not BoxWithConstraints: on device the subcomposed rows kept drawing the old level after a tap
+    // or Back changed state (the BackHandler outside saw the new level), so taps and Back looked dead.
+    val screen = LocalConfiguration.current
+    val screenW = screen.screenWidthDp.toFloat().coerceAtLeast(1f)
+    // Phone landscape with a known button: a popover just above that button (YouTube/Netflix style).
+    val anchored = anchor != null && !isTv && screen.screenWidthDp > screen.screenHeightDp
+    Box(
+        Modifier.fillMaxSize().background(Color.Black.copy(alpha = if (anchored) 0.2f else 0.4f))
             .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClose),
-        contentAlignment = Alignment.CenterEnd,
+        contentAlignment = Alignment.Center,
     ) {
-        val layout = playerMenuLayout(maxWidth.value, maxHeight.value, isTv)
+        val layout = playerMenuLayout(screenW, screen.screenHeightDp.toFloat().coerceAtLeast(1f), isTv)
         val shape = if (layout.bottomSheet) RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp) else if (isTv) RoundedCornerShape(0.dp) else Tok.radiusLg
         Column(
-            Modifier.align(if (layout.bottomSheet) Alignment.BottomCenter else Alignment.CenterEnd)
-                .padding(layout.inset.dp)
+            // TV keeps its right-edge panel; the phone landscape panel opens centred over the video.
+            (if (anchored) Modifier.layout { measurable, c ->
+                // Centre on the button, keep inside the screen, bottom edge 8dp above the button.
+                val margin = layout.inset.dp.roundToPx()
+                val bottom = (anchor!!.top - 8.dp.toPx()).roundToInt()
+                val p = measurable.measure(c.copy(minWidth = 0, minHeight = 0, maxHeight = minOf(c.maxHeight, (bottom - margin).coerceAtLeast(0))))
+                val x = (anchor.center.x - p.width / 2f).roundToInt().coerceIn(margin, (c.maxWidth - p.width - margin).coerceAtLeast(margin))
+                val y = (bottom - p.height).coerceAtLeast(margin)
+                layout(c.maxWidth, c.maxHeight) { p.place(x, y) }
+            } else Modifier.align(if (layout.bottomSheet) Alignment.BottomCenter else if (isTv) Alignment.CenterEnd else Alignment.Center)
+                .padding(layout.inset.dp))
                 // Phone side panel sizes to its widest row; TV and the portrait bottom sheet keep fixed widths.
                 .then(if (isTv || layout.bottomSheet) Modifier.width(layout.width.dp)
-                    else Modifier.widthIn(min = 200.dp, max = minOf(360f, maxWidth.value - layout.inset * 2).dp).width(IntrinsicSize.Max))
+                    else Modifier.widthIn(min = 200.dp, max = minOf(360f, screenW - layout.inset * 2).dp).width(IntrinsicSize.Max))
                 .heightIn(max = layout.height.dp)
                 .clip(shape).background(Tok.surfaceSolid).border(1.dp, Tok.border, shape)
                 .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { }
