@@ -112,6 +112,10 @@ img{display:block;max-width:100%}
 /* Content fades in once loaded, so the swap reads as an arrival
    rather than a flash. Staggered per card via --i. */
 .enter{animation:fade-in .34s var(--ease) both;animation-delay:calc(var(--i,0)*38ms)}
+/* On a TV the per-card stagger reaches ~0.8s down a row and replays on every
+   remount (returning to a page, a row re-rendering), so cards read as blank
+   while they fade. Show them at once there: no stagger, a quick fade. */
+html[data-tv="true"] .enter{animation-duration:.14s;animation-delay:0s}
 
 /* Indeterminate progress for long operations (cold resolve is 6-38s).
    A bar that MOVES is the difference between "working" and "stuck". */

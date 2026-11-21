@@ -283,8 +283,12 @@ export function initDpad() {
       // Remember where we were BEFORE moving, so coming back restores it.
       if (group) memory.set(group, active);
       // preventScroll: a plain focus() scrolled the page instantly before the
-      // smooth scroll below ran, so the focus jumped instead of gliding.
+      // scroll below ran, so the focus jumped instead of gliding.
       next.focus({ preventScroll: true });
+      // On a TV, smooth scroll is sluggish - the page glides for a beat after
+      // each press and the moved focus reads as "nothing selected, just
+      // scrolling". Scroll instantly there; keep the glide on desktop/phone.
+      const behavior = isTv() ? 'auto' : 'smooth';
       // TV title page: the hero (Back, title, Play, My List) is the top of the
       // page. 'nearest' only scrolled Play to the viewport's top edge, so
       // coming back up from Cast left the backdrop and title cut off. Show the
@@ -293,9 +297,9 @@ export function initDpad() {
       // header and the top of the backdrop off-screen (the APK scrolls fully
       // to the top here, and so does this).
       if (isTv() && next.closest('.detail .hero, .detail-back, .home-hero')) {
-        window.scrollTo({ top: 0, left: 0, behavior: 'smooth' });
+        window.scrollTo({ top: 0, left: 0, behavior });
       } else {
-        next.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'smooth' });
+        next.scrollIntoView({ block: 'nearest', inline: 'center', behavior });
       }
       e.preventDefault();
     }

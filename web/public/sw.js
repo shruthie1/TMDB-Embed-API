@@ -285,13 +285,14 @@ async function cacheFirstImage(event) {
   const hit = await cache.match(url);
   if (hit && ageOf(hit) < IMAGE_TTL_MS) return hit;
   try {
-    // cache: 'reload' skips the browser HTTP cache. image.tmdb.org sends
-    // access-control-allow-origin only when the request carries Origin, and
-    // no Vary: Origin. A poster an <img> loaded before the SW took control
-    // sits in the HTTP cache WITHOUT that header, so a CORS fetch served from
-    // it failed ("blocked by CORS policy") on every such image, doubling the
-    // requests. reload goes to the network with Origin and gets the header.
-    const response = await fetch(url, { mode: 'cors', credentials: 'omit', cache: 'reload' });
+    // Use the browser HTTP cache (no cache:'reload'). image.tmdb.org sends
+    // cache-control max-age ~1 year AND access-control-allow-origin:* on every
+    // response, Origin or not, so a CORS fetch served from the HTTP cache does
+    // not fail. 'reload' forced the network on every Cache-API miss, which
+    // blanked posters on low-memory TVs (an image evicted from memory re-hit
+    // the network instead of the year-long HTTP cache). The CORS doubling the
+    // old comment feared does not happen: the header is always present.
+    const response = await fetch(url, { mode: 'cors', credentials: 'omit' });
     if (cacheable(response)) {
       event.waitUntil(store(IMAGE_CACHE, url, response.clone(), IMAGE_MAX_ENTRIES));
       return response;
