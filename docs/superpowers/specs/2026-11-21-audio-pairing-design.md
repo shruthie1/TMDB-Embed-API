@@ -176,3 +176,46 @@ Recommendation: C, delivered in two steps so value lands early —
   - Success: "{lang} audio added from {server}."
   - Failure: "No server has working {lang} audio. Playback is unchanged."
   (Controller, 2026-11-21.)
+
+## Step 3 (owner decisions, 2026-11-21, binding)
+
+Plan: `docs/superpowers/plans/2026-11-21-audio-pairing-step3.md`.
+
+- D1. Entries follow "Your languages". "Add {lang} audio from another server"
+  shows only for a language the viewer picked in "Your languages" that the
+  playing stream lacks. Telugu first. No pick (Skip, or nothing stored) means
+  Telugu. Stored as web `localStorage['chitram:prefs:v1'].langs`
+  (`web/lib/prefs.js` `getPrefs`) and APK `LanguagePrefs` key `prefs:v1`
+  (`android/.../data/Store.kt:32`, `langs()`). This replaces the Step 2
+  "every missing language" entry rule above.
+- D2. The audio menu "Other servers" group lists only rows that carry one of
+  the viewer's languages. A row with no known language (shown as just "Audio")
+  is hidden. "In this stream" rows are never filtered. Every server stays
+  reachable from the server picker.
+- D3. Progressive mp4 picture (NetMirror hakunaymatata, showsst). APK pairs on
+  the device: `MergingMediaSource` of the mp4 video and the donor HLS audio
+  rendition, extending the Step 2 Task 6 on-device fallback. The duration gate
+  reads the mp4 length from the `moov/mvhd` box with ranged reads and keeps the
+  15 s tolerance. Web hides the Add entry while an mp4 picture plays. The
+  server answers an mp4 video half with its own 409 reason, not "could not be
+  read back".
+- D4. Server diagnostics. A failed pair logs each side's measured seconds,
+  upstream HTTP status and content type. Each gate branch logs one greppable
+  `[pair-gate]` line. `/ts-proxy` wrappers unwrap like `/m3u8-proxy`, so
+  `missingHeaders` is true only when headers are really missing. The double
+  negative "neither source could not be read back" is fixed.
+- D5. Cut mismatch. When the two lengths differ beyond 15 s, the server
+  measures the real offset instead of refusing: it decodes short low-rate mono
+  windows of the picture's own audio and of the donor audio near the start,
+  cross-correlates their loudness envelopes, then checks a middle point and a
+  point near the end. All three agree within 1 s: pair at that offset (covers
+  extra content at the start, the end, or both). They disagree: refuse with
+  "different cut". The duration-match path (delta 15 s or less) is unchanged
+  and never measures. The measurement fits inside the 15 s per-try cap.
+  Movie 1511417 (video 13506 s, audio 13434 s, TMDB 13440 s) was refused
+  although the padded rule allows it; the first server task reproduces it.
+- D6. Stream-down recovery is in scope (source:
+  `.superpowers/sdd/2026-11-21-audio-pairing-step2/offline-stuck-rca.md`).
+- Unchanged: caps 3 donors, 15 s per try, 30 s total; copy byte-equal on web
+  and APK (`…` is U+2026); never drop an audio, video or language tag; Telugu
+  first; never auto-pair; donor checked on tap only.

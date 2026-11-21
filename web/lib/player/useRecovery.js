@@ -29,7 +29,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 const STAGES = { buffering: 2500, recovering: 12000, switching: 25000, stuck: 40000 };
 const PROGRESS_WINDOW_MS = 6000;
 
-export function useRecovery({ videoRef, hlsRef, stream, onReResolve }) {
+export function useRecovery({ videoRef, hlsRef, stream, onReResolve, online = true, titleKey }) {
   const [stallStage, setStallStage] = useState(null);
   // A boolean, not a timestamp: `stallSince` was tested for truthiness, so
   // a Date.now() of 0 read as 'not stalling' and every repeated `waiting`
@@ -42,11 +42,35 @@ export function useRecovery({ videoRef, hlsRef, stream, onReResolve }) {
   const reResolves = useRef(0);
   const cb = useRef(onReResolve);
   cb.current = onReResolve;
+  // While offline the ladder holds at 'switching': an outage is not a dead
+  // source, and failing over then marked every source dead.
+  const onlineRef = useRef(online);
+  onlineRef.current = online;
+  // Set by the ladder effect: restarts a stall's ladder from zero.
+  const restart = useRef(null);
 
   /** Call from hls.js FRAG_LOAD_PROGRESS so the ladder can see real bytes. */
   const noteProgress = useCallback(() => { fragProgress.current = Date.now(); }, []);
 
-  useEffect(() => { reResolves.current = 0; }, [stream]);
+  // A new stream starts a fresh ladder. The stall latch used to survive a
+  // stream swap that did not call clearStall (resolve.load(true), a revert),
+  // so the next stream's `waiting` returned early, no timer was armed, and a
+  // dead re-resolved stream showed the spinner forever.
+  //
+  // The re-resolve cap is NOT reset here: a re-resolve itself swaps the
+  // stream, so a per-stream count never reached 2 and a dead upstream ran a
+  // refresh=1 fan-out every 25s forever. It resets on a new title, or when a
+  // stream really plays (`playing`).
+  useEffect(() => {
+    stalling.current = false;
+    setStallStage(null);
+  }, [stream]);
+  useEffect(() => { reResolves.current = 0; }, [titleKey]);
+
+  // Connection back during a held stall: run the ladder again from zero.
+  useEffect(() => {
+    if (online && stalling.current) restart.current?.();
+  }, [online]);
 
   useEffect(() => {
     const v = videoRef.current;
@@ -77,6 +101,7 @@ export function useRecovery({ videoRef, hlsRef, stream, onReResolve }) {
 
       timers.push(setTimeout(() => {
         if (downloading()) { setStallStage('buffering'); return; }
+        if (!onlineRef.current) { setStallStage('switching'); return; }  // hold
         const started = v.currentTime > 0.5;
         if (reResolves.current < 2) {
           reResolves.current += 1;
@@ -88,20 +113,24 @@ export function useRecovery({ videoRef, hlsRef, stream, onReResolve }) {
       }, STAGES.switching * patience));
 
       timers.push(setTimeout(() => {
+        if (!onlineRef.current) return;          // held at 'switching'
         if (!downloading()) setStallStage('stuck');
       }, STAGES.stuck * patience));
     };
+    restart.current = () => { clearAll(); stalling.current = false; on(); };
 
     const off = () => { clearAll(); stalling.current = false; setStallStage(null); };
+    const played = () => { reResolves.current = 0; off(); };
 
     v.addEventListener('waiting', on);
     v.addEventListener('stalled', on);
-    v.addEventListener('playing', off);
+    v.addEventListener('playing', played);
     v.addEventListener('canplay', off);
     return () => {
       clearAll();
+      restart.current = null;
       v.removeEventListener('waiting', on); v.removeEventListener('stalled', on);
-      v.removeEventListener('playing', off); v.removeEventListener('canplay', off);
+      v.removeEventListener('playing', played); v.removeEventListener('canplay', off);
     };
   }, [stream, videoRef, hlsRef]);
 

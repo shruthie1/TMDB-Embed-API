@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { useState } from 'react';
 import { act, render } from '@testing-library/react';
 import { useRecovery } from '../../lib/player/useRecovery';
 
@@ -137,5 +138,103 @@ describe('useRecovery', () => {
     stall(video);
     jump(26000);
     expect(onReResolve).toHaveBeenCalledWith({ startup: true });
+  });
+  it('escalates again after a stream swap', () => {
+    // A re-resolved stream (resolve.load(true)) arrives without clearStall.
+    // The latch from the dead stream kept the ladder from ever running again,
+    // so the viewer saw "Trying another source…" and a spinner forever.
+    const onReResolve = vi.fn();
+    const api = {};
+    const video = document.createElement('video');
+    Object.defineProperty(video, 'currentTime', { value: 30, writable: true });
+    const hlsRef = { current: { bandwidthEstimate: 8_000_000, startLoad: vi.fn() } };
+    const videoRef = { current: video };   // stable, as in the component
+    function Probe({ stream }){ Object.assign(api, useRecovery({ videoRef,
+      hlsRef, stream, onReResolve })); return null; }
+    const { rerender } = render(<Probe stream={STREAM} />);
+    stall(video);
+    jump(26000);
+    expect(api.stallStage).toBe('switching');
+    expect(onReResolve).toHaveBeenCalledTimes(1);
+    rerender(<Probe stream={{ masterUrl: 'y' }} />);
+    stall(video);
+    jump(26000);
+    expect(onReResolve).toHaveBeenCalledTimes(2);
+    jump(14000);                       // 40s after the swap
+    expect(api.stallStage).toBe('stuck');
+  });
+
+  it('holds the ladder offline', () => {
+    // An outage must not fail over: every switched-in source fails offline
+    // too, so each one was marked dead and the viewer ended on an error.
+    const onReResolve = vi.fn();
+    const api = {};
+    const video = document.createElement('video');
+    Object.defineProperty(video, 'currentTime', { value: 30, writable: true });
+    const hlsRef = { current: { bandwidthEstimate: 8_000_000, startLoad: vi.fn() } };
+    const videoRef = { current: video };
+    function Probe({ online }){ Object.assign(api, useRecovery({ videoRef,
+      hlsRef, stream: STREAM, onReResolve, online })); return null; }
+    const { rerender } = render(<Probe online={false} />);
+    stall(video);
+    jump(60000);
+    expect(onReResolve).toHaveBeenCalledTimes(0);
+    expect(api.stallStage).toBe('switching');
+    rerender(<Probe online />);
+    jump(26000);
+    expect(onReResolve).toHaveBeenCalledTimes(1);
+  });
+  it('caps re-resolves even when each re-resolve swaps the stream', () => {
+    // resolve.load(true) hands back a NEW stream object. Counting per stream
+    // reset the cap on every swap: a dead upstream re-resolved (refresh=1)
+    // every 25s forever and the stuck buttons never stayed up.
+    const api = {};
+    const video = document.createElement('video');
+    Object.defineProperty(video, 'currentTime', { value: 30, writable: true });
+    const videoRef = { current: video };
+    const hlsRef = { current: { bandwidthEstimate: 8_000_000, startLoad: vi.fn() } };
+    const swap = { current: null };
+    const onReResolve = vi.fn(() => swap.current());
+    function Probe(){
+      const [stream, setStream] = useState({ masterUrl: 's0' });
+      swap.current = () => setStream({ masterUrl: `s${Math.random()}` });
+      Object.assign(api, useRecovery({ videoRef, hlsRef, stream, onReResolve, titleKey: 'movie:1' }));
+      return null;
+    }
+    render(<Probe />);
+    for (let i = 0; i < 4; i++) { stall(video); jump(26000); }
+    expect(onReResolve).toHaveBeenCalledTimes(2);
+    expect(api.stallStage).toBe('stuck');
+    jump(120000);
+    expect(onReResolve).toHaveBeenCalledTimes(2);
+    expect(api.stallStage).toBe('stuck');
+  });
+
+  it('a successful play or a new title gives the ladder its re-resolves back', () => {
+    const api = {};
+    const video = document.createElement('video');
+    Object.defineProperty(video, 'currentTime', { value: 30, writable: true });
+    const videoRef = { current: video };
+    const hlsRef = { current: { bandwidthEstimate: 8_000_000, startLoad: vi.fn() } };
+    const onReResolve = vi.fn();
+    function Probe({ stream, titleKey }){ Object.assign(api, useRecovery({ videoRef,
+      hlsRef, stream, onReResolve, titleKey })); return null; }
+    const { rerender } = render(<Probe stream={{ a: 1 }} titleKey="movie:1" />);
+    stall(video); jump(26000);
+    rerender(<Probe stream={{ a: 2 }} titleKey="movie:1" />);
+    stall(video); jump(26000);
+    expect(onReResolve).toHaveBeenCalledTimes(2);
+    act(() => { video.dispatchEvent(new Event('playing')); });
+    stall(video); jump(26000);
+    expect(onReResolve).toHaveBeenCalledTimes(3);
+    rerender(<Probe stream={{ a: 3 }} titleKey="movie:1" />);
+    stall(video); jump(26000);
+    expect(onReResolve).toHaveBeenCalledTimes(4);
+    rerender(<Probe stream={{ a: 4 }} titleKey="movie:1" />);
+    stall(video); jump(26000);
+    expect(onReResolve).toHaveBeenCalledTimes(4);   // cap reached
+    rerender(<Probe stream={{ a: 5 }} titleKey="tv:2:1:1" />);
+    stall(video); jump(26000);
+    expect(onReResolve).toHaveBeenCalledTimes(5);   // new title
   });
 });

@@ -29,12 +29,33 @@ object FailPolicy {
 
     fun hasDeviceTwin(provider: String?): Boolean = provider?.lowercase() in DEVICE_TWINS
 
-    fun onError(source: Source?, httpCode: Int?, refreshedOnce: Boolean, deviceRetried: Boolean = false, offline: Boolean = false, twinTried: Boolean = false, languageSelection: Boolean = false): Action = when {
-        offline -> Action.WAIT_ONLINE
+    /**
+     * `serverReplied`: the error carries an HTTP response (ERROR_CODE_IO_BAD_HTTP_STATUS,
+     * InvalidResponseCodeException). A reply proves the network works, so it is
+     * the source's failure, never WAIT_ONLINE, whatever the offline reading says.
+     */
+    fun onError(source: Source?, httpCode: Int?, refreshedOnce: Boolean, deviceRetried: Boolean = false, offline: Boolean = false, twinTried: Boolean = false, languageSelection: Boolean = false, serverReplied: Boolean = httpCode != null): Action = when {
+        offline && !serverReplied -> Action.WAIT_ONLINE
         source?.onDevice != null -> if (deviceRetried) Action.FAILOVER else Action.RERESOLVE
         hasDeviceTwin(source?.provider) && !twinTried -> Action.DEVICE
         languageSelection -> Action.FAILOVER
         (httpCode == 403 || httpCode == 410) && !refreshedOnce -> Action.REFRESH
         else -> Action.FAILOVER
+    }
+
+    enum class ResolveMiss { GO_OFFLINE, FAIL_OVER }
+
+    /** A device re-resolve that found nothing: offline, wait for the network instead of burning the list. */
+    fun onResolveMiss(offline: Boolean): ResolveMiss = if (offline) ResolveMiss.GO_OFFLINE else ResolveMiss.FAIL_OVER
+
+    /**
+     * Does the network coming back restart playback? `phase`: "playing", "failed" or other.
+     * Playing resumes (prepare + play); "Every source failed" reached while
+     * offline re-resolves from the saved position. A failure reached online stays.
+     */
+    fun backOnlineRetries(phase: String, failedWhileOffline: Boolean): Boolean = when (phase) {
+        "playing" -> true
+        "failed" -> failedWhileOffline
+        else -> false
     }
 }

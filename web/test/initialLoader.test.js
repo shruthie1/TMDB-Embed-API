@@ -70,7 +70,7 @@ describe('manual recovery uses the validated ladder', () => {
     // lib/player/fatalPolicy.js.
     const sw = src.slice(src.indexOf('const recoverBySwitching'), src.indexOf('recoverBySwitchingRef.current = recoverBySwitching'));
     expect(sw).toMatch(/reportPlayback\(\{ \.\.\.reportCtx\.current, \.\.\.reportMetrics\(\), ok: false/);
-    const fatal = src.slice(src.indexOf('const onFatal'), src.indexOf('const onFatal') + 2000);
+    const fatal = src.slice(src.indexOf('const onFatal'), src.indexOf('const onFatal') + 2600);
     expect(fatal).toMatch(/fatalAction\(data\)/);
     expect(fatal).toMatch(/recoverBySwitching\(action\.reason\)/);
     const policy = readFileSync(fileURLToPath(new URL('../lib/player/fatalPolicy.js', import.meta.url)), 'utf8');

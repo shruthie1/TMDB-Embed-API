@@ -24,6 +24,7 @@ import useFocusTrap from './useFocusTrap';
 import { VA_EMBED_ID, vaEmbedChoice, shouldAutoEmbed } from '../lib/player/vaEmbed';
 import { markDead, nextAlive, qualityHeight } from '../lib/player/deadSources';
 import { fatalAction } from '../lib/player/fatalPolicy';
+import { canFailOver, offlineAction, retryResumeAt } from '../lib/player/offlineRecovery';
 import { runtimeVerdict } from '../lib/player/runtimeCheck';
 import {
   SWITCH_HARD_MS, SWITCH_TICK_MS, advanceNotice, advanceTarget, beginSourceSwitch, hasLife, tickSourceSwitch,
@@ -81,6 +82,9 @@ function seekBy(video, d) {
   video.currentTime = Math.max(0, Math.min(video.duration, video.currentTime + d));
 }
 
+// The offline banner's words, also used by the error card an outage leaves.
+const OFFLINE_MESSAGE = "You're offline. Playback will resume when the connection returns.";
+
 export default function Player({ title, startAt = 0, season = 0, episode = 0,
                                  epTitle = null, onClose, onNext }) {
   const videoRef = useRef(null);
@@ -122,6 +126,8 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   // Position to restore across a source switch, so swapping provider never
   // costs your place in the film.
   const resumeAt = useRef(0);
+  // Last position that played in this title, for a Retry after the element reset.
+  const lastPlayedAtRef = useRef(0);
   // The stream that fired `playing`, so a frame from the OLD stream can never
   // count as a server switch landing (see startSourceSwitch).
   const playedStreamRef = useRef(null);
@@ -132,6 +138,13 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   const { stream, sources, currentSource, currentSourceId, sourcesPending, error,
           mergeSources } = resolve;
   const online = useNetworkStatus();
+  // True when the error on screen was set while offline: the connection
+  // coming back then retries everything (offlineAction 'retryAll').
+  const errorWhileOfflineRef = useRef(false);
+  const onlineRef = useRef(online);
+  onlineRef.current = online;
+  // Declared with the end card below; the online effect reaches it here.
+  const retryAllRef = useRef(null);
 
   const isTv = title.mediaType === 'tv' && episode > 0;
   const epTag = isTv ? `S${season}E${episode}` : null;
@@ -432,6 +445,13 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     // A server switch in flight that failed outright: drop that server and
     // move on to the next alive one (same language first), as the timeout does.
     const fa = fatalAction(data);
+    // Offline, every source fails the same way. Blame none of them: end any
+    // switch being judged, show the offline note, and retry on 'online'.
+    if (fa.failover && !canFailOver(globalThis.navigator?.onLine)) {
+      failSwitchRef.current?.('offline');
+      resolve.setError({ message: OFFLINE_MESSAGE });
+      return;
+    }
     pendingReasonRef.current = reasonFromText(fa.kind);
     if (fa.failover && failSwitchRef.current?.(fa.reason || fa.kind)) return;
     if (switchGuard.fail()) return;
@@ -571,11 +591,21 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   // its last fragment. Nudge it once, and retry playback if the element was
   // paused by the outage. This is intentionally best-effort; the normal HLS
   // recovery ladder still owns provider switching.
+  // Record whether an error appeared while offline (any producer: onFatal,
+  // failSwitch, a resolve that failed offline).
   useEffect(() => {
-    if (!online || !stream) return;
+    errorWhileOfflineRef.current = Boolean(error)
+      && (!onlineRef.current || !canFailOver(globalThis.navigator?.onLine));
+  }, [error]);
+
+  useEffect(() => {
+    const act = offlineAction({ online, error, errorWhileOffline: errorWhileOfflineRef.current });
+    // The error card came from the outage: retry everything now it is back.
+    if (act === 'retryAll') { errorWhileOfflineRef.current = false; retryAllRef.current?.(); return; }
+    if (act !== 'nudge' || !stream) return;
     try { hls.hlsRef.current?.startLoad?.(); } catch { /* hls may be tearing down */ }
     const v = videoRef.current;
-    if (v?.paused && !error) v.play().catch(() => {});
+    if (v?.paused) v.play().catch(() => {});
   }, [online, stream, error, hls.hlsRef]);
 
   const retryNetwork = useCallback(() => {
@@ -616,7 +646,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   }, [onTvDevice, stream, hls.levels]);
 
   const recovery = useRecovery({
-    videoRef, hlsRef: hls.hlsRef, stream,
+    videoRef, hlsRef: hls.hlsRef, stream, online, titleKey,
     // A STALL is a dead source too, so take the same route a 403 does:
     // switch to another provider first, and only re-resolve if this was the
     // last one we had.
@@ -633,6 +663,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     // left, the ladder's own 'stuck' stage offers the manual escape instead
     // of a refresh=1 fan-out every 25s against rate-limited providers.
     onReResolve: ({ startup = false } = {}) => {
+      if (!canFailOver(globalThis.navigator?.onLine)) return;  // outage, not a dead source
       playbackStats.current.recoveries += 1;
       if (!recoverBySwitching(startup ? 'startup stall' : 'stall') && !startup) resolve.load(true);
     },
@@ -1158,6 +1189,16 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     beginAttempt(videoIdOf(id, sourceListRef.current) ?? id);
   }, [stream, beginAttempt]);
 
+  // Remember the last position that played (retryResumeAt). A new title starts at 0.
+  useEffect(() => { lastPlayedAtRef.current = 0; }, [titleKey]);
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const note = () => { if (v.currentTime > 0) lastPlayedAtRef.current = v.currentTime; };
+    v.addEventListener('timeupdate', note);
+    return () => v.removeEventListener('timeupdate', note);
+  }, [stream]);
+
   // Seek to the resume point once the media is ready. A pending source switch
   // wins over the initial position.
   useEffect(() => {
@@ -1298,7 +1339,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       const alternate = sourceListRef.current.find(
         s => s.masterUrl && s.provider !== currentSourceRef.current,
       );
-      if (!alternate) return;
+      if (!alternate || !canFailOver(globalThis.navigator?.onLine)) return;
       startupFallbackUsedRef.current = true;
       recoverBySwitchingRef.current?.('startup timeout');
     }, STARTUP_SWITCH_MS);
@@ -1553,6 +1594,9 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   failSwitchRef.current = (reason, uiReason = null, missingLang = null) => {
     const m = srcSwitch.current;
     if (!m) return false;
+    // Offline: the target is not dead, the network is. Stop judging the switch
+    // without marking it; the stall ladder holds and resumes on 'online'.
+    if (!canFailOver(globalThis.navigator?.onLine)) { endSourceSwitch(); return true; }
     closeAttempt(uiReason || pendingReasonRef.current || reasonFromText(reason));
     endSourceSwitch();
     // Advancing replaces the old "go back" revert for a server pick.
@@ -2003,8 +2047,11 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     firstListSizeRef.current = 0;
     pendingReasonRef.current = null;
     putAttempts([]);
+    // Resume where the viewer was, not at the original start point.
+    resumeAt.current = retryResumeAt(videoRef.current?.currentTime, lastPlayedAtRef.current);
     resolve.load(true);
   }, [resolve, putAttempts]);
+  retryAllRef.current = retryAll;
   // A row picked in Details plays at once, like the Servers menu. It ends a
   // switch still being judged (the viewer's pick wins over an automatic
   // advance), then goes through pickSource like every other manual pick, so
@@ -2205,7 +2252,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       {!online && !error && (
         <div className="pnetwork" role="alert" aria-live="assertive">
           <Icon name="offline" size={18} />
-          <span>You're offline. Playback will resume when the connection returns.</span>
+          <span>{OFFLINE_MESSAGE}</span>
           <button type="button" className="pnetwork-retry" onClick={retryNetwork}>Retry</button>
         </div>
       )}

@@ -216,6 +216,9 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     private var resumeOnReturn = false
     /** startMs of a resolve that could not run offline; replayed when the network returns. */
     private var pendingResolveMs: Long? = null
+    /** "Every source failed" was reached while offline: the network coming back re-resolves from [failedAtMs]. */
+    private var failedWhileOffline = false
+    private var failedAtMs = 0L
     private val cm: ConnectivityManager? = try { app.getSystemService(ConnectivityManager::class.java) } catch (_: Exception) { null }
     private val netCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) { viewModelScope.launch { if (offline) backOnline() } }
@@ -638,7 +641,9 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         val http = generateSequence<Throwable>(e) { it.cause }.filterIsInstance<HttpDataSource.InvalidResponseCodeException>().firstOrNull()
         val pos = player.currentPosition.coerceAtLeast(0)
         val cur = current
-        val action = FailPolicy.onError(cur, http?.responseCode, refreshedOnce, cur?.onDevice in reresolved, offline = offline || isOffline(), twinTried = cur?.provider?.lowercase() in twinTried, languageSelection = languageTrial != null)
+        val serverReplied = http != null || e.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS
+        val action = FailPolicy.onError(cur, http?.responseCode, refreshedOnce, cur?.onDevice in reresolved, offline = offline || isOffline(), twinTried = cur?.provider?.lowercase() in twinTried, languageSelection = languageTrial != null, serverReplied = serverReplied)
+        if (serverReplied && (offline || isOffline())) android.util.Log.i("Chitram", "[offline] ${cur?.provider}: ${e.errorCodeName} http=${http?.responseCode} server replied, not offline -> $action")
         val why = LoadingModel.reasonFor(http?.responseCode, decoder = e.errorCode in 4000..4999)
         if (action == FailPolicy.Action.WAIT_ONLINE) {
             android.util.Log.i("Chitram", "[offline] ${cur?.provider}: ${e.errorCodeName} while offline, waiting")
@@ -765,7 +770,10 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             val eligible = languageTrial?.let { AudioChoice.candidates(rows, it, tried) } ?: rows
             val fresh = eligible.find { it.id == s.id } ?: Ranking.rank(eligible, desiredAudio()).firstOrNull { it.id !in tried }
             if (request != r) return@launch
-            if (fresh == null) { failover("$reason, re-resolve failed", pos, why); return@launch }
+            if (fresh == null) {
+                if (FailPolicy.onResolveMiss(isOffline()) == FailPolicy.ResolveMiss.GO_OFFLINE) { resolveMissOffline(s, pos); return@launch }
+                failover("$reason, re-resolve failed", pos, why); return@launch
+            }
             if (why == LoadingModel.Reason.NO_ANSWER && FailPolicy.unchangedNetmirrorRetry(s, fresh)) {
                 android.util.Log.i("Chitram", "netmirror: unchanged CDN target after timeout; advancing instead of reattaching")
                 failover("NetMirror CDN did not respond", pos, why)
@@ -810,6 +818,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             val eligible = languageTrial?.let { AudioChoice.candidates(rows, it, tried) } ?: rows
             val fresh = Ranking.rank(eligible, desiredAudio()).firstOrNull { it.id !in tried }
             if (request != r) return@launch
+            if (fresh == null && FailPolicy.onResolveMiss(isOffline()) == FailPolicy.ResolveMiss.GO_OFFLINE) { resolveMissOffline(s, pos); return@launch }
             if (fresh == null || fresh.id in tried) { failover("$reason, device resolve failed", pos, why); return@launch }
             endAttempt(LoadingModel.RowState.FAILED, why)
             tried += s.id
@@ -850,8 +859,15 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             }
         }
         if (next == null) {
-            phase = Phase.Failed("Every source failed. Last: $reason")
+            failedWhileOffline = isOffline()
+            failedAtMs = pos
+            // Offline, every row fails the same way: say offline, and retry when it returns.
+            phase = Phase.Failed(if (failedWhileOffline) OFFLINE_TEXT else "Every source failed. Last: $reason")
             player.stop()
+            if (failedWhileOffline) {
+                android.util.Log.i("Chitram", "[offline] every source failed while offline, waiting to retry at ${pos}ms")
+                goOffline()
+            }
             return
         }
         android.util.Log.i("Chitram", "failover: $reason -> ${next.provider} (lang ${ctxLang ?: "preferred"}, ${ctxHeight ?: "-"}p)")
@@ -952,8 +968,17 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     private fun isOffline(): Boolean = try {
         val c = cm
         if (c == null) false else {
-            val n = c.activeNetwork
-            n == null || c.getNetworkCapabilities(n)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) != true
+            fun caps(n: Network?): NetCaps? = n?.let { c.getNetworkCapabilities(it) }?.let {
+                NetCaps(
+                    internet = it.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET),
+                    vpn = it.hasTransport(NetworkCapabilities.TRANSPORT_VPN),
+                )
+            }
+            val active = caps(c.activeNetwork)
+            // allNetworks is only needed for a VPN without INTERNET (API 21+; deprecated at 31, still works).
+            @Suppress("DEPRECATION")
+            val all = if (active?.vpn == true && !active.internet) c.allNetworks.mapNotNull { caps(it) } else emptyList()
+            !NetState.online(active, all)
         }
     } catch (_: Exception) { false }
 
@@ -969,12 +994,30 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         android.util.Log.i("Chitram", "[offline] paused ${current?.provider ?: "resolve"}")
     }
 
+    /** A device re-resolve found nothing because the device is offline: wait, do not fail over. */
+    private fun resolveMissOffline(s: Source, pos: Long) {
+        android.util.Log.i("Chitram", "[offline] ${s.provider}: re-resolve found nothing while offline, waiting")
+        pendingResolveMs = pos
+        goOffline()
+    }
+
     private fun backOnline() {
         offline = false
         notice = ""
         android.util.Log.i("Chitram", "[offline] back online")
         pendingResolveMs?.let { ms -> pendingResolveMs = null; resolve(refresh = false, keepProvider = null, startMs = ms); return }
-        if (phase != Phase.Playing) return
+        val phaseName = when (phase) { Phase.Playing -> "playing"; is Phase.Failed -> "failed"; else -> "other" }
+        if (!FailPolicy.backOnlineRetries(phaseName, failedWhileOffline)) return
+        if (phase is Phase.Failed) {
+            // Reached "Every source failed" offline: nothing was the servers' fault. Fresh start, same spot.
+            failedWhileOffline = false
+            android.util.Log.i("Chitram", "[offline] back online after offline failure, re-resolving at ${failedAtMs}ms")
+            tried.clear()
+            refreshedOnce = false
+            resetStart()
+            resolve(refresh = LoadingModel.retryPlan(failed = true).refresh, keepProvider = null, startMs = failedAtMs)
+            return
+        }
         stallSince = 0
         playStartedAt = System.currentTimeMillis()
         if (player.playerError != null || player.playbackState == Player.STATE_IDLE) player.prepare()
@@ -1079,6 +1122,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         guardJob?.cancel()
         subsJob?.cancel()
         pendingResolveMs = null
+        failedWhileOffline = false
         offline = false
         switching = false
         player.stop()
