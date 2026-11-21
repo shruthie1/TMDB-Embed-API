@@ -16,6 +16,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -87,7 +88,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -787,17 +790,20 @@ fun PillButton(text: String, modifier: Modifier = Modifier, primary: Boolean = f
     }
 }
 
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 private fun MenuPanel(menu: Menu, items: List<MenuItem>, isTv: Boolean, anchor: Rect? = null, titleOverride: String? = null, onUp: (() -> Unit)? = null, onClose: () -> Unit, onPick: (String) -> Unit) {
     val title = titleOverride ?: menu.title
     val icon = when (menu) { Menu.Server -> Glyphs.server; Menu.Audio -> Glyphs.audio; Menu.Quality -> Glyphs.quality; Menu.Subtitles -> Glyphs.subtitles }
     val first = remember(title) { FocusRequester() }
+    val closeFocus = remember { FocusRequester() }
     val start = items.indexOfFirst { it.selected }.coerceAtLeast(0)
     val scroll = key(title) { rememberScrollState() }
     val scope = rememberCoroutineScope()
     var scrolledTo by remember(title) { mutableStateOf(false) }
     // TV only: on touch a focused row pulls the list back to it when late rows arrive (dead scroll).
-    LaunchedEffect(title) { if (isTv) runCatching { first.requestFocus() } }
+    // No rows (empty level): focus the close button so focus never stays on the control behind the scrim.
+    LaunchedEffect(title, items.isEmpty()) { if (isTv) runCatching { if (items.isEmpty()) closeFocus.requestFocus() else first.requestFocus() } }
     // Registered last, so the open sheet takes Back before the player does, whatever holds focus.
     BackHandler {
         android.util.Log.i("Chitram", "[back] menupanel up=${onUp != null}")
@@ -807,20 +813,23 @@ private fun MenuPanel(menu: Menu, items: List<MenuItem>, isTv: Boolean, anchor: 
     // or Back changed state (the BackHandler outside saw the new level), so taps and Back looked dead.
     val screen = LocalConfiguration.current
     val screenW = screen.screenWidthDp.toFloat().coerceAtLeast(1f)
-    // Phone landscape with a known button: a popover just above that button (YouTube/Netflix style).
-    val anchored = anchor != null && !isTv && screen.screenWidthDp > screen.screenHeightDp
+    // Phone landscape and TV with a known button: a popover just above that button (YouTube/Netflix style).
+    val anchored = menuAnchored(anchor != null, isTv, screenW, screen.screenHeightDp.toFloat())
+    val tvMenu = if (anchored && isTv) tvAnchoredMenu(screenW, screen.screenHeightDp.toFloat().coerceAtLeast(1f)) else null
     Box(
         Modifier.fillMaxSize().background(Color.Black.copy(alpha = if (anchored) 0.2f else 0.4f))
+            // The scrim closes on tap but never takes D-pad focus.
+            .focusProperties { canFocus = false }
             .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClose),
         contentAlignment = Alignment.Center,
     ) {
         val layout = playerMenuLayout(screenW, screen.screenHeightDp.toFloat().coerceAtLeast(1f), isTv)
-        val shape = if (layout.bottomSheet) RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp) else if (isTv) RoundedCornerShape(0.dp) else Tok.radiusLg
+        val shape = if (layout.bottomSheet) RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp) else if (isTv && !anchored) RoundedCornerShape(0.dp) else Tok.radiusLg
         Column(
-            // TV keeps its right-edge panel; the phone landscape panel opens centred over the video.
+            // Anchored (phone landscape, TV): just above its button. Otherwise TV keeps its right-edge panel.
             (if (anchored) Modifier.layout { measurable, c ->
                 // Centre on the button, keep inside the screen, bottom edge 8dp above the button.
-                val margin = layout.inset.dp.roundToPx()
+                val margin = (tvMenu?.margin ?: layout.inset).dp.roundToPx()
                 val bottom = (anchor!!.top - 8.dp.toPx()).roundToInt()
                 val p = measurable.measure(c.copy(minWidth = 0, minHeight = 0, maxHeight = minOf(c.maxHeight, (bottom - margin).coerceAtLeast(0))))
                 val x = (anchor.center.x - p.width / 2f).roundToInt().coerceIn(margin, (c.maxWidth - p.width - margin).coerceAtLeast(margin))
@@ -829,13 +838,17 @@ private fun MenuPanel(menu: Menu, items: List<MenuItem>, isTv: Boolean, anchor: 
             } else Modifier.align(if (layout.bottomSheet) Alignment.BottomCenter else if (isTv) Alignment.CenterEnd else Alignment.Center)
                 .padding(layout.inset.dp))
                 // Phone side panel sizes to its widest row; TV and the portrait bottom sheet keep fixed widths.
-                .then(if (isTv || layout.bottomSheet) Modifier.width(layout.width.dp)
+                .then(if (tvMenu != null) Modifier.widthIn(min = tvMenu.minWidth.dp, max = tvMenu.maxWidth.dp).width(IntrinsicSize.Max)
+                    else if (isTv || layout.bottomSheet) Modifier.width(layout.width.dp)
                     else Modifier.widthIn(min = 200.dp, max = minOf(360f, screenW - layout.inset * 2).dp).width(IntrinsicSize.Max))
-                .heightIn(max = layout.height.dp)
+                .heightIn(max = (tvMenu?.maxHeight ?: layout.height).dp)
                 .clip(shape).background(Tok.surfaceSolid).border(1.dp, Tok.border, shape)
+                .focusProperties { canFocus = false }
                 .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { }
+                // TV: D-pad focus stays inside the open sheet; the controls behind the scrim are unreachable.
+                .then(if (isTv) Modifier.focusProperties { exit = { FocusRequester.Cancel } }.focusGroup() else Modifier)
                 .windowInsetsPadding(WindowInsets.displayCutout.only(if (layout.bottomSheet) WindowInsetsSides.Bottom else WindowInsetsSides.End))
-                .padding(top = if (isTv) 24.dp else 0.dp),
+                .padding(top = if (isTv && !anchored) 24.dp else 0.dp),
         ) {
             if (layout.bottomSheet) Box(Modifier.fillMaxWidth().padding(top = 6.dp), contentAlignment = Alignment.Center) {
                 Box(Modifier.width(36.dp).height(4.dp).clip(Tok.pill).background(Tok.fill3))
@@ -849,7 +862,7 @@ private fun MenuPanel(menu: Menu, items: List<MenuItem>, isTv: Boolean, anchor: 
                 BasicText(title, style = TextStyle(color = Tok.text, fontSize = if (isTv) 20.sp else 14.sp, fontWeight = FontWeight.SemiBold), modifier = Modifier.weight(1f).padding(horizontal = if (isTv) 10.dp else 8.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
                 val closeSource = remember { MutableInteractionSource() }
                 val closeFocused by closeSource.collectIsFocusedAsState()
-                Box(Modifier.size(if (isTv) 48.dp else 40.dp).controlFocus(closeFocused, Tok.radiusMd)
+                Box(Modifier.size(if (isTv) 48.dp else 40.dp).focusRequester(closeFocus).controlFocus(closeFocused, Tok.radiusMd)
                     .clickable(interactionSource = closeSource, indication = null, onClick = onClose)
                     .semantics { contentDescription = "Close $title" }, contentAlignment = Alignment.Center) {
                     Icon(Glyphs.close, contentDescription = null, tint = if (closeFocused) Focus.ink else Tok.text, modifier = Modifier.size(headIcon))
