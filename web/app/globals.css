@@ -3182,20 +3182,16 @@ html .pctl-scrub:focus-visible,html .sync-bar:focus-visible{outline:none}
   border-color:transparent;color:transparent;box-shadow:none;text-shadow:none;pointer-events:none}
 @media (prefers-reduced-motion:reduce){ .skel:is(.btn,.badge){background-image:none} }
 
-/* ── Detail hero: art sits lower, dark fade at the top (owner, 2026-11-20) ──
-   The image is drawn in the content box, so padding-top drops it by
-   --hero-drop; the strip above it shows the page colour. The top fade runs
-   from the page colour at the image's top edge (no seam) through 70% to
-   clear 30% lower, behind the header.
-   Padding only (the box is border-box and absolutely placed), so no layout
-   moves. The APK detail screens (PhoneApp.kt, TvApp.kt) match this. */
-.hero{--hero-drop:calc(var(--hero-height) * .14);
-  --hero-top-fade:linear-gradient(to bottom,var(--color-bg) var(--hero-drop),rgb(var(--rgb-bg) / .7) calc(var(--hero-drop) + 6%),
-    transparent calc(var(--hero-drop) + 30%))}
-@media (max-width:559px){ .hero{--hero-drop:calc(var(--detail-band) * .15)} }
-.hero-art.page-backdrop:not(.skel){
-  padding-top:var(--hero-drop);background-origin:content-box;background-repeat:no-repeat;
-}
+/* ── Detail hero: short top fade (owner, 2026-11-21) ───────────────────────
+   The art starts at the page top, behind the header. One thin top fade: the
+   page colour at the very top edge, eased to clear by 10% of the art, so the
+   image shows right under the header with no dark band. The 11-20 drop (a
+   page-colour strip plus a 30% fade, with the header scrim on top) read as
+   a deep band. The header's own scrim is off here so it does not double the
+   fade. The APK TV detail (TvApp.kt TvDetail) matches the stops. */
+.hero{--hero-top-fade:linear-gradient(to bottom,var(--color-bg) 0%,rgb(var(--rgb-bg) / .6) 3%,
+    rgb(var(--rgb-bg) / .25) 6%,transparent 10%)}
+body:has(.hero-art) .topbar::before{opacity:0}
 .hero-art::after{
   background:
     var(--hero-top-fade),
