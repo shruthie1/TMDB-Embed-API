@@ -113,7 +113,7 @@ describe('the size presets', () => {
   it('makes Small genuinely small on a phone', () => {
     // The report: "small looks like medium". It was 0.8, putting Small 3.3px
     // under Medium - a step you cannot see.
-    const small = at(390, 0.62), medium = at(390, 0.82);
+    const small = at(390, SIZES[0].key), medium = at(390, SIZES[1].key);
     expect(medium - small).toBeGreaterThan(3);
     expect(small).toBeLessThan(medium * 0.85);
   });
@@ -122,7 +122,7 @@ describe('the size presets', () => {
     // The floor wraps the SCALED value. Before that it wrapped only the base,
     // and Small reached 8.9px on a 390px picture.
     for (const w of [390, 360, 320, 280]) {
-      expect(at(w, 0.62)).toBeGreaterThanOrEqual(10);
+      expect(at(w, SIZES[0].key)).toBeGreaterThanOrEqual(10);
     }
   });
 

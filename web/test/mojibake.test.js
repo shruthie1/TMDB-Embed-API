@@ -42,4 +42,19 @@ describe('fixMojibake', () => {
     const src = '1\r\n00:00:01,000 --> 00:00:02,000\r\nHello\r\n\r\n';
     expect(fixMojibake(src)).toBe(src);
   });
+
+  it('repairs a line the re-encoder guessed as Windows-1250', () => {
+    // OpenSubtitles' utf8 re-encoder sometimes picks cp1250: the music note
+    // E2 99 AA comes back as U+00E2 U+2122 U+015E. U+015E is not in cp1252.
+    expect(fixMojibake('â™Ş La la â™Ş')).toBe('♪ La la ♪');
+  });
+
+  it('repairs a cp1250 line whose lead char is outside the cp1252 range', () => {
+    // \u015b (C5 9B) read as cp1250 is U+0139 U+203A; seen in a live track.
+    expect(fixMojibake('-(sanskrit \u0139\u203aloka chanting)')).toBe('-(sanskrit \u015bloka chanting)');
+  });
+
+  it('keeps an already-correct accented line under the cp1250 retry', () => {
+    expect(fixMojibake('café Şule')).toBe('café Şule');
+  });
 });

@@ -271,7 +271,7 @@ const CP1252_TO_BYTE = new Map([
 ]);
 
 export function fixMojibake(text) {
-  if (!text || !MOJIBAKE.test(text)) return text;
+  if (!text || !looksMangled(text)) return text;
   // Per LINE, not per file. Strict decoding is what makes this safe - it
   // rejects text that was not produced by this mis-decode - but one stray byte
   // anywhere then vetoed the whole track: measured on a 176KB Jawan track,
@@ -280,18 +280,56 @@ export function fixMojibake(text) {
   return text.split('\n').map(repairLine).join('\n');
 }
 
-function repairLine(line) {
-  if (!MOJIBAKE.test(line)) return line;
+// OpenSubtitles' utf8 re-encoder sometimes guesses Windows-1250 instead:
+// the music note E2 99 AA comes back as U+00E2 U+2122 U+015E, and U+015E is
+// not in cp1252. Reverse map built once; bytes 1250 leaves undefined are skipped.
+const CP1250_TO_BYTE = (() => {
+  const map = new Map();
   try {
-    const bytes = new Uint8Array([...line].map((ch) => {
-      const code = CP1252_TO_BYTE.get(ch) ?? ch.codePointAt(0);
-      // Not representable in cp1252, so this line was not produced by the
-      // mis-decode we are undoing. Bail out and keep it exactly as it is.
-      if (code > 0xff) throw new Error('not cp1252');
-      return code;
-    }));
-    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-  } catch {
+    const dec = new TextDecoder('windows-1250', { fatal: true });
+    for (let b = 0x80; b <= 0xff; b++) {
+      try { map.set(dec.decode(new Uint8Array([b])), b); } catch { /* undefined in 1250 */ }
+    }
+  } catch { /* no windows-1250 decoder: cp1252 only */ }
+  return map;
+})();
+
+function roundTrip(line, table) {
+  const bytes = new Uint8Array([...line].map((ch) => {
+    const code = table.get(ch) ?? ch.codePointAt(0);
+    // Not representable in this code page, so the line was not produced by
+    // the mis-decode we are undoing.
+    if (code > 0xff) throw new Error('not in code page');
+    // Latin-1 code points the code page maps elsewhere would round-trip wrong.
+    if (code >= 0x80 && code <= 0xff && !table.has(ch) && table === CP1250_TO_BYTE) throw new Error('not cp1250');
+    return code;
+  }));
+  return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+}
+
+// The cp1250 shape of the same bug: a UTF-8 lead byte (C2-F4) followed by a
+// continuation byte (80-BF), both read as cp1250. `\u015b` (C5 9B) becomes
+// U+0139 U+203A, and U+0139 is outside MOJIBAKE's first class.
+const MOJIBAKE_1250 = (() => {
+  if (!CP1250_TO_BYTE.size) return null;
+  const esc = ch => '\\u' + ch.codePointAt(0).toString(16).padStart(4, '0');
+  const lead = [], cont = [];
+  for (const [ch, b] of CP1250_TO_BYTE) {
+    if (b >= 0xc2 && b <= 0xf4) lead.push(esc(ch));
+    if (b >= 0x80 && b <= 0xbf) cont.push(esc(ch));
+  }
+  return new RegExp(`[${lead.join('')}][${cont.join('')}]`);
+})();
+
+function looksMangled(s) {
+  return MOJIBAKE.test(s) || (MOJIBAKE_1250 != null && MOJIBAKE_1250.test(s));
+}
+
+function repairLine(line) {
+  if (!looksMangled(line)) return line;
+  try { return roundTrip(line, CP1252_TO_BYTE); } catch { /* try cp1250 */ }
+  if (!CP1250_TO_BYTE.size) return line;
+  try { return roundTrip(line, CP1250_TO_BYTE); } catch {
     return line;                       // already correct, or not this bug
   }
 }
@@ -374,7 +412,7 @@ const PREF_KEY = 'chitram:subs:v1';
 const DEFAULTS = { scale: 0.82, offsetMs: 0 };
 
 // A choice saved on the old ladder keeps its NAME: Medium stays Medium.
-const LEGACY_SCALE = { 1: 0.82, 1.3: 1.05, 1.6: 1.3 };
+const LEGACY_SCALE = { 0.62: 0.5, 1: 0.82, 1.3: 1.05, 1.6: 1.3 };
 
 export function getSubPrefs() {
   try {
@@ -396,10 +434,11 @@ export function setSubPrefs(next) {
 // The low end is deliberately wider than the high end. Small was 0.8, which on
 // a 390px phone picture put it 13.1px against Medium's 16.4px - a 3.3px step
 // that read as "slightly medium" rather than small, which is what the viewer
-// reported. 0.62 gives a step you can actually see, and the steps grow towards
+// reported. 0.62 gives a step you can actually see (2026-11-21: still too big,
+// now 0.5; a saved 0.62 maps to it), and the steps grow towards
 // the top so each preset stays distinguishable from its neighbour.
 export const SIZES = [
-  { key: 0.62, label: 'Small' },
+  { key: 0.5, label: 'Small' },
   { key: 0.82, label: 'Medium' },
   { key: 1.05, label: 'Large' },
   { key: 1.3, label: 'Extra large' },
