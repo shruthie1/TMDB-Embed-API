@@ -721,8 +721,12 @@ registerRebaseRoute(app);
 registerPairRoute(app);
 // Cast to a TV through Web Video Caster: long-lived single-audio masters.
 require('./lib/media/castRoutes').registerCastRoutes(app);
-// The Android app's resolver override config (routes/resolve-config.json).
+// The Android app's resolver override config: built-in
+// routes/resolve-config.json < remote RESOLVE_CONFIG_URL < verified heals
+// (lib/selfheal/config.js). start() fetches the remote now and every ttlSec;
+// with RESOLVE_CONFIG_URL unset it makes no request.
 require('./routes/resolveConfig').registerResolveConfigRoute(app);
+require('./lib/selfheal/config').start();
 
 // The absolute base a player should call back on. Child URLs inside a hybrid
 // master must be absolute, because hls.js resolves them against the master's

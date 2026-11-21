@@ -17,6 +17,37 @@ const FETCH_HEADERS = {
 // returns 403 for any foreign Referer and 200 without one (measured
 // 2026-11-15), so a Referer here broke every OneTouchTV row.
 const STREAM_HEADERS = { 'User-Agent': 'Mozilla/5.0' };
+// Today's values; routes/resolve-config.json carries the same (provider
+// self-heal Task 3).
+const CONFIG_DEFAULTS = {
+    bases: [MAIN_URL], front: 'https://onetouchtv.xyz',
+    key: AES_KEY.toString('utf8'), iv: AES_IV.toString('utf8'),
+};
+const upstream = require('../utils/upstreamBase');
+const selfheal = require('../lib/selfheal/config');
+// Read per call: a remote config edit or a heal applies without a restart.
+const ottSeed = () => selfheal.cfg('onetouchtv', 'bases', CONFIG_DEFAULTS.bases)[0].replace(/\/+$/, '');
+const ottFront = () => selfheal.cfg('onetouchtv', 'front', CONFIG_DEFAULTS.front).replace(/\/+$/, '');
+// player: the front page whose main.dart.js names the api host (Task 6 scans it).
+// verifyTitle: RRR 579974 (onetouchtv has no Inception; review I3/M8).
+// healRun: the candidate must find RRR and its detail itself (lib/selfheal/onetouchtv.js).
+const UPSTREAM = {
+    name: 'onetouchtv', get seed() { return ottSeed(); }, player: () => ottFront(),
+    verifyTitle: { tmdbId: '579974', mediaType: 'movie' },
+    healRun: () => require('../lib/selfheal/onetouchtv').createRun({
+        fetchOnce: (url) => fetchEncryptedOnce(url),
+        findBestOttMatch: (...a) => findBestOttMatch(...a),
+        bases: () => selfheal.cfg('onetouchtv', 'bases', CONFIG_DEFAULTS.bases),
+    }),
+};
+function mainUrl() { return upstream.getBase('onetouchtv', ottSeed()); }
+function fetchHeaders() { return { ...FETCH_HEADERS, Referer: `${ottFront()}/` }; }
+function aesKeyIv() {
+    const k = selfheal.cfg('onetouchtv', 'key', CONFIG_DEFAULTS.key);
+    const iv = selfheal.cfg('onetouchtv', 'iv', CONFIG_DEFAULTS.iv);
+    if (Buffer.byteLength(k) !== 32 || Buffer.byteLength(iv) !== 16) return [AES_KEY, AES_IV];
+    return [Buffer.from(k, 'utf8'), Buffer.from(iv, 'utf8')];
+}
 const FETCH_TIMEOUT_MS = 15000;
 const FETCH_RETRIES = 2;
 const FETCH_RETRY_DELAY_MS = 400;
@@ -80,14 +111,15 @@ function decrypt(encoded) {
     if (pad !== 0) s += '='.repeat(4 - pad);
 
     const buf = Buffer.from(s, 'base64');
-    const decipher = createDecipheriv('aes-256-cbc', AES_KEY, AES_IV);
+    const [key, iv] = aesKeyIv();
+    const decipher = createDecipheriv('aes-256-cbc', key, iv);
     const dec = Buffer.concat([decipher.update(buf), decipher.final()]);
     return JSON.parse(dec.toString('utf8'));
 }
 
 async function fetchEncryptedOnce(url) {
     const res = await fetch(url, {
-        headers: FETCH_HEADERS,
+        headers: fetchHeaders(),
         signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
     });
     if (!res.ok) {
@@ -108,7 +140,7 @@ function isRetryable(err) {
 }
 
 async function fetchEncrypted(path, cacheTtlMs = CACHE_TTL_MS) {
-    const url = path.startsWith('https://') ? path : `${MAIN_URL}${path}`;
+    const url = path.startsWith('https://') ? path : `${mainUrl()}${path}`;
 
     if (cacheTtlMs > 0) {
         const cached = fromCache(url);
@@ -439,4 +471,4 @@ async function resolveStreams(tmdbId, mediaType, seasonNum, episodeNum) {
     }
 }
 
-module.exports = { getOnetouchtvStreams, STREAM_HEADERS, _internal: { isRetryable, cache, lastGood, timing, findBestOttMatch, splitTitleYear } };
+module.exports = { getOnetouchtvStreams, STREAM_HEADERS, CONFIG_DEFAULTS, UPSTREAM, _internal: { mainUrl, fetchHeaders, aesKeyIv, fetchEncryptedOnce, isRetryable, cache, lastGood, timing, findBestOttMatch, splitTitleYear } };

@@ -22,7 +22,7 @@ Do not duplicate `AGENTS.md` content here; update it there instead.
    check is unavailable, say why and label the result `unverified`.
    An honest "unverified" beats a confident wrong.
 
-4. **Do not disable `masterMatchesTitle`** (`providers/netmirror.js:613`, called at `:934`). It
+4. **Do not disable `masterMatchesTitle`** (`providers/netmirror.js:624`, called at `:945`). It
    catches NetMirror's rate-limit response, which arrives as HTTP 200 with a
    shared 600s clip in place of the film. Upstream has no such guard.
    But note the title IS really there — a throttle wants backoff, not

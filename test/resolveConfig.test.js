@@ -4,6 +4,12 @@ const { test } = require('node:test');
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
+const os = require('os');
+
+// Task 3 (provider self-heal): the route serves the merged config view. Keep
+// this run off any remote copy on disk and off the network.
+delete process.env.RESOLVE_CONFIG_URL;
+process.env.RESOLVE_CONFIG_FILE = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'rc-')), 'remote.json');
 
 // A1 (docs/PENDING-WORK.md): GET /api/resolve-config is what the APK's
 // ResolveConfigStore fetches. 1.1.9 logs "HTTP 404; using defaults" today.
@@ -46,9 +52,9 @@ function defaultsOf(cls) {
   return out;
 }
 
-async function serve() {
+async function serve(source) {
   const app = express();
-  require('../routes/resolveConfig').registerResolveConfigRoute(app);
+  require('../routes/resolveConfig').registerResolveConfigRoute(app, source);
   const server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
   const r = await fetch(`http://127.0.0.1:${server.address().port}/api/resolve-config`);
   const body = await r.text();
@@ -94,4 +100,57 @@ test('A1: values equal the app defaults exactly', async () => {
   assert.deepStrictEqual(cfg.mapple, defaultsOf('MappleConfig'));
   assert.deepStrictEqual(cfg.vaplayer, defaultsOf('VaplayerConfig'));
   assert.deepStrictEqual(cfg.netmirror, defaultsOf('NetmirrorConfig'));
+});
+
+const selfhealConfig = require('../lib/selfheal/config');
+
+test('Task 3: a heal shows in the served config', async () => {
+  selfhealConfig.setHeals({ vaplayer: { fields: { wrapperBases: { value: ['https://va.healed'], how: 'redirect', over: null } } } });
+  try {
+    const cfg = JSON.parse((await serve()).body);
+    assert.deepStrictEqual(cfg.vaplayer.wrapperBases, ['https://va.healed']);
+  } finally { selfhealConfig.setHeals({}); }
+  const again = JSON.parse((await serve()).body);
+  assert.notDeepStrictEqual(again.vaplayer.wrapperBases, ['https://va.healed']);
+});
+
+test('Task 3: new provider sections equal the provider constants', async () => {
+  const cfg = JSON.parse((await serve()).body);
+  for (const name of ['castletv', 'multimovies', 'vidrock', 'vidrift', 'onetouchtv', 'showsst']) {
+    const mod = require(`../providers/${name}`);
+    assert.ok(mod.CONFIG_DEFAULTS, `${name} exports CONFIG_DEFAULTS`);
+    assert.deepStrictEqual(cfg[name], mod.CONFIG_DEFAULTS, name);
+  }
+});
+
+test('Task 3: unknown top-level keys survive the merge', async () => {
+  const builtin = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'routes', 'resolve-config.json'), 'utf8'));
+  const source = selfhealConfig.createConfig({ builtin: { ...builtin, routes: { castletv: { web: 'direct' } }, zzz: [1] } });
+  const cfg = JSON.parse((await serve(source)).body);
+  assert.deepStrictEqual(cfg.zzz, [1]);
+  assert.deepStrictEqual(cfg.routes, { castletv: { web: 'direct' } });
+});
+
+test('Task 3: a snapshot that cannot be built is a 500', async () => {
+  const errors = [];
+  const orig = console.error;
+  console.error = (...a) => errors.push(a.join(' '));
+  let r;
+  try { r = (await serve({ snapshot: () => { throw new Error('boom'); } })).r; } finally { console.error = orig; }
+  assert.equal(r.status, 500);
+  assert.ok(errors.some((l) => l.startsWith('[resolve-config] snapshot failed')), errors.join('\n'));
+});
+
+test('M3: a broken built-in file is a 500 again', async () => {
+  const bad = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'rcfg-')), 'resolve-config.json');
+  fs.writeFileSync(bad, '{ broken');
+  const source = selfhealConfig.createConfig({ builtin: bad });
+  const errors = [];
+  const orig = { error: console.error, warn: console.warn };
+  console.error = (...a) => errors.push(a.join(' '));
+  console.warn = () => {};
+  let r;
+  try { r = (await serve(source)).r; } finally { Object.assign(console, orig); }
+  assert.equal(r.status, 500);
+  assert.ok(errors.some((l) => l.startsWith('[resolve-config] snapshot failed: built-in config unreadable')), errors.join('\n'));
 });

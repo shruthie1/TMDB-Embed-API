@@ -100,5 +100,64 @@
     "sessionTtlMs": 1800000,
     "metadataTtlMs": 604800000,
     "playerTtlMs": 30000
+  },
+  "castletv": {
+    "bases": [
+      "https://api.hlowb.com"
+    ],
+    "keySuffix": "T!BgJB",
+    "apiVersions": {
+      "search": "v1.1.0",
+      "details": "v1.9.9",
+      "video": "v2.0.1"
+    }
+  },
+  "multimovies": {
+    "bases": [
+      "https://vidbolt.xyz",
+      "https://vidbolt.pro"
+    ],
+    "resolvePath": "/api/resolve",
+    "playerPath": "/movie/{id}",
+    "sites": [
+      "https://multimovies.wtf"
+    ],
+    "scrapers": [
+      "https://raw.githubusercontent.com/mayurgj/nama/main/providers/multimovies.js"
+    ]
+  },
+  "vidrock": {
+    "bases": [
+      "https://vidrock.net"
+    ],
+    "key": "7f3e9c2a8b5d1f4e6a9c3b7d2e5f8a1c4b6d9e2f5a8c1b4d7e9f2a5c8b1d4e7f"
+  },
+  "vidrift": {
+    "bases": [
+      "https://embed.vidrift.net",
+      "https://embed.vidrift.in"
+    ],
+    "moviePath": "/embed/movie/{id}",
+    "tvPath": "/embed/tv/{id}/{s}/{e}"
+  },
+  "onetouchtv": {
+    "bases": [
+      "https://api3.devcorp.me"
+    ],
+    "front": "https://onetouchtv.xyz",
+    "key": "im72charPasswordofdInitVectorStm",
+    "iv": "im72charPassword"
+  },
+  "showsst": {
+    "mirrors": [
+      {
+        "api": "https://api.vidqueen.st",
+        "player": "https://player.vidqueen.st"
+      },
+      {
+        "api": "https://api.vidmario.net",
+        "player": "https://player.vidmario.net"
+      }
+    ]
   }
 }

@@ -15,7 +15,9 @@
 // evidence: in ott a single 301 from a dead host installed
 // `totally-not-a-squatter.example` as the live base before verify existed.
 //
-// State: in memory, mirrored to data/provider-bases.json so a heal survives a
+// State: in memory, mirrored to data/provider-heals.json (hosts and, since
+// 2026-11-21, key/token/path fields; legacy data/provider-bases.json is read
+// once when absent) so a heal survives a
 // restart. The file is optional. Missing file or dir = seeds only. The VM
 // deploy (scripts/deploy-vm.sh) stages a copy of the live dir, so the file
 // carries over; a fresh Docker image starts with seeds and heals again.
@@ -45,13 +47,19 @@ const CHECK_PERSIST_MS = 60 * 60 * 1000;
 
 function filePath() {
     return process.env.UPSTREAM_BASES_FILE
-        || path.join(__dirname, '..', 'data', 'provider-bases.json');
+        || path.join(__dirname, '..', 'data', 'provider-heals.json');
+}
+// Before 2026-11-21 only hosts were healed, in provider-bases.json. Read once
+// when the heals file is absent.
+function legacyPath() {
+    return path.join(path.dirname(filePath()), 'provider-bases.json');
 }
 
 const strip = (u) => String(u || '').replace(/\/+$/, '');
 const override = new AsyncLocalStorage();
 
 let entries = null; // name -> { base, previous, how, seed, updatedAt, checkedAt }
+let fieldHeals = {}; // name -> { field: { value, how, over, verifiedAt } }
 const streak = new Map();
 const lastSeed = new Map();
 const running = new Map();
@@ -59,35 +67,145 @@ const lastRun = new Map();
 const persistedCheck = new Map();
 let defaultDeps = {}; // test seam: fetch, budgetMs, timeoutMs
 
+const isBaseEntry = (v) => v && typeof v.base === 'string' && /^https?:\/\//.test(v.base);
+
+function readFile(file) {
+    try {
+        const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+        return raw && typeof raw === 'object' ? raw : null;
+    } catch (e) {
+        if (e.code !== 'ENOENT') console.warn(`[upstream] ignoring ${file}: ${e.message}`);
+        return null;
+    }
+}
+
 function load() {
     if (entries) return entries;
     entries = {};
-    try {
-        const raw = JSON.parse(fs.readFileSync(filePath(), 'utf8'));
-        if (raw && typeof raw === 'object') {
-            for (const [k, v] of Object.entries(raw)) {
-                if (v && typeof v.base === 'string' && /^https?:\/\//.test(v.base)) entries[k] = v;
-            }
+    fieldHeals = {};
+    let raw = readFile(filePath());
+    if (!raw && legacyPath() !== filePath()) {
+        raw = readFile(legacyPath());
+        // Review I4: a legacy host is held back (legacy: true) until it passes
+        // the provider's validation on first use (verifyLegacy). Never served
+        // before that, never sent to the APK.
+        if (raw) {
+            console.warn(`[upstream] heals legacy-import ${Object.keys(raw).length} from ${legacyPath()} (held until verified)`);
+            for (const v of Object.values(raw)) if (isBaseEntry(v)) v.legacy = true;
         }
-    } catch (e) {
-        if (e.code !== 'ENOENT') console.warn(`[upstream] ignoring ${filePath()}: ${e.message}`);
     }
+    for (const [k, v] of Object.entries(raw || {})) {
+        if (!v || typeof v !== 'object') continue;
+        // Legacy shape: the entry itself carries `base`.
+        if (isBaseEntry(v)) { entries[k] = v; continue; }
+        if (isBaseEntry(v.base)) entries[k] = v.base;
+        if (v.fields && typeof v.fields === 'object') fieldHeals[k] = { ...v.fields };
+    }
+    publish();
     return entries;
 }
 
+// The on-disk / config shape: { name: { base?, fields? } }.
+function serialise() {
+    const out = {};
+    for (const [k, v] of Object.entries(entries || {})) out[k] = { base: v };
+    for (const [k, f] of Object.entries(fieldHeals)) {
+        if (!Object.keys(f).length) continue;
+        out[k] = { ...(out[k] || {}), fields: f };
+    }
+    return out;
+}
+
+let warnedWrite = false;
 function save() {
     const file = filePath();
+    publish();
     try {
         fs.mkdirSync(path.dirname(file), { recursive: true });
         const tmp = `${file}.${process.pid}.tmp`;
-        fs.writeFileSync(tmp, JSON.stringify(entries, null, 2));
+        fs.writeFileSync(tmp, JSON.stringify(serialise(), null, 2));
         fs.renameSync(tmp, file);
+        warnedWrite = false;
         return true;
     } catch (e) {
-        // In memory still holds the heal for this process.
-        console.warn(`[upstream] could not write ${file}: ${e.message}`);
+        // In memory still holds the heal for this process. Warn once per streak.
+        if (!warnedWrite) console.warn(`[upstream] could not write ${file}: ${e.message}`);
+        warnedWrite = true;
         return false;
     }
+}
+
+// Every heal the config layer should see (lib/selfheal/config.js). A base is
+// listed only while getBase() would serve it.
+function allFields() {
+    load();
+    const out = {};
+    for (const [k, e] of Object.entries(entries)) {
+        const seed = lastSeed.get(k);
+        if (e.legacy || !isFresh(e) || (e.seed && seed && e.seed !== seed)) continue;
+        out[k] = { base: { ...e } };
+    }
+    for (const [k, f] of Object.entries(fieldHeals)) {
+        const live = {};
+        for (const [field, h] of Object.entries(f)) {
+            if (fieldFresh(h)) live[field] = { ...JSON.parse(JSON.stringify(h)), expiresAt: Number(h.verifiedAt) + TTL_MS };
+        }
+        if (Object.keys(live).length) out[k] = { ...(out[k] || {}), fields: live };
+    }
+    return out;
+}
+
+function publish() {
+    try { require('../lib/selfheal/config').setHeals(allFields()); } catch (e) {
+        console.warn(`[upstream] heals publish failed: ${e.message}`);
+    }
+}
+
+function currentRemote(name, field) {
+    try {
+        const v = require('../lib/selfheal/config').shared.remoteField(name, field);
+        return v === undefined ? null : v;
+    } catch { return null; }
+}
+
+/**
+ * Record a verified non-host heal (key, token, path, list). `over` is the
+ * remote value it replaces; it defaults to the current remote value, so a
+ * later remote edit of the field drops this heal (lib/selfheal/config.js).
+ * Returns true when written to disk; the value is live in memory either way.
+ */
+function setField(name, field, value, how, over) {
+    load();
+    fieldHeals[name] = fieldHeals[name] || {};
+    fieldHeals[name][field] = {
+        value, how: how || 'unknown',
+        over: over === undefined ? currentRemote(name, field) : over,
+        verifiedAt: Date.now(),
+    };
+    console.warn(`[upstream] heal-set ${name}.${field} via ${how || 'unknown'}`);
+    return save();
+}
+
+// Review I2: a field heal lives TTL_MS (7 days) from its verification, the
+// same TTL as a host heal. After that the remote or built-in value is used and
+// a later heal run may verify the field again.
+function fieldFresh(h, now = Date.now()) {
+    return Boolean(h) && now - Number(h.verifiedAt || 0) < TTL_MS;
+}
+
+function getField(name, field) {
+    load();
+    const f = fieldHeals[name] && fieldHeals[name][field];
+    return fieldFresh(f) ? { ...f } : null;
+}
+
+function dropField(name, field) {
+    load();
+    if (!fieldHeals[name] || !fieldHeals[name][field]) return false;
+    delete fieldHeals[name][field];
+    if (!Object.keys(fieldHeals[name]).length) delete fieldHeals[name];
+    console.warn(`[upstream] heal-drop ${name}.${field}`);
+    return save();
 }
 
 function isFresh(e, now = Date.now()) {
@@ -107,8 +225,51 @@ function getBase(name, seed) {
     const o = override.getStore();
     if (o && o.name === name) return o.base;
     const e = load()[name];
-    if (e && e.base && (!e.seed || e.seed === s) && isFresh(e)) return strip(e.base);
+    if (e && e.base && !e.legacy && (!e.seed || e.seed === s) && isFresh(e)) return strip(e.base);
     return s;
+}
+
+/** True when name holds a legacy-imported host that is not yet verified. */
+function legacyPending(name) {
+    const e = load()[name];
+    return Boolean(e && e.legacy);
+}
+
+/**
+ * Review I4: check a legacy-imported host once with the provider's own
+ * verify. Pass: the host becomes a normal heal. Fail: it is dropped.
+ * Single-flight per provider; never throws.
+ */
+const legacyRuns = new Map();
+function verifyLegacy(name, verify, budgetMs) {
+    if (legacyRuns.has(name)) return legacyRuns.get(name);
+    const e = load()[name];
+    if (!e || !e.legacy) return Promise.resolve(null);
+    const base = strip(e.base);
+    const p = verifyCapped(verify, base, budgetMs || VERIFY_BUDGET_MS, { fetch: fetchImpl(defaultDeps), name })
+        .then((r) => {
+            const cur = load()[name];
+            if (cur !== e) return null;
+            if (r.ok) {
+                delete e.legacy;
+                e.checkedAt = Date.now();
+                console.warn(`[upstream] heals legacy-adopt ${name} ${base}`);
+            } else {
+                delete load()[name];
+                console.warn(`[upstream] heals legacy-drop ${name} ${base}${r.timedOut ? ' (verify timed out)' : ''}`);
+            }
+            save();
+            return r.ok;
+        })
+        .finally(() => legacyRuns.delete(name));
+    legacyRuns.set(name, p);
+    return p;
+}
+
+/** The base withBase() pinned for name in this async context, or null. */
+function pinned(name) {
+    const o = override.getStore();
+    return o && o.name === name ? o.base : null;
 }
 
 /** True when getBase(name) is currently serving a healed value. */
@@ -224,14 +385,14 @@ async function slugHostFromAggregator(slug, tmdbId, deps = {}) {
 
 // Races verify against a wall clock. A distinct sentinel, because false/null
 // is also the ordinary "no stream here" answer (ott tierprobe verifyCandidate).
-async function verifyCapped(verify, url, budgetMs) {
+async function verifyCapped(verify, url, budgetMs, ctx) {
     const TIMED_OUT = Symbol('verify-timeout');
     let timer;
     const capped = new Promise((resolve) => {
         timer = setTimeout(() => resolve(TIMED_OUT), budgetMs);
         timer.unref?.();
     });
-    const run = Promise.resolve().then(() => verify(url));
+    const run = Promise.resolve().then(() => verify(url, ctx));
     run.catch(() => {});
     try {
         const r = await Promise.race([run, capped]);
@@ -250,10 +411,24 @@ async function verifyCapped(verify, url, budgetMs) {
  * opts.origin         host to read a redirect from (default: current base)
  * opts.player         front-end page to scan for an api host
  * opts.aggregatorSlug vidstreams.net slug, the last-resort trail
- * opts.verify(url)    REQUIRED to apply; truthy only on a real stream
+ * opts.extra          [url] config-listed hosts (how 'config'), after the seed
+ * opts.trails         [async (ctx) => [{ url, how, from }]] run in order,
+ *                     lazily: each only after every earlier candidate failed
+ *                     verify. ctx = { fetch, name }.
+ * opts.verify(url, ctx) REQUIRED to apply; truthy only on a real stream
+ * opts.budget         lib/selfheal/proof.js createBudget(): when given, every
+ *                     GET of this run (redirects, player scans, trails) spends
+ *                     from it (review M6). ctx.fetch is the charged fetch.
+ * opts.onApplied(url) called after a host is adopted (pending path heals
+ *                     are saved there, only after the host passed; review I2)
  */
 async function rediscover(name, opts = {}, callDeps = {}) {
     const deps = { ...defaultDeps, ...callDeps };
+    if (opts.budget) {
+        const charged = opts.budget.wrap(fetchImpl(deps));
+        charged.charged = true;
+        deps.fetch = charged;
+    }
     const seed = lastSeed.get(name) || strip(opts.seed);
     const current = opts.origin ? strip(opts.origin) : getBase(name, seed);
     const e = load()[name];
@@ -288,35 +463,59 @@ async function rediscover(name, opts = {}, callDeps = {}) {
     // A stale heal and the seed are candidates too: either may be the live one.
     if (e && e.base) add(e.base, 'previous-heal', 'data');
     if (seed && seed !== current) add(seed, 'seed', 'code');
+    for (const url of opts.extra || []) add(url, 'config', 'config');
 
-    if (!candidates.length) {
+    const trails = Array.isArray(opts.trails) ? opts.trails : [];
+    if (!candidates.length && !trails.length) {
         console.warn(`[upstream] ${name}: no candidate host found from ${current}`);
         return { applied: null, previous: current, candidates };
     }
-    console.warn(`[upstream] ${name}: candidates ${candidates.map((c) => `${c.url} (${c.how})`).join(', ')}`);
+    if (candidates.length) console.warn(`[upstream] ${name}: candidates ${candidates.map((c) => `${c.url} (${c.how})`).join(', ')}`);
     if (typeof opts.verify !== 'function') return { applied: null, previous: current, candidates };
 
     const budget = deps.budgetMs || VERIFY_BUDGET_MS;
-    for (const c of candidates) {
-        const r = await verifyCapped(opts.verify, c.url, budget);
-        if (!r.ok) {
-            console.warn(`[upstream] ${name}: rejected ${c.url} (${c.how}${r.timedOut ? ', verify timed out' : ''})`);
-            continue;
+    const ctx = { fetch: fetchImpl(deps), name };
+    const tryList = async (list) => {
+        for (const c of list) {
+            console.warn(`[heal] ${name} candidate ${c.url} via ${c.how}`);
+            const r = await verifyCapped(opts.verify, c.url, budget, ctx);
+            if (!r.ok) {
+                console.warn(`[upstream] ${name}: rejected ${c.url} (${c.how}${r.timedOut ? ', verify timed out' : ''})`);
+                continue;
+            }
+            const now = Date.now();
+            if (c.url === seed) {
+                delete load()[name];
+            } else {
+                load()[name] = { base: c.url, previous: current, how: c.how, seed, updatedAt: now, checkedAt: now };
+            }
+            save();
+            streak.set(name, 0);
+            // `previous` is logged so a bad apply can be undone from the log alone.
+            console.warn(`[upstream] ${name}: applied ${c.url} (previous ${current}, via ${c.how})`);
+            console.warn(`[heal] ${name} adopt ${c.url} via ${c.how}`);
+            if (typeof opts.onApplied === 'function') {
+                try { await opts.onApplied(c.url); } catch (err) { console.warn(`[heal] ${name} onApplied failed: ${err.message}`); }
+            }
+            return c.url;
         }
-        const now = Date.now();
-        if (c.url === seed) {
-            delete load()[name];
-        } else {
-            load()[name] = { base: c.url, previous: current, how: c.how, seed, updatedAt: now, checkedAt: now };
+        return null;
+    };
+    let applied = await tryList(candidates);
+    for (let i = 0; !applied && i < trails.length; i++) {
+        let found = [];
+        try { found = (await trails[i](ctx)) || []; } catch (err) {
+            console.warn(`[heal] ${name} trail ${i} failed: ${err.message}`);
         }
-        save();
-        streak.set(name, 0);
-        // `previous` is logged so a bad apply can be undone from the log alone.
-        console.warn(`[upstream] ${name}: applied ${c.url} (previous ${current}, via ${c.how})`);
-        return { applied: c.url, previous: current, candidates };
+        const before = candidates.length;
+        for (const c of found) add(c.url, c.how, c.from);
+        applied = await tryList(candidates.slice(before));
     }
-    console.warn(`[upstream] ${name}: no candidate passed verification`);
-    return { applied: null, previous: current, candidates };
+    if (!applied) {
+        if (!candidates.length) console.warn(`[upstream] ${name}: no candidate host found from ${current}`);
+        else console.warn(`[upstream] ${name}: no candidate passed verification`);
+    }
+    return { applied, previous: current, candidates };
 }
 
 /**
@@ -343,12 +542,13 @@ function _setDeps(deps) { defaultDeps = deps || {}; }
 
 /** Test seam: drop all in-memory state; the file is re-read on next use. */
 function _reset() {
-    entries = null; defaultDeps = {};
-    streak.clear(); lastSeed.clear(); running.clear(); lastRun.clear(); persistedCheck.clear();
+    entries = null; fieldHeals = {}; defaultDeps = {}; warnedWrite = false;
+    streak.clear(); lastSeed.clear(); running.clear(); lastRun.clear(); persistedCheck.clear(); legacyRuns.clear();
 }
 
 module.exports = {
-    getBase, isHealed, withBase, noteOk, noteFail, failStreak,
+    getBase, isHealed, withBase, pinned, noteOk, noteFail, failStreak, legacyPending, verifyLegacy,
+    setField, getField, dropField, allFields,
     rediscover, triggerRediscover, pending, verifyCapped,
     followRedirect, apiHostsFromPlayer, slugHostFromAggregator,
     FAIL_STREAK, TTL_MS, COOLDOWN_MS, VERIFY_BUDGET_MS, _reset, _setDeps,

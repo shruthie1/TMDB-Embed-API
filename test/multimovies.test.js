@@ -535,3 +535,54 @@ test('cooldown: a 429 neither adds to nor clears a server streak', async (t) => 
     assert.equal(mm._serverHealth('vega').streak, 2, '429 does not add');
     assert.equal(mm._serverHealth('vega').until, 0, 'not cooled');
 });
+
+// Vidrift's "Original" for 1261763 (TMDB te) is the Tamil track (live
+// 2026-11-21, vidrift.test.js). A source "Original" is not claimed as the
+// TMDB language when another source of the title names that language itself.
+test('originalLanguageFor: TMDB language kept only when no other source names it', () => {
+    const { originalLanguageFor } = require('../providers/multimovies');
+    const src = (...l) => l.map((language) => ({ language }));
+    assert.equal(originalLanguageFor(src('Original', 'Hindi'), 'te'), 'te');
+    assert.equal(originalLanguageFor(src('Original', 'Hindi', 'Telugu'), 'te'), null);
+    assert.equal(originalLanguageFor(src('Original', 'tel'), 'te'), null);
+    assert.equal(originalLanguageFor(src('Original', 'Telugu Sub'), 'te'), 'te');
+    assert.equal(originalLanguageFor(src('Original', 'Original'), 'te'), 'te');
+    assert.equal(originalLanguageFor(src('Original'), null), null);
+});
+
+test('getMultimoviesStreams: "Original" stays unlabelled when another server lists Telugu itself', async (t) => {
+    const mm = freshMM(t);
+    const realDeps = { ...mm._deps };
+    mm._deps.originalLanguage = async () => 'te';
+    t.after(() => Object.assign(mm._deps, realDeps));
+    const routes = rrrVidbolt();
+    const inner = routes[0][1];
+    // The plain resolve (luna) now lists an "Original" bridge master; callisto lists two Telugu.
+    const ORIG = RRR_URL.replace('5820588283537016992_0_0_1080_h265_795', '604320274028317248_0_0_1080_h265_174');
+    routes[0][1] = (u) => (serverOf(u) === null
+        ? new Response(resolveBody('luna', [{ url: ORIG, kind: 'hls', quality: '1080p', language: 'Original' }]), { status: 200 })
+        : inner(u));
+    stubVidbolt(t, routes);
+    const rows = await mm.getMultimoviesStreams('1261763', 'movie');
+    const orig = rows.find((r) => r.url === ORIG);
+    assert.ok(orig, 'Original row kept');
+    assert.ok(!normaliseStream(orig).languages.includes('Telugu'), JSON.stringify(orig.languages));
+    assert.equal(rows.map(normaliseStream).filter((r) => r.languages.includes('Telugu')).length, 2);
+});
+
+test('getMultimoviesStreams: "Original" keeps TMDB te when no source lists Telugu', async (t) => {
+    const mm = freshMM(t);
+    const realDeps = { ...mm._deps };
+    mm._deps.originalLanguage = async () => 'te';
+    t.after(() => Object.assign(mm._deps, realDeps));
+    const ORIG = RRR_URL.replace('5820588283537016992_0_0_1080_h265_795', '604320274028317248_0_0_1080_h265_174');
+    stubVidbolt(t, [
+        [/\/api\/resolve/, (u) => new Response(resolveBody('luna', serverOf(u) === null
+            ? [{ url: ORIG, kind: 'hls', quality: '1080p', language: 'Original' }]
+            : null), { status: 200 })],
+        [/vidbolt\.xyz\/movie\//, ''],
+        [/dash-hls-bridge/, () => new Response(RRR_BRIDGE, { status: 200 })],
+    ]);
+    const rows = await mm.getMultimoviesStreams('1261763', 'movie');
+    assert.deepEqual(normaliseStream(rows.find((r) => r.url === ORIG)).languages, ['Telugu']);
+});

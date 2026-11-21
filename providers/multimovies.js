@@ -57,6 +57,16 @@ const { knownLanguage } = require('../utils/streamSchema');
 // VidBolt's Cloudflare answers 403 to /api/resolve without a Referer.
 
 const ORIGIN = 'https://vidbolt.xyz';
+// Today's values; routes/resolve-config.json carries the same (provider
+// self-heal Task 3). vidbolt.pro is a measured live mirror (spec row 7), tried
+// only after the first base fails.
+const CONFIG_DEFAULTS = {
+    bases: [ORIGIN, 'https://vidbolt.pro'],
+    resolvePath: '/api/resolve',
+    playerPath: '/movie/{id}',
+    sites: ['https://multimovies.wtf'],
+    scrapers: ['https://raw.githubusercontent.com/mayurgj/nama/main/providers/multimovies.js'],
+};
 const UA = 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) '
     + 'Chrome/124.0 Mobile Safari/537.36';
 const MASTER_TIMEOUT_MS = 8000;
@@ -98,7 +108,36 @@ const DISGUISE_CACHE_MS = 6 * 60 * 60 * 1000;
 
 // Headers the stream host gets through /m3u8-proxy. The scraper sent VidBolt's
 // own Referer/Origin on every playlist and segment fetch.
+// STREAM_HEADERS is today's value (exported); rows use streamHeaders(), which
+// follows a config edit or a heal of the VidBolt host.
 const STREAM_HEADERS = { 'User-Agent': UA, Referer: `${ORIGIN}/`, Origin: ORIGIN };
+const upstream = require('../utils/upstreamBase');
+const selfheal = require('../lib/selfheal/config');
+const strip = (u) => String(u).replace(/\/+$/, '');
+const mmSeed = () => strip(selfheal.cfg('multimovies', 'bases', CONFIG_DEFAULTS.bases)[0]);
+// The live VidBolt origin for THIS call (a heal or remote edit wins over today's).
+function origin() { return upstream.getBase('multimovies', mmSeed()); }
+function streamHeaders() {
+    const o = origin();
+    return { 'User-Agent': UA, Referer: `${o}/`, Origin: o };
+}
+function resolvePath() {
+    const p = selfheal.cfg('multimovies', 'resolvePath', CONFIG_DEFAULTS.resolvePath);
+    return /^\/[\w./-]*$/.test(p) ? p : CONFIG_DEFAULTS.resolvePath;
+}
+// healRun: the VidBolt discovery chain (lib/selfheal/vidbolt.js), one per
+// rediscover, so its GET and validation caps are per run.
+// The VidBolt player page path (`/movie/{id}`), used as Referer and for the
+// server-list page. Config or a `playerPath` heal may change it.
+function playerPath(tmdbId) {
+    const t = selfheal.cfg('multimovies', 'playerPath', CONFIG_DEFAULTS.playerPath);
+    return (/^\/[^\s]*\{id\}/.test(t) ? t : CONFIG_DEFAULTS.playerPath).replace('{id}', tmdbId);
+}
+const UPSTREAM = {
+    name: 'multimovies',
+    get seed() { return mmSeed(); },
+    healRun: () => require('../lib/selfheal/vidbolt').createRun(),
+};
 
 function embedPath(tmdbId, mediaType, season, episode) {
     return mediaType === 'tv'
@@ -109,8 +148,8 @@ function embedPath(tmdbId, mediaType, season, episode) {
 // `server` null: VidBolt picks. Else `only=<server>`.
 function resolveUrl(tmdbId, mediaType, season, episode, server = null) {
     const base = mediaType === 'tv'
-        ? `${ORIGIN}/api/resolve?type=tv&id=${tmdbId}&season=${season || 1}&episode=${episode || 1}`
-        : `${ORIGIN}/api/resolve?type=movie&id=${tmdbId}`;
+        ? `${origin()}${resolvePath()}?type=tv&id=${tmdbId}&season=${season || 1}&episode=${episode || 1}`
+        : `${origin()}${resolvePath()}?type=movie&id=${tmdbId}`;
     return server ? `${base}&only=${encodeURIComponent(server)}` : base;
 }
 
@@ -218,6 +257,20 @@ function sourceLanguage(src, originalLang = null) {
     return knownLanguage(raw);
 }
 
+// "Original" is not always the TMDB original language: Vidrift's "Original"
+// for 1261763 (TMDB te) is the Tamil track (vidrift.js originalLanguageFor).
+// When another source of the same title names that language itself, the
+// "Original" source stays unlabelled: unknown, never a wrong tag. `sources`:
+// every source VidBolt listed this call, across servers. Pure, exported.
+function originalLanguageFor(sources, originalLang) {
+    const language = knownLanguage(originalLang);
+    if (!language) return null;
+    const named = (sources || [])
+        .filter((s) => !/^original$/i.test(String((s && s.language) || '').trim()))
+        .map((s) => sourceLanguage(s));
+    return named.includes(language) ? null : originalLang;
+}
+
 // One audio[] entry per AUDIO rendition the master declares. LANGUAGE wins.
 // The source's language is stamped only when the master has exactly ONE
 // AUDIO rendition, untagged with a generic NAME: several renditions are left
@@ -303,7 +356,7 @@ function streamFromMaster(src, masterText, masterUrl, deadAudioUrls = null, orig
         codecs: hls.masterCodecs(masterText),
         videoCodec: videoCodecOf(masterText, masterUrl),
         subtitles,
-        headers: { ...STREAM_HEADERS },
+        headers: streamHeaders(),
     };
 }
 
@@ -320,13 +373,13 @@ function looksLikeImage(bytes) {
 // or null when the probe could not run (fails open: the row is kept).
 async function segmentsDisguised(levelUrl) {
     try {
-        const res = await fetch(levelUrl, { headers: STREAM_HEADERS, signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
+        const res = await fetch(levelUrl, { headers: streamHeaders(), signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
         if (!res.ok) return null;
         const text = await res.text();
         const seg = text.split(/\r?\n/).map((l) => l.trim()).find((l) => l && !l.startsWith('#'));
         if (!seg) return null;
         const r = await fetch(hls.resolveUri(seg, levelUrl), {
-            headers: { ...STREAM_HEADERS, Range: 'bytes=0-15' },
+            headers: { ...streamHeaders(), Range: 'bytes=0-15' },
             signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
         });
         const head = Buffer.from(await r.arrayBuffer()).subarray(0, 16);
@@ -376,7 +429,7 @@ async function deadAudioUrls(masterText, masterUrl, tmdbId, capMs = _config.audi
     await Promise.all(media.map(async (m) => {
         const t0 = Date.now();
         try {
-            const r = await fetch(m.url, { headers: STREAM_HEADERS, signal: AbortSignal.timeout(Math.max(1, capMs)) });
+            const r = await fetch(m.url, { headers: streamHeaders(), signal: AbortSignal.timeout(Math.max(1, capMs)) });
             if (r.body && r.body.cancel) r.body.cancel().catch(() => {});
             if (!r.ok) throw new Error(`HTTP ${r.status}`);
         } catch (e) {
@@ -416,7 +469,7 @@ async function getMultimoviesStreams(tmdbId, mediaType = 'movie', seasonNum = nu
     const deadline = t0 + _config.budgetMs;
     const left = () => deadline - Date.now();
     const path = embedPath(tmdbId, type, seasonNum, episodeNum);
-    const referer = `${ORIGIN}/${path}`;
+    const referer = type === 'movie' ? `${origin()}${playerPath(tmdbId)}` : `${origin()}/${path}`;
     const phase = new AbortController();
     const stepSignal = () => AbortSignal.any([phase.signal, AbortSignal.timeout(Math.max(1, Math.min(_config.resolveStepMs, left())))]);
 
@@ -436,7 +489,7 @@ async function getMultimoviesStreams(tmdbId, mediaType = 'movie', seasonNum = nu
         try {
             const cap = Math.min(MASTER_TIMEOUT_MS, left());
             if (cap <= 0) throw new Error('budget exhausted');
-            const r = await fetch(src.url, { headers: STREAM_HEADERS, signal: AbortSignal.timeout(cap) });
+            const r = await fetch(src.url, { headers: streamHeaders(), signal: AbortSignal.timeout(cap) });
             if (!r.ok) throw new Error(`HTTP ${r.status}`);
             text = await r.text();
         } catch (e) {
@@ -448,7 +501,21 @@ async function getMultimoviesStreams(tmdbId, mediaType = 'movie', seasonNum = nu
             return null;
         }
         const audioCap = Math.max(0, Math.min(_config.audioTimeoutMs, left()));
-        const row = streamFromMaster(src, text, src.url, await deadAudioUrls(text, src.url, tmdbId, audioCap), await origP);
+        const dead = await deadAudioUrls(text, src.url, tmdbId, audioCap);
+        let originalLang = await origP;
+        if (originalLang) {
+            // Every server's list is known once the ask phase ends (the
+            // caller awaits that before any row, so this adds no wait).
+            await phaseDone;
+            const listed = [...answers.values()].flatMap((a) => (a && a.ok ? a.sources : []));
+            const kept = originalLanguageFor(listed, originalLang);
+            if (!kept) {
+                console.log(`[multimovies] "Original" not labelled ${knownLanguage(originalLang)} for ${tmdbId}: `
+                    + `another source names ${knownLanguage(originalLang)} - stays unlabelled`);
+            }
+            originalLang = kept;
+        }
+        const row = streamFromMaster(src, text, src.url, dead, originalLang);
         const top = hls.parseLevels(text, src.url)[0];
         if (top && top.url && disguisedHost(top.url) === true) {
             console.log(`[multimovies] segments disguised as images for ${tmdbId}, dropped`);
@@ -503,7 +570,7 @@ async function getMultimoviesStreams(tmdbId, mediaType = 'movie', seasonNum = nu
     ask(null);
     servers.forEach((s) => askServer(s));
     if (!listed) {
-        track(fetch(referer, { headers: { 'User-Agent': UA, Referer: `${ORIGIN}/` }, signal: stepSignal() })
+        track(fetch(referer, { headers: { 'User-Agent': UA, Referer: `${origin()}/` }, signal: stepSignal() })
             .then((r) => (r.ok ? r.text() : null))
             .then((html) => {
                 const ids = parseServerIds(html);
@@ -593,9 +660,13 @@ async function getMultimoviesStreams(tmdbId, mediaType = 'movie', seasonNum = nu
 
 module.exports = {
     getMultimoviesStreams,
+    CONFIG_DEFAULTS,
+    UPSTREAM,
+    _internal: { origin, resolveUrl, streamHeaders },
     STREAM_HEADERS,
     streamFromMaster,
     audioFromMaster,
+    originalLanguageFor,
     looksLikeImage,
     tierOf,
     masterKey,

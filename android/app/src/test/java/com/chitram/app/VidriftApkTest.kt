@@ -74,10 +74,10 @@ class VidriftApkTest {
     private fun langs(r: Resolved) = (Hls.languages(r.audio) + r.languages).distinct()
     private fun resolver(pageStep: Long = 5_000) = VidriftResolver(client, listOf(baseA, baseB), pageStepMs = pageStep)
 
-    @Test fun rrrGivesOneRowPerLanguageWithOriginalFromTmdb() = runBlocking {
+    @Test fun rrrGivesOneRowPerLanguageAndOriginalStaysUnlabelledBesideItsOwnTeluguRow() = runBlocking {
         serve(a, rrrPage, rrrMasters)
         val rows = resolver().resolveAll("movie", 579974, 0, 0, originalLang = "te")
-        assertEquals(listOf(listOf("Telugu"), listOf("Hindi"), listOf("Telugu"), listOf("Bengali")), rows.map(::langs))
+        assertEquals(listOf(emptyList(), listOf("Hindi"), listOf("Telugu"), listOf("Bengali")), rows.map(::langs))
         assertEquals("stable ids from the orion id", listOf("vidrift-36c0c00732d43d2df373f8c4e10e971b", "vidrift-fb969c400dbbad41a01f816e419f992b",
             "vidrift-4160f9215437e11c789d19d826048e8b", "vidrift-eb12dbd64fdfc1e245c4fa4d98710c9d"), rows.map { it.key })
         rows.forEach {
@@ -86,6 +86,41 @@ class VidriftApkTest {
             assertEquals(1080, it.levels.first().height)
         }
         assertTrue(rows.first().codecs!!.startsWith("hvc1"))
+    }
+
+    // Don't Trouble the Trouble (1261763, TMDB te), live 2026-11-21: Original,
+    // Hindi, Tamil, Telugu, Malayalam, Kannada. The Original audio is the Tamil
+    // track (owner heard Tamil; byte-identical to the Tamil row), and prod
+    // showed two "Telugu" rows. Server twin: test/vidrift.test.js.
+    private val dtttPage = Fixtures.read("vidrift/dttt-page.html")
+    private val dtttIds = listOf("7986230982bb6809d7a2b9e62553bf96", "bc18259d78c1fcb4243c40352e1e648e", "304cd356b4971579515c76cf4bc11dcc",
+        "2fc41d4bd36ca36378d03459dba7791b", "9a1f5fb246528cabe936837425539f81", "b90372f155025bd739851e15d012c67d")
+
+    @Test fun dtttOriginalIsNotTeluguWhenThePageHasItsOwnTeluguRow() = runBlocking {
+        serve(a, dtttPage, dtttIds.associate { "/api/orion/$it/master.m3u8" to original })
+        val rows = resolver().resolveAll("movie", 1261763, 0, 0, originalLang = "te")
+        assertEquals(listOf(emptyList(), listOf("Hindi"), listOf("Tamil"), listOf("Telugu"), listOf("Malayalam"), listOf("Kannada")), rows.map(::langs))
+        assertNull(rows[0].audio.single().language)
+        assertEquals(1, rows.count { "Telugu" in langs(it) })
+    }
+
+    @Test fun originalLanguageForKeepsTmdbOnlyWhenNoOtherEntryNamesIt() {
+        fun n(vararg l: String) = l.map { "Orion · $it" }
+        assertEquals("te", VidriftResolver.originalLanguageFor(n("Original", "Hindi"), "te"))
+        assertNull(VidriftResolver.originalLanguageFor(n("Original", "Hindi", "Telugu"), "te"))
+        assertNull(VidriftResolver.originalLanguageFor(n("Original", "Telugu"), "tel"))
+        assertNull(VidriftResolver.originalLanguageFor(n("Original", "Bangla"), "bn"))
+        assertEquals("te", VidriftResolver.originalLanguageFor(n("Original", "Telugu Sub"), "te"))
+        assertNull(VidriftResolver.originalLanguageFor(n("Original"), null))
+        assertNull(VidriftResolver.originalLanguageFor(n("Original"), "xx"))
+    }
+
+    @Test fun originalKeepsTmdbTeluguWhenThePageHasNoTeluguEntry() = runBlocking {
+        val page = dtttPage.replace(Regex("""\{"index":3,[^{}]*"name":"Orion · Telugu"[^{}]*"rungs":\[[^\]]*][^{}]*},"""), "")
+        assertTrue("fixture edit removed the Telugu entry", "Orion · Telugu" !in page)
+        serve(a, page, dtttIds.associate { "/api/orion/$it/master.m3u8" to original })
+        val rows = resolver().resolveAll("movie", 1261763, 0, 0, originalLang = "te")
+        assertEquals(listOf("Telugu"), langs(rows[0]))
     }
 
     @Test fun originalWithoutTmdbLanguageStaysUnlabelled() = runBlocking {

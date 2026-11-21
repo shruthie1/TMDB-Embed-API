@@ -57,11 +57,12 @@ const neverAnswers = (u, init) => new Promise((_, rej) => {
     init.signal.addEventListener('abort', () => rej(Object.assign(new Error('aborted'), { name: 'TimeoutError' })));
 });
 
-test('RRR: one row per language master; Original takes TMDB original_language', async () => {
+test('RRR: one row per language master; Original stays unlabelled because the page has its own Telugu row', async () => {
     stubFetch([[isPage('embed.vidrift.net'), () => text(RRR_PAGE)], [isMaster, () => text(MASTER_TE)]]);
     const rows = await vidrift.getVidriftStreams('579974', 'movie');
     assert.equal(rows.length, 4);
-    assert.deepEqual(rows.map((r) => r.languages), [['Telugu'], ['Hindi'], ['Telugu'], ['Bengali']]);
+    assert.deepEqual(rows.map((r) => r.languages), [[], ['Hindi'], ['Telugu'], ['Bengali']]);
+    assert.match(rows[0].title, /Original/);
     assert.equal(rows.upstreamError, undefined);
     for (const r of rows) {
         assert.equal(r.provider, 'vidrift');
@@ -183,7 +184,9 @@ test('a dead master on both hosts: row dropped, upstreamError set (no full-hit c
         [isMaster, () => text(MASTER_TE)],
     ]);
     const rows = await vidrift.getVidriftStreams('579974', 'movie');
-    assert.deepEqual(rows.map((r) => r.languages[0]), ['Telugu', 'Hindi', 'Bengali']);
+    // The page still names Telugu, so Original stays unlabelled even though
+    // the Telugu master died: unknown, never a guessed Telugu.
+    assert.deepEqual(rows.map((r) => r.languages[0]), [undefined, 'Hindi', 'Bengali']);
     assert.match(rows.upstreamError || '', /Orion · Telugu/);
 });
 
@@ -316,14 +319,56 @@ test('subtitles: HLS playlist URLs are not emitted, real vtt is kept', () => {
     assert.deepEqual(row.subtitles.map((s) => s.url.replace(/^.*\//, '')), ['s_te.vtt']);
 });
 
-test('R1: "Original" with TMDB bn / mr is Bengali / Marathi (not left as Original)', async () => {
-    for (const [code, name] of [['bn', 'Bengali'], ['mr', 'Marathi']]) {
+test('R1: "Original" with TMDB mr / pa is Marathi / Punjabi; bn stays unlabelled (RRR lists Bangla itself)', async () => {
+    for (const [code, name] of [['mr', 'Marathi'], ['pa', 'Punjabi'], ['bn', null]]) {
         stubFetch([[isPage('embed.vidrift.net'), () => text(RRR_PAGE)], [isMaster, () => text(MASTER_TE)]],
             { originalLanguage: code });
         const rows = await vidrift.getVidriftStreams('579974', 'movie');
         const orig = rows.find((r) => r.url.includes('36c0c00732d43d2df373f8c4e10e971b'));
-        assert.deepEqual(normaliseStream(orig).languages, [name], code);
+        assert.deepEqual(normaliseStream(orig).languages, name ? [name] : [], code);
     }
+});
+
+// Don't Trouble the Trouble (1261763, TMDB te), live 2026-11-21. Page lists
+// Original, Hindi, Tamil, Telugu, Malayalam, Kannada. The Original audio is
+// the Tamil track (owner heard Tamil; audio segments byte-identical to the
+// Tamil row's), and prod labelled it Telugu: two "Telugu" rows on the web.
+const DTTT_PAGE = read('dttt-page.html');
+const DTTT_ORIG = '7986230982bb6809d7a2b9e62553bf96';
+const DTTT_TE = '2fc41d4bd36ca36378d03459dba7791b';
+
+test('1261763: Original is NOT labelled Telugu when the page has its own Telugu row; one Telugu row only', async () => {
+    stubFetch([[isPage('embed.vidrift.net'), () => text(DTTT_PAGE)], [isMaster, () => text(MASTER_ORIG)]]);
+    const rows = await vidrift.getVidriftStreams('1261763', 'movie');
+    assert.equal(rows.length, 6);
+    const n = rows.map(normaliseStream);
+    assert.deepEqual(n.map((r) => r.languages), [[], ['Hindi'], ['Tamil'], ['Telugu'], ['Malayalam'], ['Kannada']]);
+    const orig = rows.find((r) => r.url.includes(DTTT_ORIG));
+    assert.match(orig.title, /Original/);
+    assert.ok(!normaliseStream(orig).audio.some((a) => a.language), 'Original audio carries no language');
+    assert.equal(n.filter((r) => r.languages.includes('Telugu')).length, 1);
+    assert.ok(rows.find((r) => r.url.includes(DTTT_TE)).languages.includes('Telugu'));
+});
+
+test('originalLanguageFor: TMDB language kept only when no other entry names it', () => {
+    const names = (...l) => l.map((x) => ({ name: `Orion · ${x}` }));
+    assert.equal(vidrift.originalLanguageFor(names('Original', 'Hindi'), 'te'), 'te');
+    assert.equal(vidrift.originalLanguageFor(names('Original', 'Hindi', 'Telugu'), 'te'), null);
+    assert.equal(vidrift.originalLanguageFor(names('Original', 'Hindi', 'Telugu'), 'tel'), null);
+    assert.equal(vidrift.originalLanguageFor(names('Original', 'Bangla'), 'bn'), null);
+    // A "<lang> Sub" entry is not an audio language, so it does not block.
+    assert.equal(vidrift.originalLanguageFor(names('Original', 'Telugu Sub'), 'te'), 'te');
+    assert.equal(vidrift.originalLanguageFor(names('Original'), null), null);
+    assert.equal(vidrift.originalLanguageFor(names('Original'), 'xx'), null);
+});
+
+test('Original keeps TMDB te when the page has no Telugu entry of its own', async () => {
+    const page = DTTT_PAGE.replace(/\{"index":3,[^{}]*"name":"Orion · Telugu"[^{}]*"rungs":\[[^\]]*\][^{}]*\},/, '');
+    assert.ok(!page.includes('Orion · Telugu'), 'fixture edit removed the Telugu entry');
+    stubFetch([[isPage('embed.vidrift.net'), () => text(page)], [isMaster, () => text(MASTER_ORIG)]]);
+    const rows = await vidrift.getVidriftStreams('1261763', 'movie');
+    const orig = rows.find((r) => r.url.includes(DTTT_ORIG));
+    assert.deepEqual(normaliseStream(orig).languages, ['Telugu']);
 });
 
 test('R1: knownLanguage covers 2- and 3-letter Indian codes', () => {

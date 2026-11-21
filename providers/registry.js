@@ -96,29 +96,108 @@ function loadProvider(providerFile) {
 // is a catalogue gap and counts for nothing. Crossing the streak starts a
 // rediscover in the background; this request is never held for it.
 const upstream = require('../utils/upstreamBase');
+const { classifyAndLog, shouldHeal } = require('../lib/selfheal/classify');
+const proof = require('../lib/selfheal/proof');
 // ott tierprobe TIER_TITLES: Inception, Dune 2, Breaking Bad.
 const MAINSTREAM_IDS = new Set(['27205', '693134', '1396']);
 const VERIFY_TITLE = { tmdbId: '27205', mediaType: 'movie' };
 
-function noteUpstream(providerInfo, module, outcome, ctx) {
+/**
+ * The verify a candidate host must pass before adoption (review I3):
+ *   1. the provider's cheap validator, when it has one (run.validate);
+ *   2. the provider's own resolve of its validation title, pinned to the
+ *      candidate (one budget GET; run.ownResolve when the run must pin more);
+ *   3. proof that the answer is THAT film: run.titleProven (provider-side id
+ *      or title match on the candidate itself), else the HLS duration of one
+ *      row against the TMDB runtime (lib/selfheal/proof.js). The answer's
+ *      shape alone never adopts a host.
+ */
+function makeVerify(u, fn, run, budget) {
+  const verifyTitle = u.verifyTitle || VERIFY_TITLE;
+  return (candidate, ctx) => upstream.withBase(u.name, candidate, async () => {
+    if (run && run.validate && !(await run.validate(candidate, ctx))) return false;
+    if (!budget.charge(1)) {
+      console.warn(`[heal] ${u.name} reject ${candidate} cap ${budget.max} GETs`);
+      return false;
+    }
+    const r = run && typeof run.ownResolve === 'function'
+      ? await run.ownResolve(candidate, fn, verifyTitle)
+      : await fn(verifyTitle.tmdbId, verifyTitle.mediaType, null, null);
+    if (!(Array.isArray(r) && r.length > 0)) {
+      console.warn(`[heal] ${u.name} reject ${candidate} own-resolve-empty`);
+      return false;
+    }
+    if (run && typeof run.titleProven === 'function') {
+      const p = await run.titleProven(candidate, ctx, r);
+      if (p === true) {
+        console.warn(`[heal] ${u.name} title-proof ${candidate} ok by provider`);
+        return true;
+      }
+      if (p === false) {
+        console.warn(`[heal] ${u.name} reject ${candidate} title-mismatch`);
+        return false;
+      }
+    }
+    // The rows came from the provider's own fetch (global fetch), so the
+    // proof reads them the same way; node-fetch drew HTTP 403 from the
+    // vidrock and vaplayer CDNs (laptop, 2026-11-21 17:43Z).
+    return proof.titleProof(u.name, candidate, r, verifyTitle.tmdbId, budget.wrap(proof.proofFetch()));
+  });
+}
+
+// Review I4: a host imported from the legacy data/provider-bases.json is
+// held back until it passes this provider's verify once (first use).
+function checkLegacy(providerInfo, module) {
+  const u = module && module.UPSTREAM;
+  if (!u || !upstream.legacyPending(u.name)) return;
+  const run = typeof u.healRun === 'function' ? u.healRun() : null;
+  const budget = (run && run.budget) || proof.createBudget();
+  console.warn(`[heal] ${u.name} legacy-verify start`);
+  upstream.verifyLegacy(u.name, makeVerify(u, module[providerInfo.functionName], run, budget))
+    .catch((e) => console.warn(`[heal] ${u.name} legacy-verify failed: ${e.message}`));
+}
+
+function noteUpstream(providerInfo, module, outcome, ctx, err = null) {
   const u = module && module.UPSTREAM;
   if (!u) return;
   if (outcome === 'ok') { upstream.noteOk(u.name); return; }
-  if (outcome === 'empty' && !MAINSTREAM_IDS.has(String(ctx.tmdbId))) return;
+  // Empty answers count only on the provider's own validation title (review
+  // M8: a provider that never carries Inception must not count it), or on
+  // the mainstream titles when the provider names none.
+  const countsEmpty = u.verifyTitle
+    ? String(ctx.tmdbId) === String(u.verifyTitle.tmdbId)
+    : MAINSTREAM_IDS.has(String(ctx.tmdbId));
+  if (outcome === 'empty' && !countsEmpty) return;
   if (upstream.noteFail(u.name) < upstream.FAIL_STREAK) return;
+  // Review I1: a Cloudflare challenge (blocked, incl. HTTP 403), a throttle
+  // (HTTP 429) or a 5xx is not a move: rediscovering only spends requests.
+  // A timeout or a reset streak may be a move, so it heals (the old rule).
+  if (err) {
+    const r = classifyAndLog(u.name, { message: err.message, status: err.status }, { full: true });
+    if (!shouldHeal(r)) {
+      console.warn(`[heal] ${u.name} skip rediscover (${r.kind} ${r.rule})`);
+      return;
+    }
+  }
   const fn = module[providerInfo.functionName];
   const current = upstream.getBase(u.name, u.seed);
   console.warn(`[registry] ${providerInfo.name} failed ${upstream.failStreak(u.name)}x in a row on ${current} - rediscovering`);
+  // A provider-specific heal run (extra config hosts, lazy trails, a cheap
+  // validator that runs before the full resolve). See lib/selfheal/vidbolt.js.
+  const run = typeof u.healRun === 'function' ? u.healRun() : null;
+  // One 12-GET budget for the whole run (review M6): redirects, player scans,
+  // trails, validation, each own resolve and the title proof.
+  const budget = (run && run.budget) || proof.createBudget();
   upstream.triggerRediscover(u.name, {
     seed: u.seed,
     player: u.player ? u.player(current) : undefined,
     aggregatorSlug: u.aggregatorSlug,
-    // The provider's own resolve, pointed at the candidate, carrying a title
-    // it should have. Anything less is satisfied by a parked page.
-    verify: (candidate) => upstream.withBase(u.name, candidate, async () => {
-      const r = await fn(VERIFY_TITLE.tmdbId, VERIFY_TITLE.mediaType, null, null);
-      return Array.isArray(r) && r.length > 0;
-    }),
+    extra: run ? run.extra : undefined,
+    trails: run ? run.trails : undefined,
+    budget,
+    // Pending path heals are saved only after their host passed (review I2).
+    onApplied: run && typeof run.onApplied === 'function' ? run.onApplied : undefined,
+    verify: makeVerify(u, fn, run, budget),
   });
 }
 
@@ -134,6 +213,7 @@ function createFetchFunction(providerInfo) {
       return [];
     }
 
+    checkLegacy(providerInfo, module);
     try {
       const mediaType = ctx.type === 'movie' ? 'movie' : 'tv';
       const t0 = Date.now();
@@ -202,7 +282,7 @@ function createFetchFunction(providerInfo) {
 
       // The aggregate route records this as a 'timeout', not an 'empty'.
       if (result === TIMED_OUT) {
-        noteUpstream(providerInfo, module, 'fail', ctx);
+        noteUpstream(providerInfo, module, 'fail', ctx, new Error(`timeout after ${PROVIDER_DEADLINE_MS}ms`));
         const out = []; out.timedOut = true; return out;
       }
 
@@ -229,7 +309,7 @@ function createFetchFunction(providerInfo) {
       // does not cache it; returning [] here made every upstream outage look
       // like "this title has no streams" for PROVIDER_EMPTY_TTL_MS.
       console.error(`[registry] ${providerInfo.name} fetch error:`, e.message);
-      noteUpstream(providerInfo, module, 'fail', ctx);
+      noteUpstream(providerInfo, module, 'fail', ctx, e);
       throw e;
     }
   };
@@ -295,4 +375,4 @@ function getProvider(name) {
 
 function getCookieStats() { return lastCookieStats; }
 
-module.exports = { listProviders, getProvider, getCookieStats, PROVIDER_DEADLINE_MS };
+module.exports = { listProviders, getProvider, getCookieStats, PROVIDER_DEADLINE_MS, _noteUpstream: noteUpstream, _checkLegacy: checkLegacy, _makeVerify: makeVerify };

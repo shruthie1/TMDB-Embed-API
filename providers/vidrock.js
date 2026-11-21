@@ -46,6 +46,26 @@ const HEADERS = {
     Referer: 'https://vidrock.net/',
     Origin: 'https://vidrock.net',
 };
+// Today's values; routes/resolve-config.json carries the same (provider
+// self-heal Task 3).
+const CONFIG_DEFAULTS = { bases: [API_BASE], key: STREAM_KEY.toString('hex') };
+const upstream = require('../utils/upstreamBase');
+const selfheal = require('../lib/selfheal/config');
+// Read per call: a remote config edit or a heal applies without a restart.
+const vidrockSeed = () => selfheal.cfg('vidrock', 'bases', CONFIG_DEFAULTS.bases)[0].replace(/\/+$/, '');
+// verifyTitle: RRR 579974. vidrock answered 0 rows for Inception and 1 HLS
+// row for RRR (laptop, 2026-11-21). The title is proven by the HLS duration
+// (lib/selfheal/proof.js), vidrock's API carries no title.
+const UPSTREAM = { name: 'vidrock', get seed() { return vidrockSeed(); }, verifyTitle: { tmdbId: '579974', mediaType: 'movie' } };
+function apiBase() { return upstream.getBase('vidrock', vidrockSeed()); }
+function headers() {
+    const b = apiBase();
+    return { ...HEADERS, Referer: `${b}/`, Origin: b };
+}
+function streamKey() {
+    const hex = selfheal.cfg('vidrock', 'key', CONFIG_DEFAULTS.key);
+    return /^[0-9a-f]{64}$/i.test(hex) ? Buffer.from(hex, 'hex') : STREAM_KEY;
+}
 const API_TIMEOUT_MS = 10000;
 const MASTER_TIMEOUT_MS = 8000;
 const MASTER_RETRY_DELAY_MS = 500;
@@ -57,7 +77,7 @@ function decryptStreamUrl(encoded) {
     if (buf.length <= GCM_IV_LENGTH + GCM_TAG_LENGTH) throw new Error('ciphertext too short');
     const iv = Buffer.concat([buf.subarray(0, GCM_IV_LENGTH), Buffer.from([0, 0, 0, 2])]);
     const body = buf.subarray(GCM_IV_LENGTH, buf.length - GCM_TAG_LENGTH);
-    const d = createDecipheriv('aes-256-ctr', STREAM_KEY, iv);
+    const d = createDecipheriv('aes-256-ctr', streamKey(), iv);
     return Buffer.concat([d.update(body), d.final()]).toString('utf8');
 }
 
@@ -105,7 +125,7 @@ function streamFromMaster(server, entry, url, masterText) {
         levels: levels.map((l) => ({ height: l.height, quality: tierOf(l.width, l.height), bandwidth: l.bandwidth, codecs: l.codecs })),
         codecs: hls.masterCodecs(masterText),
         subtitles: [],
-        headers: { ...HEADERS },
+        headers: headers(),
     };
 }
 
@@ -120,7 +140,7 @@ async function getVidrockStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
     const path = type === 'tv' ? `tv/${id}/${seasonNum || 1}/${episodeNum || 1}` : `movie/${id}`;
 
     // Transport error / non-2xx: unknown, thrown so it is not cached as empty.
-    const res = await fetch(`${API_BASE}/api/${path}`, { headers: HEADERS, signal: AbortSignal.timeout(API_TIMEOUT_MS) });
+    const res = await fetch(`${apiBase()}/api/${path}`, { headers: headers(), signal: AbortSignal.timeout(API_TIMEOUT_MS) });
     if (!res.ok) throw new Error(`vidrock: api HTTP ${res.status} for ${id}`);
     const body = await res.json().catch(() => null);
     if (!body || typeof body !== 'object' || body.error) {
@@ -148,7 +168,7 @@ async function getVidrockStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
             return null;
         }
         try {
-            const get = () => fetch(url, { headers: HEADERS, signal: AbortSignal.timeout(MASTER_TIMEOUT_MS) });
+            const get = () => fetch(url, { headers: headers(), signal: AbortSignal.timeout(MASTER_TIMEOUT_MS) });
             let r = await get();
             if (r.status === 403) {
                 console.log(`[vidrock] ${name}: master 403, retry once`);
@@ -172,4 +192,4 @@ async function getVidrockStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
     return out;
 }
 
-module.exports = { getVidrockStreams, decryptStreamUrl, streamFromMaster, tierOf, HEADERS };
+module.exports = { getVidrockStreams, decryptStreamUrl, streamFromMaster, tierOf, HEADERS, CONFIG_DEFAULTS, UPSTREAM, _internal: { apiBase, headers, streamKey } };

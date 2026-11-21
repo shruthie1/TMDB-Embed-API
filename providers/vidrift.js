@@ -20,8 +20,9 @@
 // LANGUAGE. Per AUDIO rendition, its own LANGUAGE tag wins. Only when the
 // master has exactly ONE untagged AUDIO rendition (or none, audio muxed) does
 // the page label apply: the part after "·" ("Bangla" -> Bengali). "Original"
-// takes the title's TMDB original_language (RRR te); unknown -> stays
-// "Original" with no language. embedMeta.lang is NOT used: Krack, a Telugu
+// takes the title's TMDB original_language, unless another entry
+// on the page names that language itself (originalLanguageFor); unknown ->
+// stays "Original" with no language. embedMeta.lang is NOT used: Krack, a Telugu
 // film, had lang "" (review I2). Never read from a TMDB title string.
 //
 // FAILURES. A master that fails on every host is dropped and named in
@@ -64,6 +65,14 @@ const BASES = [
     'https://embed.vidrift.in',
 ].map((b) => String(b).replace(/\/+$/, ''));
 
+// Today's static values (VIDRIFT_BASE excluded); routes/resolve-config.json
+// carries the same (provider self-heal Task 3).
+const CONFIG_DEFAULTS = {
+    bases: ['https://embed.vidrift.net', 'https://embed.vidrift.in'],
+    moviePath: '/embed/movie/{id}',
+    tvPath: '/embed/tv/{id}/{s}/{e}',
+};
+
 // The embed page answers 403 "Embed this page in an iframe." to Node's fetch
 // (undici adds Sec-Fetch-Mode: cors) and 200 to axios and curl with the same
 // UA + Referer (measured 2026-11-21, RRR: fetch 403 x2, axios 200 673 ms).
@@ -90,11 +99,56 @@ function streamHeaders(base) {
     return { 'User-Agent': UA, Referer: `${base}/`, Origin: base };
 }
 
+const { AsyncLocalStorage } = require('async_hooks');
+const upstream = require('../utils/upstreamBase');
+const selfheal = require('../lib/selfheal/config');
+const strip = (u) => String(u).replace(/\/+$/, '');
+// A path template under test by a heal run (lib/selfheal/vidrift.js).
+const pathTrial = new AsyncLocalStorage();
+const okTmpl = (t) => typeof t === 'string' && /^\/[^\s]*\{id\}/.test(t);
+
+function moviePath() {
+    const t = pathTrial.getStore() || selfheal.cfg('vidrift', 'moviePath', CONFIG_DEFAULTS.moviePath);
+    return okTmpl(t) ? t : CONFIG_DEFAULTS.moviePath;
+}
+function tvPath() {
+    const t = selfheal.cfg('vidrift', 'tvPath', CONFIG_DEFAULTS.tvPath);
+    return okTmpl(t) && t.includes('{s}') && t.includes('{e}') ? t : CONFIG_DEFAULTS.tvPath;
+}
+
+// Hosts for THIS call, in order: VIDRIFT_BASE, a heal, config bases, today's
+// BASES. Inside a heal verify (upstream.withBase) only the candidate, so a pass
+// proves the candidate and not a fallback host.
+const vidriftSeed = () => strip(selfheal.cfg('vidrift', 'bases', CONFIG_DEFAULTS.bases)[0]);
+function liveBases() {
+    const pin = upstream.pinned('vidrift');
+    if (pin) return [pin];
+    const cfgBases = selfheal.cfg('vidrift', 'bases', CONFIG_DEFAULTS.bases).map(strip);
+    const env = process.env.VIDRIFT_BASE ? [strip(process.env.VIDRIFT_BASE)] : [];
+    return [...new Set([...env, upstream.getBase('vidrift', vidriftSeed()), ...cfgBases, ...BASES])];
+}
+
 function embedUrl(base, tmdbId, mediaType, season, episode) {
     return mediaType === 'tv'
-        ? `${base}/embed/tv/${tmdbId}/${season}/${episode}`
-        : `${base}/embed/movie/${tmdbId}`;
+        ? `${base}${tvPath().replace('{id}', tmdbId).replace('{s}', season).replace('{e}', episode)}`
+        : `${base}${moviePath().replace('{id}', tmdbId)}`;
 }
+
+// healRun: shared title-page trail + validator (lib/selfheal/vidrift.js). Its
+// own-resolve check is RRR 579974, the title vidrift is verified on.
+const VERIFY_TITLE = { tmdbId: '579974', mediaType: 'movie' };
+const UPSTREAM = {
+    name: 'vidrift',
+    get seed() { return vidriftSeed(); },
+    verifyTitle: VERIFY_TITLE,
+    healRun: () => require('../lib/selfheal/vidrift').createRun({
+        // The provider's own resolve of RRR with a trial movie path.
+        ownResolvePath: (tmpl) => pathTrial.run(tmpl, async () => {
+            const r = await getVidriftStreams(VERIFY_TITLE.tmdbId, VERIFY_TITLE.mediaType);
+            return Array.isArray(r) && r.length > 0;
+        }),
+    }),
+};
 
 // `var embedMeta = {...};` -> object, or null when the page has none.
 function parseEmbedMeta(html) {
@@ -154,6 +208,22 @@ function pageLanguage(entry, originalLang) {
     }
     const language = langName(label);
     return { language, label: language };
+}
+
+// "Original" is not always the TMDB original language. Don't Trouble the
+// Trouble (1261763, TMDB te) lists Original, Hindi, Tamil, Telugu, Malayalam,
+// Kannada; its Original audio is byte-identical to the Tamil row's (audio
+// segment 200: 136 of 82,461 bytes differ vs Tamil, 80,074 vs Telugu, live
+// 2026-11-21), and the owner heard Tamil. When another entry on the same
+// page names that language itself, the page already places it elsewhere, so
+// "Original" stays unlabelled: unknown, never a wrong tag. Pure, exported.
+function originalLanguageFor(entries, originalLang) {
+    const language = knownLanguage(originalLang);
+    if (!language) return null;
+    const named = (entries || [])
+        .map((e) => pageLanguage(e, null).language)
+        .filter(Boolean);
+    return named.includes(language) ? null : originalLang;
 }
 
 // Tier from height. Width only lifts a letterboxed encode (1920x800 is a
@@ -240,8 +310,9 @@ function stepSignal(stepMs, deadline) {
 // "no streams". Returns the hosts left to try for masters, page host first.
 async function fetchPage(tmdbId, type, season, episode, deadline) {
     const errors = [];
-    for (let i = 0; i < BASES.length; i++) {
-        const base = BASES[i];
+    const bases = liveBases();
+    for (let i = 0; i < bases.length; i++) {
+        const base = bases[i];
         const url = embedUrl(base, tmdbId, type, season, episode);
         const t0 = Date.now();
         try {
@@ -252,7 +323,7 @@ async function fetchPage(tmdbId, type, season, episode, deadline) {
             if (!meta) throw new Error('no embedMeta in page');
             if (!Array.isArray(meta.orionStreams)) throw new Error(`orionStreams ${meta.orionStreams === null ? 'null' : 'missing'}`);
             console.log(`[vidrift] page ${base} ${Date.now() - t0}ms`);
-            return { meta, bases: [base, ...BASES.filter((b) => b !== base)] };
+            return { meta, bases: [base, ...bases.filter((b) => b !== base)] };
         } catch (e) {
             const msg = e.name === 'TimeoutError' || e.name === 'AbortError' || e.code === 'ERR_CANCELED'
                 ? `no answer in ${Date.now() - t0}ms` : e.message;
@@ -317,9 +388,14 @@ async function getVidriftStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
             return l;
         }) : null,
     ]);
+    const originalFor = originalLanguageFor(entries, originalLang);
+    if (originalLang && knownLanguage(originalLang) && !originalFor) {
+        console.log(`[vidrift] "Original" not labelled ${knownLanguage(originalLang)} for ${tmdbId}: another entry names `
+            + `${knownLanguage(originalLang)} - stays unlabelled`);
+    }
     const failed = results.filter((r) => r.error).map((r) => r.error);
     const built = results.filter((r) => !r.error).map((r) => {
-        const row = streamFromMaster(r.entry, r.text, r.masterUrl, r.base, originalLang);
+        const row = streamFromMaster(r.entry, r.text, r.masterUrl, r.base, originalFor);
         console.log(`[vidrift] "${r.entry.name}" -> ${row.languages.join('/') || 'unlabelled'} ${row.quality} `
             + `${row.videoCodec || '?'} audio=${row.audio.length} ${r.base} (${r.ms}ms)`);
         return row;
@@ -338,10 +414,14 @@ async function getVidriftStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
 module.exports = {
     getVidriftStreams,
     BASES,
+    CONFIG_DEFAULTS,
+    UPSTREAM,
+    _internal: { liveBases, moviePath, tvPath },
     streamHeaders,
     embedUrl,
     parseEmbedMeta,
     pageLanguage,
+    originalLanguageFor,
     streamFromMaster,
     _config,
     _deps,

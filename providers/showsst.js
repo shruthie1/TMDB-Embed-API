@@ -45,19 +45,39 @@ const MIRRORS = [
     { api: 'https://api.vidmario.net', player: 'https://player.vidmario.net' },
 ].map((m) => ({ api: String(m.api).replace(/\/+$/, ''), player: String(m.player).replace(/\/+$/, '') }));
 const API_BASE = MIRRORS[0].api;
+// Today's static mirrors (env mirror excluded); routes/resolve-config.json
+// carries the same (provider self-heal Task 3).
+const CONFIG_DEFAULTS = {
+    mirrors: [
+        { api: 'https://api.vidqueen.st', player: 'https://player.vidqueen.st' },
+        { api: 'https://api.vidmario.net', player: 'https://player.vidmario.net' },
+    ],
+};
 
 // A healed api host (utils/upstreamBase.js) goes in front of the static list,
 // read per call. Its player is the same name with `api.` -> `player.`, the
 // pairing every mirror so far has used.
 const upstream = require('../utils/upstreamBase');
 const playerFor = (api) => api.replace('//api.', '//player.');
-const UPSTREAM = { name: 'showsst', seed: API_BASE, player: playerFor };
+const selfheal = require('../lib/selfheal/config');
+// Env mirror first (as today), then the config list (remote, else built-in =
+// today's static list). Read per call.
+function staticMirrors() {
+    const list = selfheal.cfg('showsst', 'mirrors', CONFIG_DEFAULTS.mirrors)
+        .filter((m) => m && typeof m.api === 'string' && /^https?:\/\//.test(m.api))
+        .map((m) => ({ api: m.api.replace(/\/+$/, ''), player: String(m.player || playerFor(m.api)).replace(/\/+$/, '') }));
+    const env = process.env.SHOWSST_API_BASE ? [MIRRORS[0]] : [];
+    const out = [...env, ...list.filter((m) => !env.some((e) => e.api === m.api))];
+    return out.length ? out : MIRRORS;
+}
+const UPSTREAM = { name: 'showsst', get seed() { return staticMirrors()[0].api; }, player: playerFor };
 function mirrors() {
-    const api = upstream.getBase('showsst', API_BASE);
-    if (api === API_BASE) return MIRRORS;
-    const known = MIRRORS.find((m) => m.api === api);
+    const base = staticMirrors();
+    const api = upstream.getBase('showsst', base[0].api);
+    if (api === base[0].api) return base;
+    const known = base.find((m) => m.api === api);
     const first = known || { api, player: playerFor(api) };
-    return [first, ...MIRRORS.filter((m) => m !== first)];
+    return [first, ...base.filter((m) => m !== first)];
 }
 
 // Headers for the stream host. The MP4 hosts answer 206 with or without a
@@ -185,4 +205,4 @@ async function getShowsstStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
     }));
 }
 
-module.exports = { getShowsstStreams, API_BASE, MIRRORS, UPSTREAM, streamHeaders };
+module.exports = { getShowsstStreams, API_BASE, MIRRORS, UPSTREAM, streamHeaders, CONFIG_DEFAULTS, _mirrors: mirrors };

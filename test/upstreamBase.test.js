@@ -90,10 +90,11 @@ test('a verified candidate is persisted and getBase returns it', async () => {
     assert.deepEqual(tried, ['https://mapple.rip']);
     assert.equal(up.getBase('mapple', 'https://mapple.fun'), 'https://mapple.rip');
 
-    const saved = JSON.parse(fs.readFileSync(FILE, 'utf8'));
-    assert.equal(saved.mapple.base, 'https://mapple.rip');
-    assert.equal(saved.mapple.previous, 'https://mapple.fun');
-    assert.equal(saved.mapple.how, 'redirect');
+    // provider-heals.json shape (2026-11-21): { name: { base: {...}, fields? } }.
+    const saved = JSON.parse(fs.readFileSync(FILE, 'utf8')).mapple.base;
+    assert.equal(saved.base, 'https://mapple.rip');
+    assert.equal(saved.previous, 'https://mapple.fun');
+    assert.equal(saved.how, 'redirect');
 
     // A restart reads it back.
     up._reset();
@@ -164,8 +165,20 @@ test('registry: a failure streak heals showsst onto the host its old api redirec
         if (host === 'frame.example') return new Response(MP4_HEAD, { status: 206, headers: { 'content-type': 'video/mp4' } });
         throw new Error(`getaddrinfo ENOTFOUND ${host}`);
     };
+    // Review I3: the candidate must serve the validation title (Inception,
+    // 148 min). The heal run reads the MP4 row's mvhd duration.
+    const mvhd = Buffer.alloc(32);
+    mvhd.write('mvhd', 0); mvhd.writeUInt32BE(1000, 16); mvhd.writeUInt32BE(148 * 60 * 1000, 20);
+    const redirects = fakeFetch({ 'HEAD https://api.vidqueen.st': res(301, { location: 'https://api.vidfresh.example/' }) });
+    const proof = require('../lib/selfheal/proof');
+    proof._setDeps({
+        getDetails: async () => ({ runtime: 148 }),
+        fetch: async () => new Response(Buffer.concat([MP4_HEAD, mvhd]), { status: 206 }),
+    });
     up._setDeps({
-        fetch: fakeFetch({ 'HEAD https://api.vidqueen.st': res(301, { location: 'https://api.vidfresh.example/' }) }),
+        fetch: async (url, opts) => (new URL(url).hostname === 'frame.example'
+            ? new Response(Buffer.concat([MP4_HEAD, mvhd]), { status: 206 })
+            : redirects(url, opts)),
         budgetMs: 2000,
     });
     try {
@@ -188,6 +201,7 @@ test('registry: a failure streak heals showsst onto the host its old api redirec
         assert.equal(up.failStreak('showsst'), 0);
     } finally {
         global.fetch = realFetch;
+        proof._setDeps({});
     }
 });
 

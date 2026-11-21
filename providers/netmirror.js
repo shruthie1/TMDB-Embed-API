@@ -211,15 +211,21 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // that dies silently the next time the operators move.
 //
 // Ordered; the first that answers wins and is remembered for the process.
-const API_MIRRORS = (process.env.NETMIRROR_API_BASE
-    ? [process.env.NETMIRROR_API_BASE]
-    : ['https://net27.cc', 'https://netfree.cc', 'https://iosmirror.cc', 'https://net79.cc'])
-    .map((u) => u.replace(/\/$/, ''));
+const DEFAULT_API_MIRRORS = ['https://net27.cc', 'https://netfree.cc', 'https://iosmirror.cc', 'https://net79.cc'];
+const selfheal = require('../lib/selfheal/config');
+// Env first, then config netmirror.webMirrors, then today's list. Read per call;
+// the walk itself (when and how often) is unchanged.
+function apiMirrors() {
+    return (process.env.NETMIRROR_API_BASE
+        ? [process.env.NETMIRROR_API_BASE]
+        : selfheal.cfg('netmirror', 'webMirrors', DEFAULT_API_MIRRORS))
+        .map((u) => u.replace(/\/$/, ''));
+}
 
 let liveMirror = null;
 
 function apiBase() {
-    return liveMirror || API_MIRRORS[0];
+    return liveMirror || apiMirrors()[0];
 }
 
 /**
@@ -230,9 +236,10 @@ function apiBase() {
  * provider survives an operator moving domains.
  */
 async function withMirror(build) {
+    const mirrors = apiMirrors();
     const order = liveMirror
-        ? [liveMirror, ...API_MIRRORS.filter((m) => m !== liveMirror)]
-        : API_MIRRORS;
+        ? [liveMirror, ...mirrors.filter((m) => m !== liveMirror)]
+        : mirrors;
     let lastErr = null;
     for (const base of order) {
         try {
@@ -279,9 +286,13 @@ async function resolveNewTvApi() {
         .split(',')
         .map((value) => value.trim().replace(/\/$/, ''))
         .filter(Boolean);
+    // Env first, then config netmirror.domains (built-in = this same list),
+    // then today's encoded list. Same loop, same stop rules.
     const domains = [
         ...custom,
-        ...NEW_TV_DOMAINS.map((value) => Buffer.from(value, 'base64').toString('utf8'))
+        ...selfheal.cfg('netmirror', 'domains',
+            NEW_TV_DOMAINS.map((value) => Buffer.from(value, 'base64').toString('utf8')))
+            .map((value) => String(value).replace(/\/$/, '')),
     ];
 
     for (const domain of domains) {
@@ -1429,4 +1440,4 @@ async function getNetmirrorStreams(tmdbId, mediaType = 'movie', seasonNum = null
 // while the VIDEO rungs point at one shared decoy id. Measured 2026-09-22 on
 // 155 (The Dark Knight) and 693134 (Dune: Part Two) - both served video from
 // files/220884.
-module.exports = { getNetmirrorStreams, masterMatchesTitle, nmFetch };
+module.exports = { getNetmirrorStreams, masterMatchesTitle, nmFetch, _resolveNewTvApi: resolveNewTvApi };

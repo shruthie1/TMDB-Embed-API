@@ -2,30 +2,31 @@
 // GET /api/resolve-config: the override config the Android app's
 // ResolveConfigStore fetches (android/.../resolve/ResolveConfig.kt). It lets a
 // provider-site change (host, path, front list, token regex, timeout) reach the
-// app as a server edit instead of an app update. Edit routes/resolve-config.json
-// and deploy; the app re-fetches after ttlSec. The file is read per request, so
-// an edit on the VM takes effect without a restart.
+// app as a server edit instead of an app update.
 //
-// The app treats any missing or invalid field as its built-in default, so a
-// broken file degrades to defaults, never to a crash. The JSON ships with the
-// app's own defaults exactly (test/resolveConfig.test.js checks it).
+// Since 2026-11-21 (provider self-heal) it serves the merged view from
+// lib/selfheal/config.js: built-in routes/resolve-config.json < remote
+// RESOLVE_CONFIG_URL < verified heals (data/provider-heals.json). The built-in
+// file is still re-read when it changes, so an edit on the VM takes effect
+// without a restart.
+//
+// The app treats any missing or invalid field as its built-in default and
+// ignores unknown keys, so a broken file degrades to defaults, never to a
+// crash. The built-in JSON ships with the app's own defaults exactly
+// (test/resolveConfig.test.js checks it).
 
-const fs = require('fs');
-const path = require('path');
-
-const FILE = path.join(__dirname, 'resolve-config.json');
 // Short: the app keeps its own copy for ttlSec, and the Vercel edge in front of
 // /api/resolve-config must not pin a stale config for long.
 const CACHE_CONTROL = 'public, max-age=300';
 
-function registerResolveConfigRoute(app, file = FILE) {
+function registerResolveConfigRoute(app, source = null) {
     app.get('/api/resolve-config', (req, res) => {
         let text;
         try {
-            text = fs.readFileSync(file, 'utf8');
-            JSON.parse(text);
+            const src = source || require('../lib/selfheal/config');
+            text = JSON.stringify(src.snapshot());
         } catch (e) {
-            console.error(`[resolve-config] unreadable ${file}: ${e.message}`);
+            console.error(`[resolve-config] snapshot failed: ${e.message}`);
             return res.status(500).json({ error: 'resolve-config unavailable' });
         }
         res.set('Content-Type', 'application/json; charset=utf-8');

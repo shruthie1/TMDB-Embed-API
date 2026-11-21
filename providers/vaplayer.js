@@ -22,13 +22,20 @@ const upstream = require('../utils/upstreamBase');
 
 // Seed only; wrapperOrigin() is the live host (utils/upstreamBase.js).
 const WRAPPER_ORIGIN = process.env.VAPLAYER_WRAPPER_ORIGIN || 'https://vaplayer.ru';
-const UPSTREAM = { name: 'vaplayer', seed: WRAPPER_ORIGIN };
-function wrapperOrigin() { return upstream.getBase('vaplayer', WRAPPER_ORIGIN); }
+const selfheal = require('../lib/selfheal/config');
+// Env first (as today), then config wrapperBases[0]. Read per call.
+const vaSeed = () => (process.env.VAPLAYER_WRAPPER_ORIGIN
+    || selfheal.cfg('vaplayer', 'wrapperBases', ['https://vaplayer.ru'])[0]).replace(/\/+$/, '');
+const UPSTREAM = { name: 'vaplayer', get seed() { return vaSeed(); } };
+function wrapperOrigin() { return upstream.getBase('vaplayer', vaSeed()); }
 // api.php lives on streamdata.<wrapper host>. Unhealed it is the fixed
 // STREAM_API; after a heal it follows the new wrapper host. A wrong guess here
 // fails verify, so it is never applied.
 function streamApi() {
-    if (!upstream.isHealed('vaplayer', WRAPPER_ORIGIN)) return STREAM_API;
+    // A verified CONFIG.streamDataApiUrl (heal) or a remote edit wins.
+    const healed = selfheal.cfg('vaplayer', 'streamDataApiUrl', '');
+    if (/^https:\/\//.test(healed)) return healed;
+    if (!upstream.isHealed('vaplayer', vaSeed())) return STREAM_API;
     return `https://streamdata.${new URL(wrapperOrigin()).host}/api.php`;
 }
 const STEP_TIMEOUT_MS = Number(process.env.VAPLAYER_STEP_TIMEOUT_MS) || 8000;
@@ -303,4 +310,4 @@ async function getVaplayerStreams(tmdbId, mediaType = 'movie', seasonNum = null,
     }
 }
 
-module.exports = { applyToken, decryptStreamUrls, getVaplayerStreams, UPSTREAM };
+module.exports = { applyToken, decryptStreamUrls, getVaplayerStreams, UPSTREAM, _internal: { streamApi, wrapperOrigin } };

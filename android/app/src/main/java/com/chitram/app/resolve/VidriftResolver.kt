@@ -25,7 +25,8 @@ import java.util.concurrent.TimeUnit
  * Language (server twin, exactly): a rendition's own LANGUAGE wins. The page
  * label applies only when the master has exactly ONE untagged AUDIO rendition
  * (or none, audio muxed). "Original" takes [originalLang] (the title's TMDB
- * original_language from the catalog); unknown stays unlabelled. A label
+ * original_language from the catalog) unless another entry names that
+ * language itself ([originalLanguageFor]); unknown stays unlabelled. A label
  * ending in sub/subs/subbed/subtitles is never an audio language.
  *
  * Hosts: tried in order, a dead page moves to the next. The host that last
@@ -115,6 +116,13 @@ class VidriftResolver(
             return@coroutineScope emptyList()
         }
 
+        // "Original" names the TMDB language only when no other entry names it (server originalLanguageFor).
+        val originalFor = originalLanguageFor(entries.map { it.name }, originalLang)
+        if (originalFor == null && com.chitram.app.data.Ranking.knownLanguageName(originalLang) != null &&
+            entries.any { Regex("""·\s*original\s*$""", RegexOption.IGNORE_CASE).containsMatchIn(it.name) }) {
+            android.util.Log.i("Chitram", "[vidrift] \"Original\" not labelled ${com.chitram.app.data.Ranking.knownLanguageName(originalLang)} for $tmdbId: another entry names it - stays unlabelled")
+        }
+
         // Masters in parallel: the page host first, then the mirrors, inside the budget.
         val jobs = entries.map { e ->
             async {
@@ -127,7 +135,7 @@ class VidriftResolver(
                     val got = try {
                         withTimeoutOrNull(cap) {
                             val r = capped(cap).fetch(Request.Builder().url(url).apply { streamHeaders(base).forEach { (k, v) -> header(k, v) } }.build())
-                            if (!r.ok) "HTTP ${r.code}" else rowFor(e, r.body, url, base, originalLang) ?: "no variants"
+                            if (!r.ok) "HTTP ${r.code}" else rowFor(e, r.body, url, base, originalFor) ?: "no variants"
                         } ?: "no answer in ${System.currentTimeMillis() - m0}ms"
                     } catch (x: Exception) {
                         if (x is kotlinx.coroutines.CancellationException) throw x
@@ -239,6 +247,18 @@ class VidriftResolver(
             }
             val lang = langName(label)
             return lang to lang
+        }
+
+        /**
+         * Server originalLanguageFor: "Original" is not always the TMDB original
+         * language. 1261763 (TMDB te) lists Original + Tamil + Telugu, and its
+         * Original audio is the Tamil track (byte-identical, owner heard Tamil,
+         * 2026-11-21). When another entry on the page names that language
+         * itself, [originalLang] is dropped: "Original" stays unlabelled.
+         */
+        internal fun originalLanguageFor(names: List<String?>, originalLang: String?): String? {
+            val lang = com.chitram.app.data.Ranking.knownLanguageName(originalLang) ?: return null
+            return if (names.any { pageLanguage(it, null).first == lang }) null else originalLang
         }
 
         /**

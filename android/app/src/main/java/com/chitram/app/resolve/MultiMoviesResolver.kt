@@ -97,7 +97,7 @@ class MultiMoviesResolver(
                         val sources = (stream?.get("sources") as? JsonArray).orEmpty()
                             .mapNotNull { it as? JsonObject }
                             .filter { str(it, "kind") == "hls" }
-                            .mapNotNull { o -> str(o, "url")?.let { it to sourceLanguage(str(o, "language"), originalLang) } }
+                            .mapNotNull { o -> str(o, "url")?.let { it to str(o, "language") } }
                         Answer(label, ok = true, code = r.code, server = stream?.let { str(it, "server") }, sources = sources)
                     } ?: Answer(label, timedOut = true)
                 } catch (x: Exception) {
@@ -108,7 +108,10 @@ class MultiMoviesResolver(
             }
         }
 
-        fun master(url: String, lang: String?) = async {
+        // Every source VidBolt listed this call (raw language), complete once the ask phase ends.
+        val listedLanguages = kotlinx.coroutines.CompletableDeferred<List<String?>>()
+
+        fun master(url: String, raw: String?) = async {
             val cap = minOf(masterTimeoutMs, left())
             if (cap <= 0) return@async null
             val m = withTimeoutOrNull(cap) {
@@ -121,6 +124,15 @@ class MultiMoviesResolver(
                 }
             }
             if (m == null || m.levels.isEmpty()) return@async null
+            // "Original" names the TMDB language only when no other source names it
+            // (server originalLanguageFor); the phase ends before any row is read.
+            val lang = if (isOriginal(raw)) {
+                val kept = originalLanguageFor(listedLanguages.await(), originalLang)
+                if (kept == null && com.chitram.app.data.Ranking.knownLanguageName(originalLang) != null) {
+                    android.util.Log.i("Chitram", "[multimovies] \"Original\" not labelled ${com.chitram.app.data.Ranking.knownLanguageName(originalLang)} for $tmdbId: another source names it - stays unlabelled")
+                }
+                sourceLanguage(raw, kept)
+            } else sourceLanguage(raw, originalLang)
             Resolved(
                 provider = "multimovies",
                 label = "MultiMovies",
@@ -187,6 +199,7 @@ class MultiMoviesResolver(
         }
         askJobs.forEach { it.cancel() }
         events.close()
+        listedLanguages.complete(answers.values.filter { it.ok }.flatMap { a -> a.sources.map { it.second } })
 
         // A 429 is VidBolt limiting our whole IP, not this server: the streak is left as is.
         asked.forEach { if (answers[it]?.code == 429) releaseProbe(it) else recordServer(it, answers[it]?.ok == true) }
@@ -345,6 +358,20 @@ class MultiMoviesResolver(
         /** "[4] Telugu", "1. English", "Hindi (Original)" -> "Telugu", "English", "Hindi" (server cleanName). */
         internal fun cleanName(name: String?): String =
             (name ?: "").replace(Regex("""^\s*(\[\d+]|\d+[.)])\s*"""), "").replace(Regex("""\s*\(.*\)\s*$"""), "").trim()
+
+        private fun isOriginal(raw: String?) = raw?.trim().equals("original", true)
+
+        /**
+         * Server originalLanguageFor: "Original" is not always the TMDB original
+         * language (Vidrift's Original for 1261763, TMDB te, is the Tamil track,
+         * 2026-11-21). When another source of the title names that language
+         * itself, [originalLang] is dropped and "Original" stays unlabelled.
+         * `rawLanguages`: every source's raw VidBolt `language`, across servers.
+         */
+        internal fun originalLanguageFor(rawLanguages: List<String?>, originalLang: String?): String? {
+            val lang = com.chitram.app.data.Ranking.knownLanguageName(originalLang) ?: return null
+            return if (rawLanguages.any { !isOriginal(it) && sourceLanguage(it) == lang }) null else originalLang
+        }
 
         /**
          * VidBolt's per-source `language` when it names a KNOWN audio language

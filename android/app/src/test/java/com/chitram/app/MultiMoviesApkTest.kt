@@ -220,6 +220,26 @@ class MultiMoviesApkTest {
         assertEquals(listOf("Telugu"), labels(row))
     }
 
+    // Vidrift's "Original" for 1261763 (TMDB te) is the Tamil track (2026-11-21).
+    // Server twin: test/multimovies.test.js originalLanguageFor.
+    @Test fun originalSourceStaysUnlabelledWhenAnotherSourceNamesTheLanguage() = runBlocking {
+        serve(listOf("/o.m3u8" to "Original", "/te.m3u8" to "Telugu", "/ta.m3u8" to "Tamil"),
+            mapOf("/o.m3u8" to master(generic()), "/te.m3u8" to master(generic()), "/ta.m3u8" to master(generic())))
+        val rows = MultiMoviesResolver(OkHttpClient(), origin = base).resolveAll("movie", 1261763, 0, 0, originalLang = "te")
+        val orig = rows.single { it.url == "$base/o.m3u8" }
+        assertFalse(labels(orig).toString(), "Telugu" in labels(orig))
+        assertEquals(1, rows.count { "Telugu" in labels(it) })
+    }
+
+    @Test fun originalLanguageForFollowsTheServerRule() {
+        assertEquals("te", MultiMoviesResolver.originalLanguageFor(listOf("Original", "Hindi"), "te"))
+        assertEquals(null, MultiMoviesResolver.originalLanguageFor(listOf("Original", "Hindi", "Telugu"), "te"))
+        assertEquals(null, MultiMoviesResolver.originalLanguageFor(listOf("Original", "tel"), "te"))
+        assertEquals("te", MultiMoviesResolver.originalLanguageFor(listOf("Original", "Telugu Sub"), "te"))
+        assertEquals("te", MultiMoviesResolver.originalLanguageFor(listOf("Original", "Original"), "te"))
+        assertEquals(null, MultiMoviesResolver.originalLanguageFor(listOf("Original"), null))
+    }
+
     // ---- Review I4: stable ids from the master url, not the index
 
     @Test fun rowIdsComeFromTheMasterNotTheOrder() = runBlocking {

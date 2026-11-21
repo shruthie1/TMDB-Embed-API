@@ -6,8 +6,23 @@ const upstream = require('../utils/upstreamBase');
 
 // Seed only; castleBase() is the live host (utils/upstreamBase.js).
 const CASTLE_BASE = 'https://api.hlowb.com';
-const UPSTREAM = { name: 'castletv', seed: CASTLE_BASE };
-function castleBase() { return upstream.getBase('castletv', CASTLE_BASE); }
+const UPSTREAM = { name: 'castletv' };
+// Today's values; routes/resolve-config.json carries the same (provider
+// self-heal Task 3). Remote config or a heal may replace them per call.
+const CONFIG_DEFAULTS = {
+    bases: [CASTLE_BASE],
+    keySuffix: 'T!BgJB',
+    apiVersions: { search: 'v1.1.0', details: 'v1.9.9', video: 'v2.0.1' },
+};
+const selfheal = require('../lib/selfheal/config');
+// Read per call: a remote config edit or a heal applies without a restart.
+const castleSeed = () => selfheal.cfg('castletv', 'bases', CONFIG_DEFAULTS.bases)[0];
+Object.defineProperty(UPSTREAM, 'seed', { get: castleSeed, enumerable: true });
+function castleBase() { return upstream.getBase('castletv', castleSeed()); }
+function apiVersion(kind) {
+    const v = selfheal.cfg('castletv', 'apiVersions', CONFIG_DEFAULTS.apiVersions);
+    return typeof v[kind] === 'string' && /^v[\d.]+$/.test(v[kind]) ? v[kind] : CONFIG_DEFAULTS.apiVersions[kind];
+}
 const PKG = 'com.external.castle';
 const CHANNEL = 'IndiaA';
 const CLIENT = '1';
@@ -39,7 +54,7 @@ function castleSafeParse(text) {
 
 function deriveKey(securityKey) {
     const keyBytes = Buffer.from(securityKey, 'base64');
-    const suffix = Buffer.from('T!BgJB', 'utf8');
+    const suffix = Buffer.from(selfheal.cfg('castletv', 'keySuffix', CONFIG_DEFAULTS.keySuffix), 'utf8');
     const combined = Buffer.concat([keyBytes, suffix]);
     if (combined.length < 16) {
         return Buffer.concat([combined, Buffer.alloc(16 - combined.length, 0)]);
@@ -113,13 +128,13 @@ async function searchCastle(secKey, keyword) {
         page: '1',
         size: '30'
     });
-    const res = await castleRequest(`${castleBase()}/film-api/v1.1.0/movie/searchByKeyword?${params}`);
+    const res = await castleRequest(`${castleBase()}/film-api/${apiVersion('search')}/movie/searchByKeyword?${params}`);
     const cipher = await extractCipher(res);
     return castleSafeParse(decryptCastle(cipher, secKey));
 }
 
 async function getCastleDetails(secKey, movieId) {
-    const url = `${castleBase()}/film-api/v1.9.9/movie?channel=${CHANNEL}&clientType=${CLIENT}&lang=${LANG}&movieId=${movieId}&packageName=${PKG}`;
+    const url = `${castleBase()}/film-api/${apiVersion('details')}/movie?channel=${CHANNEL}&clientType=${CLIENT}&lang=${LANG}&movieId=${movieId}&packageName=${PKG}`;
     const res = await castleRequest(url);
     const cipher = await extractCipher(res);
     return castleSafeParse(decryptCastle(cipher, secKey));
@@ -140,7 +155,7 @@ async function getVideoByLanguage(secKey, movieId, episodeId, languageId, resolu
         resolution: resolution.toString(),
         packageName: PKG
     };
-    const url = `${castleBase()}/film-api/v2.0.1/movie/getVideo2?clientType=${CLIENT}&packageName=${PKG}&channel=${CHANNEL}&lang=${LANG}`;
+    const url = `${castleBase()}/film-api/${apiVersion('video')}/movie/getVideo2?clientType=${CLIENT}&packageName=${PKG}&channel=${CHANNEL}&lang=${LANG}`;
     const res = await castleRequest(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -164,7 +179,7 @@ async function getVideoShared(secKey, movieId, episodeId, resolution) {
         resolution: resolution.toString(),
         packageName: PKG
     };
-    const url = `${castleBase()}/film-api/v2.0.1/movie/getVideo2?clientType=${CLIENT}&packageName=${PKG}&channel=${CHANNEL}&lang=${LANG}`;
+    const url = `${castleBase()}/film-api/${apiVersion('video')}/movie/getVideo2?clientType=${CLIENT}&packageName=${PKG}&channel=${CHANNEL}&lang=${LANG}`;
     const res = await castleRequest(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -579,4 +594,4 @@ async function getCastletvStreams(tmdbId, mediaType = 'movie', seasonNum = null,
     }
 }
 
-module.exports = { getCastletvStreams, UPSTREAM };
+module.exports = { getCastletvStreams, UPSTREAM, CONFIG_DEFAULTS, _deriveKey: deriveKey, _internal: { castleBase, apiVersion } };
