@@ -17,6 +17,7 @@ const streamHeaders = require('./lib/media/streamHeaders');
 const { verifyTopStreams } = require('./lib/media/segmentVerify');
 const { registerCapabilityRoutes } = require('./routes/capabilities');
 const { createProxyRoutes, processStreamsForProxy } = require('./proxy/proxyServer');
+const { routeStreams, surfaceAllows, surfaceOf } = require('./lib/routing/providerRoutes');
 const { resolveImdbId, searchTitles } = require('./utils/tmdb');
 const { applyFilters } = require('./utils/streamFilters');
 const castleDemux = require('./utils/castleDemux');
@@ -545,8 +546,9 @@ const streamsMemo = createTtlCache({
 // `withCaps` is part of the key: the two variants return different payloads for
 // the same title, so sharing one entry would serve a capabilities response to a
 // plain caller (and, worse, a plain one to a UI that needs the ladders).
-function memoKey(type, tmdbId, season, episode, withCaps) {
-  return `${type}:${tmdbId}:${season ?? ''}:${episode ?? ''}:${withCaps ? 'caps' : 'plain'}`;
+// The surface is part of it too: a web answer has no APK-only rows.
+function memoKey(type, tmdbId, season, episode, withCaps, surface = null) {
+  return `${type}:${tmdbId}:${season ?? ''}:${episode ?? ''}:${withCaps ? 'caps' : 'plain'}${surface ? `:${surface}` : ''}`;
 }
 function memoGet(key) {
   const payload = streamsMemo.get(key) || null;
@@ -711,63 +713,22 @@ function serverUrlFor(req) {
   return publicBase(req);
 }
 
-// Make a provider's streams playable from a browser: remember each url's
-// request headers (for /hybrid/pair), then route header-gated origins via
-// the proxy. Shared by the aggregate and the per-provider route - the
-// per-provider route used to skip it and returned NetMirror's raw mp4,
-// which its CDN refuses without a Referer (429 / ERR_BLOCKED_BY_ORB).
+// Make a provider's streams playable: remember each url's request headers
+// (for /hybrid/pair), proxy the rows that need it, and say per row whether a
+// client may skip the proxy. Shared by the aggregate and the per-provider
+// route - the per-provider route used to skip it and returned NetMirror's raw
+// mp4, which its CDN refuses without a Referer (429 / ERR_BLOCKED_BY_ORB).
+//
+// Whether a client NEEDS the proxy is per-provider config, not "the row has
+// headers" (owner 2026-11-21, routing-matrix.md): that rule sent CastleTV and
+// the multimovies bridge through the VM for nothing. `url` stays proxied for
+// old clients; see lib/routing/providerRoutes.js for the contract.
 function routeStreamsForBrowser(streams, serverUrl) {
-  // Record url -> headers BEFORE any proxy rewriting. Both branches below
-  // strip `headers` once the proxy carries them, so recording afterwards
-  // would remember a proxied url with nothing attached and /hybrid/pair
-  // would be back to fetching provider manifests bare.
-  streamHeaders.rememberStreams(streams);
-  if (config.enableProxy) {
-    streams = processStreamsForProxy(streams, serverUrl);
-    // Omit original headers when proxying to avoid leaking upstream requirements
-    streams = streams.map(s => { if (s && typeof s === 'object') { const { headers, ...rest } = s; return rest; } return s; });
-  } else {
-    // Proxy the streams that CANNOT work any other way, even though the
-    // routing policy is off.
-    //
-    // `enableProxy` is a performance policy - the proxy costs 13-22x in
-    // latency, so ordinary streams go direct. But a stream whose origin
-    // demands a Referer/Origin cannot be played by a browser at all: fetch
-    // and <video> both forbid setting those headers, so the request goes out
-    // bare and the origin refuses it.
-    //
-    // Measured 2026-09-23 on movie/1273049 (NetMirror, a raw mp4):
-    //   no Referer                       HTTP/2 429  text/html 185b
-    //   Referer videodownloader.site     HTTP/2 206  video/mp4
-    //                                    x-oss-cdn-auth: success
-    // In Chrome that surfaced as ERR_BLOCKED_BY_ORB on the media request and
-    // "NetMirror is not responding" in the player - a provider that worked
-    // perfectly from curl and never once worked in a browser.
-    //
-    // So the test is need, not policy: a stream carrying request headers is
-    // routed through the proxy; everything else stays direct and keeps the
-    // speed that turning the flag off was for.
-    const needsHeaders = (s) => s && typeof s === 'object' && !s.__noProxy
-      && s.headers && Object.keys(s.headers).length > 0;
-    const gated = streams.filter(needsHeaders);
-    if (gated.length) {
-      const proxiedByUrl = new Map(
-        processStreamsForProxy(gated, serverUrl).map((s, i) => [gated[i].url, s.url]));
-      streams = streams.map((s) => {
-        if (!needsHeaders(s)) return s;
-        const url = proxiedByUrl.get(s.url);
-        if (!url) return s;
-        // Drop the headers now that the proxy carries them, for the same
-        // reason as the enableProxy branch above: they are an upstream
-        // requirement and not the browser's business.
-        const { headers, ...rest } = s;
-        return { ...rest, url };
-      });
-      console.log(`[proxy] ${gated.length}/${streams.length} stream(s) routed via proxy `
-        + '(header-gated origins); the rest direct');
-    }
-  }
-  return streams;
+  return routeStreams(streams, serverUrl, {
+    enableProxy: config.enableProxy,
+    processStreamsForProxy,
+    rememberStreams: (s) => streamHeaders.rememberStreams(s),
+  });
 }
 
 // season/episode are TMDB numbers: positive integers when given. Season 0
@@ -803,7 +764,8 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
   try {
     metrics.streamRequests++;
     const wantCaps = req.query.capabilities === '1';
-    const mk = memoKey(type, tmdbId, season, episode, wantCaps);
+    const surface = surfaceOf(req.query);
+    const mk = memoKey(type, tmdbId, season, episode, wantCaps, surface);
     const cached = req.query.refresh === '1' ? null : memoGet(mk);
     if (cached) {
       metrics.memoHits = (metrics.memoHits || 0) + 1;
@@ -817,7 +779,8 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
     metrics.memoMisses = (metrics.memoMisses || 0) + 1;
     const tmdbType = type === 'movie' ? 'movie' : 'tv';
     const imdbId = await resolveImdbId(tmdbType, tmdbId); if (imdbId) metrics.tmdbToImdbLookups++;
-    const selectedProviders = (config.defaultProviders.length ? config.defaultProviders : listProviders().map(p=>p.name));
+    const selectedProviders = (config.defaultProviders.length ? config.defaultProviders : listProviders().map(p=>p.name))
+      .filter((name) => surfaceAllows(name, surface));
     const providerTimings = {};
 
     // CastleTV runs ahead of the pack, alone, because the answer it gives
@@ -1103,6 +1066,9 @@ app.get('/api/streams/:provider/:type/:tmdbId', async (req,res) => {
   if (badSeason) return res.status(400).json({ success:false, error: badSeason });
   const prov = getProvider(provider);
   if (!prov) return res.status(404).json({ success:false, error:'PROVIDER_NOT_FOUND' });
+  if (!surfaceAllows(prov.name, surfaceOf(req.query))) {
+    return res.status(404).json({ success:false, error:'PROVIDER_NOT_FOR_WEB' });
+  }
   if (!prov.enabled) return res.status(503).json({ success:false, error:'PROVIDER_DISABLED' });
   if (!/^\d+$/.test(String(req.params.tmdbId))) {
     return res.status(400).json({ success:false, error:'INVALID_TMDB_ID' });

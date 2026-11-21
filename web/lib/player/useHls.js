@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { playableUrl, proxiedSegment, PREFERRED_LANGUAGE } from '../backend';
 import { languageName } from '../subtitles';
 import { probeTsAudio, swapPids } from './tsAudio';
+import { planPlayUrl, isEarlyFailure, markDirectFailed, logRoute, DIRECT_FIRST_FRAME_MS } from './directRoute';
 
 /**
  * HLS allows every audio rendition to be marked DEFAULT=NO. That is valid
@@ -74,7 +75,7 @@ export function muxedAudioLoader(Base, muxed) {
  * carrying it across a source switch offered rungs the new provider does not
  * have.
  */
-export function useHls({ videoRef, stream, onFatal, onHlsReady, config = {}, preferredLanguage, onLanguage }) {
+export function useHls({ videoRef, stream, onFatal, onHlsReady, onRouteFallback, config = {}, preferredLanguage, onLanguage }) {
   const hlsRef = useRef(null);
   // The language the VIEWER last chose, which outranks the build-time default.
   //
@@ -92,16 +93,20 @@ export function useHls({ videoRef, stream, onFatal, onHlsReady, config = {}, pre
   // Callbacks and config are new object identities on every render. Depending
   // on them re-ran this effect in a loop, destroying and rebuilding hls.js
   // until the tab ran out of memory. Only `stream` may trigger a re-attach.
-  const cbRef = useRef({ onFatal, onHlsReady, config });
-  cbRef.current = { onFatal, onHlsReady, config };
+  const cbRef = useRef({ onFatal, onHlsReady, onRouteFallback, config });
+  cbRef.current = { onFatal, onHlsReady, onRouteFallback, config };
   const [levels, setLevels] = useState([]);
   const [currentLevel, setCurrentLevel] = useState(-1);   // -1 = auto
   const [autoLevel, setAutoLevel] = useState(null);       // what ABR chose
   const [audioTracks, setAudioTracks] = useState([]);
   const [currentAudio, setCurrentAudio] = useState(null);
   const muxedRef = useRef(null);
+  // 'direct' | 'proxy' for the attempt running now (Player's switch checker).
+  const routeRef = useRef(null);
 
   useEffect(() => {
+    // No stale route from the previous stream (re-review m-D).
+    routeRef.current = null;
     if (!stream?.masterUrl) return;
     const video = videoRef.current;
     if (!video) return;
@@ -112,7 +117,51 @@ export function useHls({ videoRef, stream, onFatal, onHlsReady, config = {}, pre
     setLevels([]); setCurrentLevel(-1); setAutoLevel(null);
     setAudioTracks([]); setCurrentAudio(null);
 
-    (async () => {
+    // Direct vs proxy (directRoute.js): a row the server's provider config
+    // marks web-direct is played from its upstream url first. A failure before
+    // the first frame retries the SAME row once via the proxied masterUrl, and
+    // only that attempt's failure reaches onFatal (failover).
+    const plan = planPlayUrl(stream);
+    logRoute(plan.mode, stream, `reason=${plan.reason}`);
+    let firstFrame = false;
+    let frameTimer = null;
+    let fellBack = false;
+    const onFirstFrame = () => { firstFrame = true; clearTimeout(frameTimer); };
+    video.addEventListener('loadeddata', onFirstFrame);
+    let onNativeError = null;
+    const dropNativeWatch = () => {
+      if (onNativeError) video.removeEventListener('error', onNativeError);
+      onNativeError = null;
+    };
+    let start = null; // defined below; fallBack only runs after it exists
+    const fallBack = (why) => {
+      if (fellBack || cancelled || firstFrame) return;
+      fellBack = true;
+      clearTimeout(frameTimer);
+      dropNativeWatch();
+      markDirectFailed(stream);
+      logRoute('direct-failed', stream, `reason=${why} fallback=proxy`);
+      // The proxy attempt gets its own full startup window (Player re-arms
+      // its 15 s server-switch clock on this).
+      try { cbRef.current.onRouteFallback?.(why); } catch { /* never block the retry */ }
+      const old = hlsRef.current;
+      hlsRef.current = null;
+      try { old?.stopLoad(); } catch { /* torn down */ }
+      try { old?.detachMedia(); } catch { /* already detached */ }
+      try { old?.destroy(); } catch { /* already destroyed */ }
+      start(stream.masterUrl, 'proxy');
+    };
+    const armDirect = (mode, native) => {
+      if (mode !== 'direct') return;
+      frameTimer = setTimeout(() => fallBack('no-first-frame-10s'), DIRECT_FIRST_FRAME_MS);
+      if (native) {
+        onNativeError = () => fallBack('media-error');
+        video.addEventListener('error', onNativeError);
+      }
+    };
+
+    start = async (url, mode) => {
+      routeRef.current = mode;
       // The MANIFEST goes through the resolver proxy, because a browser cannot
       // set the `Referer` these CDNs require on a playlist. Segments are left
       // absolute and stream direct.
@@ -129,11 +178,12 @@ export function useHls({ videoRef, stream, onFatal, onHlsReady, config = {}, pre
       // No ladder and no #EXT-X-MEDIA graph here: one muxed file, so the
       // quality and audio menus correctly stay empty for this source.
       if (stream.progressive) {
-        video.src = proxiedSegment(stream.masterUrl, stream.referer);
+        video.src = mode === 'direct' ? url : proxiedSegment(url, stream.referer);
+        armDirect(mode, true);
         return;
       }
 
-      const src = playableUrl(stream.masterUrl, stream.referer);
+      const src = mode === 'direct' ? url : playableUrl(url, stream.referer);
       const { default: Hls } = await import('hls.js');
       if (cancelled) return;
 
@@ -141,7 +191,7 @@ export function useHls({ videoRef, stream, onFatal, onHlsReady, config = {}, pre
       // it, and the native path exposes no level API — which is why the menu
       // used to read "Single quality". Prefer hls.js; native only for Safari.
       if (!Hls.isSupported()) {
-        if (video.canPlayType('application/vnd.apple.mpegurl') !== '') video.src = src;
+        if (video.canPlayType('application/vnd.apple.mpegurl') !== '') { video.src = src; armDirect(mode, true); }
         else cbRef.current.onFatal?.({ message: 'This browser cannot play HLS video.' });
         return;
       }
@@ -298,6 +348,11 @@ export function useHls({ videoRef, stream, onFatal, onHlsReady, config = {}, pre
       // left alone: those are recoverable mid-playback and hls.js handles them.
       let manifestFails = 0;
       hls.on(Hls.Events.ERROR, (_e, data) => {
+        if (hlsRef.current !== hls) return;
+        if (mode === 'direct' && isEarlyFailure(data, firstFrame)) {
+          fallBack(`hls-${data?.details || 'error'}${data?.response?.code ? `-${data.response.code}` : ''}`);
+          return;
+        }
         if (data.fatal) { cbRef.current.onFatal?.(data, hls); return; }
         const d = data?.details;
         if (d === 'manifestLoadError' || d === 'manifestLoadTimeOut'
@@ -321,17 +376,27 @@ export function useHls({ videoRef, stream, onFatal, onHlsReady, config = {}, pre
             // without it hls.js keeps working through its own retry budget
             // underneath us against a url we have already declared dead.
             try { hls?.stopLoad(); } catch { /* torn down */ }
-            cbRef.current.onFatal?.({ ...data, fatal: true }, hls);
+            const escalated = { ...data, fatal: true };
+            if (mode === 'direct' && isEarlyFailure(escalated, firstFrame)) {
+              fallBack(`hls-${d}${code ? `-${code}` : ''}`);
+              return;
+            }
+            cbRef.current.onFatal?.(escalated, hls);
           }
         }
       });
 
       hls.loadSource(src);
       hls.attachMedia(video);
-    })();
+      armDirect(mode, false);
+    };
+    start(plan.url, plan.mode);
 
     return () => {
       cancelled = true;
+      clearTimeout(frameTimer);
+      dropNativeWatch();
+      video.removeEventListener('loadeddata', onFirstFrame);
       // Detach the old MediaSource from the element before the next provider
       // is attached. `destroy()` normally does this, but browsers can retain
       // the previous MediaSource during a same-element source switch; the UI
@@ -414,6 +479,6 @@ export function useHls({ videoRef, stream, onFatal, onHlsReady, config = {}, pre
     return true;
   }, [onLanguage]);
 
-  return { hlsRef, levels, currentLevel, autoLevel, audioTracks, currentAudio,
+  return { hlsRef, routeRef, levels, currentLevel, autoLevel, audioTracks, currentAudio,
            pickLevel, pickAudio };
 }

@@ -175,6 +175,11 @@ export function toSource(s, i = 0) {
     provider: s.provider || s.name || 'Unknown',
     label: s.title || s.provider || 'Stream',
     masterUrl: s.url,
+    // The upstream url, only when the server's provider config says a browser
+    // can fetch it without the proxy (lib/routing/providerRoutes.js). useHls
+    // tries it first and falls back to masterUrl on the same row.
+    webDirectUrl: s.route?.web === 'direct' && typeof s.directUrl === 'string' && s.directUrl
+      ? s.directUrl : null,
     referer: null,
     // Anything not HLS goes to <video src> directly rather than through
     // hls.js - useHls branches on this.
@@ -279,7 +284,7 @@ export function rankSources(sources) {
   });
 }
 
-function endpoint(type, id, { season, episode, provider, refresh, capabilities, full }) {
+export function endpoint(type, id, { season, episode, provider, refresh, capabilities, full } = {}) {
   // The backend's own route vocabulary is movie|series, not movie|tv.
   const kind = type === 'tv' || type === 'series' ? 'series' : 'movie';
   const qs = new URLSearchParams();
@@ -288,6 +293,9 @@ function endpoint(type, id, { season, episode, provider, refresh, capabilities, 
   if (refresh) qs.set('refresh', '1');
   if (capabilities) qs.set('capabilities', '1');
   if (full) qs.set('full', '1');
+  // The server skips APK-only providers (mapple, VaPlayer) for the web, so the
+  // answer never waits on their timeouts (lib/routing/providerRoutes.js).
+  qs.set('client', 'web');
   const q = qs.toString();
   const path = provider
     ? `/api/streams/${provider}/${kind}/${id}`
@@ -295,11 +303,18 @@ function endpoint(type, id, { season, episode, provider, refresh, capabilities, 
   return `${path}${q ? `?${q}` : ''}`;
 }
 
+/**
+ * mapple and VaPlayer are APK-only (owner rule 2026-11-21). The server no longer
+ * sends them to the web; this also drops them from an old or cached answer.
+ */
+const APK_ONLY = /^(mapple|vaplayer)\b/i;
+
 /** Keep partial catalog coverage visible instead of turning it into a complete source list. */
 export function sourcesFromResponse(d) {
   const pending = Boolean(d?.partial || d?.providerError)
     || (Array.isArray(d?.providerErrors) && d.providerErrors.some((p) => String(p).toLowerCase() === 'netmirror'));
-  return rankSources((Array.isArray(d?.streams) ? d.streams : []).map((raw, i) => {
+  return rankSources((Array.isArray(d?.streams) ? d.streams : [])
+    .filter((raw) => !APK_ONLY.test(String(raw?.provider || raw?.name || '').trim())).map((raw, i) => {
     const s = toSource(raw, i);
     return s && pending && String(s.provider).toLowerCase() === 'netmirror' ? { ...s, incomplete: true } : s;
   }).filter(Boolean));

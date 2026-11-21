@@ -27,10 +27,11 @@ import { fatalAction } from '../lib/player/fatalPolicy';
 import { canFailOver, offlineAction, retryResumeAt } from '../lib/player/offlineRecovery';
 import { runtimeVerdict } from '../lib/player/runtimeCheck';
 import {
-  SWITCH_HARD_MS, SWITCH_TICK_MS, advanceNotice, advanceTarget, beginSourceSwitch, hasLife, tickSourceSwitch,
+  SWITCH_HARD_MS, SWITCH_TICK_MS, advanceNotice, advanceTarget, beginSourceSwitch, hasLife, rearmSourceSwitch, tickSourceSwitch,
 } from '../lib/player/switchFlow';
 import { createWarmScheduler } from '../lib/player/warmSources';
 import useNoPictureGuard from '../lib/player/useNoPictureGuard';
+import useStartupSwitch from '../lib/player/useStartupSwitch';
 import { pairSources, listSources as listBackendSources } from '../lib/backend';
 import { canCast, castBody, prepareCast } from '../lib/cast';
 import { pairDecodable } from '../lib/player/codecSupport';
@@ -560,9 +561,13 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   // paired/substituted language never goes through hls.pickAudio at all.
   const [wantLang, setWantLang] = useState(null);
 
+  // Bumped by useHls when a web-direct row retries via its proxied url.
+  const [routeFallbacks, setRouteFallbacks] = useState(0);
   const hls = useHls({ videoRef, stream, onFatal, config: hlsConfig,
+    onRouteFallback: () => setRouteFallbacks((n) => n + 1),
     preferredLanguage: wantLang, onLanguage: setWantLang,
     onHlsReady: (h) => { hlsInstance.current = h; } });
+  const hlsRouteRef = hls.routeRef;
   const discoveredTracksRef = useRef(null);
   discoveredTracksRef.current = { tracks: hls.audioTracks, selected: hls.currentAudio };
   // Same fallback as switchSource: the viewer's pick, else the track playing
@@ -1317,34 +1322,10 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     staleRefresh.reset();
   }, [title.mediaType, title.tmdbId, season, episode, staleRefresh]);
 
-  // A server-side validation only proves that bytes exist from the VM. On a
-  // user's device the first frame can still take 14-19s, especially when a
-  // provider's CDN route is slow. Once another validated source is already in
-  // hand, switch at startup instead of waiting for the mid-playback recovery
-  // ladder (which intentionally waits much longer for ordinary stalls).
-  //
-  // This is scoped to one stream and fires once. It never interrupts a source
-  // that has reached a playable readyState, and it does not start a new
-  // resolve; the alternate URL is already validated and in memory.
-  // Give the selected source enough time to receive its first media
-  // fragment on high-latency mobile/TV networks. Switching at 8s looked
-  // like provider flapping even when playback was about to start.
-  const STARTUP_SWITCH_MS = 15000;
-  useEffect(() => {
-    if (!stream) return;
-    const timer = setTimeout(() => {
-      const v = videoRef.current;
-      if (startupFallbackUsedRef.current || startedRef.current || !v
-          || v.readyState >= 3 || !sourceListRef.current.length) return;
-      const alternate = sourceListRef.current.find(
-        s => s.masterUrl && s.provider !== currentSourceRef.current,
-      );
-      if (!alternate || !canFailOver(globalThis.navigator?.onLine)) return;
-      startupFallbackUsedRef.current = true;
-      recoverBySwitchingRef.current?.('startup timeout');
-    }, STARTUP_SWITCH_MS);
-    return () => clearTimeout(timer);
-  }, [stream]);
+  // Startup server switch (15 s, once per stream): lib/player/useStartupSwitch.js.
+  // A direct->proxy fallback on the same row bumps routeFallbacks and re-arms it.
+  useStartupSwitch({ stream, restartKey: routeFallbacks, videoRef, usedRef: startupFallbackUsedRef,
+    startedRef, sourceListRef, currentSourceRef, recoverBySwitchingRef });
 
   // Measure viewer-visible stalls, not hls.js retries. A repeated `waiting`
   // event belongs to one stall episode and must not inflate the metric.
@@ -1577,6 +1558,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
         streamKey: streamRef.current,
         frames: playedStreamRef.current != null && playedStreamRef.current === streamRef.current,
         alive: hasLife(videoRef.current),
+        direct: hlsRouteRef.current === 'direct',
       });
       if (r.verdict === 'wait') { srcSwitch.current = r.state; return; }
       if (r.verdict === 'landed') { endSourceSwitch(); switchGuard.landed(); return; }
@@ -1585,8 +1567,13 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       const took = Date.now() - (srcSwitch.current?.startedAt ?? Date.now());
       failSwitchRef.current?.('switch timeout', took >= SWITCH_HARD_MS ? Reason.NO_PICTURE : Reason.NO_ANSWER);
     }, SWITCH_TICK_MS);
-  }, [warm, endSourceSwitch, switchGuard, videoRef, beginAttempt]);
+  }, [warm, endSourceSwitch, switchGuard, videoRef, beginAttempt, hlsRouteRef]);
   useEffect(() => () => clearInterval(srcTick.current), []);
+  // A web-direct row retried via its proxied url: that attempt gets its own
+  // 8 s / 20 s switch window (re-review I-A), like the 15 s startup switch.
+  useEffect(() => {
+    if (routeFallbacks) srcSwitch.current = rearmSourceSwitch(srcSwitch.current);
+  }, [routeFallbacks]);
 
   // The server being switched to failed (timeout or a fatal error). Mark it
   // dead, take it out of the menus, and play the next alive row in the

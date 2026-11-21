@@ -28,8 +28,18 @@ export function vaEmbedUrl({ imdbId, mediaType, season = 0, episode = 0 } = {}) 
   return `${ORIGIN}/embed/movie/${imdb}`;
 }
 
-/** The Servers-menu row for it, or null. Always appended LAST by callers. */
-export function vaEmbedChoice(title = {}) {
+/**
+ * The Servers-menu row for it: always null now. Owner rule 2026-11-21:
+ * VaPlayer (and mapple) are APK-only, the browser must never use them, so the
+ * web offers no "VaPlayer (embed)" row, no "Their player" frame and no
+ * automatic embed. Player.jsx keeps its embed wiring inert behind this null.
+ */
+export function vaEmbedChoice() {
+  return null;
+}
+
+/** The row shape the embed wiring expects, for tests of that wiring only. */
+export function vaEmbedRow(title = {}) {
   const url = vaEmbedUrl(title);
   return url ? { id: VA_EMBED_ID, label: VA_EMBED_LABEL, quality: null, embed: true, url } : null;
 }

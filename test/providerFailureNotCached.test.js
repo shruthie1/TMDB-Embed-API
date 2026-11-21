@@ -100,6 +100,23 @@ test('per-provider route reports a timeout and a partial answer as providerError
     assert.match(b.d.providerError || '', /503/);
 });
 
+// 2026-11-21 vidrift live: every host 403, the provider threw, and the route
+// answered 200 count 0. That is the contract, but the error must be in
+// providerError, reach the breaker, and not be cached as "no streams".
+test('per-provider route: a provider that throws is providerError, a breaker miss, not cached', async () => {
+    const before = (metrics.providerHealth.onetouchtv && metrics.providerHealth.onetouchtv.consecutiveMisses) || 0;
+    plan[4007] = { onetouchtv: async () => { throw new Error('vidrift-like: every host failed: HTTP 403'); } };
+    const a = await getRes('/api/streams/onetouchtv/movie/4007');
+    assert.equal(a.r.status, 200);
+    assert.equal(a.d.count, 0);
+    assert.match(a.d.providerError || '', /every host failed: HTTP 403/);
+    assert.equal(metrics.providerHealth.onetouchtv.consecutiveMisses, before + 1);
+    await getRes('/api/streams/onetouchtv/movie/4007');
+    assert.equal(calls['onetouchtv:4007'], 2, 'the failure was not cached as empty');
+    metrics.providerHealth.onetouchtv.consecutiveMisses = 0;
+    metrics.providerHealth.onetouchtv.trippedUntil = null;
+});
+
 test('a breaker-skipped provider: response not memoized, no-store', async () => {
     for (let i = 0; i < BREAKER_THRESHOLD; i++) recordProviderOutcome('onetouchtv', 'error', 1, 0, true, `trip:${i}`);
     assert.ok(metrics.providerHealth.onetouchtv.trippedUntil, 'breaker open');

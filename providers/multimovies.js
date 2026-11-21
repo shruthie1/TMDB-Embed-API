@@ -37,6 +37,7 @@
 // listing; one with no 2xx answer inside AUDIO_TIMEOUT_MS leaves audio[].
 
 const hls = require('../lib/media/hlsManifest');
+const { knownLanguage } = require('../utils/streamSchema');
 
 const ORIGIN = 'https://vidbolt.xyz';
 const UA = 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) '
@@ -72,12 +73,37 @@ function cleanName(name) {
         .trim();
 }
 
-// One audio[] entry per AUDIO rendition the master declares. LANGUAGE wins;
-// an untagged or `und` rendition falls back to its NAME so no tag is lost.
-function audioFromMaster(text, baseUrl, deadUrls = null) {
-    return hls.parseMedia(text, baseUrl, 'AUDIO').filter((m) => !(deadUrls && m.url && deadUrls.has(m.url))).map((m) => {
+// A rendition NAME that says nothing about language ("Audio", "Track 1").
+// The RRR bridge masters (MovieBox via dash-hls-bridge) all use NAME="Audio"
+// with no LANGUAGE (2026-11-21), so their rows read languages ['Audio'].
+const GENERIC_AUDIO_NAME = /^(audio|audio\s*\d+|track\s*\d*|default|main|aac|stereo|sound)$/i;
+
+// VidBolt's /api/resolve `language` for one source, when it names a KNOWN
+// audio language (knownLanguage: no title-cased junk like "Hindi dubbed").
+// MovieBox "<lang> sub" sources carry the original audio with subtitles, so
+// they are never an audio language. "Original" takes the title's TMDB
+// original_language when known, else nothing.
+function sourceLanguage(src, originalLang = null) {
+    const raw = String((src && src.language) || '').trim();
+    if (!raw || /\bsub(s|bed|titles?)?$/i.test(raw)) return null;
+    if (/^original$/i.test(raw)) return knownLanguage(originalLang);
+    return knownLanguage(raw);
+}
+
+// One audio[] entry per AUDIO rendition the master declares. LANGUAGE wins.
+// The source's language is stamped only when the master has exactly ONE
+// AUDIO rendition, untagged with a generic NAME: several renditions are left
+// as the master states (one source language cannot name them all). Anything
+// else falls back to its NAME so no tag is lost.
+function audioFromMaster(text, baseUrl, deadUrls = null, srcLanguage = null) {
+    const all = hls.parseMedia(text, baseUrl, 'AUDIO');
+    const single = all.length === 1;
+    return all.filter((m) => !(deadUrls && m.url && deadUrls.has(m.url))).map((m) => {
         const code = String(m.languageCode || '').trim();
-        const language = code && !/^(und|unk|mul|zxx)$/i.test(code) ? code : cleanName(m.name) || null;
+        const name = cleanName(m.name);
+        const language = code && !/^(und|unk|mul|zxx)$/i.test(code) ? code
+            : (single && srcLanguage && (!name || GENERIC_AUDIO_NAME.test(name))) ? srcLanguage
+            : name || null;
         return { language, name: cleanName(m.name) || null, channels: m.channels || null, codec: null };
     });
 }
@@ -115,10 +141,10 @@ function videoCodecOf(masterText, masterUrl) {
 }
 
 // Pure: the stream row for one fetched master. Exported for tests.
-function streamFromMaster(src, masterText, masterUrl, deadAudioUrls = null) {
+function streamFromMaster(src, masterText, masterUrl, deadAudioUrls = null, originalLang = null) {
     const levels = hls.parseLevels(masterText, masterUrl);
     if (!levels.length) return null;
-    const audio = audioFromMaster(masterText, masterUrl, deadAudioUrls);
+    const audio = audioFromMaster(masterText, masterUrl, deadAudioUrls, sourceLanguage(src, originalLang));
     const languages = teluguFirst([...new Set(audio.map((a) => a.language).filter(Boolean))]);
     const quality = tierOf(levels[0]) || (/\b(2160|1440|1080|720|480|360)p\b/i.exec(src.quality || '') || [])[0] || 'Auto';
     const subtitles = hls.parseMedia(masterText, masterUrl, 'SUBTITLES')
@@ -239,6 +265,18 @@ async function getMultimoviesStreams(tmdbId, mediaType = 'movie', seasonNum = nu
         return [];
     }
 
+    // Only when a source says "Original": the title's TMDB original_language
+    // (cached 6 h in utils/tmdb.js). Unknown -> null, that row stays unlabelled.
+    let originalLang = null;
+    if (sources.some((s) => /^original$/i.test(String(s.language || '').trim()))) {
+        try {
+            const d = await require('../utils/tmdb').getDetails(type, tmdbId);
+            originalLang = (d && d.original_language) || null;
+        } catch (e) {
+            console.log(`[multimovies] TMDB original_language unknown for ${tmdbId}: ${e.message}`);
+        }
+    }
+
     const rows = await Promise.all(sources.map(async (src) => {
         let text;
         try {
@@ -253,7 +291,7 @@ async function getMultimoviesStreams(tmdbId, mediaType = 'movie', seasonNum = nu
             console.log(`[multimovies] master has no variants for ${tmdbId}, dropped`);
             return null;
         }
-        const row = streamFromMaster(src, text, src.url, await deadAudioUrls(text, src.url, tmdbId));
+        const row = streamFromMaster(src, text, src.url, await deadAudioUrls(text, src.url, tmdbId), originalLang);
         const top = hls.parseLevels(text, src.url)[0];
         if (top && top.url && disguisedHost(top.url) === true) {
             console.log(`[multimovies] segments disguised as images for ${tmdbId}, dropped`);

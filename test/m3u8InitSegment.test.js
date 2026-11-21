@@ -21,8 +21,16 @@ test('EXT-X-MAP init segment is routed through ts-proxy, absolute and relative',
     const out = rewriteM3u8(body, 'https://cdn.example/video/index.m3u8', 'https://api.example', { Referer: 'https://mapple.fun/' });
     const maps = out.split('\n').filter((l) => l.startsWith('#EXT-X-MAP'));
     assert.equal(maps.length, 2);
-    assert.match(maps[0], /URI="https:\/\/api\.example\/ts-proxy\?url=https%3A%2F%2Fcdn\.example%2Fvideo%2Finit\.mp4&headers=/);
-    assert.match(maps[1], /URI="https:\/\/api\.example\/ts-proxy\?url=https%3A%2F%2Fcdn\.example%2Fvideo%2Finit2\.mp4&headers=.*",BYTERANGE="720@0"/);
+    // Headers ride as a short token since R4 (lib/routing/headerTokens.js).
+    const headerTokens = require('../lib/routing/headerTokens');
+    const m0 = maps[0].match(/URI="(https:\/\/api\.example\/ts-proxy\?[^"]+)"/);
+    const m1 = maps[1].match(/URI="(https:\/\/api\.example\/ts-proxy\?[^"]+)",BYTERANGE="720@0"/);
+    assert.ok(m0 && m1, maps.join('\n'));
+    const q0 = new URL(m0[1]).searchParams; const q1 = new URL(m1[1]).searchParams;
+    assert.equal(q0.get('url'), 'https://cdn.example/video/init.mp4');
+    assert.equal(q1.get('url'), 'https://cdn.example/video/init2.mp4');
+    assert.deepEqual(headerTokens.get(q0.get('h')), { Referer: 'https://mapple.fun/' });
+    assert.equal(q1.get('h'), q0.get('h'));
 });
 
 // fMP4 segments and init files (mapple) start with a styp/ftyp/moof box but

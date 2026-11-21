@@ -7,7 +7,8 @@ import { resolveLive, prewarmStreams, STREAMS_RETRY_DELAYS_MS } from '../lib/bac
 
 const body = (streams, extra = {}) => ({ success: true, count: streams.length, providerTimings: {}, streams, ...extra });
 const CASTLE = { url: 'https://cdn/castle.m3u8', provider: 'CastleTV', quality: '1080p', container: 'hls', languages: ['Telugu'] };
-const MAPPLE = { url: 'https://cdn/mapple.m3u8', provider: 'Mapple', quality: '2160p', container: 'hls', languages: ['English'] };
+// A late secondary row (was Mapple; mapple is APK-only since 2026-11-21).
+const MAPPLE = { url: 'https://cdn/onetouch.m3u8', provider: 'OneTouchTV', quality: '2160p', container: 'hls', languages: ['English'] };
 const res = (json) => ({ ok: true, status: 200, json: async () => json });
 const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 
@@ -90,7 +91,7 @@ describe('partial answer follow-up', () => {
     vi.stubGlobal('fetch', fetchMock);
     const more = new Promise((r) => run(601, { onMore: r }));
     const list = await more;
-    expect(list.map((s) => s.provider).sort()).toEqual(['CastleTV', 'Mapple']);
+    expect(list.map((s) => s.provider).sort()).toEqual(['CastleTV', 'OneTouchTV']);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(String(fetchMock.mock.calls[1][0])).toContain('full=1');
     // The complete answer is now cached; a replay costs no request.

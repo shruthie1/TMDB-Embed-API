@@ -26,6 +26,7 @@ const providerFunctionMap = {
   'mapple.js': 'getMappleStreams',
   'multimovies.js': 'getMultimoviesStreams',
   'vidrock.js': 'getVidrockStreams',
+  'vidrift.js': 'getVidriftStreams',
 };
 
 // Per-request cookie context.

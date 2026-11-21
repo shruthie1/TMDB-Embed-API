@@ -348,6 +348,6 @@ function normaliseStreams(list) {
 
 module.exports = {
     QUALITIES, LANG_CANON,
-    canonicalLanguage, trackNameLanguage, canonicalQuality, languagesFromLabel, languagesFromReleaseName,
+    canonicalLanguage, knownLanguage, trackNameLanguage, canonicalQuality, languagesFromLabel, languagesFromReleaseName,
     inferContainer, stripLangBracket, normaliseStream, normaliseStreams,
 };

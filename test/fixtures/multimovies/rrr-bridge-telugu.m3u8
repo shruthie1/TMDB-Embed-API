@@ -1,0 +1,9 @@
+#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Audio",DEFAULT=YES,AUTOSELECT=YES,URI="https://dash-hls-bridge.johndoesdmc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F5820588283537016992_0_0_1080_h265_795%2Fv3.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+#EXT-X-STREAM-INF:BANDWIDTH=2200000,RESOLUTION=2058x1080,AUDIO="audio"
+https://dash-hls-bridge.johndoesdmc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F5820588283537016992_0_0_1080_h265_795%2Fv0.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED
+#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=1372x720,AUDIO="audio"
+https://dash-hls-bridge.johndoesdmc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F5820588283537016992_0_0_1080_h265_795%2Fv1.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED
+#EXT-X-STREAM-INF:BANDWIDTH=350000,RESOLUTION=914x480,AUDIO="audio"
+https://dash-hls-bridge.johndoesdmc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F5820588283537016992_0_0_1080_h265_795%2Fv2.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED

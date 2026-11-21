@@ -7,6 +7,7 @@ const fetch = require('node-fetch');
 const http = require('http');
 const https = require('https');
 const { publicBase } = require('../lib/runtime/publicBase');
+const headerTokens = require('../lib/routing/headerTokens');
 
 // node-fetch without an explicit agent uses a small default connection pool per
 // host. HLS is connection-hungry (a playlist warm-up plus the segment the player
@@ -393,6 +394,24 @@ function extractOriginalUrl(proxyUrl) {
 // `seg=1` marks every key, init and segment url emitted from a playlist.
 // /ts-proxy never clamps those to the open window: a segment can have any
 // extension (or none) and exceed 4MB, and hls.js does not resume a partial one.
+// A query value needs only `&`, `#`, `%`, `+` and non-URL bytes escaped.
+// encodeURIComponent also escapes `/ : ? = @ , ;`, which grew every long
+// signed segment url by ~50% (multimovies 708 -> 1,066 bytes per line).
+// Both WHATWG URLSearchParams and express's qs decode the result to the
+// exact same string (test/playlistSize.test.js).
+function encodeQueryValue(v) {
+    return encodeURIComponent(v).replace(/%(2F|3A|3F|3D|40|2C|3B)/g, (m) => decodeURIComponent(m));
+}
+
+// Segment, key and init lines: lightly encoded url + a short header token
+// (lib/routing/headerTokens.js) in place of the row's headers as JSON on
+// every line. /ts-proxy still accepts the old `headers=` form, so a player
+// holding a playlist rewritten before this change keeps working.
+function tsProxyLine(baseProxyUrl, absUrl, headers) {
+    const id = headerTokens.put(headers);
+    return `${baseProxyUrl}/ts-proxy?url=${encodeQueryValue(absUrl)}${id ? `&h=${id}` : ''}&seg=1`;
+}
+
 function rewriteM3u8(content, targetUrl, baseProxyUrl, headers, ptsOffset = 0) {
     const segRoute = ptsOffset ? 'pts-rebase' : 'ts-proxy';
     const segExtra = ptsOffset ? `&pts=${ptsOffset}` : '';
@@ -412,7 +431,7 @@ function rewriteM3u8(content, targetUrl, baseProxyUrl, headers, ptsOffset = 0) {
             if (line.startsWith('#EXT-X-KEY:')) {
                 const regex = /https?:\/\/[^""\s]+/g; const keyUrl = regex.exec(line)?.[0];
                 if (keyUrl) {
-                    const proxyUrl = `${baseProxyUrl}/ts-proxy?url=${encodeURIComponent(keyUrl)}&headers=${encodeURIComponent(JSON.stringify(headers))}&seg=1`;
+                    const proxyUrl = tsProxyLine(baseProxyUrl, keyUrl, headers);
                     out.push(line.replace(keyUrl, proxyUrl));
                     if (!isCacheDisabled()) prefetchSegment(keyUrl, headers);
                 } else out.push(line);
@@ -424,7 +443,7 @@ function rewriteM3u8(content, targetUrl, baseProxyUrl, headers, ptsOffset = 0) {
                 if (uriMatch) {
                     try {
                         const initUrl = new URL(uriMatch[1], targetUrl).href;
-                        const proxyUrl = `${baseProxyUrl}/ts-proxy?url=${encodeURIComponent(initUrl)}&headers=${encodeURIComponent(JSON.stringify(headers))}&seg=1`;
+                        const proxyUrl = tsProxyLine(baseProxyUrl, initUrl, headers);
                         out.push(line.replace(uriMatch[1], proxyUrl));
                     } catch { out.push(line); }
                 } else out.push(line);
@@ -458,7 +477,9 @@ function rewriteM3u8(content, targetUrl, baseProxyUrl, headers, ptsOffset = 0) {
                     // /m3u8-proxy (404) - which is why a proxied stream still
                     // would not play.
                     segmentUrls.push(abs);
-                    out.push(`${baseProxyUrl}/${segRoute}?url=${encodeURIComponent(abs)}&headers=${encodeURIComponent(JSON.stringify(headers))}${segExtra}&seg=1`);
+                    out.push(ptsOffset
+                        ? `${baseProxyUrl}/${segRoute}?url=${encodeURIComponent(abs)}&headers=${encodeURIComponent(JSON.stringify(headers))}${segExtra}&seg=1`
+                        : tsProxyLine(baseProxyUrl, abs, headers));
                 }
             } catch { out.push(line); }
         } else out.push(line);
@@ -670,6 +691,17 @@ function createProxyRoutes(app) {
         if (initChunkKB > 2048) initChunkKB = 2048; // hard cap 2MB
         let headers = {}; try { headers = JSON.parse(req.query.headers || '{}'); } catch {
             // Ignore URL parsing errors
+        }
+        // A playlist line written by tsProxyLine carries `h=<token>`. An
+        // unknown token cannot be guessed: fetching bare would only earn an
+        // upstream 403 later, so say what happened.
+        if (req.query.h) {
+            const known = headerTokens.get(req.query.h);
+            if (!known) {
+                stage(`unknown header token h=${String(req.query.h).slice(0, 32)}`);
+                return res.status(410).json({ error: 'unknown header token', reason: 'reload the playlist' });
+            }
+            headers = { ...known, ...headers };
         }
         // Pass through Range header for progressive playback / seeking
         const range = req.headers['range'];
@@ -1065,7 +1097,7 @@ function processStreamsForProxy(streams, serverUrl) {
 }
 
 module.exports = {
-    createProxyRoutes, processStreamsForProxy, rewriteM3u8,
+    createProxyRoutes, processStreamsForProxy, rewriteM3u8, extractOriginalUrl,
     inferContentType, sniffSegmentType,
     // Exposed for tests.
     _segmentCache: { cacheSegment, getCachedSegment, stats: () => ({ entries: segmentCache.size, bytes: segmentCacheBytes, maxBytes: CACHE_MAX_BYTES }) },

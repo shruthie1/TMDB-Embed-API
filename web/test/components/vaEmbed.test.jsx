@@ -12,7 +12,7 @@ const { default: PlayerControls } = await import('../../components/PlayerControl
 const { default: EmbedStage } = await import('../../components/player/EmbedStage');
 const { videoChoices } = await import('../../lib/player/trackChoices');
 const {
-  VA_EMBED_ID, vaEmbedUrl, vaEmbedChoice, shouldAutoEmbed,
+  VA_EMBED_ID, vaEmbedUrl, vaEmbedChoice, vaEmbedRow, shouldAutoEmbed,
 } = await import('../../lib/player/vaEmbed');
 
 const SOURCES = [
@@ -45,8 +45,14 @@ describe('the embed row in the Servers menu', () => {
                     embed={embed} />,
   );
 
-  it('is listed LAST when the title has an imdb id', () => {
+  it('is never offered on the web (owner rule: VaPlayer is APK-only)', () => {
     const { container } = mount(vaEmbedChoice(DEVARA));
+    fireEvent.click(serverBtn(container));
+    expect(rowTexts(container)).toEqual(['CastleTV', 'OneTouchTV']);
+  });
+
+  it('the menu wiring still lists a given embed row LAST', () => {
+    const { container } = mount(vaEmbedRow(DEVARA));
     fireEvent.click(serverBtn(container));
     expect(rowTexts(container)).toEqual(['CastleTV', 'OneTouchTV', 'VaPlayer (embed)']);
   });
@@ -62,7 +68,7 @@ describe('the embed row in the Servers menu', () => {
 // then EmbedStage with the frame, Close and the Servers menu.
 function Harness({ onBack }) {
   const [on, setOn] = useState(false);
-  const embed = vaEmbedChoice(DEVARA);
+  const embed = vaEmbedRow(DEVARA);
   if (on) {
     return (
       <EmbedStage url={embed.url} choices={[...videoChoices(SOURCES), embed]}
@@ -123,14 +129,14 @@ describe('selecting the embed', () => {
   it('the TV frame takes no focus, so the remote stays on Close and Servers', () => {
     const { container } = render(
       <EmbedStage url="https://vaplayer.ru/embed/movie/tt11821912" tv
-                  choices={[vaEmbedChoice(DEVARA)]} onClose={() => {}} />,
+                  choices={[vaEmbedRow(DEVARA)]} onClose={() => {}} />,
     );
     expect(container.querySelector('iframe').getAttribute('tabindex')).toBe('-1');
   });
 });
 
 describe('automatic use', () => {
-  const embed = vaEmbedChoice(DEVARA);
+  const embed = vaEmbedRow(DEVARA);
   const error = { message: 'No playable source found.' };
 
   it('only when the resolve returned zero sources', () => {

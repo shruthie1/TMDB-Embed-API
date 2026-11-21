@@ -31,5 +31,6 @@
   "enableMappleProvider": true,
   "enableShowsstProvider": false,
   "enableMultimoviesProvider": true,
-  "enableVidrockProvider": true
+  "enableVidrockProvider": true,
+  "enableVidriftProvider": true
 }

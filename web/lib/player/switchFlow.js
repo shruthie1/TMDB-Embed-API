@@ -67,7 +67,7 @@ export function beginSourceSwitch({ target, label, at = 0, ctx = {}, streamKey =
  * differs from the one at begin once the new stream is attached. `frames` is
  * true once the new stream fired `playing` or reached readyState >= 3.
  */
-export function tickSourceSwitch(state, { streamKey, frames = false, alive = false, now = Date.now() }) {
+export function tickSourceSwitch(state, { streamKey, frames = false, alive = false, direct = false, now = Date.now() }) {
   if (!state) return { state: null, verdict: 'wait' };
   const attached = streamKey !== state.streamKey;
   const next = attached && state.phase === 'requested' ? { ...state, phase: 'loading' } : state;
@@ -75,10 +75,22 @@ export function tickSourceSwitch(state, { streamKey, frames = false, alive = fal
   const elapsed = now - state.startedAt;
   // Before attach (a pairing still running on the backend) there is nothing
   // to look at yet, so only the hard cap applies.
-  if (elapsed >= SWITCH_HARD_MS || (attached && elapsed >= SWITCH_NO_LIFE_MS && !alive)) {
+  // `direct`: the row is still on its web-direct attempt. Its own 10 s timer
+  // (useHls, DIRECT_FIRST_FRAME_MS) moves it to the proxied url and the clock is
+  // re-armed then, so the no-life rule must not kill it first (re-review I-A).
+  if (elapsed >= SWITCH_HARD_MS || (attached && !direct && elapsed >= SWITCH_NO_LIFE_MS && !alive)) {
     return { state: null, verdict: 'dead' };
   }
   return { state: next, verdict: 'wait' };
+}
+
+/**
+ * The row being judged moved from its direct url to its proxied url (same
+ * row). That attempt gets the full SWITCH_NO_LIFE_MS / SWITCH_HARD_MS window
+ * from now; the phase is kept.
+ */
+export function rearmSourceSwitch(state, now = Date.now()) {
+  return state ? { ...state, startedAt: now } : state;
 }
 
 /**

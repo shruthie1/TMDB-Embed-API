@@ -156,3 +156,61 @@ test('P6b: the disguised-segment check does not hold up the resolve, and is cach
     await mm._disguiseSettled();
     assert.equal(segHits, 1, 'one check per host');
 });
+
+// Recorded 2026-11-21: RRR (579974) VidBolt Telugu bridge master, signature
+// redacted. AUDIO is NAME="Audio" with no LANGUAGE; vidbolt /api/resolve says
+// language "Telugu" for this source. Before: languages ['Audio'].
+const RRR_BRIDGE = require('fs').readFileSync(require('path').join(__dirname, 'fixtures', 'multimovies', 'rrr-bridge-telugu.m3u8'), 'utf8');
+const RRR_URL = 'https://dash-hls-bridge.johndoesdmc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F5820588283537016992_0_0_1080_h265_795%2Fmaster.m3u8';
+
+test('RRR bridge: generic "Audio" rendition takes VidBolt source language, Telugu', () => {
+    const n = normaliseStream(streamFromMaster({ quality: '1080p', language: 'Telugu' }, RRR_BRIDGE, RRR_URL));
+    assert.deepEqual(n.languages, ['Telugu']);
+    assert.deepEqual(n.audio.map((a) => a.language), ['Telugu']);
+    assert.equal(n.selectableAudio, true);
+    assert.equal(n.videoCodec, 'hevc');
+});
+
+test('RRR bridge: a master that states a real LANGUAGE still wins over the source', () => {
+    const tagged = RRR_BRIDGE.replace('NAME="Audio"', 'NAME="Audio",LANGUAGE="hin"');
+    const n = normaliseStream(streamFromMaster({ language: 'Telugu' }, tagged, RRR_URL));
+    assert.deepEqual(n.languages, ['Hindi']);
+});
+
+test('RRR bridge: no source language keeps the old fallback, nothing dropped', () => {
+    const n = normaliseStream(streamFromMaster({}, RRR_BRIDGE, RRR_URL));
+    assert.deepEqual(n.audio.map((a) => a.name), ['Audio']);
+    assert.equal(n.audio.length, 1);
+});
+
+test('RRR bridge: "Arabic sub" is a subtitle label, not an audio language', () => {
+    const n = normaliseStream(streamFromMaster({ language: 'Arabic sub' }, RRR_BRIDGE, RRR_URL));
+    assert.ok(!n.languages.includes('Arabic'));
+    assert.equal(n.audio.length, 1);
+});
+
+test('RRR bridge: a named (non-generic) rendition is not overridden by the source', () => {
+    const named = RRR_BRIDGE.replace('NAME="Audio"', 'NAME="Tamil"');
+    const n = normaliseStream(streamFromMaster({ language: 'Telugu' }, named, RRR_URL));
+    assert.deepEqual(n.languages, ['Tamil']);
+});
+
+test('RRR bridge: two generic renditions are left as the master states (no stamp)', () => {
+    const two = RRR_BRIDGE.replace(/(#EXT-X-MEDIA:TYPE=AUDIO[^\n]*NAME=)"Audio"([^\n]*)/, '$1"Audio 1"$2\n$1"Audio 2"$2');
+    const n = normaliseStream(streamFromMaster({ language: 'Telugu' }, two, RRR_URL));
+    assert.equal(n.audio.length, 2);
+    assert.ok(!n.audio.some((a) => a.language === 'Telugu'), 'no Telugu stamped on two renditions');
+});
+
+test('RRR bridge: an unrecognised source label ("Hindi Dubbed") does not replace "Audio"', () => {
+    const n = normaliseStream(streamFromMaster({ language: 'Hindi Dubbed' }, RRR_BRIDGE, RRR_URL));
+    assert.deepEqual(n.audio.map((a) => a.name), ['Audio']);
+    assert.ok(!n.languages.some((l) => /dub/i.test(l)), n.languages.join(','));
+});
+
+test('RRR bridge: source "Original" takes TMDB original_language, else stays unlabelled', () => {
+    const withTmdb = normaliseStream(streamFromMaster({ language: 'Original' }, RRR_BRIDGE, RRR_URL, null, 'te'));
+    assert.deepEqual(withTmdb.languages, ['Telugu']);
+    const without = normaliseStream(streamFromMaster({ language: 'Original' }, RRR_BRIDGE, RRR_URL, null, null));
+    assert.ok(!without.languages.includes('Telugu'));
+});
