@@ -282,7 +282,9 @@ export function initDpad() {
     if (next) {
       // Remember where we were BEFORE moving, so coming back restores it.
       if (group) memory.set(group, active);
-      next.focus();
+      // preventScroll: a plain focus() scrolled the page instantly before the
+      // smooth scroll below ran, so the focus jumped instead of gliding.
+      next.focus({ preventScroll: true });
       // TV title page: the hero (Back, title, Play, My List) is the top of the
       // page. 'nearest' only scrolled Play to the viewport's top edge, so
       // coming back up from Cast left the backdrop and title cut off. Show the

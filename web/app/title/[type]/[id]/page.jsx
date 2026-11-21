@@ -183,6 +183,10 @@ export default function TitlePage() {
   // Loading: the same article, hero and backdrop element the loaded page
   // uses, so React keeps them mounted when the data lands. A separate
   // skeleton tree unmounted the backdrop and repainted it from black.
+  // The children below sit in the SAME slots as the loaded return (Back, hero,
+  // episodes, cast, More like this, facts): React matches by position, so a
+  // slot that moved remounted its row and its fade replayed (measured: the
+  // "More like this" section was replaced when the title landed).
   if (!t) {
     return (
       <article className="detail title-skeleton" aria-busy="true" aria-label="Loading title">
@@ -284,8 +288,7 @@ export default function TitlePage() {
         </div>
       </div>
 
-      {isTv && !full && <EpisodeListSkeleton />}
-      {isTv && full && (
+      {isTv && (full ? (
         <EpisodeList
           tmdbId={tmdbId}
           initialSeason={resume?.season}
@@ -296,7 +299,7 @@ export default function TitlePage() {
             setPlay({ season: ep.season, episode: ep.episode, startAt: p?.positionSec || 0, label: ep.title });
           }}
         />
-      )}
+      ) : <EpisodeListSkeleton />)}
 
       {full ? <CastRow credits={t.credits} /> : <CastRowSkeleton />}
 
@@ -304,8 +307,7 @@ export default function TitlePage() {
         <Row label="More like this" titles={similar || []} loading={similar === undefined} />
       )}
 
-      {!full && <FactsSkeleton />}
-      {full && (
+      {full ? (
         <div className="facts">
           {t.genres?.length > 0 && (
             <div className="fact"><span className="k">Genres</span><span className="v">{t.genres.join(' · ')}</span></div>
@@ -320,7 +322,7 @@ export default function TitlePage() {
             <div className="fact"><span className="k">Country</span><span className="v">{t.country.join(', ')}</span></div>
           )}
         </div>
-      )}
+      ) : <FactsSkeleton />}
 
       {play && (
         <ErrorBoundary label="the player" onClose={() => setPlay(null)}>

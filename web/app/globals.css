@@ -1678,6 +1678,10 @@ kbd{
 /* Ten-foot layout: large, legible posters and a wider continuation cue. The
    D-pad moves focus between links; no on-screen rail arrows are necessary. */
 [data-tv="true"] .rail{gap:var(--space-4-5);padding-bottom:var(--space-2-5);scroll-snap-type:x mandatory;scroll-padding-inline:var(--space-12)}
+/* D-pad scrolls a card into view with block:'nearest', which parked a focused
+   card flush with the screen edge (measured: Continue watching card bottom =
+   1080 of 1080), so its ring and lift were cut. Keep room around it. */
+[data-tv="true"] .card,[data-tv="true"] .ep,[data-tv="true"] .person{scroll-margin-block:40px}
 [data-tv="true"] .rail > *{flex-basis:290px}
 [data-tv="true"] .row-sec{margin-bottom:var(--space-10)}
 [data-tv="true"] .rail-wrap{--rail-gutter:var(--space-12)}
