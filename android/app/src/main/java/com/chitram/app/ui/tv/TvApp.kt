@@ -1076,6 +1076,16 @@ private fun TvSearch(nav: Nav) {
     val firstCard = remember { FocusRequester() }
     val grid = rememberLazyGridState()
     val kb = LocalSoftwareKeyboardController.current
+    // The rail (nav) is reached from the search field with Back: pressing it moves
+    // focus to the rail and opens it. Left/Right are kept by the field for the
+    // cursor, so typing no longer escapes to the rail. Enabled only while the field
+    // itself holds focus; once focus is in the results grid or the rail, Back falls
+    // through to the app handler and pops as usual.
+    val railEntry = LocalRailEntry.current
+    var fieldFocused by remember { mutableStateOf(false) }
+    BackHandler(enabled = fieldFocused && railEntry.value != null) {
+        railEntry.value?.let { runCatching { it.requestFocus() } }
+    }
     // Set by the IME action or D-pad Down: focus the first card once results are in.
     var toResults by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { field.focusWhenAttached() }
@@ -1094,7 +1104,6 @@ private fun TvSearch(nav: Nav) {
         toResults = true
     }
     Column(Modifier.fillMaxSize().padding(start = GUTTER, end = GUTTER, top = TvWeb.DETAIL_TOP.px)) {
-        var fieldFocused by remember { mutableStateOf(false) }
         val searchSize = TvWeb.SEARCH_INPUT.pxSp
         BasicTextField(
             value = vm.query,
@@ -1118,6 +1127,10 @@ private fun TvSearch(nav: Nav) {
                             if (vm.results.isNotEmpty() || vm.loading || vm.resultsFor != vm.query.trim()) goToResults()
                             true
                         }
+                        // Left/Right belong to the field (cursor / on-screen keyboard),
+                        // not to focus movement: without this, Left escaped to the rail
+                        // and re-opened it every time, which made typing navigation bad.
+                        e.key == Key.DirectionLeft || e.key == Key.DirectionRight -> true
                         // D-pad centre opens the on-screen keyboard.
                         e.type == KeyEventType.KeyUp && (e.key == Key.DirectionCenter || e.key == Key.Enter) -> { kb?.show(); true }
                         else -> false
