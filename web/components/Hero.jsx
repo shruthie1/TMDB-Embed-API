@@ -10,6 +10,10 @@ import { isTv } from '../lib/dpad';
 /** Auto-advance interval. Must match --hero-rotate in app/tokens.css. */
 const ROTATE_MS = 8000;
 
+function focusVisible(el) {
+  try { return el.matches(':focus-visible'); } catch { return false; }
+}
+
 /**
  * Rotating hero. Pauses on hover/focus and under reduced-motion, so it never
  * yanks the page out from under someone mid-read.
@@ -82,9 +86,12 @@ export default function Hero({ titles = [], loading }) {
     <section
       className="home-hero"
       data-paused={paused || undefined}
-      onMouseEnter={() => setPaused(true)}
-      onMouseLeave={() => setPaused(false)}
-      onFocusCapture={() => setPaused(true)}
+      // A real mouse only: a phone tap fires mouseenter but usually no
+      // mouseleave, and a tap's focus never blurs, so both used to pause the
+      // carousel for good. Keyboard / D-pad focus still pauses it.
+      onPointerEnter={e => { if (e.pointerType === 'mouse') setPaused(true); }}
+      onPointerLeave={e => { if (e.pointerType === 'mouse') setPaused(false); }}
+      onFocusCapture={e => { if (isTv() || focusVisible(e.target)) setPaused(true); }}
       onBlurCapture={() => setPaused(false)}
       onPointerDown={e => { swipeStart.current = { x: e.clientX, y: e.clientY }; setPaused(true); }}
       onPointerUp={e => {

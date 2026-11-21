@@ -1804,7 +1804,7 @@ kbd{
   gap:var(--space-2-5);padding:var(--space-2-5) var(--space-2) var(--space-2-5) var(--space-3-5);
   background:rgb(var(--rgb-surface) / .98);
   border-bottom:1px solid var(--line);
-  font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--paper-2);
+  font-size:11px;color:var(--paper-2);
 }
 .pmenu-sheet-head .icon-btn{ min-width:30px;min-height:30px;color:var(--mid) }
 .pmenu-sheet-head .icon-btn:hover{ color:var(--paper) }
@@ -2676,7 +2676,6 @@ body:not(:has(.page-backdrop)) .topbar::after{opacity:1}
 .hero-dots{flex:1 1 auto;gap:var(--space-1-5);justify-content:center}
 .hero-dot{flex:1 1 0;min-width:0;width:auto;height:3px;border-radius:var(--radius-pill);
   background:var(--indicator);position:relative;overflow:hidden}
-.hero-dot.on{background:var(--indicator)}
 /* Hit area: the bar is 3px tall. Transparent borders make it 40px (8px up to
    the buttons above, 29px down over the row heading) and 3px each side in
    place of the 6px gap; the negative margins give the layout back and the
@@ -2686,6 +2685,10 @@ body:not(:has(.page-backdrop)) .topbar::after{opacity:1}
 .hero-dots{gap:0}
 .hero-dot{box-sizing:content-box;border:solid transparent;border-width:8px 3px 29px;
   margin:-8px 0 -29px;background-clip:padding-box}
+/* Longhands only: the older .hero-dot.on{background:...} shorthand (0,2,0)
+   resets background-clip to border-box, which painted the whole 34x40 hit
+   area as an oval blob. */
+.hero-dot.on{background-color:var(--indicator);background-clip:padding-box}
 .hero-dot:first-child{margin-left:-3px}
 .hero-dot:last-child{margin-right:-3px}
 .hero-dot.on::after{content:"";position:absolute;inset:0;border-radius:inherit;background:var(--indicator-active);
@@ -3210,19 +3213,23 @@ html .pctl-scrub:focus-visible,html .sync-bar:focus-visible{outline:none}
 [data-tv="true"] .ov-load-panel{width:min(560px,60vw)}
 
 /* Shared player menu surfaces. These rules never size the player or controls. */
-.pmenu-unified{width:272px;max-width:calc(100vw - 24px);padding:0;display:flex;flex-direction:column;overflow:hidden}
-.pmenu-picker-head{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3);min-height:44px}
+/* Sized to content: the longest row sets the width, up to the cap (row meta is
+   nowrap + ellipsis). Rows 38px, normal-case headers. */
+.pmenu-unified{width:max-content;min-width:200px;max-width:min(300px,calc(100vw - 24px));padding:0;display:flex;flex-direction:column;overflow:hidden}
+.pmenu-picker-head{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3);min-height:38px}
+.pmenu-picker-head,.pmenu-sheet-head{min-height:38px;text-transform:none;letter-spacing:0;padding:0 var(--space-1) 0 var(--space-3)}
 .pmenu-heading{display:flex;align-items:center;gap:var(--space-2);font-size:var(--text-sm);font-weight:var(--weight-medium)}
-.pmenu-picker-head .icon-btn,.pmenu-sheet-head .icon-btn{min-width:44px;min-height:44px}
-.pmenu-picker-body{min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:var(--space-1-5)}
-.pmenu .pmenu-item{min-height:44px;padding:var(--space-1-5) var(--space-3);gap:var(--space-2-5)}
+.pmenu-picker-head .icon-btn,.pmenu-sheet-head .icon-btn{min-width:36px;min-height:36px}
+.pmenu-picker-body{min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:var(--space-1)}
+.pmenu .pmenu-item{min-height:38px;padding:var(--space-1) var(--space-2-5);gap:var(--space-2)}
+.sheet-picks .pctl-pick-btn{height:38px;min-height:38px;padding:0 var(--space-2-5)}
 .pmenu .pmenu-item:active{background:rgb(var(--rgb-white) / .12)}
 .pmenu-group{margin:var(--space-2) var(--space-3) var(--space-1);font-size:var(--text-xs);font-weight:var(--weight-medium);color:var(--color-text-muted)}
 .pmenu-group:first-child{margin-top:var(--space-1)}
 .pmenu-marker{width:18px;flex:0 0 18px;display:flex;align-items:center;justify-content:center;color:var(--color-text-primary)}
-.pmenu-copy{display:flex;flex:1;min-width:0;flex-direction:column;gap:var(--space-0-5);align-items:stretch}
-.pmenu-copy .pmenu-text{flex:none;display:block;font-size:var(--text-sm);line-height:1.4}
-.pmenu-copy .pmenu-meta{margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:var(--text-xs);line-height:1.4}
+.pmenu-copy{display:flex;flex:1;min-width:0;flex-direction:column;gap:0;align-items:stretch}
+.pmenu-copy .pmenu-text{flex:none;display:block;font-size:var(--text-sm);line-height:1.25}
+.pmenu-copy .pmenu-meta{margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:var(--text-xs);line-height:1.25}
 .pmenu-item.on{background:var(--color-fill-2)}
 .pmenu-item:focus-visible{outline:var(--focus-ring);outline-offset:calc(-1 * var(--focus-offset))}
 .sheet-picks .pmenu-unified{width:auto;max-width:none;overflow:visible}
@@ -3243,15 +3250,18 @@ html .pctl-scrub:focus-visible,html .sync-bar:focus-visible{outline:none}
   .pmenu-unified .pmenu-picker-body{padding-bottom:calc(var(--space-3) + var(--safe-b))}
 }
 @media (pointer:coarse) and (max-height:500px) and (min-width:640px){
+  /* Phone landscape: a content-sized card at the bottom right, not a
+     full-height rail. */
   .pctl .pmenu-unified,.pctl .pmenu-sheet,.embed-stage .pmenu-unified{
-    position:fixed;left:auto;right:var(--safe-r,0px);top:var(--safe-t,0px);bottom:0;
-    width:min(360px,50vw);max-height:none;border-radius:var(--radius-lg) 0 0 var(--radius-lg);
+    position:fixed;left:auto;top:auto;bottom:var(--space-2);right:calc(var(--safe-r,0px) + var(--space-2));
+    width:max-content;min-width:200px;max-width:min(320px,50vw);
+    max-height:calc(100svh - var(--safe-t,0px) - var(--space-4));border-radius:var(--radius-md);
   }
-  .pctl .sheet-picks .pmenu-unified{position:static;width:auto;max-height:none;border-radius:0}
+  .pctl .sheet-picks .pmenu-unified{position:static;width:auto;min-width:0;max-width:none;max-height:none;border-radius:0}
 }
 html[data-tv="true"] .pctl .pmenu-unified,html[data-tv="true"] .pctl .pmenu-sheet,
 html[data-tv="true"] .embed-stage .pmenu-unified{
-  position:fixed;left:auto;right:0;top:0;bottom:0;width:min(400px,50vw);max-height:none;
+  position:fixed;left:auto;right:0;top:0;bottom:0;width:min(400px,50vw);max-width:none;max-height:none;
   border-radius:var(--radius-lg) 0 0 var(--radius-lg);
 }
 html[data-tv="true"] .pmenu .pmenu-item{min-height:56px}
