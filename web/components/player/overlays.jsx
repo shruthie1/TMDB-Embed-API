@@ -58,7 +58,7 @@ export function Loading({ view, title, meta, onArt = false, onClose, onRetry, on
           {view.showChooser && (
             <button type="button" className="ov-pill focusable" data-focus=""
                     data-action="choose-server" onClick={() => { if (onChooseServer) onChooseServer(); else { setOpen(true); setFocusRow(true); } }}>
-              <span>Choose a server</span>
+              <Icon name="server" size={18} /><span>Choose a server</span>
             </button>
           )}
           {onClose && (
@@ -69,7 +69,8 @@ export function Loading({ view, title, meta, onArt = false, onClose, onRetry, on
           <button type="button" className="ov-pill ov-pill-quiet focusable" data-focus=""
                   ref={detailsRef} aria-expanded={open} aria-controls="load-rows"
                   onClick={() => setOpen((o) => !o)}>
-            <span>Details</span><span aria-hidden="true">{open ? '⌃' : '⌄'}</span>
+            <span>Details</span>
+            <Icon name="chevron" size={16} className={`ov-chev${open ? ' open' : ''}`} />
           </button>
         </div>
         <div className="ov-load-panel" id="load-rows" hidden={!open} ref={rowsRef}>

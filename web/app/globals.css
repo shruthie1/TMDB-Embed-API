@@ -2868,6 +2868,26 @@ html[data-tv="true"] .ov-resolving .ov-meta{font-size:20px}
 html[data-tv="true"] .ov-resolving .ov-status{font-size:22px}
 html[data-tv="true"] .ov-resolving .ov-spinner{width:56px;height:56px}
 html[data-tv="true"] .ov-pill{font-size:20px;padding:0 28px}
+/* TV loading overlay, fixed for a 10-foot view (owner, 2026-11-21):
+   - icons were hard-coded 18px and read as hairlines next to 20px text; scale
+     them up like the rest of the TV UI.
+   - the focus scale(1.09)+ring ate the 10px row gap so the ring touched the
+     next pill, and the ring was clipped by the card's overflow:auto. Give the
+     pills the flat white TV focus (no scale), a bigger gap, and let the card
+     show the ring.
+   - margin fallback for flex `gap`: Fire TV Silk is Chrome 70, which ignores
+     `gap` on flex rows, so without this the pills touch. */
+html[data-tv="true"] .ov-pill svg,
+html[data-tv="true"] .ov-back svg{width:26px;height:26px}
+html[data-tv="true"] .ov-resolving .ov-actions{gap:20px;flex-wrap:wrap;justify-content:center}
+html[data-tv="true"] .ov-resolving .ov-actions > *{margin:4px}
+html[data-tv="true"] .ov-resolving .ov-card{overflow:visible;max-height:none}
+html[data-tv="true"] .ov-pill.focusable:focus,
+html[data-tv="true"] .ov-pill.focusable:focus-visible{
+  transform:none;background:#fff;color:#06070C;outline:none;
+}
+.ov-chev{transition:transform .15s var(--ease)}
+.ov-chev.open{transform:rotate(180deg)}
 /* Phase 2, stream buffering: a bare cyan ring. A named state (source switch,
    reconnect) sits in a dark box with the source counter. */
 .pspinner{width:40px;height:40px;border:3px solid rgb(255 255 255 / .1);border-top-color:#22D3EE;box-shadow:none}

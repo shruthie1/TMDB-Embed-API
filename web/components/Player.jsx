@@ -2005,8 +2005,11 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       )}
 
       {/* On a TV the native bar handles playback and this carries only what it
-          cannot: which provider, and which rung. */}
-      {stream && useNative && !embedOn && (
+          cannot: which provider, and which rung. Gated on framedOnce: before the
+          first frame the loading overlay owns the screen, and TvBar mounts open
+          (z-index 5) and showed through the semi-transparent overlay on Fire TV
+          (Chrome 70 ignores the :has() guard, so gate it here). */}
+      {stream && useNative && !embedOn && framedOnce && (
         <TvBar
           sources={tvSources}
           currentSource={currentSource}
