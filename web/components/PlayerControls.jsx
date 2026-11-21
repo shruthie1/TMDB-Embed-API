@@ -89,7 +89,7 @@ export function sourceMeta(source) {
  * list moved out to its own "Servers" control on 2026-09-22, so this sheet no
  * longer duplicates it.
  */
-const FITS = [['contain', 'Fit whole'], ['cover', 'Fill screen'], ['fill', 'Stretch']];
+const FITS = [['width', 'Fit width'], ['contain', 'Fit whole'], ['cover', 'Fill screen'], ['fill', 'Stretch']];
 
 function SettingsSheet({ subs, currentSub, onPickSub, subLoading, subPrefs, onSubPrefs,
                           onClose, picks, fit, onSetFit }) {
@@ -228,7 +228,7 @@ export default function PlayerControls({
   labels = null, onCheckSources, checkingSources = false, onPickLanguage, audioSources = sources,
   audioSync = null,
   subs = [], currentSub = null, onPickSub, subLoading = false,
-  fit = 'cover', onCycleFit, onSetFit,
+  fit = 'width', onCycleFit, onSetFit,
   subPrefs = { scale: 1, offsetMs: 0 }, onSubPrefs,
   levels = [], currentLevel = -1, autoLevel, onPickLevel,
   audioTracks = [], currentAudio, onPickAudio, onPickPair,
@@ -813,10 +813,12 @@ export default function PlayerControls({
               panel is already full-screen and the remote has no use for it. */}
           {!compact && !tv && (
           <button className="icon-btn focusable" data-focus=""
-                  aria-label={`Picture fit: ${fit === 'contain' ? 'whole frame'
+                  aria-label={`Picture fit: ${fit === 'width' ? 'fit width'
+                    : fit === 'contain' ? 'whole frame'
                     : fit === 'cover' ? 'fill and crop' : 'stretch'}`}
                   onClick={() => onCycleFit?.()}>
-            <Icon name={fit === 'contain' ? 'fit-contain'
+            <Icon name={fit === 'width' ? 'fit-width'
+                      : fit === 'contain' ? 'fit-contain'
                       : fit === 'cover' ? 'fit-cover' : 'fit-fill'} size={17} />
           </button>
           )}

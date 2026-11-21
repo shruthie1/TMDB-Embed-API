@@ -171,10 +171,14 @@ export function useCueOverlay({ videoRef, subUrl, fit = 'cover', enabled = true 
       // came from the element while the height was derived from that same
       // width, so the box was taller than the picture and bottom-aligned
       // captions landed mid-frame instead of near the lower edge.
-      const letterboxed = fit === 'contain';
       // Wider box than film -> bars on the SIDES, full height.
       // Taller box than film -> bars top and bottom, full width.
       const barsOnSides = boxAr > ar;
+      // 'contain' letterboxes on whichever axis. 'width' sizes the video box to
+      // the full width (height auto), so there is NO internal bar for a film
+      // wider than the box; a bar appears only when max-height:100% clamps a tall
+      // film, which is the side-bar (boxAr < ar) case. 'cover'/'fill' never bar.
+      const letterboxed = fit === 'contain' || (fit === 'width' && barsOnSides);
       const picW = !letterboxed || !barsOnSides ? r.width : r.height * ar;
       const picH = !letterboxed || barsOnSides ? r.height : r.width / ar;
       // A film wider than its raster carries the letterbox IN THE PIXELS.

@@ -54,7 +54,7 @@ export default function TvBar({
   levels = [], currentLevel, autoLevel, onPickLevel,
   audioTracks = [], currentAudio, onPickAudio, onPickLanguage, audioSources = sources,
   sourcesPending = false, onClose, onCheckSources, checkingSources = false,
-  fit = 'cover', onSetFit,
+  fit = 'width', onSetFit,
   subs = [], currentSub, onPickSub, subLoading = false,
 }) {
   /**
@@ -346,7 +346,7 @@ export default function TvBar({
       <div className="tvbar-row" data-focus-group="">
         <span className="tvbar-k">Picture</span>
         <div className="tvbar-btns">
-          {[['contain', 'Fit whole'], ['cover', 'Fill screen'], ['fill', 'Stretch']]
+          {[['width', 'Fit width'], ['contain', 'Fit whole'], ['cover', 'Fill screen'], ['fill', 'Stretch']]
             .map(([mode, label]) => (
               <button key={mode} type="button"
                       className={`tvbar-btn focusable ${fit === mode ? 'on' : ''}`}

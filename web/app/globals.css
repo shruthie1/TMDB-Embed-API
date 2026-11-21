@@ -94,7 +94,7 @@ img{display:block;max-width:100%}
     var(--color-fill-1) 60%,
     transparent 80%);
   background:var(--skel-shine) 0 0/220% 100%,var(--raised);
-  animation:shimmer 1.5s linear infinite;
+  animation:shimmer 2.4s linear infinite;
 }
 /* No background here: a `background` shorthand on these reset the shimmer,
    so text and line bars were flat. .skel paints them. */
@@ -293,7 +293,7 @@ main{padding:0 var(--space-5) var(--space-24)}
    decodes, then fade it in, so the box is never a flat dark tile. */
 .hero-poster{position:relative}
 .hero-poster.loading::after{content:"";position:absolute;inset:0;pointer-events:none;
-  background:linear-gradient(100deg,transparent 30%,rgb(var(--rgb-text) / .07) 50%,transparent 70%) 0 0/300% 100%;animation:shimmer 1.4s linear infinite}
+  background:linear-gradient(100deg,transparent 30%,rgb(var(--rgb-text) / .07) 50%,transparent 70%) 0 0/300% 100%;animation:shimmer 2.4s linear infinite}
 @media (prefers-reduced-motion:reduce){.hero-poster.loading::after{animation:none}}
 .hero-poster img{transition:opacity var(--duration-fast) ease}
 .hero-poster.loading img{opacity:0}
@@ -414,6 +414,16 @@ main{padding:0 var(--space-5) var(--space-24)}
   position:absolute;inset:0;
   width:100%;height:100%;
   object-fit:cover;object-position:center;background:var(--color-player-bg);
+}
+/* Fit width (default, owner 2026-11-21): the picture uses the full screen width
+   and its height follows the film's ratio, so nothing in the frame is cut; a
+   film wider than the screen shows bars top and bottom. The video box itself is
+   width-wide and height-auto, centred, instead of filling the inset:0 stage. */
+.video[data-fit="width"]{
+  inset:auto;top:50%;left:0;
+  width:100%;height:auto;max-height:100%;
+  transform:translateY(-50%);
+  object-fit:contain;
 }
 .player-close{
   position:absolute;top:14px;right:14px;z-index:3;padding:var(--space-2) var(--space-4);

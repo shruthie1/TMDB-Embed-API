@@ -239,18 +239,27 @@ describe('picture fit in the settings sheet', () => {
   const rows = (c) => [...c.querySelectorAll('.pmenu-sheet [role="menuitemradio"]')]
     .map(b => b.textContent.trim());
 
-  it('lists Fit whole, Fill screen and Stretch on a phone, current one ticked', () => {
+  it('lists Fit width, Fit whole, Fill screen and Stretch on a phone, current one ticked', () => {
     isCompact = true;
     const onSetFit = vi.fn();
     const { container, unmount } = openSheet({ fit: 'cover', onSetFit });
     const r = rows(container);
-    expect(r).toEqual(expect.arrayContaining(['Fit whole', 'Fill screen', 'Stretch']));
+    const fits = ['Fit width', 'Fit whole', 'Fill screen', 'Stretch'];
+    expect(r.filter(t => fits.includes(t))).toEqual(fits);
     const on = [...container.querySelectorAll('.pmenu-sheet [aria-checked="true"]')].map(b => b.textContent.trim());
     expect(on).toContain('Fill screen');
     const stretch = [...container.querySelectorAll('.pmenu-sheet [role="menuitemradio"]')]
       .find(b => b.textContent.trim() === 'Stretch');
     fireEvent.click(stretch);
     expect(onSetFit).toHaveBeenCalledWith('fill');
+    unmount(); isCompact = false;
+  });
+
+  it('ticks Fit width when no fit is passed (the default)', () => {
+    isCompact = true;
+    const { container, unmount } = openSheet({ onSetFit: () => {} });
+    const on = [...container.querySelectorAll('.pmenu-sheet [aria-checked="true"]')].map(b => b.textContent.trim());
+    expect(on).toContain('Fit width');
     unmount(); isCompact = false;
   });
 

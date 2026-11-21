@@ -22,12 +22,17 @@ android {
         applicationId = "com.chitram.app"
         minSdk = 25
         targetSdk = 35
-        versionCode = 40
-        versionName = "1.2.27"
+        versionCode = 48
+        versionName = "1.2.35"
         // Only ship the locales and densities we use.
         resourceConfigurations += listOf("en")
     }
 
+    // Fire TV's home row draws android:banner (wide 16:9), NOT android:icon.
+    // Working apps (incl. sideloaded com.home.yt) all pair a SQUARE icon with a
+    // wide banner; a wide icon gets squeezed into the square icon slot = the
+    // compressed tile. So one square mipmap/ic_launcher + one drawable/banner
+    // serve both phone and TV. No product flavors.
     signingConfigs {
         create("release") {
             if (ksPass != null && File(ksFile).exists()) {

@@ -649,17 +649,18 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
    * TV player offers this because the right answer depends on the film and on
    * how much the viewer minds either bars or a crop.
    */
-  const [fit, setFit] = useState('cover');
-  // 'Fill screen' (cover) is the default on EVERY device and every film starts
-  // there (owner call, 2026-11-20: no bars by default). A crop is a per-film judgement - choosing Fill for one wide film
-  // should not silently crop the next - so the previous choice is deliberately
-  // not restored. The picker is one press away when a particular film wants it.
+  const [fit, setFit] = useState('width');
+  // 'Fit width' is the default on EVERY device and every film starts there
+  // (owner call, 2026-11-21: the picture uses the full screen width, nothing in
+  // the frame cut). A crop or a stretch is a per-film judgement - choosing one
+  // for a wide film should not silently carry to the next - so the previous
+  // choice is deliberately not restored. The picker is one press away.
   //
   // The value is still WRITTEN on change, so nothing else that reads
   // chitram.fit breaks; it is simply not read back at startup.
   const cycleFit = useCallback(() => {
     setFit(f => {
-      const next = f === 'contain' ? 'cover' : f === 'cover' ? 'fill' : 'contain';
+      const next = f === 'width' ? 'contain' : f === 'contain' ? 'cover' : f === 'cover' ? 'fill' : 'width';
       try { localStorage.setItem('chitram.fit', next); } catch { /* private mode */ }
       // No toast. A fit change is the most self-evident action in the player -
       // the picture visibly reframes - so naming it puts a card over the very
@@ -677,7 +678,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
    * through here.
    */
   const applyFit = useCallback((next) => {
-    if (!['contain', 'cover', 'fill'].includes(next)) return;
+    if (!['width', 'contain', 'cover', 'fill'].includes(next)) return;
     setFit(next);
     try { localStorage.setItem('chitram.fit', next); } catch { /* private mode */ }
     // Silent, like cycleFit: the reframe is its own feedback, and the settings
@@ -1970,7 +1971,8 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       )}
       <video ref={videoRef} className="video" playsInline referrerPolicy="no-referrer"
              controls={useNative || undefined}
-             style={{ objectFit: fit }}>
+             data-fit={fit}
+             style={{ objectFit: fit === 'width' ? undefined : fit }}>
         {/* Keyed on the url so React replaces the element on a language
             change - reusing it leaves the previous cues showing. */}
         {subtitles.subUrl && (

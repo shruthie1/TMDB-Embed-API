@@ -20,6 +20,7 @@ const P = {
   fullscreen: { d: 'M4 9V5h4M20 9V5h-4M4 15v4h4M20 15v4h-4' },
   // Picture fit. Distinguishable at 17px: contain shows the frame inset with
   // bars, cover shows it overflowing the screen, fill shows it stretched.
+  'fit-width':   { d: 'M3 8h18M3 16h18M6 5l-3 3 3 3M18 5l3 3-3 3', rect: [3, 8, 18, 8, 1] },
   'fit-contain': { d: 'M3 8h18M3 16h18', rect: [3, 8, 18, 8, 1] },
   'fit-cover':   { d: 'M7 3v18M17 3v18', rect: [3, 6, 18, 12, 1] },
   'fit-fill':    { d: 'M3 12h18M6 9l-3 3 3 3M18 9l3 3-3 3', rect: [3, 6, 18, 12, 1] },

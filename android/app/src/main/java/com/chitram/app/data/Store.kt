@@ -236,8 +236,8 @@ enum class VideoFit(val label: String, val resizeMode: Int) {
     FitWidth("Fit width", 1),    // RESIZE_MODE_FIXED_WIDTH: full width, crop top and bottom
     Stretch("Stretch", 3);       // RESIZE_MODE_FILL: fill the screen, distort
 
-    /** Phone bar button cycle: Fit, Fill, Stretch. Fit width is a TV sheet choice. */
-    fun next(): VideoFit = when (this) { Fit -> Fill; Fill -> Stretch; Stretch, FitWidth -> Fit }
+    /** Phone bar button cycle: Fit width (default), Fit, Fill, Stretch, round. */
+    fun next(): VideoFit = when (this) { FitWidth -> Fit; Fit -> Fill; Fill -> Stretch; Stretch -> FitWidth }
 
     companion object {
         fun parse(s: String?): VideoFit? = entries.firstOrNull { it.name == s }
@@ -258,10 +258,11 @@ class PlayerPrefs(private val kv: KeyValue) {
         set(v) = kv.put(TV_FIT, v?.name)
 
     /**
-     * Phones default to Fill (crop to fill the 20:9 panel). TVs default to Fit:
-     * the whole frame, nothing cropped (owner, 1.2.23). A stored choice wins.
+     * Default everywhere is Fit width: the picture fills the screen width and
+     * nothing in the frame is cut, bars only where the film is wider than the
+     * screen (owner, 2026-11-21). A stored choice wins.
      */
-    fun fitFor(isTv: Boolean): VideoFit = if (isTv) tvFit ?: VideoFit.Fit else fit ?: VideoFit.Fill
+    fun fitFor(isTv: Boolean): VideoFit = if (isTv) tvFit ?: VideoFit.FitWidth else fit ?: VideoFit.FitWidth
 
     fun save(isTv: Boolean, v: VideoFit) { if (isTv) tvFit = v else fit = v }
 }

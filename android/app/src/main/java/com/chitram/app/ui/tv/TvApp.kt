@@ -159,6 +159,7 @@ import com.chitram.app.ui.common.Tok
 import com.chitram.app.ui.common.langName
 import com.chitram.app.ui.common.metaLine
 import com.chitram.app.ui.common.runtimeText
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -297,6 +298,8 @@ private class NavGeo {
     fun forget(kind: String, key: String) {
         rects.remove("$kind|$key"); reqs.remove("$kind|$key"); rows[kind]?.remove(key)
     }
+    /** The stop's requester while it is composed, on screen or not; never creates one. */
+    fun composed(kind: String, key: String): FocusRequester? = reqs["$kind|$key"]
 
     /** The on-screen stop in row [kind] under the focused one; null when none is laid out yet. */
     fun below(kind: String, viewLeft: Float, viewRight: Float): FocusRequester? {
@@ -344,14 +347,28 @@ private fun TvHome(nav: Nav, restore: MutableState<String?>, listState: LazyList
     val density = LocalDensity.current
     val screenW = with(density) { LocalConfiguration.current.screenWidthDp.dp.toPx() }
     val railPx = with(density) { RAIL_W.toPx() }
+    val goJob = remember { arrayOfNulls<Job>(1) }
     fun goTo(j: Int) {
         val kind = slots[j]
         val item = if (kind == HERO) 0 else 1 + visible.indexOfFirst { it.kind == kind }
-        scope.launch {
+        goJob[0]?.cancel()
+        goJob[0] = scope.launch {
             // Animated, not a jump: an off-screen target row used to snap to the top.
-            if (listState.layoutInfo.visibleItemsInfo.none { it.index == item }) { listState.animateScrollToItem(item); withFrameNanos { } }
-            val fr = geo.below(kind, railPx, screenW) ?: rowFocus[kind]
-            runCatching { fr?.requestFocus() }
+            // The hero goes all the way to the page top. Its buttons sit at its bottom,
+            // so a hero sliver can be "visible" with them clipped: a clipped stop has no
+            // on-screen rect, below() found nothing, no scroll ran, and Up was dead.
+            if (kind == HERO) {
+                if (listState.firstVisibleItemIndex != 0 || listState.firstVisibleItemScrollOffset != 0) listState.animateScrollToItem(0)
+            } else if (listState.layoutInfo.visibleItemsInfo.none { it.index == item }) listState.animateScrollToItem(item)
+            // A target that was scrolled off is re-composed only now. Ask each frame
+            // until focus has landed in the target slot (about a second at most).
+            repeat(60) {
+                withFrameNanos { }
+                if (geo.at?.startsWith("$kind|") == true) return@launch
+                val fr = geo.below(kind, railPx, screenW)
+                    ?: if (kind == HERO) geo.composed(HERO, "watch") else rowFocus[kind]
+                fr?.let { runCatching { it.requestFocus() } }
+            }
         }
     }
     /** Up/Down from slot [kind]: always consumed, so focus never falls into the rail or off the page. */
@@ -360,6 +377,30 @@ private fun TvHome(nav: Nav, restore: MutableState<String?>, listState: LazyList
         return true
     }
     fun enter(kind: String) { slots.indexOf(kind).takeIf { it >= 0 }?.let { goTo(it) } }
+    // Watch now / My List gained focus: the page belongs at the very top (web
+    // scrollTo(0)). Focus can land there without goTo's scroll finishing: the hero
+    // re-composes mid-scroll and its restore effect requests Watch now, whose
+    // bringIntoView (MinimalScroll, "nearest") cancels animateScrollToItem(0) and
+    // stops as soon as the buttons show, leaving the hero half scrolled. Wait a
+    // frame so that bringIntoView has started, then override it until offset 0.
+    // Never skipped: keeps scrolling until the list has sat at offset 0 for 3
+    // frames in a row (a late bringIntoView can still cancel an earlier scroll),
+    // up to about a second. Shares goJob, so a later Down (goTo a row) cancels this.
+    fun pinTop() {
+        goJob[0]?.cancel()
+        goJob[0] = scope.launch {
+            var still = 0
+            repeat(60) {
+                withFrameNanos { }
+                if (listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0) {
+                    if (++still >= 3) return@launch
+                } else {
+                    still = 0
+                    listState.animateScrollToItem(0)
+                }
+            }
+        }
+    }
 
     Box(Modifier.fillMaxSize()) {
         // Hero art runs under the rail (web .page-backdrop left: -rail-w) and
@@ -405,7 +446,7 @@ private fun TvHome(nav: Nav, restore: MutableState<String?>, listState: LazyList
             LazyColumn(state = listState, contentPadding = PaddingValues(bottom = 72.dp), verticalArrangement = Arrangement.spacedBy(TvWeb.ROW_GAP.px)) {
                 item(key = HERO) {
                     if (vm.heroTitles == null) HeroSkeleton()
-                    else if (hasHero) TvHero(pool!!, heroAt, onIndex = { heroAt = it }, nav, restore, geo, onDown = { move(HERO, 1) })
+                    else if (hasHero) TvHero(pool!!, heroAt, onIndex = { heroAt = it }, nav, restore, geo, onDown = { move(HERO, 1) }, onFocusTop = { pinTop() })
                     else Brand(Modifier.padding(start = GUTTER, top = 9.dp, bottom = 9.dp))
                 }
                 itemsIndexed(visible, key = { _, r -> r.kind }) { _, row ->
@@ -447,7 +488,7 @@ private fun HeroSkeleton() {
  */
 @Composable
 @OptIn(ExperimentalComposeUiApi::class)
-private fun TvHero(pool: List<Title>, at: Int, onIndex: (Int) -> Unit, nav: Nav, restore: MutableState<String?>, geo: NavGeo, onDown: () -> Boolean) {
+private fun TvHero(pool: List<Title>, at: Int, onIndex: (Int) -> Unit, nav: Nav, restore: MutableState<String?>, geo: NavGeo, onDown: () -> Boolean, onFocusTop: () -> Unit) {
     val i = at % pool.size
     val t = pool[i]
     var paused by remember { mutableStateOf(false) }
@@ -502,12 +543,12 @@ private fun TvHero(pool: List<Title>, at: Int, onIndex: (Int) -> Unit, nav: Nav,
             // could throw (not attached yet, swallowed) and nothing retried, so the
             // next focus search took the rail. Retry each frame until Watch now holds it.
             if (restore.value == "$HERO|watch") LaunchedEffect(Unit) { watch.focusWhenAttached(landed = { geo.at == "$HERO|watch" }) }
-            TvButton("Watch now", primary = true, modifier = Modifier.navSlot(geo, HERO, "watch"), icon = Icons.Filled.PlayArrow) {
+            TvButton("Watch now", primary = true, modifier = Modifier.navSlot(geo, HERO, "watch").onFocusChanged { if (it.isFocused) onFocusTop() }, icon = Icons.Filled.PlayArrow) {
                 restore.value = "$HERO|watch"
                 nav.push(Screen.Detail(t.mediaType, t.tmdbId))
             }
             TvButton(if (saved) "In My List" else "+ My List", primary = false,
-                modifier = Modifier.navSlot(geo, HERO, "list").onPreviewKeyEvent { e ->
+                modifier = Modifier.navSlot(geo, HERO, "list").onFocusChanged { if (it.isFocused) onFocusTop() }.onPreviewKeyEvent { e ->
                     if (e.type == KeyEventType.KeyDown && e.key == Key.DirectionRight && pool.size > 1) { onIndex((i + 1) % pool.size); true } else false
                 },
                 icon = if (saved) Icons.Filled.Check else null) { saved = myList.toggle(t) }
@@ -630,6 +671,28 @@ private fun CardSkeleton() {
         Box(Modifier.size(CARD_W, POSTER_H).background(Tok.surfaceSolid, RADIUS))
         Box(Modifier.padding(top = TvWeb.CARD_TITLE_TOP.px).fillMaxWidth(0.84f).height(TvWeb.CARD_TITLE.px).background(Tok.surfaceSolid, RADIUS))
         Box(Modifier.padding(top = 2f.px).fillMaxWidth(0.4f).height(TvWeb.CARD_META.px).background(Tok.surfaceSolid, RADIUS))
+    }
+}
+
+/**
+ * Detail-page loading skeleton: the same poster + text-column shape as the loaded
+ * "head" item, so Play and the title do not jump when the title lands. Static
+ * block fill, matching CardSkeleton and the row skeletons (the TV app does not
+ * animate its skeletons).
+ */
+@Composable
+private fun DetailSkeleton() {
+    fun Modifier.bar(wf: Float, h: Dp) = this.fillMaxWidth(wf).height(h).background(Tok.surfaceSolid, RADIUS)
+    Row(Modifier.padding(start = GUTTER, end = GUTTER, top = TvWeb.DETAIL_PAD_TOP.px), verticalAlignment = Alignment.Bottom) {
+        Box(Modifier.size(TvWeb.DETAIL_POSTER_W.px, (TvWeb.DETAIL_POSTER_W * 1.5f).px).background(Tok.surfaceSolid, RADIUS))
+        Column(Modifier.padding(start = TvWeb.DETAIL_POSTER_GAP.px).fillMaxWidth(0.7f)) {
+            Box(Modifier.bar(0.6f, TvWeb.DETAIL_TITLE.px))
+            Box(Modifier.padding(top = 10.dp).bar(0.35f, TvWeb.TAGLINE.px))
+            Box(Modifier.padding(top = 10.dp).bar(0.5f, TvWeb.DETAIL_META.px))
+            Box(Modifier.padding(top = 14.dp).bar(0.95f, TvWeb.DETAIL_OVERVIEW.px))
+            Box(Modifier.padding(top = 6.dp).bar(0.9f, TvWeb.DETAIL_OVERVIEW.px))
+            Box(Modifier.padding(top = 6.dp).bar(0.7f, TvWeb.DETAIL_OVERVIEW.px))
+        }
     }
 }
 
@@ -763,15 +826,18 @@ private fun TvDetail(nav: Nav, type: String, id: Long) {
     val t = vm.full
     val playFocus = remember { FocusRequester() }
     Box(Modifier.fillMaxSize()) {
-        // The art sits a little below the screen edge (owner, 2026-11-20) so the
-        // bottom and left scrims overlap it the way they did before. The top fade is
-        // kept SHORT (owner, 2026-11-21): page colour only right at the art's top
-        // edge, eased to clear over a thin strip, so there is no deep dark band under
-        // the nav. Restoring artTop also fixes the regression where the image rode up
-        // and lost its bottom fade / left framing.
-        val artTop = 96.dp
-        Art(t?.backdrop, "w1280", Modifier.align(Alignment.TopEnd).padding(top = artTop).fillMaxWidth(0.72f).fillMaxHeight(0.8f), alignment = Alignment.TopCenter)
-        Box(Modifier.padding(top = artTop).fillMaxWidth().fillMaxHeight(0.1f).background(Brush.verticalGradient(0f to Tok.bg, 0.3f to Tok.bg.copy(alpha = 0.6f), 0.6f to Tok.bg.copy(alpha = 0.25f), 1f to Color.Transparent)))
+        // Hero backdrop, matched to the web .hero-art (owner, 2026-11-21: rewrite,
+        // stop patching; refined to match the HOME carousel fade, which the owner
+        // approved). The art starts at the very top (NO top padding, no black band)
+        // and bleeds under the nav; the "Back"/wordmark sit over it. A tall top fade
+        // (same stops as the home hero: bg .85 -> transparent over the top ~26%) eases
+        // the art's top edge into the page so there is no hard cut. scrimBottom fades
+        // the bottom, scrimLeft keeps the poster/text column legible. The art fills
+        // most of the height so its bottom edge lands deep in scrimBottom's opaque zone.
+        Art(t?.backdrop, "w1280", Modifier.align(Alignment.TopEnd).fillMaxWidth().fillMaxHeight(0.92f), alignment = Alignment.TopCenter)
+        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(
+            0f to Tok.bg.copy(alpha = 0.85f), 0.26f to Color.Transparent,
+        )))
         Box(Modifier.fillMaxSize().background(Tok.scrimLeft))
         Box(Modifier.fillMaxSize().background(Tok.scrimBottom))
         val detailList = rememberLazyListState()
@@ -798,8 +864,16 @@ private fun TvDetail(nav: Nav, type: String, id: Long) {
                     }
                 }
                 if (t == null) {
+                    // An error still shows text; while loading, a skeleton shaped
+                    // like the head below (poster + title/meta/overview bars), so the
+                    // page does not jump when the title lands. Same static block fill
+                    // as CardSkeleton / the row skeletons.
                     item(key = "loading") {
-                        Text(vm.error ?: "Loading", color = Tok.textMuted, fontSize = TvWeb.DETAIL_META.pxSp, modifier = Modifier.padding(start = GUTTER, top = 16.dp))
+                        if (vm.error != null) {
+                            Text(vm.error!!, color = Tok.textMuted, fontSize = TvWeb.DETAIL_META.pxSp, modifier = Modifier.padding(start = GUTTER, top = 16.dp))
+                        } else {
+                            DetailSkeleton()
+                        }
                     }
                     return@LazyColumn
                 }
@@ -1085,16 +1159,15 @@ private fun TvSearch(nav: Nav) {
     val firstCard = remember { FocusRequester() }
     val grid = rememberLazyGridState()
     val kb = LocalSoftwareKeyboardController.current
-    // The rail (nav) is reached from the search field with Back: pressing it moves
-    // focus to the rail and opens it. Left/Right are kept by the field for the
-    // cursor, so typing no longer escapes to the rail. Enabled only while the field
-    // itself holds focus; once focus is in the results grid or the rail, Back falls
-    // through to the app handler and pops as usual.
-    val railEntry = LocalRailEntry.current
     var fieldFocused by remember { mutableStateOf(false) }
-    BackHandler(enabled = fieldFocused && railEntry.value != null) {
-        railEntry.value?.let { runCatching { it.requestFocus() } }
-    }
+    // Back on the field (owner, 2026-11-21): hide the keypad and move focus into
+    // the results grid, the same as D-pad Down. With no results yet, pop the
+    // screen. Never the rail.
+    // Why the field handles Back itself: Compose UI 1.7 maps Back KeyDown to a
+    // FocusDirection.Exit focus search at the root (AndroidComposeView.keyInputModifier).
+    // That moved focus out of the field onto the rail's Search item and consumed
+    // KeyDown, so no BackHandler ever ran. The field's onPreviewKeyEvent sees Back
+    // before that root handler, and consuming it stops the Exit search.
     // Set by the IME action or D-pad Down: focus the first card once results are in.
     var toResults by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { field.focusWhenAttached() }
@@ -1107,6 +1180,9 @@ private fun TvSearch(nav: Nav) {
             toResults = false
         }
     }
+    // Has something to drop into: real results, a load in flight, or a query the
+    // results list hasn't caught up to yet.
+    fun hasResults() = vm.results.isNotEmpty() || vm.loading || vm.resultsFor != vm.query.trim()
     fun goToResults() {
         kb?.hide()
         vm.submit()
@@ -1131,9 +1207,17 @@ private fun TvSearch(nav: Nav) {
                 .onFocusChanged { fieldFocused = it.isFocused }
                 .onPreviewKeyEvent { e ->
                     when {
+                        // Back: consumed here (both edges) so the root Exit focus
+                        // search never runs and never reaches the rail. Act on KeyUp:
+                        // hide the keypad and drop into results; with none, pop.
+                        e.key == Key.Back && e.type == KeyEventType.KeyDown -> true
+                        e.key == Key.Back && e.type == KeyEventType.KeyUp -> {
+                            if (hasResults()) goToResults() else if (nav.stack.size > 1) nav.pop()
+                            true
+                        }
                         // D-pad Down leaves the field for the first result.
                         e.type == KeyEventType.KeyDown && e.key == Key.DirectionDown -> {
-                            if (vm.results.isNotEmpty() || vm.loading || vm.resultsFor != vm.query.trim()) goToResults()
+                            if (hasResults()) goToResults()
                             true
                         }
                         // Left/Right belong to the field (cursor / on-screen keyboard),
