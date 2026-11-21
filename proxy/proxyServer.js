@@ -8,6 +8,7 @@ const http = require('http');
 const https = require('https');
 const { publicBase } = require('../lib/runtime/publicBase');
 const headerTokens = require('../lib/routing/headerTokens');
+const { playlistCompression } = require('./playlistCompression');
 
 // node-fetch without an explicit agent uses a small default connection pool per
 // host. HLS is connection-hungry (a playlist warm-up plus the segment the player
@@ -412,7 +413,27 @@ function tsProxyLine(baseProxyUrl, absUrl, headers) {
     return `${baseProxyUrl}/ts-proxy?url=${encodeQueryValue(absUrl)}${id ? `&h=${id}` : ''}&seg=1`;
 }
 
-function rewriteM3u8(content, targetUrl, baseProxyUrl, headers, ptsOffset = 0) {
+// CODECS for a proxied master's #EXT-X-STREAM-INF lines.
+//
+// Without CODECS, ExoPlayer cannot prepare chunkless and hls.js probes: both
+// download a chunk of the first variant and of every audio rendition before
+// the first frame (multimovies RCA, 2026-11-21: ~9 s). An upstream CODECS is
+// always kept verbatim. A missing one is filled ONLY from a value the server
+// already holds for this row (stream.codecs, carried as `&codecs=`), and only
+// when that value is a valid RFC 6381 list naming BOTH a video and an audio
+// codec: a video-only CODECS on a muxed variant makes a player drop the audio
+// track, which would lose audio to save latency. Never a guessed default.
+const VIDEO_CODEC_RE = /^(avc1|avc3|hvc1|hev1|dvh1|dvhe|av01|vp09|vp08|mp4v)\b/i;
+const AUDIO_CODEC_RE = /^(mp4a|ac-3|ec-3|ac-4|opus|flac|mp3|dtsc|dtse|dtsx)\b/i;
+function completeCodecs(value) {
+    const s = String(value || '').trim();
+    if (!s || s.length > 200 || !/^[A-Za-z0-9.\-]+(\s*,\s*[A-Za-z0-9.\-]+)*$/.test(s)) return null;
+    const list = s.split(',').map((c) => c.trim());
+    if (!list.some((c) => VIDEO_CODEC_RE.test(c)) || !list.some((c) => AUDIO_CODEC_RE.test(c))) return null;
+    return list.join(',');
+}
+
+function rewriteM3u8(content, targetUrl, baseProxyUrl, headers, ptsOffset = 0, opts = {}) {
     const segRoute = ptsOffset ? 'pts-rebase' : 'ts-proxy';
     const segExtra = ptsOffset ? `&pts=${ptsOffset}` : '';
     const lines = content.split('\n');
@@ -425,9 +446,19 @@ function rewriteM3u8(content, targetUrl, baseProxyUrl, headers, ptsOffset = 0) {
     // inside it were never rewritten and went to the origin raw (403).
     // Measured 2026-09-22 on movie/1408162.
     let afterStreamInf = false;
+    const knownCodecs = completeCodecs(opts.knownCodecs);
+    let codecsKept = 0; let codecsAdded = 0; let codecsMissing = 0;
     for (const line of lines) {
         if (line.startsWith('#')) {
-            if (line.startsWith('#EXT-X-STREAM-INF')) afterStreamInf = true;
+            if (line.startsWith('#EXT-X-STREAM-INF')) {
+                afterStreamInf = true;
+                if (/(^|[:,])CODECS=/.test(line)) codecsKept++;
+                else if (knownCodecs) {
+                    out.push(`${line.replace(/\r$/, '')},CODECS="${knownCodecs}"`);
+                    codecsAdded++;
+                    continue;
+                } else codecsMissing++;
+            }
             if (line.startsWith('#EXT-X-KEY:')) {
                 const regex = /https?:\/\/[^""\s]+/g; const keyUrl = regex.exec(line)?.[0];
                 if (keyUrl) {
@@ -483,6 +514,10 @@ function rewriteM3u8(content, targetUrl, baseProxyUrl, headers, ptsOffset = 0) {
                 }
             } catch { out.push(line); }
         } else out.push(line);
+    }
+    if (codecsKept + codecsAdded + codecsMissing) {
+        console.log(`[m3u8-proxy] codecs: kept=${codecsKept} added=${codecsAdded} missing=${codecsMissing}`
+            + (codecsAdded ? ` value=${knownCodecs}` : (opts.knownCodecs && !knownCodecs ? ' known=rejected' : '')));
     }
     if (segmentUrls.length && !isCacheDisabled()) {
         // Prefetch only the first few segments, and never more than a couple at
@@ -595,7 +630,7 @@ setInterval(() => {
 
 function createProxyRoutes(app) {
     // m3u8 playlist proxy
-    app.get('/m3u8-proxy', cors(), async (req, res) => {
+    app.get('/m3u8-proxy', cors(), playlistCompression(), async (req, res) => {
         const mId = (m3u8Seq = (m3u8Seq + 1) % 100000);
         const m_t0 = Date.now();
         const mstage = (n) => console.log(`[m3u8-proxy#${mId}] ${n} +${Date.now() - m_t0}ms`);
@@ -644,7 +679,8 @@ function createProxyRoutes(app) {
             // A hybrid's audio playlist carries `rebase=1&pts=<n>`; everything
             // else rewrites exactly as before.
             const ptsOffset = req.query.rebase === '1' ? (Number(req.query.pts) || 0) : 0;
-            const rewritten = rewriteM3u8(text, targetUrl, baseProxyUrl, headers, ptsOffset);
+            const rewritten = rewriteM3u8(text, targetUrl, baseProxyUrl, headers, ptsOffset,
+                { knownCodecs: req.query.codecs });
             res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
             res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
             res.setHeader('Access-Control-Allow-Origin', '*');
@@ -1092,13 +1128,17 @@ function processStreamsForProxy(streams, serverUrl) {
         if (/\.(mp4|mkv)(\?|$)/i.test(original)) {
             return { ...s, url: `${serverUrl}/ts-proxy?url=${encodeURIComponent(original)}${hParam}` };
         }
-        return { ...s, url: `${serverUrl}/m3u8-proxy?url=${encodeURIComponent(original)}${hParam}` };
+        // The row's measured CODECS rides along so /m3u8-proxy can fill a
+        // master that lacks it (see completeCodecs). Incomplete values are not sent.
+        const known = completeCodecs(s.codecs);
+        const cParam = known ? `&codecs=${encodeURIComponent(known)}` : '';
+        return { ...s, url: `${serverUrl}/m3u8-proxy?url=${encodeURIComponent(original)}${hParam}${cParam}` };
     });
 }
 
 module.exports = {
     createProxyRoutes, processStreamsForProxy, rewriteM3u8, extractOriginalUrl,
-    inferContentType, sniffSegmentType,
+    inferContentType, sniffSegmentType, completeCodecs,
     // Exposed for tests.
     _segmentCache: { cacheSegment, getCachedSegment, stats: () => ({ entries: segmentCache.size, bytes: segmentCacheBytes, maxBytes: CACHE_MAX_BYTES }) },
 };

@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const compression = require('compression');
+const { compressFilter } = require('./proxy/playlistCompression');
 const os = require('os');
 const { config, saveConfigPatch, OVERRIDE_PATH } = require('./utils/config');
 const { requireAuth, getSession } = require('./utils/auth');
@@ -75,14 +76,10 @@ process.exit = function(code){
 };
 setImmediate(()=>console.log('[diagnostic] post-start setImmediate fired'));
 app.use(cors());
-// gzip JSON only (/api/streams answers are ~90 KB raw). m3u8 playlists, media
-// segments and HTML are left alone: the filter runs when headers go out and
-// passes nothing whose Content-Type is not JSON, so the proxy and hybrid
-// routes stream exactly as before.
-app.use(compression({
-  filter: (req, res) => /\bjson\b/i.test(String(res.getHeader('Content-Type') || ''))
-    && compression.filter(req, res),
-}));
+// gzip JSON and HLS text playlists only (proxy/playlistCompression.js). Media
+// segments, HTML and any ranged response are left alone: the filter runs when
+// headers go out, so segment routes stream exactly as before.
+app.use(compression({ filter: compressFilter(compression) }));
 app.use(express.json());
 // Auth routes + login rate limiting live in routes/auth.js.
 registerAuthRoutes(app);

@@ -6,6 +6,7 @@
 //   source_stats    what a real browser saw when it played a source (G1)
 //   audio_evidence  which audio language a file carries, and who said so (G10)
 //   provider_health breaker state and a latency EWMA per provider (G6)
+//   castle_demux_job castle-demux job specs, so a restart can rebuild a job
 //
 // In-memory state died with every pm2 restart and every deploy, so the server
 // re-learned from zero each time: a provider that never works got its full
@@ -92,6 +93,16 @@ const MIGRATIONS = [
         last_ok_at integer,
         updated_at integer not null
      );`,
+    // v2: castle-demux job specs. The jobs live in a Map, and every API
+    // restart (every deploy) emptied it, so a TV mid-film got 404 on its next
+    // playlist or segment. The spec is persisted so a miss can rebuild the job.
+    `create table if not exists castle_demux_job (
+        id text primary key,
+        spec text not null,
+        expires_at integer not null,
+        updated_at integer not null
+     );
+     create index if not exists castle_demux_job_expires on castle_demux_job (expires_at);`,
 ];
 
 // ---- input shaping -------------------------------------------------------
@@ -181,6 +192,13 @@ function sqliteBackend(file) {
              ema_latency_ms=excluded.ema_latency_ms, consecutive_misses=excluded.consecutive_misses,
              tripped_until=excluded.tripped_until, trips=excluded.trips, last_miss_title=excluded.last_miss_title,
              last_ok_at=excluded.last_ok_at, updated_at=excluded.updated_at`),
+        demuxJobGet: db.prepare('select spec, expires_at from castle_demux_job where id=?'),
+        demuxJobUpsert: db.prepare(`insert into castle_demux_job (id,spec,expires_at,updated_at)
+            values (@id,@spec,@expires_at,@updated_at)
+            on conflict (id) do update set spec=excluded.spec, expires_at=excluded.expires_at,
+             updated_at=excluded.updated_at`),
+        demuxJobTouch: db.prepare('update castle_demux_job set expires_at=?, updated_at=? where id=?'),
+        demuxJobPrune: db.prepare('delete from castle_demux_job where expires_at < ?'),
     };
 
     return {
@@ -194,6 +212,10 @@ function sqliteBackend(file) {
         healthGet: (name) => q.healthGet.get(name),
         healthAll: () => q.healthAll.all(),
         healthPut: (row) => { q.healthUpsert.run(row); },
+        demuxJobGet: (id) => q.demuxJobGet.get(id),
+        demuxJobPut: (row) => { q.demuxJobUpsert.run(row); },
+        demuxJobTouch: (id, expiresAt, at) => { q.demuxJobTouch.run(expiresAt, at, id); },
+        demuxJobPrune: (at) => q.demuxJobPrune.run(at).changes,
         close: () => db.close(),
     };
 }
@@ -205,7 +227,8 @@ function sqliteBackend(file) {
 // cannot load; slower and coarser, but it still survives a restart.
 
 function jsonBackend(file) {
-    const empty = () => ({ version: MIGRATIONS.length, source_stats: {}, audio_evidence: [], provider_health: {} });
+    const empty = () => ({ version: MIGRATIONS.length, source_stats: {}, audio_evidence: [], provider_health: {},
+        castle_demux_job: {} });
     let data = empty();
     let writable = file !== ':memory:';
     if (writable) {
@@ -252,6 +275,20 @@ function jsonBackend(file) {
         healthGet: (name) => data.provider_health[name],
         healthAll: () => Object.values(data.provider_health),
         healthPut: (row) => { data.provider_health[row.provider] = { ...row }; flush(); },
+        demuxJobGet: (id) => data.castle_demux_job[id],
+        demuxJobPut: (row) => { data.castle_demux_job[row.id] = { ...row }; flush(); },
+        demuxJobTouch: (id, expiresAt, at) => {
+            const r = data.castle_demux_job[id];
+            if (r) { r.expires_at = expiresAt; r.updated_at = at; flush(); }
+        },
+        demuxJobPrune: (at) => {
+            let n = 0;
+            for (const [id, r] of Object.entries(data.castle_demux_job)) {
+                if (r.expires_at < at) { delete data.castle_demux_job[id]; n++; }
+            }
+            if (n) flush();
+            return n;
+        },
         close: () => { if (timer) { clearTimeout(timer); flushNow(); } },
     };
 }
@@ -348,6 +385,19 @@ function openStore(file = DEFAULT_PATH, { backend } = {}) {
         return row;
     }
 
+    // castle-demux job specs (lib/media/republish.js). The spec is JSON the
+    // caller owns; this layer only stores it with an expiry.
+    function putDemuxJob(id, spec, expiresAt) {
+        b.demuxJobPut({ id: String(id), spec: JSON.stringify(spec), expires_at: Math.trunc(expiresAt), updated_at: now() });
+    }
+    function getDemuxJob(id) {
+        const r = b.demuxJobGet(String(id));
+        if (!r || r.expires_at < now()) return null;
+        return safeParse(r.spec);
+    }
+    function touchDemuxJob(id, expiresAt) { b.demuxJobTouch(String(id), Math.trunc(expiresAt), now()); }
+    function pruneDemuxJobs() { return b.demuxJobPrune(now()); }
+
     return {
         get backend() { return b.kind; },
         // Why sqlite was not used, or null. Health reports it so a silent
@@ -358,6 +408,7 @@ function openStore(file = DEFAULT_PATH, { backend } = {}) {
         recordPlayback, sourceStatsFor,
         putAudioEvidence, audioEvidenceFor,
         providerHealth, allProviderHealth, saveProviderHealth,
+        putDemuxJob, getDemuxJob, touchDemuxJob, pruneDemuxJobs,
         close: () => b.close(),
     };
 }
