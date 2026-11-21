@@ -144,7 +144,7 @@ class OnDeviceResolver(
         return try {
             block().also {
                 breakers.remove(name)
-                android.util.Log.i("Chitram", "on-device $name: ${if (it != null) "ok" else "none"} in ${now() - t0}ms")
+                android.util.Log.i("Chitram", "on-device $name: ${if (it != null && (it as? Collection<*>)?.isEmpty() != true) "ok" else "none"} in ${now() - t0}ms")
             }
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e

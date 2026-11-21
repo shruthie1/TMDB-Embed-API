@@ -42,12 +42,19 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.text.style.LineHeightStyle
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInParent
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -200,7 +207,8 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
     }
     LaunchedEffect(seekHint, lastInput) { if (seekHint != 0) { delay(600); seekHint = 0 } }
 
-    val back = {
+    val back: () -> Unit = {
+        android.util.Log.i("Chitram", "[back] menu=$menu provider=$serverProvider details=$details")
         when {
             details -> details = false
             menu == Menu.Server && serverProvider != null -> serverProvider = null
@@ -333,7 +341,7 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
                 Menu.Quality -> vm.qualityItems()
                 Menu.Subtitles -> vm.subtitleItems()
             }
-            val shown = if (m == Menu.Server && serverProvider.equals("netmirror", true)) items + MenuItem("check:netmirror", if (vm.checkingNetmirror) "Checking sources…" else "Check for more streams", "Current playback continues") else items
+            val shown = if (m == Menu.Server && serverProvider.equals("netmirror", true)) items + MenuItem("check:netmirror", if (vm.checkingNetmirror) "Checking sources…" else "Check for more streams", vm.netmirrorNote ?: "Current playback continues") else items
             MenuPanel(m, shown, isTv, titleOverride = if (m == Menu.Server) serverProvider else null,
                 onUp = if (m == Menu.Server && serverProvider != null) ({ serverProvider = null }) else null,
                 onClose = { menu = null }, onPick = { key ->
@@ -440,16 +448,21 @@ private fun LoadingDetails(v: LoadingModel.View, isTv: Boolean, focusId: String?
     val first = remember { FocusRequester() }
     val target = focusId ?: v.rows.firstOrNull { it.clickable }?.id
     LaunchedEffect(Unit) { if (isTv && target != null) runCatching { first.requestFocus() } }
+    // Phones: the panel ends after its last row (same height cap as the player sheets), no empty band below.
+    BoxWithConstraints(Modifier.fillMaxWidth(0.4f).fillMaxHeight(), contentAlignment = Alignment.CenterEnd) {
+    val layout = playerMenuLayout(maxWidth.value.coerceAtLeast(1f) / 0.4f, maxHeight.value.coerceAtLeast(1f), isTv)
     Column(
-        Modifier.fillMaxWidth(0.4f).fillMaxHeight().background(Tok.surface.copy(alpha = 0.94f))
-            .windowInsetsPadding(WindowInsets.displayCutout)
+        Modifier.fillMaxWidth()
+            .then(if (isTv) Modifier.fillMaxHeight() else Modifier.padding(vertical = layout.inset.dp).heightIn(max = layout.height.dp).clip(Tok.radiusLg))
+            .background(Tok.surface.copy(alpha = 0.94f))
+            .windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.End))
             .onPreviewKeyEvent { e ->
                 if (e.type == KeyEventType.KeyDown && e.key == Key.DirectionLeft) { onClose(); true } else false
             }
-            .padding(vertical = if (isTv) 24.dp else 12.dp),
+            .padding(vertical = if (isTv) 24.dp else 4.dp),
     ) {
-        BasicText("Sources", style = TextStyle(color = Tok.text, fontSize = if (isTv) 20.sp else 17.sp, fontWeight = FontWeight.SemiBold), modifier = Modifier.padding(horizontal = 18.dp, vertical = 6.dp))
-        LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
+        BasicText("Sources", style = TextStyle(color = Tok.text, fontSize = if (isTv) 20.sp else 14.sp, fontWeight = FontWeight.SemiBold), modifier = Modifier.padding(horizontal = if (isTv) 18.dp else 14.dp, vertical = if (isTv) 6.dp else 8.dp))
+        LazyColumn(Modifier.fillMaxWidth().weight(1f, fill = isTv)) {
             items(v.rows, key = { it.id }) { row ->
                 val src = remember { MutableInteractionSource() }
                 val focused by src.collectIsFocusedAsState()
@@ -474,21 +487,27 @@ private fun LoadingDetails(v: LoadingModel.View, isTv: Boolean, focusId: String?
                             contentDescription = row.description
                             if (row.clickable) role = Role.Button
                         }
-                        .padding(horizontal = 10.dp, vertical = 7.dp),
+                        .then(if (isTv) Modifier.padding(horizontal = 10.dp, vertical = 7.dp) else Modifier.heightIn(min = 40.dp).padding(horizontal = 10.dp, vertical = 4.dp)),
+                    verticalArrangement = Arrangement.Center,
                 ) {
                     val ink = if (focused) Focus.ink else Tok.text
-                    BasicText("$mark ${row.title}", style = TextStyle(color = ink, fontSize = if (isTv) 17.sp else 14.sp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    BasicText("$mark ${row.title}", style = if (isTv) TextStyle(color = ink, fontSize = 17.sp) else TextStyle(color = ink, fontSize = 14.sp, lineHeight = 17.sp, lineHeightStyle = TightLines), maxLines = 1, overflow = TextOverflow.Ellipsis)
                     BasicText(
                         row.status + if (focused && isTv) " · OK to play" else "",
-                        style = TextStyle(color = if (focused) Focus.ink.copy(alpha = 0.75f) else Tok.textSecondary, fontSize = if (isTv) 14.sp else 12.sp),
-                        modifier = Modifier.padding(start = 16.dp, top = 1.dp),
+                        style = if (isTv) TextStyle(color = if (focused) Focus.ink.copy(alpha = 0.75f) else Tok.textSecondary, fontSize = 14.sp)
+                            else TextStyle(color = if (focused) Focus.ink.copy(alpha = 0.75f) else Tok.textSecondary, fontSize = 12.sp, lineHeight = 14.sp, lineHeightStyle = TightLines),
+                        modifier = Modifier.padding(start = 16.dp, top = if (isTv) 1.dp else 0.dp),
                     )
                 }
             }
         }
-        BasicText(v.footer, style = TextStyle(color = Tok.textMuted, fontSize = 12.sp), modifier = Modifier.padding(horizontal = 18.dp, vertical = 6.dp).clearAndSetSemantics { })
+        BasicText(v.footer, style = TextStyle(color = Tok.textMuted, fontSize = 12.sp), modifier = Modifier.padding(horizontal = if (isTv) 18.dp else 14.dp, vertical = if (isTv) 6.dp else 4.dp).clearAndSetSemantics { })
+    }
     }
 }
+
+/** Phone sheet text: trims the font's extra leading so a row's name and detail sit together. */
+private val TightLines = LineHeightStyle(LineHeightStyle.Alignment.Center, LineHeightStyle.Trim.Both)
 
 @Composable
 private fun CenterNote(text: String, sub: String) {
@@ -762,8 +781,16 @@ private fun MenuPanel(menu: Menu, items: List<MenuItem>, isTv: Boolean, titleOve
     val icon = when (menu) { Menu.Server -> Glyphs.server; Menu.Audio -> Glyphs.audio; Menu.Quality -> Glyphs.quality; Menu.Subtitles -> Glyphs.subtitles }
     val first = remember(title) { FocusRequester() }
     val start = items.indexOfFirst { it.selected }.coerceAtLeast(0)
-    val listState = key(title) { rememberLazyListState(initialFirstVisibleItemIndex = start) }
-    LaunchedEffect(title) { runCatching { first.requestFocus() } }
+    val scroll = key(title) { rememberScrollState() }
+    val scope = rememberCoroutineScope()
+    var scrolledTo by remember(title) { mutableStateOf(false) }
+    // TV only: on touch a focused row pulls the list back to it when late rows arrive (dead scroll).
+    LaunchedEffect(title) { if (isTv) runCatching { first.requestFocus() } }
+    // Registered last, so the open sheet takes Back before the player does, whatever holds focus.
+    BackHandler {
+        android.util.Log.i("Chitram", "[back] menupanel up=${onUp != null}")
+        (onUp ?: onClose)()
+    }
     BoxWithConstraints(
         Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.4f))
             .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClose),
@@ -774,63 +801,76 @@ private fun MenuPanel(menu: Menu, items: List<MenuItem>, isTv: Boolean, titleOve
         Column(
             Modifier.align(if (layout.bottomSheet) Alignment.BottomCenter else Alignment.CenterEnd)
                 .padding(layout.inset.dp)
-                .width(layout.width.dp).heightIn(max = layout.height.dp)
+                // Phone side panel sizes to its widest row; TV and the portrait bottom sheet keep fixed widths.
+                .then(if (isTv || layout.bottomSheet) Modifier.width(layout.width.dp)
+                    else Modifier.widthIn(min = 200.dp, max = minOf(360f, maxWidth.value - layout.inset * 2).dp).width(IntrinsicSize.Max))
+                .heightIn(max = layout.height.dp)
                 .clip(shape).background(Tok.surfaceSolid).border(1.dp, Tok.border, shape)
                 .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { }
-                .windowInsetsPadding(WindowInsets.displayCutout)
+                .windowInsetsPadding(WindowInsets.displayCutout.only(if (layout.bottomSheet) WindowInsetsSides.Bottom else WindowInsetsSides.End))
                 .padding(top = if (isTv) 24.dp else 0.dp),
         ) {
             if (layout.bottomSheet) Box(Modifier.fillMaxWidth().padding(top = 6.dp), contentAlignment = Alignment.Center) {
                 Box(Modifier.width(36.dp).height(4.dp).clip(Tok.pill).background(Tok.fill3))
             }
-            Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                if (onUp != null) Box(Modifier.size(44.dp).clickable(onClick = onUp).semantics { contentDescription = "Back to servers" }, contentAlignment = Alignment.Center) {
-                    Icon(Glyphs.back, contentDescription = null, tint = Tok.text, modifier = Modifier.size(20.dp))
+            val headIcon = if (isTv) 20.dp else 16.dp
+            Row(Modifier.fillMaxWidth().heightIn(min = if (isTv) 44.dp else 40.dp).padding(horizontal = if (isTv) 8.dp else 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (onUp != null) Box(Modifier.size(if (isTv) 44.dp else 40.dp).clickable(onClick = onUp).semantics { contentDescription = "Back to servers" }, contentAlignment = Alignment.Center) {
+                    Icon(Glyphs.back, contentDescription = null, tint = Tok.text, modifier = Modifier.size(headIcon))
                 }
-                Icon(icon, contentDescription = null, tint = Tok.textSecondary, modifier = Modifier.padding(start = 4.dp).size(18.dp))
-                BasicText(title, style = TextStyle(color = Tok.text, fontSize = if (isTv) 20.sp else 15.sp, fontWeight = FontWeight.SemiBold), modifier = Modifier.weight(1f).padding(horizontal = 10.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Icon(icon, contentDescription = null, tint = Tok.textSecondary, modifier = Modifier.padding(start = 4.dp).size(if (isTv) 18.dp else 16.dp))
+                BasicText(title, style = TextStyle(color = Tok.text, fontSize = if (isTv) 20.sp else 14.sp, fontWeight = FontWeight.SemiBold), modifier = Modifier.weight(1f).padding(horizontal = if (isTv) 10.dp else 8.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
                 val closeSource = remember { MutableInteractionSource() }
                 val closeFocused by closeSource.collectIsFocusedAsState()
-                Box(Modifier.size(if (isTv) 48.dp else 44.dp).controlFocus(closeFocused, Tok.radiusMd)
+                Box(Modifier.size(if (isTv) 48.dp else 40.dp).controlFocus(closeFocused, Tok.radiusMd)
                     .clickable(interactionSource = closeSource, indication = null, onClick = onClose)
                     .semantics { contentDescription = "Close $title" }, contentAlignment = Alignment.Center) {
-                    Icon(Glyphs.close, contentDescription = null, tint = if (closeFocused) Focus.ink else Tok.text, modifier = Modifier.size(20.dp))
+                    Icon(Glyphs.close, contentDescription = null, tint = if (closeFocused) Focus.ink else Tok.text, modifier = Modifier.size(headIcon))
                 }
             }
             Box(Modifier.fillMaxWidth().height(1.dp).background(Tok.fill2))
             if (items.isEmpty()) BasicText("Nothing to choose here.", style = TextStyle(color = Tok.textMuted, fontSize = 14.sp), modifier = Modifier.padding(24.dp))
-            LazyColumn(Modifier.fillMaxWidth().weight(1f, fill = false).padding(horizontal = 6.dp, vertical = 4.dp), state = listState) {
-                itemsIndexed(items, key = { _, it -> it.key }) { i, item ->
+            // A plain scrolling Column: the phone panel's IntrinsicSize.Max width needs intrinsic measurement, which LazyColumn lacks.
+            Column(Modifier.fillMaxWidth().weight(1f, fill = false).verticalScroll(scroll).padding(horizontal = if (isTv) 6.dp else 4.dp, vertical = if (isTv) 4.dp else 2.dp)) {
+                items.forEachIndexed { i, item -> key(item.key) {
                     val src = remember { MutableInteractionSource() }
                     val focused by src.collectIsFocusedAsState()
                     // Audio rows sit under "In this stream" / "Other servers".
                     if (item.group.isNotEmpty() && (i == 0 || items[i - 1].group != item.group)) BasicText(item.group,
                         style = TextStyle(color = Tok.textMuted, fontSize = if (isTv) 13.sp else 11.sp, fontWeight = FontWeight.Medium),
-                        modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = if (i == 0) 4.dp else 10.dp, bottom = 2.dp))
+                        modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = if (i == 0) 4.dp else if (isTv) 10.dp else 8.dp, bottom = 2.dp))
                     Row(
                         Modifier.fillMaxWidth().padding(vertical = if (isTv) 2.dp else 0.dp)
                             .then(if (i == start) Modifier.focusRequester(first) else Modifier)
+                            // Open with the selected row in view, once; later rows never pull the list back.
+                            .then(if (i == start && start > 0) Modifier.onGloballyPositioned { c ->
+                                if (!scrolledTo) { scrolledTo = true; val y = c.positionInParent().y.toInt(); scope.launch { scroll.scrollTo(y) } }
+                            } else Modifier)
                             .controlFocus(focused, Tok.radiusMd, lift = false)
                             .clip(Tok.radiusMd)
                             .background(if (focused) Focus.fill else if (item.selected) Tok.fill2 else Color.Transparent)
                             // Press feedback on touch only; TV keeps the white focus fill.
                             .clickable(interactionSource = src, indication = if (isTv) null else ripple(color = Color.White)) { onPick(item.key) }
                             .semantics { stateDescription = if (item.selected) "Selected" else "Not selected" }
-                            .heightIn(min = if (isTv) 56.dp else 44.dp)
-                            .padding(horizontal = 12.dp, vertical = if (isTv) 10.dp else 6.dp),
+                            .heightIn(min = if (isTv) 56.dp else 40.dp)
+                            .padding(horizontal = if (isTv) 12.dp else 10.dp, vertical = if (isTv) 10.dp else 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Box(Modifier.size(if (isTv) 20.dp else 18.dp), contentAlignment = Alignment.Center) {
-                            if (item.selected) Icon(Glyphs.check, contentDescription = "Selected", tint = if (focused) Focus.ink else Tok.text, modifier = Modifier.size(if (isTv) 18.dp else 16.dp))
+                        Box(Modifier.size(if (isTv) 20.dp else 16.dp), contentAlignment = Alignment.Center) {
+                            if (item.selected) Icon(Glyphs.check, contentDescription = "Selected", tint = if (focused) Focus.ink else Tok.text, modifier = Modifier.size(if (isTv) 18.dp else 14.dp))
                         }
-                        Spacer(Modifier.width(if (isTv) 12.dp else 10.dp))
+                        Spacer(Modifier.width(if (isTv) 12.dp else 8.dp))
                         Column(Modifier.weight(1f)) {
-                            BasicText(item.label, style = TextStyle(color = if (focused) Focus.ink else if (item.dim) Tok.textDim else Tok.text, fontSize = if (isTv) 18.sp else 15.sp,
-                                fontWeight = if (item.selected) FontWeight.Medium else FontWeight.Normal), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            if (item.detail.isNotEmpty()) BasicText(item.detail, style = TextStyle(color = if (focused) Focus.ink.copy(alpha = 0.7f) else Tok.textMuted, fontSize = if (isTv) 14.sp else 12.sp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            val labelColor = if (focused) Focus.ink else if (item.dim) Tok.textDim else Tok.text
+                            val weight = if (item.selected) FontWeight.Medium else FontWeight.Normal
+                            BasicText(item.label, style = if (isTv) TextStyle(color = labelColor, fontSize = 18.sp, fontWeight = weight)
+                                else TextStyle(color = labelColor, fontSize = 14.sp, lineHeight = 17.sp, lineHeightStyle = TightLines, fontWeight = weight), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            val detailColor = if (focused) Focus.ink.copy(alpha = 0.7f) else Tok.textMuted
+                            if (item.detail.isNotEmpty()) BasicText(item.detail, style = if (isTv) TextStyle(color = detailColor, fontSize = 14.sp)
+                                else TextStyle(color = detailColor, fontSize = 12.sp, lineHeight = 14.sp, lineHeightStyle = TightLines), maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     }
-                }
+                } }
             }
         }
     }

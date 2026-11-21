@@ -75,6 +75,16 @@ data class PlayRequest(
 /** [group]: a sheet sub-heading ("In this stream" / "Other servers"); rows with the same group sit under one label. */
 data class MenuItem(val key: String, val label: String, val detail: String = "", val selected: Boolean = false, val dim: Boolean = false, val group: String = "")
 
+internal fun streamCount(n: Int) = if (n == 1) "1 stream" else "$n streams"
+
+/** Runs a NetMirror check and says what it found, so the tap is never silent. */
+internal suspend fun <T> netmirrorCheck(resolve: suspend () -> List<T>): Pair<List<T>, String> = try {
+    val rows = resolve()
+    rows to if (rows.isEmpty()) "No NetMirror streams for this title" else "${rows.size} added"
+} catch (e: com.chitram.app.resolve.StepException) {
+    emptyList<T>() to "NetMirror unavailable"
+}
+
 class PlayerVm(app: Application) : AndroidViewModel(app) {
     private val g = app as App
 
@@ -267,6 +277,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         saveProgress()
         if (request?.id != r.id || request?.type != r.type) selectedAudioLanguage = null
         request = r
+        netmirrorNote = null
         languageTrial = null
         languageFallback = null
         discoveredAudio.clear()
@@ -1003,7 +1014,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         if (provider == null) return sources.groupBy { it.provider.lowercase() }.map { (_, rows) ->
             val name = rows.first().provider
             val languages = rows.flatMap(AudioChoice::languages).distinct().take(3).joinToString(", ")
-            MenuItem("group:$name", name, listOf("${rows.size} streams", languages).filter { it.isNotEmpty() }.joinToString(" · "), rows.any { it.id == current?.id })
+            MenuItem("group:$name", name, listOf(streamCount(rows.size), languages).filter { it.isNotEmpty() }.joinToString(" · "), rows.any { it.id == current?.id })
         } + if (sources.none { it.provider.equals("netmirror", true) }) listOf(MenuItem("group:NetMirror", "NetMirror", "Check streams on demand")) else emptyList()
         return Ranking.menuOrder(sources.filter { it.provider.equals(provider, true) }).map { source ->
             val languages = AudioChoice.languages(source).joinToString(", ").ifEmpty { "Unknown audio" }
@@ -1016,14 +1027,22 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     }
 
     var checkingNetmirror by mutableStateOf(false); private set
+    /** Result of the last NetMirror check, shown on the Check row. */
+    var netmirrorNote by mutableStateOf<String?>(null); private set
     fun checkNetmirror() {
         val r = request ?: return
         if (checkingNetmirror) return
         checkingNetmirror = true
+        netmirrorNote = null
         viewModelScope.launch {
+            val t0 = System.currentTimeMillis()
             try {
-                val rows = g.onDevice.resolveAll("netmirror", r.type, r.id, r.season, r.episode, g.codecs, desiredAudio(), fresh = true, title = r.title)
+                val (rows, note) = netmirrorCheck { g.onDevice.resolveAll("netmirror", r.type, r.id, r.season, r.episode, g.codecs, desiredAudio(), fresh = true, title = r.title) }
+                android.util.Log.i("Chitram", "[netmirror] check: ${rows.size} rows")
                 if (request == r) putSources(Ranking.merge(sources, rows, desiredAudio(), null))
+                // A cached answer comes back in ~100ms; keep "Checking sources…" up long enough to read.
+                delay((600 - (System.currentTimeMillis() - t0)).coerceAtLeast(0))
+                netmirrorNote = note
             } finally { checkingNetmirror = false }
         }
     }
