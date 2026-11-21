@@ -55,20 +55,38 @@ describe('phone home hero (< 640px)', () => {
     expect(rule(block, '.home-hero-title')).toContain('text-overflow:ellipsis');
   });
 
-  it('keeps the text stack within 35% of the hero at 390x844', () => {
-    const [vw, vh] = [390, 844];
-    const m = tok('hero-height-phone').match(/min\(([\d.]+)svh,\s*([\d.]+)vw\)/);
-    const hero = Math.min(vh * m[1] / 100, vw * m[2] / 100);
-    const stack =
-      2 * px(tok('space-4')) +                                    // block padding
-      px(tok('hero-title-phone')) * +tok('hero-title-phone-lh') + // one title line
-      px(tok('space-1')) + px(tok('hero-meta-phone')) * 1.5 +     // meta
-      px(tok('space-3')) + px(tok('btn-h-phone')) +               // buttons
-      px(tok('space-2')) + 3;                                     // indicator
-    expect(stack / hero).toBeLessThanOrEqual(0.35);
+  it('shows the wide backdrop band, not a 4:5 crop', () => {
+    const art = rule(block, '.home-hero-art');
+    expect(art).toContain('height:calc(var(--backdrop-reach,var(--header-h))+var(--detail-band))');
+    // 390px wide, 48px header: the art box stays a wide landscape frame.
+    const band = 390 * parseFloat(tok('detail-band')) / 100;
+    expect(390 / (48 + band)).toBeGreaterThanOrEqual(1.25);
   });
 
-  it('fades the art into the page colour from halfway down', () => {
-    expect(tok('hero-scrim-phone')).toMatch(/transparent 50%.*var\(--color-bg\) 100%/);
+  it('uses the shared hero scrim, not a phone-only one', () => {
+    expect(rule(block, '.home-hero-art::after')).toBe('background:var(--hero-scrim)');
+  });
+});
+
+describe('home hero: one treatment on phone, desktop and TV', () => {
+  const all = globals.replace(/\s+/g, '');
+
+  it('has one top fade and one bottom fade for every form factor', () => {
+    expect(all).toContain('--hero-scrim:linear-gradient(tobottom,rgb(var(--rgb-bg)/.85)0%,rgb(var(--rgb-bg)/0)21%)');
+    expect(all).toContain('linear-gradient(totop,var(--color-bg)0%,var(--color-overlay-5)12%,var(--color-overlay-3)30%,var(--color-overlay-1)55%,transparent78%)');
+    expect(all).toContain('@media(min-width:640px){.home-hero-art::after{background:var(--hero-wash),var(--hero-scrim)}}');
+    expect(all).toContain('body:has(.home-hero).topbar::before{opacity:0}');
+  });
+
+  it('crops the backdrop to the same focal point everywhere', () => {
+    expect(all).toContain('.home-hero-art.page-backdrop{background-size:cover;background-position:center18%}');
+    expect(all).not.toMatch(/\.home-hero-art\{background-position:center20%\}/);
+  });
+
+  it('insets the copy by the page gutter and the same bottom room', () => {
+    expect(all).toContain('--hero-pad-bottom:calc(var(--hero-dots-bottom)+3px+var(--space-4))');
+    expect(all).toContain('@media(max-width:559px){.home-hero{--hero-gutter:var(--space-4)}}');
+    expect(all).toContain('html[data-tv="true"].home-hero{--hero-gutter:var(--tv-gap)');
+    expect(all).toContain('html[data-tv="true"].home-hero-in{padding-bottom:var(--hero-pad-bottom)}');
   });
 });

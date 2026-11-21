@@ -2954,13 +2954,18 @@ html .pmenu-item:focus-visible,html[data-tv="true"] .pmenu-item:focus{outline-of
    TV are unchanged.
    ═══════════════════════════════════════════════════════════════════════════ */
 @media (max-width:639px){
-  .home-hero{min-height:var(--hero-height-phone);margin-bottom:var(--space-2)}
-  .home-hero-art{background-position:center 20%}
-  .home-hero-art::after{background:var(--hero-scrim-phone)}
+  /* The art is the wide backdrop band (as on the detail page), not a 4:5
+     crop: header reach + --detail-band (16:9 x 1.14). The copy sits on the
+     band's faded bottom edge and overlaps it by about --space-18. */
+  .home-hero{min-height:calc(var(--detail-band) + var(--space-20));margin-bottom:var(--space-2)}
+  .home-hero-art{bottom:auto;height:calc(var(--backdrop-reach, var(--header-h)) + var(--detail-band))}
+  .skel.home-hero-art{height:var(--detail-band)}
+  /* No side wash: the phone copy spans the full width at the bottom. */
+  .home-hero-art::after{background:var(--hero-scrim)}
   /* The text stack is pinned to the bottom and kept short (title one line,
-     no synopsis), so it covers at most ~32% of the hero. */
+     no synopsis). */
   .home-hero-in{position:absolute;left:0;right:0;bottom:0;max-width:none;
-    padding:var(--space-4) var(--space-5) calc(var(--hero-dots-bottom) + 3px + var(--space-2))}
+    padding:var(--space-4) var(--hero-gutter) var(--hero-pad-bottom)}
   .home-hero-title{
     font-size:var(--hero-title-phone);line-height:var(--hero-title-phone-lh);
     white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
@@ -3029,7 +3034,33 @@ html .pmenu-item:focus-visible,html[data-tv="true"] .pmenu-item:focus{outline-of
 }
 
 /* Desktop and TV: the text column keeps room under the buttons for the bars. */
-@media (min-width:640px){ .home-hero-in{padding-bottom:calc(var(--hero-dots-bottom) + 3px + var(--space-4))} }
+@media (min-width:640px){ .home-hero-in{padding-bottom:var(--hero-pad-bottom)} }
+html[data-tv="true"] .home-hero-in{padding-bottom:var(--hero-pad-bottom)}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Home hero: ONE treatment on phone, desktop and TV (APK TvApp.kt mirrors it).
+   - Image: the wide backdrop (Hero.jsx t.backdrop), cover-cropped, focal
+     point centre 18% everywhere (APK BiasAlignment(0, -0.64)).
+   - Scrim: one top fade (bg .85 -> 0 over the top 21%, the old desktop header
+     scrim) and one bottom fade into the page. Desktop and TV add the same
+     left wash behind their left text column.
+   - Insets: the page gutter on the sides; bars + 3px + 16px under the copy.
+   ═══════════════════════════════════════════════════════════════════════════ */
+.home-hero{
+  --hero-gutter:var(--space-5);
+  --hero-pad-bottom:calc(var(--hero-dots-bottom) + 3px + var(--space-4));
+  --hero-scrim:linear-gradient(to bottom,rgb(var(--rgb-bg) / .85) 0%,rgb(var(--rgb-bg) / 0) 21%),
+    linear-gradient(to top,var(--color-bg) 0%,var(--color-overlay-5) 12%,var(--color-overlay-3) 30%,
+                    var(--color-overlay-1) 55%,transparent 78%);
+  --hero-wash:linear-gradient(to right,var(--color-overlay-4) 0%,var(--color-overlay-2) 38%,transparent 60%);
+  margin-inline:calc(-1 * var(--hero-gutter));padding-inline:var(--hero-gutter);
+}
+@media (max-width:559px){ .home-hero{--hero-gutter:var(--space-4)} }
+html[data-tv="true"] .home-hero{--hero-gutter:var(--tv-gap);margin-inline:calc(-1 * var(--hero-gutter));padding-inline:var(--hero-gutter)}
+.home-hero-art.page-backdrop{background-size:cover;background-position:center 18%}
+@media (min-width:640px){ .home-hero-art::after{background:var(--hero-wash),var(--hero-scrim)} }
+/* The hero owns the top fade, so the header's own scrim would double it. */
+body:has(.home-hero) .topbar::before{opacity:0}
 
 /* ── Header nav: one item style for links and Languages ───────────────────
    Readable over a light frame (secondary text plus a soft shadow, a denser
