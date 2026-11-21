@@ -224,7 +224,7 @@ private fun PhoneHome(nav: Nav, listState: LazyListState) {
     LaunchedEffect(Unit) { vm.load() }
     val shown = vm.rows.filter { it.shown }
     Box(Modifier.fillMaxSize()) {
-        LazyColumn(state = listState, contentPadding = PaddingValues(bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(22.dp)) {
+        LazyColumn(state = listState, contentPadding = PaddingValues(bottom = 48.dp), verticalArrangement = Arrangement.spacedBy(22.dp)) {
             item(key = "hero") { Box { HeroCarousel(vm.heroTitles, nav); HomeHeader(nav) } }
             items(shown, key = { it.kind }) { row -> PhoneRow(row, nav, onRetry = { vm.retry(row.kind) }) }
         }
@@ -418,7 +418,7 @@ private fun PhoneDetail(nav: Nav, type: String, id: Long, rowPoster: String? = n
                     TextButton(onClick = { vm.retry() }) { Text("Try again", color = Color.White) }
                 }
             }
-        } else LazyColumn(state = detailList, contentPadding = PaddingValues(bottom = 32.dp)) {
+        } else LazyColumn(state = detailList, contentPadding = PaddingValues(bottom = 48.dp)) {
             item(key = "art") {
                 // Backdrop runs under the status bar; poster and title sit on its fade.
                 BoxWithConstraints(Modifier.fillMaxWidth()) {

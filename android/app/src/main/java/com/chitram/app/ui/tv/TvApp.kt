@@ -348,7 +348,8 @@ private fun TvHome(nav: Nav, restore: MutableState<String?>, listState: LazyList
         val kind = slots[j]
         val item = if (kind == HERO) 0 else 1 + visible.indexOfFirst { it.kind == kind }
         scope.launch {
-            if (listState.layoutInfo.visibleItemsInfo.none { it.index == item }) { listState.scrollToItem(item); withFrameNanos { } }
+            // Animated, not a jump: an off-screen target row used to snap to the top.
+            if (listState.layoutInfo.visibleItemsInfo.none { it.index == item }) { listState.animateScrollToItem(item); withFrameNanos { } }
             val fr = geo.below(kind, railPx, screenW) ?: rowFocus[kind]
             runCatching { fr?.requestFocus() }
         }
@@ -400,8 +401,8 @@ private fun TvHome(nav: Nav, restore: MutableState<String?>, listState: LazyList
             }
         }
         val rowScroll = CenterScroll
-        CompositionLocalProvider(LocalBringIntoViewSpec provides MinimalScroll) {
-            LazyColumn(state = listState, contentPadding = PaddingValues(bottom = 48.dp), verticalArrangement = Arrangement.spacedBy(TvWeb.ROW_GAP.px)) {
+        CompositionLocalProvider(LocalBringIntoViewSpec provides rememberMinimalScroll()) {
+            LazyColumn(state = listState, contentPadding = PaddingValues(bottom = 72.dp), verticalArrangement = Arrangement.spacedBy(TvWeb.ROW_GAP.px)) {
                 item(key = HERO) {
                     if (vm.heroTitles == null) HeroSkeleton()
                     else if (hasHero) TvHero(pool!!, heroAt, onIndex = { heroAt = it }, nav, restore, geo, onDown = { move(HERO, 1) })
@@ -552,7 +553,9 @@ private fun TvRow(
         val all = row.seeAll
         val hasMore = all != null || row.kind == "list"
         val seeAll = remember { FocusRequester() }
-        Row(Modifier.fillMaxWidth().padding(start = GUTTER, end = GUTTER, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        // Min height = the "See all" pill, which lands only after the row loads; without
+        // it the header grew a few px on load and every row below shifted.
+        Row(Modifier.fillMaxWidth().padding(start = GUTTER, end = GUTTER, bottom = 6.dp).heightIn(min = TvWeb.CHIP_H.px), verticalAlignment = Alignment.CenterVertically) {
             Text(row.label, style = TextStyle(color = Tok.textSecondary, fontSize = TvWeb.ROW_LABEL.pxSp, fontWeight = FontWeight.Medium),
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(bottom = TvWeb.ROW_LABEL_BOTTOM.px))
             if (hasMore && !row.loading && row.titles.isNotEmpty()) {
@@ -771,13 +774,6 @@ private fun TvDetail(nav: Nav, type: String, id: Long) {
         Box(Modifier.padding(top = artTop).fillMaxWidth().fillMaxHeight(0.1f).background(Brush.verticalGradient(0f to Tok.bg, 0.3f to Tok.bg.copy(alpha = 0.6f), 0.6f to Tok.bg.copy(alpha = 0.25f), 1f to Color.Transparent)))
         Box(Modifier.fillMaxSize().background(Tok.scrimLeft))
         Box(Modifier.fillMaxSize().background(Tok.scrimBottom))
-        if (t == null) {
-            Column(Modifier.padding(start = GUTTER, top = TvWeb.DETAIL_TOP.px)) {
-                BackPill { nav.pop() }
-                Text(vm.error ?: "Loading", color = Tok.textMuted, fontSize = TvWeb.DETAIL_META.pxSp, modifier = Modifier.padding(top = 16.dp))
-            }
-            return@Box
-        }
         val detailList = rememberLazyListState()
         val scope = rememberCoroutineScope()
         // Focus Play, then pin the list to the top: focusing scrolls Play into
@@ -785,20 +781,30 @@ private fun TvDetail(nav: Nav, type: String, id: Long) {
         // Play lives in a lazy item, composed during the first measure pass, after
         // this effect starts: a bare requestFocus() threw (swallowed), nothing held
         // focus and the next D-pad press fell to the rail's first item (Search).
-        LaunchedEffect(t.tmdbId) { playFocus.focusWhenAttached(); detailList.scrollToItem(0) }
+        if (t != null) LaunchedEffect(t.tmdbId) { playFocus.focusWhenAttached(); detailList.scrollToItem(0) }
         // Compose's TV default pivots the focused item to 30% of the height,
         // which pushed the title off the top. Scroll only as far as needed and
         // return to the very top when Play takes focus.
-        CompositionLocalProvider(LocalBringIntoViewSpec provides MinimalScroll) {
-            LazyColumn(state = detailList, contentPadding = PaddingValues(top = TvWeb.DETAIL_TOP.px, bottom = 48.dp)) {
+        CompositionLocalProvider(LocalBringIntoViewSpec provides rememberMinimalScroll()) {
+            LazyColumn(state = detailList, contentPadding = PaddingValues(top = TvWeb.DETAIL_TOP.px, bottom = 72.dp)) {
+                // Web: Back top-left, the wordmark top-right. One item in both the
+                // loading and the loaded state, so Back and the wordmark stay put
+                // (no remount, no flicker) when the title lands.
+                item(key = "top") {
+                    Row(Modifier.padding(horizontal = GUTTER), verticalAlignment = Alignment.CenterVertically) {
+                        BackPill { nav.pop() }
+                        Spacer(Modifier.weight(1f))
+                        Brand()
+                    }
+                }
+                if (t == null) {
+                    item(key = "loading") {
+                        Text(vm.error ?: "Loading", color = Tok.textMuted, fontSize = TvWeb.DETAIL_META.pxSp, modifier = Modifier.padding(start = GUTTER, top = 16.dp))
+                    }
+                    return@LazyColumn
+                }
                 item(key = "head") {
                     Column(Modifier.padding(horizontal = GUTTER)) {
-                        // Web: Back top-left, the wordmark top-right.
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            BackPill { nav.pop() }
-                            Spacer(Modifier.weight(1f))
-                            Brand()
-                        }
                         // Hero: poster + text column, settled to the bottom of a 70vh block.
                         Box(Modifier.fillMaxWidth().heightIn(min = (TvWeb.HERO_H - TvWeb.BTN_H - TvWeb.DETAIL_PAD_BOTTOM - 66f).px), contentAlignment = Alignment.BottomStart) {
                             Row(Modifier.padding(top = TvWeb.DETAIL_PAD_TOP.px), verticalAlignment = Alignment.Bottom) {
@@ -1233,10 +1239,19 @@ private fun FlowRowCompat(content: @Composable () -> Unit) {
     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally), verticalArrangement = Arrangement.spacedBy(6.dp)) { content() }
 }
 
-/** Scroll only as far as needed to show the focused item (web block:'nearest'). */
+/**
+ * Scroll only as far as needed to show the focused item (web block:'nearest').
+ * The focused rect is the card's poster only. Its title, meta and progress lines
+ * and the focus lift sit outside it, so a bare 'nearest' left the last row's card
+ * half cut at the bottom edge. [lead]/[trail] (px) widen the rect to cover them.
+ */
 @OptIn(ExperimentalFoundationApi::class)
-private val MinimalScroll = object : BringIntoViewSpec {
+private class MinimalScroll(private val lead: Float, private val trail: Float) : BringIntoViewSpec {
     override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float {
+        val padded = size + lead + trail
+        return if (padded <= containerSize) nearest(offset - lead, padded, containerSize) else nearest(offset, size, containerSize)
+    }
+    private fun nearest(offset: Float, size: Float, containerSize: Float): Float {
         val trailing = offset + size
         return when {
             offset >= 0 && trailing <= containerSize -> 0f
@@ -1245,6 +1260,14 @@ private val MinimalScroll = object : BringIntoViewSpec {
             else -> trailing - containerSize
         }
     }
+}
+
+/** Lead: the focus lift above a card. Trail: an episode card's text (title, meta, two overview lines) plus the lift. */
+@Composable
+@OptIn(ExperimentalFoundationApi::class)
+private fun rememberMinimalScroll(): BringIntoViewSpec {
+    val d = LocalDensity.current
+    return remember(d) { with(d) { MinimalScroll(FOCUS_PAD.toPx(), (140f.px).toPx()) } }
 }
 
 /** Centre the focused card in its row (web scrollIntoView inline:'center'); the list clamps at its ends. */
