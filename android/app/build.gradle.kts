@@ -22,8 +22,8 @@ android {
         applicationId = "com.chitram.app"
         minSdk = 25
         targetSdk = 35
-        versionCode = 63
-        versionName = "1.2.50"
+        versionCode = 64
+        versionName = "1.2.51"
         // Only ship the locales and densities we use.
         resourceConfigurations += listOf("en")
     }

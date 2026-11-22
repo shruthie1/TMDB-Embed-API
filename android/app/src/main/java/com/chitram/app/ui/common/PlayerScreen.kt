@@ -179,6 +179,8 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
             if (e == Lifecycle.Event.ON_RESUME) activity?.window?.let {
                 WindowCompat.getInsetsController(it, view).hide(WindowInsetsCompat.Type.systemBars())
             }
+            // P23: a re-cast Android blocked while WVC was in front goes out now.
+            if (e == Lifecycle.Event.ON_RESUME) vm.onUiResumed()
         }
         lifecycle.addObserver(obs)
         onDispose { lifecycle.removeObserver(obs) }

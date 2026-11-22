@@ -283,6 +283,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                 if (!playing) saveProgress()
                 // Back on the phone: the TV cast is over, free the LAN proxy (C5).
                 if (playing && CastProxy.running) CastProxy.stop(getApplication())
+                if (playing) { castJob?.cancel(); pendingRecast = null }
             }
             override fun onPlaybackStateChanged(state: Int) {
                 buffering = state == Player.STATE_BUFFERING
@@ -1496,22 +1497,137 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     /**
      * Cast to TV: pauses here and returns what to hand Web Video Caster, or null
      * when nothing is playing. WVC takes no start position, so the TV starts at 0.
+     *
+     * P23 (owner 2026-11-22: no manual step): after the launch a watch follows
+     * what the receiver fetches. A refused stream re-casts the next source on
+     * its own (CastWatch.Chain: H.264 first after an HEVC refusal, then Telugu,
+     * then the listed order), at most 3 rows per tap.
      */
     suspend fun castSpec(): WvcCast.Spec? {
         // Never the donor alone: a fused pair casts its fused master (current); an
         // on-device merge (Task 6) casts the picture row, since the TV cannot merge.
-        val s = current ?: return null
+        val playing = current ?: return null
         val r = request ?: return null
         player.pause()
         saveProgress()
+        castJob?.cancel()
+        val chain = CastWatch.Chain(sources.ifEmpty { listOf(playing) }.let { if (it.any { x -> x.id == playing.id }) it else listOf(playing) + it }, castMemory)
+        val s = chain.first(playing)
+        if (s.id != playing.id) android.util.Log.i("Chitram", "[cast] receiver ${castMemory.lastReceiver} refused HEVC before: casting ${s.provider} ${s.id} in place of ${playing.provider}")
+        val first = prepareCast(s, r) ?: return null
+        startCastWatch(chain, r, first)
+        return first.spec
+    }
+
+    /** One cast launch: what WVC gets, the route, and how to read what the receiver fetched. */
+    private class CastLaunch(val row: Source, val spec: WvcCast.Spec, val via: String, val seen: (suspend () -> CastWatch.Seen?)?)
+
+    private val castMemory by lazy { CastWatch.Memory(com.chitram.app.data.PrefsKeyValue(getApplication(), "cast")) }
+    private var castJob: Job? = null
+    /** A re-cast launched while the app was in the background (Android may block that start): sent again on resume. */
+    @Volatile private var pendingRecast: WvcCast.Spec? = null
+
+    private suspend fun prepareCast(s: Source, r: PlayRequest): CastLaunch? = withContext(Dispatchers.IO) {
+        val app = getApplication<Application>()
+        val token = java.security.SecureRandom().let { rnd -> ByteArray(10).also(rnd::nextBytes) }.joinToString("") { "%02x".format(it) }
+        // P23: a MultiMovies DASH row casts HLS (the VM route, else the phone's LAN pages).
+        val route = DashCast.route(s, Api.VM, g.api.vmUp, token) { url -> castProbe(url) }
+        when (route) {
+            is DashCast.Route.Vm -> {
+                CastProxy.stop(app)
+                val watchUrl = "${Api.VM}/mm/hls/cast/$token"
+                return@withContext CastLaunch(s, WvcCast.spec(s, r, castUrl = route.url), "vm") { vmSeen(watchUrl) }
+            }
+            DashCast.Route.Lan -> {
+                val url = try { CastProxy.startDash(app, s, g.api.client) } catch (e: Exception) {
+                    android.util.Log.w("Chitram", "[lanproxy] dash start failed: ${e.javaClass.simpleName}: ${e.message}"); null
+                }
+                if (url != null) return@withContext CastLaunch(s, WvcCast.spec(s, r, castUrl = url), "lan") { CastProxy.seen }
+                // No Wi-Fi address or MPD unreadable: the VM route anyway (WVC cannot open a DASH type).
+                DashCast.vmMasterUrl(Api.VM, s.url, DashCast.rowLanguage(s), token)?.let { url ->
+                    return@withContext CastLaunch(s, WvcCast.spec(s, r, castUrl = url), "vm") { vmSeen("${Api.VM}/mm/hls/cast/$token") }
+                }
+            }
+            null -> Unit
+        }
         // C5: an on-device row goes through the phone's LAN proxy (headers + token added here).
-        // A DASH row is not proxied: LanProxy rewrites HLS playlists only (its MPD would lose the segment paths).
-        val lan = if (s.onDevice == null || s.dash) null else withContext(Dispatchers.IO) {
-            try { CastProxy.start(getApplication(), s, g.api.client, g.prefs.preferredAudio()) } catch (e: Exception) {
-                android.util.Log.w("Chitram", "[lanproxy] start failed: ${e.javaClass.simpleName}: ${e.message}"); null
+        val lan = if (s.onDevice == null) null else try { CastProxy.start(app, s, g.api.client, g.prefs.preferredAudio()) } catch (e: Exception) {
+            android.util.Log.w("Chitram", "[lanproxy] start failed: ${e.javaClass.simpleName}: ${e.message}"); null
+        }
+        if (s.onDevice == null) CastProxy.stop(app)
+        CastLaunch(s, WvcCast.spec(s, r, lan), if (lan != null) "lan" else "direct", if (lan != null) ({ CastProxy.seen }) else null)
+    }
+
+    /** The VM route's master answers 200 (it also warms the VM's MPD and init cache). */
+    private fun castProbe(url: String): Boolean {
+        val c = g.api.client.newBuilder().callTimeout(DashCast.PROBE_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS).build()
+        return c.newCall(okhttp3.Request.Builder().url(url).build()).execute().use { it.isSuccessful }
+    }
+
+    private fun vmSeen(url: String): CastWatch.Seen? = try {
+        g.api.client.newCall(okhttp3.Request.Builder().url(url).header("Cache-Control", "no-store").build()).execute().use { res ->
+            if (!res.isSuccessful) return null
+            val o = kotlinx.serialization.json.Json.parseToJsonElement(res.body?.string().orEmpty()) as? kotlinx.serialization.json.JsonObject ?: return null
+            fun long(k: String) = (o[k] as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull()
+            CastWatch.Seen(long("master"), long("video"), (o["receiver"] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it.isString }?.content)
+        }
+    } catch (_: Exception) { null }
+
+    private fun startCastWatch(chain: CastWatch.Chain, r: PlayRequest, first: CastLaunch) {
+        val app = getApplication<Application>()
+        pendingRecast = null
+        if (first.seen == null) {
+            // Backend VM rows (m3u8-proxy) and direct casts: nothing to observe.
+            android.util.Log.i("Chitram", CastWatch.logLine(first.row, first.via, CastWatch.Verdict.UNKNOWN))
+            return
+        }
+        CastProxy.beginWatch(app)
+        CastProxy.onStopped = { castJob?.cancel() }
+        castJob = viewModelScope.launch {
+            try {
+                var cur = first
+                while (isActive) {
+                    val started = System.currentTimeMillis()
+                    var seen = CastWatch.Seen()
+                    var v = CastWatch.Verdict.PENDING
+                    while (isActive && v == CastWatch.Verdict.PENDING) {
+                        delay(CastWatch.POLL_MS)
+                        seen = withContext(Dispatchers.IO) { cur.seen?.invoke() } ?: seen
+                        v = CastWatch.verdict(seen, started, System.currentTimeMillis())
+                        // The receiver has the re-cast: nothing to send again on resume.
+                        if (seen.master != null) pendingRecast = null
+                    }
+                    android.util.Log.i("Chitram", CastWatch.logLine(cur.row, cur.via, v))
+                    if (v == CastWatch.Verdict.OK) { pendingRecast = null; castMemory.saw(seen.receiver) }
+                    if (v != CastWatch.Verdict.FAIL) return@launch
+                    val next = chain.onFail(cur.row, seen.receiver) ?: run {
+                        android.util.Log.i("Chitram", "[cast] no next source to re-cast after ${cur.row.provider}")
+                        return@launch
+                    }
+                    cur = prepareCast(next, r) ?: return@launch
+                    if (cur.seen == null) {
+                        android.util.Log.i("Chitram", CastWatch.logLine(cur.row, cur.via, CastWatch.Verdict.UNKNOWN))
+                    }
+                    android.util.Log.i("Chitram", "[cast] re-cast ${next.provider} ${next.id} via=${cur.via}")
+                    pendingRecast = cur.spec
+                    WvcCast.open(app, cur.spec)
+                    if (cur.seen == null) return@launch
+                }
+            } finally {
+                CastProxy.endWatch(app)
             }
         }
-        return WvcCast.spec(s, r, lan)
+    }
+
+    /**
+     * The player screen is back in front. Android may block a re-cast started
+     * from the background; if one is still unconfirmed, send it again now.
+     */
+    fun onUiResumed() {
+        val spec = pendingRecast ?: return
+        pendingRecast = null
+        android.util.Log.i("Chitram", "[cast] re-cast sent again on resume")
+        WvcCast.open(getApplication(), spec)
     }
 
     fun togglePlay() { if (player.isPlaying) player.pause() else { if (player.playbackState == Player.STATE_ENDED) player.seekTo(0); player.play() } }

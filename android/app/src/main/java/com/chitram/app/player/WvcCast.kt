@@ -29,6 +29,7 @@ object WvcCast {
     private const val STORE_MARKET = "market://details?id=$PACKAGE"
     private const val STORE_WEB = "https://play.google.com/store/apps/details?id=$PACKAGE"
     const val HLS_MIME = "application/x-mpegurl"
+    /** WVC 6.2.0 matches no activity for this type (nor for mixed-case x-mpegURL). Never sent. */
     const val DASH_MIME = "application/dash+xml"
     private val NEEDED = listOf("Referer", "Origin", "User-Agent")
 
@@ -51,11 +52,21 @@ object WvcCast {
      * `lanUrl` (C5): the phone's LAN proxy URL for an on-device row. The phone
      * then adds the headers and vaplayer's token itself, so the TV needs neither
      * the headers nor WVC's phone routing.
+     *
+     * `castUrl` (P23): an HLS master built for a MultiMovies DASH row (the VM
+     * route or the phone's LAN pages). Its segment lines are signed sacdn URLs,
+     * so the receiver needs no headers.
      */
-    fun spec(row: Source, r: PlayRequest, lanUrl: String? = null): Spec {
+    fun spec(row: Source, r: PlayRequest, lanUrl: String? = null, castUrl: String? = null): Spec {
+        val title = if (r.type == "tv" && r.season > 0) "${r.title} S${r.season} E${r.episode}" else r.title
+        if (castUrl != null) return Spec(castUrl, HLS_MIME, title, Api.image(r.poster, "w500"), emptyMap(), null)
+        // WVC 6.2.0 has no activity for application/dash+xml (measured on the owner's phone,
+        // 2026-11-22): a DASH row always casts the VM HLS route, with the HLS type.
+        if (row.dash) DashCast.vmMasterUrl(Api.VM, row.url, DashCast.rowLanguage(row), null)?.let {
+            return Spec(it, HLS_MIME, title, Api.image(r.poster, "w500"), emptyMap(), null)
+        }
         // A TV gets no provider headers from WVC: cast a direct row's proxied url.
         val s = DirectRoute.proxyOf(row)
-        val title = if (r.type == "tv" && r.season > 0) "${r.title} S${r.season} E${r.episode}" else r.title
         val viaPhone = lanUrl != null && s.onDevice != null
         val headers = if (s.onDevice == null || viaPhone) emptyMap()
         else NEEDED.mapNotNull { k -> s.headers.entries.firstOrNull { it.key.equals(k, ignoreCase = true) }?.let { k to it.value } }.toMap()
@@ -64,7 +75,7 @@ object WvcCast {
             // Lowercase: Android matches intent MIME types case-sensitively, and
             // WVC registers application/x-mpegurl. "x-mpegURL" found no activity
             // and fell through to the Play Store (owner report, 1.2.0).
-            mime = when { s.dash -> DASH_MIME; s.progressive -> "video/mp4"; else -> HLS_MIME },
+            mime = if (s.progressive) "video/mp4" else HLS_MIME,
             title = title,
             poster = Api.image(r.poster, "w500"),
             headers = headers,

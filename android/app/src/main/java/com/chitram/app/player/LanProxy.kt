@@ -38,7 +38,29 @@ class LanProxy(
     private val idleMs: Long = IDLE_MS,
     private val tickMs: Long = 30_000,
     private val onIdle: () -> Unit = {},
+    private val pages: ((String) -> MpdHls.Page?)? = null,
+    private val self: (InetAddress) -> Boolean = { it == bind },
 ) : Closeable {
+    /** What the receiver fetched (cast watch). Requests from the phone itself ([self]) do not count. */
+    @Volatile var seen: CastWatch.Seen = CastWatch.Seen()
+        private set
+    /** The upstream URL handed to the receiver (its master, or the progressive file). */
+    @Volatile var topUpstream: String? = null
+
+    /** The phone URL of a built page (P23 DASH cast: "master.m3u8", "<rep>.m3u8"). */
+    fun pageUrl(name: String): String = "http://$host:$port/$key/p/$name"
+
+    private fun note(from: InetAddress, master: Boolean, video: Boolean, ua: String?) {
+        if (self(from) || (!master && !video)) return
+        val now = System.currentTimeMillis()
+        val s = seen
+        seen = when {
+            master && video -> s.copy(master = now, video = now, receiver = receiverId(ua, from))
+            master -> s.copy(master = now, receiver = receiverId(ua, from))
+            else -> s.copy(video = now)
+        }
+    }
+
     val key: String = ByteArray(12).also { SecureRandom().nextBytes(it) }.joinToString("") { "%02x".format(it) }
     private val server = ServerSocket(0, 50, bind)
     val port: Int = server.localPort
@@ -117,17 +139,34 @@ class LanProxy(
             lastHit = System.currentTimeMillis()
             if (method == "OPTIONS") return writeHead(out, 204, "No Content", listOf("Content-Length" to "0"))
             if (method != "GET" && method != "HEAD") return writeStatus(out, 405, "Method Not Allowed")
-            val upstream = upstreamFor(parts[1].substringBefore('?')) ?: return writeStatus(out, 404, "Not Found")
+            val path = parts[1].substringBefore('?')
+            val seg = path.trimStart('/').split('/')
+            if (seg.size == 3 && seg[0] == key && seg[1] == "p") {
+                val page = pages?.invoke(seg[2]) ?: return writeStatus(out, 404, "Not Found")
+                note(s.inetAddress, page.master, page.video, reqHeaders["user-agent"])
+                val bytes = page.text.toByteArray(Charsets.UTF_8)
+                writeHead(out, 200, "OK", listOf("Content-Type" to "application/vnd.apple.mpegurl", "Content-Length" to bytes.size.toString(), "Cache-Control" to "no-store"))
+                if (method == "GET") out.write(bytes)
+                out.flush()
+                return
+            }
+            val upstream = upstreamFor(path) ?: return writeStatus(out, 404, "Not Found")
+            val from = s.inetAddress
+            val ua = reqHeaders["user-agent"]
             val rb = Request.Builder().url(upstream).header("Accept-Encoding", "identity")
             reqHeaders["range"]?.let { rb.header("Range", it) }
             if (method == "HEAD") rb.head()
-            client.newCall(rb.build()).execute().use { res -> relay(res, method, out) }
+            client.newCall(rb.build()).execute().use { res ->
+                val playlist = relay(res, method, out)
+                if (res.isSuccessful && method == "GET") note(from, master = upstream == topUpstream, video = !playlist, ua = ua)
+            }
         } catch (e: Exception) {
             if (!closed) android.util.Log.w("Chitram", "[lanproxy] ${e.javaClass.simpleName}: ${e.message}")
         }
     }
 
-    private fun relay(res: Response, method: String, out: OutputStream) {
+    /** True when it relayed a playlist. */
+    private fun relay(res: Response, method: String, out: OutputStream): Boolean {
         val body = res.body
         val type = res.header("Content-Type").orEmpty()
         val isPlaylist = res.isSuccessful && method == "GET" && body != null &&
@@ -138,13 +177,14 @@ class LanProxy(
             writeHead(out, res.code, res.message, listOf("Content-Type" to "application/vnd.apple.mpegurl", "Content-Length" to bytes.size.toString()))
             out.write(bytes)
             out.flush()
-            return
+            return true
         }
         val h = ArrayList<Pair<String, String>>()
         for (k in listOf("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges")) res.header(k)?.let { h += k to it }
         writeHead(out, res.code, res.message, h)
         if (method == "GET") body?.byteStream()?.copyTo(out, 64 * 1024)
         out.flush()
+        return false
     }
 
     private fun writeStatus(out: OutputStream, code: Int, msg: String) =
@@ -225,6 +265,12 @@ class LanProxy(
         fun lanAddress(): InetAddress? = try {
             pickAddress(NetworkInterface.getNetworkInterfaces().toList().filter { it.isUp && !it.isLoopback }.map { it.name to it.inetAddresses.toList() })
         } catch (_: Exception) { null }
+
+        /** A short id for the receiver: its user agent, else its address. */
+        fun receiverId(ua: String?, from: InetAddress): String {
+            val src = ua?.takeIf { it.isNotBlank() } ?: from.hostAddress.orEmpty()
+            return java.security.MessageDigest.getInstance("SHA-256").digest(src.toByteArray()).take(6).joinToString("") { "%02x".format(it) }
+        }
 
         private fun hex(s: String): String = s.toByteArray(Charsets.UTF_8).joinToString("") { "%02x".format(it) }
 
