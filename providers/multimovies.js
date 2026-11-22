@@ -631,7 +631,12 @@ async function getMultimoviesStreams(tmdbId, mediaType = 'movie', seasonNum = nu
         // walks every server) or every listed server answered 2xx.
         if ((def && def.ok) || (asked.length && asked.every((s) => answers.get(s) && answers.get(s).ok))) {
             console.log(`[multimovies] no hls source for ${tmdbId} (server=${def && def.server})`);
-            return partial([]);
+            // VidBolt answered 2xx with no source: no rows for this title.
+            // When some server went unheard the answer stays partial (not
+            // cached) but is marked titleEmpty, so it never moves the host.
+            const rows = partial([]);
+            if (rows.upstreamError) rows.titleEmpty = true;
+            return rows;
         }
         // Transport error or non-2xx: unknown, not empty. Thrown so the
         // fan-out records an error and does not cache "no streams".

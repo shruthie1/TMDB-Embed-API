@@ -251,6 +251,18 @@ function looksLikePreviewPayload(data) {
     return urls.length > 0 && urls.every(isPreviewUrl);
 }
 
+// Which gate below empties this payload; null when it is playable. Logged
+// once per title when Castle answers but nothing is playable (soak 1: RRR
+// logged "Got 0 stream(s)" 23 times with no reason).
+function dropReason(raw) {
+    const data = unwrap(raw) || {};
+    if (data.permissionDenied === true) return 'permissionDenied';
+    if (data.isPreview === true) return 'isPreview';
+    if (looksLikePreviewPayload(data)) return 'preview-url';
+    if (!data.videoUrl && !((data.videos || []).some((v) => v && v.url))) return 'no-url';
+    return null;
+}
+
 function buildCastleStreams(raw, langLabel, titleLine, resolution) {
     const data = unwrap(raw);
     // Castle gates real playback behind a signed-in VIP session. Anonymously we
@@ -498,6 +510,8 @@ async function getCastletvStreams(tmdbId, mediaType = 'movie', seasonNum = null,
         const failedTracks = [];
         let rejected = 0;
         let lastRejection = null;
+        const drops = new Map();
+        const noteDrop = (raw) => { const k = dropReason(raw) || 'playable'; drops.set(k, (drops.get(k) || 0) + 1); };
 
         if (tracks.length > 0) {
             const langJobs = tracks.map((track) =>
@@ -529,6 +543,7 @@ async function getCastletvStreams(tmdbId, mediaType = 'movie', seasonNum = null,
                 for (const r of trackResults) {
                     if (r.status !== 'fulfilled') continue;
                     const { raw, resolution, track } = r.value;
+                    noteDrop(raw);
                     for (const s of buildCastleStreams(raw, '', titleLine, resolution)) {
                         const identity = mediaIdentity(s.url);
                         const langName = track.languageName || track.abbreviate || 'Unknown';
@@ -568,6 +583,7 @@ async function getCastletvStreams(tmdbId, mediaType = 'movie', seasonNum = null,
             for (const r of sharedResults) {
                 if (r.status !== 'fulfilled') { rejected++; lastRejection = r.reason; continue; }
                 const { raw, resolution } = r.value;
+                noteDrop(raw);
                 for (const s of buildCastleStreams(raw, sharedLabel, titleLine, resolution)) {
                     const identity = mediaIdentity(s.url);
                     if (seenUrls.has(s.url) || seenMedia.has(identity)) continue;
@@ -579,6 +595,9 @@ async function getCastletvStreams(tmdbId, mediaType = 'movie', seasonNum = null,
         }
 
         console.log(`[CastleTV] Got ${streams.length} stream(s) for "${title}"`);
+        if (!streams.length && drops.size) {
+            console.log(`[CastleTV] no-playable ${tmdbId} id=${activeId} ${[...drops].map(([k, n]) => `${k}=${n}`).join(' ')}`);
+        }
         const why = lastRejection && (lastRejection.message || String(lastRejection));
         if (!streams.length && rejected) {
             throw new Error(`${rejected} video call(s) failed, none returned a stream: ${why}`);
@@ -594,4 +613,4 @@ async function getCastletvStreams(tmdbId, mediaType = 'movie', seasonNum = null,
     }
 }
 
-module.exports = { getCastletvStreams, UPSTREAM, CONFIG_DEFAULTS, _deriveKey: deriveKey, _internal: { castleBase, apiVersion } };
+module.exports = { getCastletvStreams, UPSTREAM, CONFIG_DEFAULTS, _deriveKey: deriveKey, _internal: { castleBase, apiVersion, dropReason } };

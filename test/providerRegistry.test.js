@@ -95,3 +95,55 @@ test('Task 8: verifyTitleOf gives RRR for vidrift/vidrock/onetouchtv and null fo
     for (const n of ['vidrift', 'vidrock', 'onetouchtv']) assert.equal(verifyTitleOf(n).tmdbId, '579974');
     assert.equal(verifyTitleOf('castletv'), null);
 });
+
+// Soak 1 (VM 2026-11-22 09:12:54Z): 5 vidrift `orionStreams null` answers for
+// title 1496785 counted as host fails and moved the host .net -> .in. A
+// title-level empty must never move a host.
+const titleEmpty = (msg) => Object.assign(new Error(msg), { titleEmpty: true });
+
+test('soak 1: 5 vidrift titleEmpty errors on a non-verify title: zero rediscover, no fail streak', (t) => {
+    const calls = captureRediscover(t);
+    const { _noteUpstream } = require('../providers/registry');
+    const mod = require('../providers/vidrift');
+    for (let i = 0; i < 6; i++) {
+        _noteUpstream(info('vidrift', 'getVidriftStreams'), mod, 'fail', { tmdbId: '1496785' },
+            titleEmpty('vidrift: every host failed for 1496785: https://embed.vidrift.net: orionStreams null; https://embed.vidrift.in: orionStreams null'));
+    }
+    assert.equal(calls.length, 0);
+    assert.equal(up.failStreak('vidrift'), 0);
+});
+
+test('soak 1: titleEmpty on the provider verify title still counts (RRR must have rows)', (t) => {
+    const calls = captureRediscover(t);
+    const { _noteUpstream } = require('../providers/registry');
+    const mod = require('../providers/vidrift');
+    for (let i = 0; i < 5; i++) {
+        _noteUpstream(info('vidrift', 'getVidriftStreams'), mod, 'fail', { tmdbId: '579974' }, titleEmpty('orionStreams null'));
+    }
+    assert.equal(calls.length, 1);
+});
+
+test('soak 1: 5 multimovies titleEmpty errors (VidBolt 2xx, no source) on a non-verify title: zero rediscover', (t) => {
+    const calls = captureRediscover(t);
+    const { _noteUpstream } = require('../providers/registry');
+    const mod = require('../providers/multimovies');
+    for (let i = 0; i < 5; i++) {
+        _noteUpstream(info('multimovies', 'getMultimoviesStreams'), mod, 'fail', { tmdbId: '1496785' }, titleEmpty('multimovies vidbolt server(s) not heard: 2(timeout)'));
+    }
+    assert.equal(calls.length, 0);
+});
+
+test('soak 1: the registry wrapper keeps titleEmpty on the [] + upstreamError throw', async (t) => {
+    const calls = captureRediscover(t);
+    const reg = require('../providers/registry');
+    const mm = require('../providers/multimovies');
+    const real = mm.getMultimoviesStreams;
+    mm.getMultimoviesStreams = async () => Object.assign([], { upstreamError: 'multimovies vidbolt server(s) not heard: vega(cut)', titleEmpty: true });
+    t.after(() => { mm.getMultimoviesStreams = real; });
+    const p = reg.getProvider('multimovies');
+    for (let i = 0; i < 5; i++) {
+        await assert.rejects(p.fetch({ tmdbId: '1496785', type: 'movie' }), (e) => e.titleEmpty === true);
+    }
+    assert.equal(calls.length, 0);
+    assert.equal(up.failStreak('multimovies'), 0);
+});

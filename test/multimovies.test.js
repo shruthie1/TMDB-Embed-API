@@ -586,3 +586,22 @@ test('getMultimoviesStreams: "Original" keeps TMDB te when no source lists Telug
     const rows = await mm.getMultimoviesStreams('1261763', 'movie');
     assert.deepEqual(normaliseStream(rows.find((r) => r.url === ORIG)).languages, ['Telugu']);
 });
+
+// Soak 1: VidBolt answered 2xx with no source for the title while a server
+// went unheard. Partial (not cached), but marked titleEmpty so the registry
+// never counts it toward a host move.
+test('soak 1: no source from VidBolt (2xx) with a server unheard: [] partial and titleEmpty', async (t) => {
+    const mm = freshMM(t, { settleMs: 100, resolveStepMs: 2000 });
+    stubVidbolt(t, [[/\/api\/resolve/, (u) => (serverOf(u) === 'vega' ? 'hang' : new Response(resolveBody(serverOf(u), null), { status: 200 }))],
+        [/vidbolt\.xyz\/movie\//, '']]);
+    const rows = await mm.getMultimoviesStreams('1496785', 'movie');
+    assert.equal(rows.length, 0);
+    assert.match(rows.upstreamError || '', /not heard: vega/);
+    assert.equal(rows.titleEmpty, true);
+});
+
+test('soak 1: VidBolt 5xx on every ask: thrown, not titleEmpty', async (t) => {
+    const mm = freshMM(t, { settleMs: 50, resolveStepMs: 500 });
+    stubVidbolt(t, [[/\/api\/resolve/, () => new Response('bad', { status: 502 })], [/vidbolt\.xyz\/movie\//, '']]);
+    await assert.rejects(mm.getMultimoviesStreams('1496785', 'movie'), (e) => !e.titleEmpty);
+});

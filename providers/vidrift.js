@@ -310,6 +310,12 @@ function stepSignal(stepMs, deadline) {
 // "no streams". Returns the hosts left to try for masters, page host first.
 async function fetchPage(tmdbId, type, season, episode, deadline) {
     const errors = [];
+    // A host whose page and embedMeta parse but whose orionStreams is null:
+    // the title has no rows there (soak 1, 1496785 on both hosts). Still an
+    // error, so the fan-out does not cache it (null was seen to be transient
+    // on Krack), but marked titleEmpty so it never feeds the host fail
+    // streak or a rediscover (providers/registry.js noteUpstream).
+    let titleEmpty = false;
     const bases = liveBases();
     for (let i = 0; i < bases.length; i++) {
         const base = bases[i];
@@ -321,7 +327,8 @@ async function fetchPage(tmdbId, type, season, episode, deadline) {
             if (!(res.status >= 200 && res.status < 300)) throw new Error(`HTTP ${res.status}`);
             const meta = parseEmbedMeta(res.text);
             if (!meta) throw new Error('no embedMeta in page');
-            if (!Array.isArray(meta.orionStreams)) throw new Error(`orionStreams ${meta.orionStreams === null ? 'null' : 'missing'}`);
+            if (meta.orionStreams === null) { titleEmpty = true; throw new Error('orionStreams null'); }
+            if (!Array.isArray(meta.orionStreams)) throw new Error('orionStreams missing');
             console.log(`[vidrift] page ${base} ${Date.now() - t0}ms`);
             return { meta, bases: [base, ...bases.filter((b) => b !== base)] };
         } catch (e) {
@@ -332,7 +339,12 @@ async function fetchPage(tmdbId, type, season, episode, deadline) {
             if (Date.now() >= deadline) break;
         }
     }
-    throw new Error(`vidrift: every host failed for ${tmdbId}: ${errors.join('; ')}`);
+    const err = new Error(`vidrift: every host failed for ${tmdbId}: ${errors.join('; ')}`);
+    if (titleEmpty) {
+        err.titleEmpty = true;
+        console.log(`[vidrift] title-empty ${tmdbId}: orionStreams null, host not counted`);
+    }
+    throw err;
 }
 
 // One master: the page host first, then the mirrors, inside the budget.

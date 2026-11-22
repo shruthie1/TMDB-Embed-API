@@ -178,6 +178,16 @@ function noteUpstream(providerInfo, module, outcome, ctx, err = null) {
   const u = module && module.UPSTREAM;
   if (!u) return;
   if (outcome === 'ok') { upstream.noteOk(u.name); keys.noteKeyOk(u.name); return; }
+  // Soak 1 (2026-11-22 09:12:54Z): a provider error marked titleEmpty (the
+  // host answered, its page parsed, the title has no rows: vidrift
+  // orionStreams null, VidBolt 2xx with no source) is an empty, not a fail.
+  // It never feeds the host streak or a rediscover, except on the provider's
+  // own validation title (the empty rule below).
+  if (outcome === 'fail' && err && err.titleEmpty === true) {
+    console.warn(`[heal] ${u.name} title-empty ${ctx.tmdbId} not a host fail`);
+    outcome = 'empty';
+    err = null;
+  }
   // A key failure (GCM tag, CBC padding) is not a move: it counts toward the
   // key streak (3) only, never the host streak.
   if (err && typeof module.keyHeal === 'function') {
@@ -362,7 +372,9 @@ function createFetchFunction(providerInfo) {
       // upstream failed. With no rows that is a failure, not an empty; with
       // rows the marker must survive normalisation so the caller does not
       // cache an incomplete answer.
-      if (result.upstreamError && result.length === 0) throw new Error(String(result.upstreamError));
+      if (result.upstreamError && result.length === 0) {
+        throw Object.assign(new Error(String(result.upstreamError)), result.titleEmpty === true ? { titleEmpty: true } : {});
+      }
 
       // Add provider name if not present, then normalise to the canonical
       // stream contract (utils/streamSchema.js) so every provider's output

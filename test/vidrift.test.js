@@ -407,3 +407,33 @@ test('route: web proxy, apk direct, on both hosts', () => {
     assert.deepEqual(routeFor('vidrift', `${BASE}/api/orion/a/master.m3u8`), { web: 'proxy', apk: 'direct' });
     assert.deepEqual(routeFor('vidrift', 'https://embed.vidrift.in/api/orion/a/master.m3u8'), { web: 'proxy', apk: 'direct' });
 });
+
+// Soak 1 (VM 2026-11-22 09:12:54Z): title 1496785 answered `orionStreams null`
+// on .net and .in. The page and embedMeta parse fine, so the title has no
+// rows; the host is fine. The error says so (titleEmpty) so the registry
+// does not feed the host fail streak with it.
+test('orionStreams null on every host: error marked titleEmpty (no rows for this title, not a host fault)', async () => {
+    stubFetch([[(u) => u.includes('/embed/movie/'), () => text(KRACK_PAGE)]]);
+    await assert.rejects(vidrift.getVidriftStreams('1496785', 'movie'), (e) => {
+        assert.match(e.message, /orionStreams null/);
+        assert.equal(e.titleEmpty, true);
+        return true;
+    });
+});
+
+test('.net answers 502, .in answers orionStreams null: still titleEmpty (a host that answered says no rows)', async () => {
+    stubFetch([
+        [isPage('embed.vidrift.net'), () => text('bad gateway', 502)],
+        [isPage('embed.vidrift.in'), () => text(KRACK_PAGE)],
+    ]);
+    await assert.rejects(vidrift.getVidriftStreams('1496785', 'movie'), (e) => e.titleEmpty === true);
+});
+
+test('dead hosts or a page without embedMeta: not titleEmpty (host fault)', async () => {
+    stubFetch([[(u) => u.includes('/embed/movie/'), () => text('bad gateway', 502)]]);
+    await assert.rejects(vidrift.getVidriftStreams('579974', 'movie'), (e) => !e.titleEmpty);
+    stubFetch([[(u) => u.includes('/embed/movie/'), () => text('<html></html>')]]);
+    await assert.rejects(vidrift.getVidriftStreams('579974', 'movie'), (e) => !e.titleEmpty);
+    stubFetch([[(u) => u.includes('/embed/movie/'), () => text(KRACK_PAGE.replace('"orionStreams":null,', '').replace(',"orionStreams":null', ''))]]);
+    await assert.rejects(vidrift.getVidriftStreams('579974', 'movie'), (e) => /orionStreams missing|no embedMeta/.test(e.message) && !e.titleEmpty);
+});
