@@ -10,6 +10,12 @@ import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.longOrNull
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.CacheControl
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -128,6 +134,15 @@ data class ResolveConfig(
 ) {
     companion object {
         private val json = Json { ignoreUnknownKeys = true; isLenient = true }
+        private val SECTIONS = listOf("mapple", "vaplayer", "netmirror", "castletv", "multimovies")
+
+        /**
+         * A JSON object with at least one known provider section. A 200 such as
+         * `{"error":"x"}` is not a config and must not be cached (review M8).
+         */
+        fun hasConfigShape(text: String): Boolean = runCatching {
+            (json.parseToJsonElement(text) as? JsonObject)?.let { o -> SECTIONS.any { o[it] is JsonObject } } == true
+        }.getOrDefault(false)
 
         /** Defaults overlaid with whatever valid fields `text` carries. Throws only on non-JSON. */
         fun parse(text: String): ResolveConfig {
@@ -236,12 +251,21 @@ data class ResolveConfig(
 }
 
 /**
- * The override config: fetched from the backend, kept in KeyValue with its TTL,
- * defaults when nothing was ever fetched. Order: the VM merged view at [url]
- * (built-in + remote + VM heals), then the static copy at [remoteUrl] (no heals)
- * when the VM fetch fails or the VM breaker is open ([vmUp] false). When both
- * fail the last good copy stays (even if stale) and no fetch is retried for
- * RETRY_MS, so a down backend never adds its timeout to every play.
+ * The override config: fetched from the backend, kept in KeyValue with its TTL
+ * and its source, defaults when nothing was ever fetched. Order: the VM merged
+ * view at [url] (built-in + remote + VM heals), then the static copy at
+ * [remoteUrl] (no heals) when the VM fetch fails or the VM breaker is open
+ * ([vmUp] false).
+ *
+ * Review I1: the remote copy never displaces a cached VM copy (up to
+ * VM_MAX_AGE_MS old); it only fills when there is no VM copy. A remote copy
+ * lives RETRY_MS, so the VM is asked again soon. When every fetch fails the
+ * last good copy stays (even if stale) and no fetch is retried for RETRY_MS,
+ * so a down backend never adds its timeout to every play.
+ *
+ * Review M7: [get] waits at most WAIT_MS for a refresh; past that it returns
+ * the cached (stale) copy or defaults while the refresh finishes in the
+ * background.
  */
 class ResolveConfigStore(
     client: OkHttpClient,
@@ -253,53 +277,70 @@ class ResolveConfigStore(
     private val now: () -> Long = System::currentTimeMillis,
 ) {
     private val http = client.newBuilder().callTimeout(FETCH_TIMEOUT_MS, TimeUnit.MILLISECONDS).build()
-    @Volatile private var mem: Pair<ResolveConfig, Long>? = null
+    private class Copy(val cfg: ResolveConfig, val at: Long, val from: String)
+    @Volatile private var mem: Copy? = null
     @Volatile private var lastAttempt = 0L
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var inflight: Deferred<ResolveConfig>? = null
 
     /** Cached or default config, no network. */
-    fun current(): ResolveConfig = cached()?.first ?: ResolveConfig()
+    fun current(): ResolveConfig = cached()?.cfg ?: ResolveConfig()
 
     suspend fun get(): ResolveConfig {
         val c = cached()
-        if (c != null && now() - c.second < c.first.ttlSec * 1000) return c.first
-        if (now() - lastAttempt < RETRY_MS) return c?.first ?: ResolveConfig()
-        return refresh()
+        if (c != null && now() - c.at < lifeMs(c)) return c.cfg
+        if (now() - lastAttempt < RETRY_MS) return c?.cfg ?: ResolveConfig()
+        val job = synchronized(this) { inflight?.takeIf { it.isActive } ?: scope.async { refresh() }.also { inflight = it } }
+        return withTimeoutOrNull(WAIT_MS) { job.await() } ?: current().also {
+            android.util.Log.i("Chitram", "resolve-config: no answer in ${WAIT_MS}ms; using ${if (cached() != null) "cached" else "defaults"}, refresh continues")
+        }
     }
 
     suspend fun refresh(): ResolveConfig {
         lastAttempt = now()
-        val vm = vmUp()
-        val tries = listOfNotNull(url.takeIf { vm }?.let { "vm" to it }, remoteUrl?.let { "remote" to it })
+        val prev = cached()
         val why = mutableListOf<String>()
-        if (!vm) why += "vm paused"
-        for ((from, u) in tries) {
-            try {
-                val req = Request.Builder().url(u).cacheControl(CacheControl.Builder().noStore().noCache().build()).build()
-                val r = http.fetch(req)
-                if (!r.ok) throw StepException("resolve-config", r.code, "HTTP ${r.code}")
-                // An error page with 200 is not a config: the next url is tried.
-                if (!r.body.trimStart().startsWith("{")) throw StepException("resolve-config", r.code, "not a JSON object")
-                val cfg = ResolveConfig.parse(r.body)
-                val at = now()
-                mem = cfg to at
-                kv.put(KEY, r.body)
-                kv.put(KEY_AT, at.toString())
-                android.util.Log.i("Chitram", "resolve-config: fetched v${cfg.version} from $from")
-                return cfg
-            } catch (e: Exception) {
-                if (e is kotlinx.coroutines.CancellationException) throw e
-                why += "$from ${e.message}"
-            }
+        if (vmUp()) fetchOrNull(url, FROM_VM, why)?.let { return it } else why += "vm paused"
+        if (prev != null && prev.from == FROM_VM && now() - prev.at < VM_MAX_AGE_MS) {
+            android.util.Log.i("Chitram", "resolve-config: vm failed (${why.joinToString("; ")}); keeping cached vm copy (age ${(now() - prev.at) / 1000}s), remote not asked")
+            return prev.cfg
         }
-        android.util.Log.i("Chitram", "resolve-config: fetch failed (${why.joinToString("; ")}); using ${if (cached() != null) "cached" else "defaults"}")
+        remoteUrl?.let { u -> fetchOrNull(u, FROM_REMOTE, why)?.let { return it } }
+        android.util.Log.i("Chitram", "resolve-config: fetch failed (${why.joinToString("; ")}); using ${if (prev != null) "cached" else "defaults"}")
         return current()
     }
 
-    private fun cached(): Pair<ResolveConfig, Long>? {
+    private suspend fun fetchOrNull(u: String, from: String, why: MutableList<String>): ResolveConfig? = try {
+        val req = Request.Builder().url(u).cacheControl(CacheControl.Builder().noStore().noCache().build()).build()
+        val r = http.fetch(req)
+        if (!r.ok) throw StepException("resolve-config", r.code, "HTTP ${r.code}")
+        // An error page or error object with 200 is not a config: the next url is tried.
+        if (!r.body.trimStart().startsWith("{")) throw StepException("resolve-config", r.code, "not a JSON object")
+        if (!ResolveConfig.hasConfigShape(r.body)) throw StepException("resolve-config", r.code, "no provider section")
+        val cfg = ResolveConfig.parse(r.body)
+        val at = now()
+        mem = Copy(cfg, at, from)
+        kv.put(KEY, r.body)
+        kv.put(KEY_AT, at.toString())
+        kv.put(KEY_FROM, from)
+        android.util.Log.i("Chitram", "resolve-config: fetched v${cfg.version} from $from")
+        cfg
+    } catch (e: Exception) {
+        if (e is kotlinx.coroutines.CancellationException) throw e
+        why += "$from ${e.message}"
+        null
+    }
+
+    /** A VM copy lives ttlSec; a remote copy at most RETRY_MS, so the VM is retried soon. */
+    private fun lifeMs(c: Copy): Long = if (c.from == FROM_REMOTE) minOf(c.cfg.ttlSec * 1000, RETRY_MS) else c.cfg.ttlSec * 1000
+
+    private fun cached(): Copy? {
         mem?.let { return it }
         val raw = kv.get(KEY) ?: return null
         val at = kv.get(KEY_AT)?.toLongOrNull() ?: 0L
-        return runCatching { ResolveConfig.parse(raw) }.getOrNull()?.let { (it to at).also { p -> mem = p } }
+        // No source recorded: written by a build that only fetched from the VM.
+        val from = kv.get(KEY_FROM) ?: FROM_VM
+        return runCatching { ResolveConfig.parse(raw) }.getOrNull()?.let { Copy(it, at, from).also { p -> mem = p } }
     }
 
     companion object {
@@ -312,7 +353,14 @@ class ResolveConfigStore(
         const val REMOTE_PATH = "/resolve-config.json"
         const val KEY = "resolve.config"
         const val KEY_AT = "resolve.config.at"
+        const val KEY_FROM = "resolve.config.from"
+        const val FROM_VM = "vm"
+        const val FROM_REMOTE = "remote"
         const val RETRY_MS = 10 * 60 * 1000L
         const val FETCH_TIMEOUT_MS = 4000L
+        /** Longest a play waits for a config refresh before using the cached copy (review M7). */
+        const val WAIT_MS = 4000L
+        /** A VM copy older than this (the ttlSec ceiling, 7 days) may be replaced by the remote copy. */
+        const val VM_MAX_AGE_MS = 7 * 86400 * 1000L
     }
 }

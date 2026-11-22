@@ -201,7 +201,16 @@ class VaplayerResolver(
          * strings, then JSON, then a plain object literal (bare keys quoted,
          * single-quoted strings converted, trailing commas dropped). No code runs.
          */
-        fun parseConfig(html: String): JsonObject? {
+        fun parseConfig(html: String): JsonObject? =
+            // Any Throwable (a deeply nested hostile CONFIG overflows strictJson's
+            // recursion: StackOverflowError is an Error, not an Exception) means
+            // no CONFIG, so the caller keeps the regex-only path (review M5).
+            try { parseConfigOrThrow(html) } catch (t: Throwable) {
+                android.util.Log.i("Chitram", "vaplayer: CONFIG unreadable (${t.javaClass.simpleName}); regex path only")
+                null
+            }
+
+        private fun parseConfigOrThrow(html: String): JsonObject? {
             val m = Regex("""\b(?:const|let|var)\s+CONFIG\s*=\s*\{""").find(html) ?: return null
             val start = m.range.last
             var depth = 0

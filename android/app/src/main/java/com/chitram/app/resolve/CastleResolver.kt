@@ -49,16 +49,18 @@ class CastleResolver(
     /** The key call is the host probe: a cross-origin 3xx is a move to follow, not a page to read. */
     private val probeHttp = http.newBuilder().followRedirects(false).followSslRedirects(false).build()
     private val hosts = hosts ?: HostBook(com.chitram.app.data.MemoryKeyValue())
+    /** Tried after the config hosts, so a config list without it never removes it (review I2). */
+    private val builtIn = listOf(base)
 
-    /** The session on one API host: its base and its security key. */
-    private class Session(val base: String, val sec: String, val suffix: String)
+    /** The session on one API host: its base, its security key and the suffix that decrypts. */
+    private class Session(val base: String, val sec: String, @Volatile var suffix: String)
 
     /** null: Castle has no confident match. Throws when the chain failed. */
     suspend fun resolve(type: String, title: String, year: Int?, season: Int, episode: Int, preferred: String, alternates: List<String> = emptyList()): Resolved? {
         if (title.isBlank()) return null
         val series = type == "tv" || type == "series"
         val cfg = config()
-        val (base, key) = hosts.heal(NAME, cfg.bases) { b -> keyProbe(b) }
+        val (base, key) = hosts.heal(NAME, cfg.bases, builtIn) { b -> keyProbe(b) }
         val sec = Session(base, key, cfg.keySuffix)
         // Year guard for films only: a series row can carry a later season's date.
         val guardYear = if (series) null else year
@@ -153,11 +155,11 @@ class CastleResolver(
 
     private suspend fun search(sec: Session, keyword: String): String {
         val q = "channel=$CHANNEL&clientType=$CLIENT&keyword=${enc(keyword)}&lang=$LANG&mode=1&packageName=$PKG&page=1&size=30"
-        return decrypt(cipher(req(sec.base, "${sec.base}/film-api/v1.1.0/movie/searchByKeyword?$q").build(), "search"), sec.sec, sec.suffix)
+        return open(sec, cipher(req(sec.base, "${sec.base}/film-api/v1.1.0/movie/searchByKeyword?$q").build(), "search"))
     }
 
     private suspend fun details(sec: Session, id: String): String =
-        decrypt(cipher(req(sec.base, "${sec.base}/film-api/v1.9.9/movie?channel=$CHANNEL&clientType=$CLIENT&lang=$LANG&movieId=$id&packageName=$PKG").build(), "details"), sec.sec, sec.suffix)
+        open(sec, cipher(req(sec.base, "${sec.base}/film-api/v1.9.9/movie?channel=$CHANNEL&clientType=$CLIENT&lang=$LANG&movieId=$id&packageName=$PKG").build(), "details"))
 
     private suspend fun video(sec: Session, movieId: String, episodeId: String, languageId: String?, resolution: Int): JsonObject {
         val body = buildJsonObject {
@@ -168,8 +170,29 @@ class CastleResolver(
             put("isNewUser", "true"); put("resolution", resolution.toString()); put("packageName", PKG)
         }.toString().toRequestBody("application/json".toMediaType())
         val url = "${sec.base}/film-api/v2.0.1/movie/getVideo2?clientType=$CLIENT&packageName=$PKG&channel=$CHANNEL&lang=$LANG"
-        return unwrap(parse(decrypt(cipher(req(sec.base, url).post(body).build(), "video"), sec.sec, sec.suffix)))
+        return unwrap(parse(open(sec, cipher(req(sec.base, url).post(body).build(), "video"))))
     }
+
+    /**
+     * Decrypts with the session suffix. When a config suffix fails (bad padding or
+     * a non-JSON plaintext), the built-in [KEY_SUFFIX] is tried once; if it works
+     * the session keeps it. Otherwise the first failure stands (review I2).
+     */
+    private fun open(sec: Session, cipherText: String): String {
+        val suffix = sec.suffix
+        val first = runCatching { decrypt(cipherText, sec.sec, suffix) }
+        if (suffix == KEY_SUFFIX) return first.getOrThrow()
+        first.getOrNull()?.takeIf(::looksJson)?.let { return it }
+        val retry = runCatching { decrypt(cipherText, sec.sec, KEY_SUFFIX) }.getOrNull()?.takeIf(::looksJson)
+        if (retry != null) {
+            log("config keySuffix does not decrypt; built-in suffix does, using it")
+            sec.suffix = KEY_SUFFIX
+            return retry
+        }
+        return first.getOrThrow()
+    }
+
+    private fun looksJson(s: String) = s.trimStart().let { it.startsWith("{") || it.startsWith("[") }
 
     /** `year` from publishTime (epoch ms, UTC); null when absent. */
     data class Row(val id: String, val title: String, val year: Int? = null)

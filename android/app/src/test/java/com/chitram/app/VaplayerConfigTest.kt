@@ -88,4 +88,14 @@ class VaplayerConfigTest {
         assertNull(VaplayerResolver.parseConfig("const CONFIG = {unclosed: 1"))
         assertNull(VaplayerResolver.parseConfig("no config here"))
     }
+
+    /** Review M5: a hostile, deeply nested CONFIG must not throw (StackOverflowError is an Error). */
+    @Test fun deeplyNestedConfigFallsBackToRegexPath() = runBlocking {
+        val n = 200_000
+        val nested = "{\"a\":".repeat(n) + "1" + "}".repeat(n)
+        val page = """<script>var x = {"apiToken":"TOK9"}; const CONFIG = $nested;</script>"""
+        assertNull(VaplayerResolver.parseConfig(page))
+        assertNull(run(page))
+        assertTrue(apiCall(), apiCall().endsWith("api_token=TOK9"))
+    }
 }

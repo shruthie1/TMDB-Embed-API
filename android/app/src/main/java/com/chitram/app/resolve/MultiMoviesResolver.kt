@@ -39,6 +39,8 @@ class MultiMoviesResolver(
     private val config: () -> MultiMoviesConfig = { MultiMoviesConfig(bases = listOf(origin)) },
 ) {
     private val hosts = hosts ?: HostBook(com.chitram.app.data.MemoryKeyValue())
+    /** Tried after the config hosts, so a config list without it never removes it (review I2). */
+    private val builtIn = listOf(origin)
 
     /**
      * 8 s connect (review I1): covers the measured 7.6 s connect to a live
@@ -72,17 +74,23 @@ class MultiMoviesResolver(
         val t0 = System.currentTimeMillis()
         val cfg = config()
         fun left() = if (budgetMs == Long.MAX_VALUE) Long.MAX_VALUE else budgetMs - (System.currentTimeMillis() - t0)
-        // Host probe = the resolve itself (no extra request): a host is Dead only
-        // when no ask got a 2xx JSON answer. A 2xx with no source, or masters with
-        // no audio rendition, is the title, not the host: asking the next host
-        // would double the calls VidBolt rate-limits (429 after ~16 in 15 s).
-        // A 429 means the host is alive: kept, and the error goes to the caller.
-        val (_, out) = hosts.heal(NAME, cfg.bases) { base ->
+        // Host probe = the resolve itself (no extra request). The host moves only
+        // when it is dead (review I3): refused/reset, DNS failure, a 2xx that is not
+        // JSON (parked page) or a 5xx on the plain resolve. A timeout, 403 or 429
+        // fails the call and keeps the host. A 2xx with no source is the title, not
+        // the host: the next host is not asked (VidBolt 429s after ~16 calls in 15 s)
+        // and the 7-day pin is not refreshed.
+        val (_, out) = hosts.heal(NAME, cfg.bases, builtIn) { base ->
             if (left() <= BUDGET_MARGIN_MS) return@heal HostBook.Probe.Dead(StepException("multimovies resolve", 0, "budget spent before $base"))
             try {
-                HostBook.Probe.Ok(Result.success(resolveAt(base, cfg.resolvePath, type, tmdbId, season, episode, originalLang, left())))
+                val rows = resolveAt(base, cfg.resolvePath, type, tmdbId, season, episode, originalLang, left())
+                HostBook.Probe.Ok(Result.success(rows), remember = rows.isNotEmpty() || hosts.healed(NAME) != base)
+            } catch (x: HostDown) {
+                android.util.Log.i("Chitram", "[multimovies] host $base dead (${x.error.message}): next host")
+                HostBook.Probe.Dead(x.error)
             } catch (x: StepException) {
-                if (x.code == 429) HostBook.Probe.Ok(Result.failure(x)) else HostBook.Probe.Dead(x)
+                android.util.Log.i("Chitram", "[multimovies] host $base kept (code ${x.code}): call failed, host not moved")
+                HostBook.Probe.Ok(Result.failure(x), remember = false)
             }
         }
         return out.getOrThrow()
@@ -122,7 +130,7 @@ class MultiMoviesResolver(
                     withTimeoutOrNull(step) {
                         val r = http.fetch(Request.Builder().url(url).header("User-Agent", UA).header("Referer", referer).build())
                         if (!r.ok) return@withTimeoutOrNull Answer(label, code = r.code)
-                        val body = MappleResolver.obj(r.body) ?: return@withTimeoutOrNull Answer(label, code = r.code, error = "not JSON")
+                        val body = MappleResolver.obj(r.body) ?: return@withTimeoutOrNull Answer(label, code = r.code, error = NOT_JSON)
                         val stream = body["stream"] as? JsonObject
                         val sources = (stream?.get("sources") as? JsonArray).orEmpty()
                             .mapNotNull { it as? JsonObject }
@@ -132,7 +140,8 @@ class MultiMoviesResolver(
                     } ?: Answer(label, timedOut = true)
                 } catch (x: Exception) {
                     if (x is kotlinx.coroutines.CancellationException) throw x
-                    Answer(label, error = x.message ?: x.javaClass.simpleName)
+                    // Refused, reset, DNS: the host is gone. A socket/call timeout is not.
+                    Answer(label, error = x.message ?: x.javaClass.simpleName, dead = x !is java.io.InterruptedIOException)
                 }
                 events.trySend(a)
             }
@@ -253,7 +262,9 @@ class MultiMoviesResolver(
                 android.util.Log.i("Chitram", "[multimovies] no hls source for $tmdbId")
                 return@coroutineScope emptyList()
             }
-            throw StepException("multimovies resolve", def?.code ?: 0, summary)
+            val err = StepException("multimovies resolve", def?.code ?: 0, summary)
+            val dead = def != null && !def.ok && !def.timedOut && (def.dead || def.code >= 500 || def.error == NOT_JSON)
+            throw if (dead) HostDown(err) else err
         }
 
         val done = masters.mapValues { it.value.await() }
@@ -272,8 +283,12 @@ class MultiMoviesResolver(
         val error: String? = null,
         val server: String? = null,
         val sources: List<Pair<String, String?>> = emptyList(),
+        /** The fetch threw a non-timeout error (refused, reset, DNS). */
+        val dead: Boolean = false,
     )
     private class EmbedIds(val ids: List<String>?)
+    /** The plain resolve says the host itself is gone: [HostBook] tries the next host. */
+    private class HostDown(val error: StepException) : Exception(error.message)
 
     companion object {
         const val ORIGIN = "https://vidbolt.xyz"
@@ -289,6 +304,7 @@ class MultiMoviesResolver(
         /** After an HTTP 429 from VidBolt, only the plain resolve runs for this long (about 16 calls in ~15 s gave 429, 2026-11-21). */
         const val THROTTLE_COOLDOWN_MS = 60_000L
         private const val DEFAULT = "default"
+        private const val NOT_JSON = "not JSON"
         /** vidbolt.xyz/movie/579974 embed page "servers", 2026-11-21. */
         val FALLBACK_SERVERS = listOf("orion", "callisto", "luna", "vega", "quantum", "quasar")
         const val SERVER_LIST_TTL_MS = 6 * 60 * 60 * 1000L

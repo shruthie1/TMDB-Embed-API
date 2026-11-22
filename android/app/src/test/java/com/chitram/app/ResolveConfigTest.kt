@@ -30,14 +30,17 @@ class ResolveConfigTest {
     private var remoteCode = 200
     private var remoteBody = """{"version":2,"ttlSec":3600,"castletv":{"bases":["https://remote.castle"]}}"""
 
+    private var vmDelayMs = 0L
+    private var remoteDelayMs = 0L
+
     init {
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
                 val p = request.path!!
                 seen += p
                 return when (p) {
-                    "/api/resolve-config" -> MockResponse().setResponseCode(vmCode).setBody(vmBody)
-                    "/resolve-config.json" -> MockResponse().setResponseCode(remoteCode).setBody(remoteBody)
+                    "/api/resolve-config" -> MockResponse().setResponseCode(vmCode).setBody(vmBody).setHeadersDelay(vmDelayMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+                    "/resolve-config.json" -> MockResponse().setResponseCode(remoteCode).setBody(remoteBody).setHeadersDelay(remoteDelayMs, java.util.concurrent.TimeUnit.MILLISECONDS)
                     else -> MockResponse().setResponseCode(404)
                 }
             }
@@ -127,5 +130,69 @@ class ResolveConfigTest {
         val cfg = ResolveConfig.parse(f.readText())
         assertEquals(CastleResolver.BASE, cfg.castletv.bases.first())
         assertEquals(MultiMoviesResolver.ORIGIN, cfg.multimovies.bases.first())
+    }
+    // ---- review fixes (review-apk-10-12.md) ---------------------------------
+
+    /** I1: a VM blip at refresh time keeps the cached VM copy (VM heals); the remote copy does not replace it. */
+    @Test fun vmCopyKeptWhenVmFailsAndRemoteAnswers() = runBlocking {
+        val kv = MemoryKeyValue()
+        val s = store(kv)
+        assertEquals(listOf("https://vm.castle"), s.refresh().castletv.bases)
+        clock += 3601_000 // the VM copy's ttlSec (3600) is spent
+        vmCode = 500
+        seen.clear()
+        assertEquals(listOf("https://vm.castle"), s.get().castletv.bases)
+        assertTrue(seen.toString(), "/resolve-config.json" !in seen)
+        // An app restart still reads the VM copy.
+        assertEquals(listOf("https://vm.castle"), store(kv).current().castletv.bases)
+    }
+
+    /** I1: the remote copy only fills a gap; the VM is asked again after RETRY_MS, not after ttlSec. */
+    @Test fun remoteCopyRetriesVmAfterRetryWindow() = runBlocking {
+        vmCode = 500
+        val kv = MemoryKeyValue()
+        val s = store(kv)
+        assertEquals(listOf("https://remote.castle"), s.refresh().castletv.bases)
+        vmCode = 200
+        clock += ResolveConfigStore.RETRY_MS + 1 // well inside ttlSec 3600
+        assertEquals(listOf("https://vm.castle"), s.get().castletv.bases)
+        // The source survives a restart: a remote copy in KeyValue is short-lived there too.
+        vmCode = 500
+        val kv2 = MemoryKeyValue()
+        assertEquals(listOf("https://remote.castle"), store(kv2).refresh().castletv.bases)
+        vmCode = 200
+        clock += ResolveConfigStore.RETRY_MS + 1
+        assertEquals(listOf("https://vm.castle"), store(kv2).get().castletv.bases)
+    }
+
+    /** M8: a 200 JSON object with no known provider section is a failed fetch, never cached. */
+    @Test fun jsonWithoutConfigShapeIsAFailure() = runBlocking {
+        vmBody = """{"error":"x"}"""
+        remoteBody = """{"ok":false}"""
+        val kv = MemoryKeyValue()
+        assertEquals(ResolveConfig(), store(kv).refresh())
+        assertEquals(null, kv.get(ResolveConfigStore.KEY))
+        // With a good copy cached, the error object does not replace it.
+        vmBody = """{"version":1,"ttlSec":3600,"castletv":{"bases":["https://vm.castle"]}}"""
+        val s = store(kv)
+        assertEquals(listOf("https://vm.castle"), s.refresh().castletv.bases)
+        vmBody = """{"error":"x"}"""
+        assertEquals(listOf("https://vm.castle"), s.refresh().castletv.bases)
+        assertTrue(kv.get(ResolveConfigStore.KEY)!!.contains("vm.castle"))
+    }
+
+    /** M7: an expired copy and a hanging VM + remote: get() returns the stale copy within 4 s, not 8 s. */
+    @Test fun expiredCopyServedWithinFourSeconds() = runBlocking {
+        vmCode = 500
+        val kv = MemoryKeyValue()
+        val s = store(kv)
+        assertEquals(listOf("https://remote.castle"), s.refresh().castletv.bases)
+        vmCode = 200; vmDelayMs = 6000; remoteDelayMs = 6000
+        clock += 3601_000
+        val t0 = System.currentTimeMillis()
+        val got = s.get()
+        val took = System.currentTimeMillis() - t0
+        assertEquals(listOf("https://remote.castle"), got.castletv.bases)
+        assertTrue("took ${took}ms", took < 4600)
     }
 }

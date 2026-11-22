@@ -17,8 +17,12 @@ class HostBook(private val kv: KeyValue, private val now: () -> Long = System::c
         return base.takeIf { it.startsWith("http") && now() - at < TTL_MS }
     }
 
-    fun candidates(name: String, configured: List<String>): List<String> =
-        (listOfNotNull(healed(name)) + configured).map { it.trimEnd('/') }.distinct()
+    /**
+     * Healed host, then [configured], then [builtIn] last (deduped): a config list
+     * that drops the built-in host never removes it (review I2).
+     */
+    fun candidates(name: String, configured: List<String>, builtIn: List<String> = emptyList()): List<String> =
+        (listOfNotNull(healed(name)) + configured + builtIn).map { it.trimEnd('/') }.distinct()
 
     /** The first configured host is the default: remembering it means forgetting any heal. */
     fun remember(name: String, base: String, configured: List<String>) {
@@ -27,19 +31,24 @@ class HostBook(private val kv: KeyValue, private val now: () -> Long = System::c
     }
 
     sealed interface Probe<out T> {
-        data class Ok<T>(val value: T) : Probe<T>
+        /**
+         * The host answered. [remember] false: use it for this call but do not
+         * (re)pin it, for an answer that says nothing about the host's health
+         * (no sources, rate limit). Review I3.
+         */
+        data class Ok<T>(val value: T, val remember: Boolean = true) : Probe<T>
         /** The host answered with a redirect to another origin: try that origin too. */
         data class Moved(val origin: String) : Probe<Nothing>
         data class Dead(val error: Exception) : Probe<Nothing>
     }
 
     /**
-     * Tries candidates in order (healed, configured, then redirect targets found
+     * Tries candidates in order (healed, configured, built-in, then redirect targets found
      * on the way, at most [MAX_EXTRA]). Returns the base that worked and its
      * value; throws the last error when none did.
      */
-    suspend fun <T> heal(name: String, configured: List<String>, probe: suspend (String) -> Probe<T>): Pair<String, T> {
-        val queue = ArrayDeque(candidates(name, configured))
+    suspend fun <T> heal(name: String, configured: List<String>, builtIn: List<String> = emptyList(), probe: suspend (String) -> Probe<T>): Pair<String, T> {
+        val queue = ArrayDeque(candidates(name, configured, builtIn))
         val seen = queue.toMutableSet()
         var extra = 0
         var last: Exception = StepException(name, 0, "no candidate host")
@@ -51,7 +60,7 @@ class HostBook(private val kv: KeyValue, private val now: () -> Long = System::c
             }
             when (r) {
                 is Probe.Ok -> {
-                    remember(name, base, configured)
+                    if (r.remember) remember(name, base, configured)
                     if (base != configured.firstOrNull()?.trimEnd('/')) android.util.Log.i("Chitram", "heal: $name using $base")
                     return base to r.value
                 }

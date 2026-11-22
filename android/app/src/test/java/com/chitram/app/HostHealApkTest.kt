@@ -201,4 +201,90 @@ class HostHealApkTest {
         assertTrue(err is com.chitram.app.resolve.StepException && err.code == 429)
         assertEquals(0, b.requestCount)
     }
+    // ---- review fixes (review-apk-10-12.md) ---------------------------------
+
+    /** I2: a config host list that drops the built-in host still ends with the built-in host. */
+    @Test fun castleConfigWithoutBuiltInHostFallsBackToBuiltIn() = runBlocking {
+        val seenB = CopyOnWriteArrayList<String>()
+        castleApi(b, seenB)
+        // [base] stands for the built-in api.hlowb.com (a test must not reach the real one).
+        val c = CastleResolver(OkHttpClient(), baseB, hosts = hosts, config = { CastleConfig(bases = listOf(dead)) })
+        assertNull(c.resolve("movie", "Mirai", 2025, 0, 0, "Telugu"))
+        assertTrue(seenB.toString(), seenB.any { it.startsWith("/film-api/v1.1.0/movie/searchByKeyword") })
+    }
+
+    /**
+     * I2: a typo in the config keySuffix: the decrypt is retried once with the built-in suffix.
+     * The test key is 15 bytes, so only the suffix's first character reaches the AES key.
+     */
+    @Test fun castleBadConfigSuffixRetriesBuiltInSuffix() = runBlocking {
+        val seen = CopyOnWriteArrayList<String>()
+        castleApi(a, seen, suffix = CastleResolver.KEY_SUFFIX)
+        val c = CastleResolver(OkHttpClient(), baseA, hosts = hosts, config = { CastleConfig(bases = listOf(baseA), keySuffix = "X!BgJB") })
+        assertNull(c.resolve("movie", "Mirai", 2025, 0, 0, "Telugu"))
+        assertTrue(seen.toString(), seen.any { it.startsWith("/film-api/v1.1.0/movie/searchByKeyword") })
+    }
+
+    @Test fun multiMoviesConfigWithoutBuiltInHostFallsBackToBuiltIn() = runBlocking {
+        val seenB = CopyOnWriteArrayList<RecordedRequest>()
+        vidbolt(b, baseB, seenB)
+        val m = MultiMoviesResolver(OkHttpClient(), baseB, hosts = hosts, config = { MultiMoviesConfig(bases = listOf(dead)) })
+        assertEquals(1, m.resolveAll("movie", 579974, 0, 0).size)
+    }
+
+    @Test fun hostBookAppendsBuiltInLastDeduped() {
+        assertEquals(listOf("https://x", "https://y", "https://b"), hosts.candidates("n", listOf("https://x", "https://y/"), listOf("https://b", "https://y")))
+    }
+
+    /** I3: a 403 (Cloudflare on this IP) fails the call and keeps the host, like 429. */
+    @Test fun multiMovies403KeepsTheHostAndThrows() = runBlocking {
+        a.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest) = MockResponse().setResponseCode(403).setBody("<html>cf</html>")
+        }
+        val m = MultiMoviesResolver(OkHttpClient(), baseA, hosts = hosts, config = { MultiMoviesConfig(bases = listOf(baseA, baseB)) })
+        val err = runCatching { m.resolveAll("movie", 1, 0, 0) }.exceptionOrNull()
+        assertTrue("$err", err is com.chitram.app.resolve.StepException && err.code == 403)
+        assertEquals(0, b.requestCount)
+        assertNull(hosts.healed(MultiMoviesResolver.NAME))
+    }
+
+    /** I3: a timeout at the step cap fails the call and keeps the host. */
+    @Test fun multiMoviesTimeoutKeepsTheHostAndThrows() = runBlocking {
+        a.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest) =
+                MockResponse().setBody("{}").setHeadersDelay(MultiMoviesResolver.RESOLVE_STEP_MS + 2000, java.util.concurrent.TimeUnit.MILLISECONDS)
+        }
+        val m = MultiMoviesResolver(OkHttpClient(), baseA, hosts = hosts, config = { MultiMoviesConfig(bases = listOf(baseA, baseB)) })
+        assertTrue(runCatching { m.resolveAll("movie", 1, 0, 0) }.isFailure)
+        assertEquals(0, b.requestCount)
+        assertNull(hosts.healed(MultiMoviesResolver.NAME))
+    }
+
+    /** I3: a 5xx on the host still moves to the next host. */
+    @Test fun multiMovies5xxMovesTheHost() = runBlocking {
+        a.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest) = MockResponse().setResponseCode(503)
+        }
+        val seenB = CopyOnWriteArrayList<RecordedRequest>()
+        vidbolt(b, baseB, seenB)
+        val m = MultiMoviesResolver(OkHttpClient(), baseA, hosts = hosts, config = { MultiMoviesConfig(bases = listOf(baseA, baseB)) })
+        assertEquals(1, m.resolveAll("movie", 579974, 0, 0).size)
+        assertEquals(baseB, hosts.healed(MultiMoviesResolver.NAME))
+    }
+
+    /** I3: a 2xx with no sources (or a 429) on the pinned host does not refresh the 7-day pin. */
+    @Test fun multiMoviesEmptyAnswerDoesNotRefreshThePin() = runBlocking {
+        var clock = 0L
+        val book = HostBook(kv) { clock }
+        book.remember(MultiMoviesResolver.NAME, baseB, listOf(baseA, baseB))
+        b.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest) = MockResponse().setBody("""{"stream":null}""")
+        }
+        clock = HostBook.TTL_MS - 60_000
+        val m = MultiMoviesResolver(OkHttpClient(), baseA, hosts = book, config = { MultiMoviesConfig(bases = listOf(baseA, baseB)) })
+        assertTrue(m.resolveAll("movie", 1, 0, 0).isEmpty())
+        assertEquals(0, a.requestCount)
+        clock = HostBook.TTL_MS + 1
+        assertNull(book.healed(MultiMoviesResolver.NAME))
+    }
 }
