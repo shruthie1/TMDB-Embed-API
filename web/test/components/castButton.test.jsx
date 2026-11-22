@@ -62,10 +62,11 @@ describe('Cast button', () => {
     await findByText(/Web Video Caster is not installed/);
   });
 
-  it('tells the viewer to pick Web Video Caster in the Chrome chooser', async () => {
+  it('shows no "Chrome asks" hint next to the intent link (owner 2026-11-22)', async () => {
     const prepare = vi.fn(async () => ({ href: 'intent://h#Intent;end' }));
-    const { getByLabelText, findByText } = setup({ cast: { prepare } });
+    const { getByLabelText, findByText, queryByText } = setup({ cast: { prepare } });
     fireEvent.click(getByLabelText('Cast to TV'));
-    await findByText(/pick Web Video Caster/);
+    await findByText(/Open Web Video Caster/);
+    expect(queryByText(/Chrome asks/)).toBeNull();
   });
 });

@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { listSubtitles, loadTrack, getSubPrefs, setSubPrefs } from '../subtitles';
 import { abortReason } from '../abortReason';
+import { getSubsOff, setSubsOff } from './subsOff';
 
 /**
  * Owns caption state: the available tracks, the chosen one, its blob url and
@@ -151,11 +152,19 @@ export function useSubtitles({ imdbId, season = 0, episode = 0, runtimeMin = 0, 
     // but not a change of title, whose tracks the viewer has never seen.
     if (touched.current && !stale) return;
     if (stale) touched.current = false;
+    // A client-wide "off" (any title, any player) beats auto-pick. Only an
+    // explicit pick of a track clears it - see subsOff.js.
+    if (getSubsOff()) {
+      try { console.debug(`[subs] off by viewer, skipped auto ${imdbId}${episode ? ` S${season}E${episode}` : ''}`); } catch { /* no console */ }
+      if (stale) setCurrentSub(null);
+      return;
+    }
     setCurrentSub(subs[0].id);
-  }, [subs, currentSub]);
+  }, [subs, currentSub]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const chooseSub = useCallback((id) => {
     touched.current = true;
+    setSubsOff(!id);
     setCurrentSub(id);
   }, []);
 

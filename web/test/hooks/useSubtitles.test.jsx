@@ -34,7 +34,7 @@ function harness(props = { imdbId: 'tt1' }) {
   return new Proxy({}, { get: (_t, k) => latest[k] });
 }
 
-beforeEach(() => { listed.tracks = []; listed.throws = false; loaded.calls = []; loaded.failUrls = []; loaded.hold = null; revoked.length = 0; });
+beforeEach(() => { localStorage.clear(); listed.tracks = []; listed.throws = false; loaded.calls = []; loaded.failUrls = []; loaded.hold = null; revoked.length = 0; });
 
 describe('useSubtitles', () => {
   it('lists the tracks for a title', async () => {

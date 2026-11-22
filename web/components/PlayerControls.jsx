@@ -222,7 +222,6 @@ function CastButton({ prepare }) {
           Open Web Video Caster{st.audio?.name ? ` (${st.audio.name})` : ''}
         </a>
       )}
-      {st.phase === 'ready' && st.href.startsWith('intent:') && <span style={note}>Chrome asks: pick Web Video Caster</span>}
       {st.phase === 'missing' && (
         <span style={note} role="status">Web Video Caster is not installed. Install it, then tap Cast again.</span>
       )}
