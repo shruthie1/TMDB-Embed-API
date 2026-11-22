@@ -1,5 +1,7 @@
 package com.chitram.app.data
 
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+
 /**
  * Kotlin port of web/lib/backend.js (toSource, sourceHeight, rankSources and the
  * remembered-provider reorder in resolveLive) and web/lib/player/trackChoices.js.
@@ -340,19 +342,35 @@ object Ranking {
         )
 
     /**
+     * Gap 9.10: rows from two or more providers, each labelled Telugu, on the same
+     * master (host + path, query dropped). One of them may be a mislabelled dub.
+     * Only a log line for review (`[lang] shared-telugu-master <host/path>
+     * providers=A,B`): no tag is changed without evidence.
+     */
+    fun sharedTeluguMasters(rows: List<Source>): List<String> =
+        rows.filter { r -> r.languages.any { sameLanguage(it, "Telugu") } }
+            .groupBy { r -> r.url.toHttpUrlOrNull()?.let { "${it.host}${it.encodedPath}" } ?: r.url.substringBefore('?') }
+            .mapNotNull { (master, rs) ->
+                val providers = rs.map { it.provider }.distinctBy { it.lowercase() }
+                if (providers.size < 2) null else "[lang] shared-telugu-master $master providers=${providers.joinToString(",")}"
+            }
+
+    /**
      * Honour the remembered provider by ORDER, never over the viewer's language
      * (A8): rows in the preferred language (tier 0-2) stay ahead of the rest.
      * Inside each part the best selectable-audio row stays first, then the
      * pinned provider's rows, then the others; unsupported last.
-     * `manual`: the viewer picked that provider by hand, so it leads outright.
+     * `manual`: the viewer picked that provider by hand, so it leads its part,
+     * ahead of the best selectable-audio row. Gap 8.5 (owner rule "language still
+     * wins"): a manual pick in another language never leads a row in the viewer's.
      */
     fun applyPin(sources: List<Source>, provider: String?, preferred: String = "Telugu", manual: Boolean = false): List<Source> {
         if (provider.isNullOrEmpty()) return sources
         val wanted = { s: Source -> s.provider.equals(provider, ignoreCase = true) }
         val ok = sources.filter { !it.unsupported }
         val last = sources.filter { it.unsupported }
-        if (manual) return ok.filter(wanted) + ok.filterNot(wanted) + last
         fun part(rows: List<Source>): List<Source> {
+            if (manual) return rows.filter(wanted) + rows.filterNot(wanted)
             val best = rows.firstOrNull { it.selectableAudio }
             return listOfNotNull(best) + rows.filter { wanted(it) && it !== best } + rows.filter { !wanted(it) && it !== best }
         }

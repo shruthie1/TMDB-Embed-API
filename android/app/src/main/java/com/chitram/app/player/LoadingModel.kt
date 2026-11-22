@@ -50,6 +50,10 @@ object LoadingModel {
      * "slow" on almost every switch while the server was fine.
      */
     object Copy {
+        /** Failure card: every source was tried and none played. */
+        const val COULDNT_PLAY = "Couldn't play this title"
+        /** Failure card: the title has no source at all. */
+        const val NO_SOURCES = "No sources found yet"
         /** A server switch the viewer asked for is in flight. */
         const val SWITCHING_SERVER = "Switching server…"
         /** The source list is still on its way. */
@@ -140,7 +144,14 @@ object LoadingModel {
         val showTryAgain: Boolean,
         val rows: List<Row>,
         val footer: String,
+        /** Failure card: "Refresh sources" (primary; TV focus starts there) and Back. */
+        val showRefresh: Boolean = false,
     )
+
+    enum class Focus { DETAILS, REFRESH }
+
+    /** Where TV focus starts: Refresh sources on the failure card, Details while loading. */
+    fun tvFocus(v: View): Focus = if (v.showRefresh) Focus.REFRESH else Focus.DETAILS
 
     data class RetryPlan(val refresh: Boolean, val keepDevice: Boolean)
 
@@ -227,7 +238,9 @@ object LoadingModel {
         if (i.failed) {
             val distinct = triedAttempts.map { it.id }.distinct().size
             val detail = if (distinct > 0) "We tried $distinct sources. None of them played." else i.failMessage.ifEmpty { "No playable source found." }
-            return View(Phase.FAILED, "Couldn't start ${i.title}", detail, showChooser = false, showTryAgain = true, rows = rows, footer = footer)
+            // Every source failed: "Couldn't play this title". None at all: "No sources found yet".
+            val headline = if (distinct == 0 && list.isNullOrEmpty()) Copy.NO_SOURCES else Copy.COULDNT_PLAY
+            return View(Phase.FAILED, headline, detail, showChooser = false, showTryAgain = false, rows = rows, footer = footer, showRefresh = true)
         }
         val chooser = list != null && !i.framed && t >= LOADING_CHOOSER_MS
         val cur = i.attempts.lastOrNull()

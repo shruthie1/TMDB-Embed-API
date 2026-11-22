@@ -67,9 +67,14 @@ class MultiMoviesResolver(
      * [masterTimeoutMs] and by what is left of [budgetMs]; a dead or slow one
      * drops only its row. Rows keep ask order (plain first, then servers),
      * one per master ([masterKey]). Each source's own `language` labels a lone
-     * generic rendition. `originalLang`: the title's TMDB original language,
-     * for an "Original" source. Throws when no ask got a 2xx answer.
+     * generic rendition; "Original" labels nothing. Each sacdn source's
+     * index.mpd audio `lang` then decides Telugu and corrects tam/kan/hin/mal
+     * ([mpdLanguagePlan]); when an MPD fails the title falls back to "last
+     * listed Telugu wins" ([teluguClaimWinner]).
+     * `originalLang` is accepted for the caller and not used: "Original" is
+     * never the TMDB language (server twin, 2026-11-22). Throws when no ask got a 2xx answer.
      */
+    @Suppress("UNUSED_PARAMETER")
     suspend fun resolveAll(type: String, tmdbId: Long, season: Int, episode: Int, originalLang: String? = null, budgetMs: Long = Long.MAX_VALUE): List<Resolved> {
         val t0 = System.currentTimeMillis()
         val cfg = config()
@@ -83,7 +88,7 @@ class MultiMoviesResolver(
         val (_, out) = hosts.heal(NAME, cfg.bases, builtIn) { base ->
             if (left() <= BUDGET_MARGIN_MS) return@heal HostBook.Probe.Dead(StepException("multimovies resolve", 0, "budget spent before $base"))
             try {
-                val rows = resolveAt(base, cfg.resolvePath, type, tmdbId, season, episode, originalLang, left())
+                val rows = resolveAt(base, cfg.resolvePath, type, tmdbId, season, episode, left())
                 HostBook.Probe.Ok(Result.success(rows), remember = rows.isNotEmpty() || hosts.healed(NAME) != base)
             } catch (x: HostDown) {
                 android.util.Log.i("Chitram", "[multimovies] host $base dead (${x.error.message}): next host")
@@ -96,7 +101,7 @@ class MultiMoviesResolver(
         return out.getOrThrow()
     }
 
-    private suspend fun resolveAt(origin: String, resolvePath: String, type: String, tmdbId: Long, season: Int, episode: Int, originalLang: String?, budgetMs: Long): List<Resolved> = coroutineScope {
+    private suspend fun resolveAt(origin: String, resolvePath: String, type: String, tmdbId: Long, season: Int, episode: Int, budgetMs: Long): List<Resolved> = coroutineScope {
         val t0 = System.currentTimeMillis()
         val tv = type == "tv" || type == "series"
         val s = season.coerceAtLeast(1)
@@ -117,7 +122,8 @@ class MultiMoviesResolver(
 
         val events = Channel<Any>(Channel.UNLIMITED)
         val askJobs = mutableListOf<kotlinx.coroutines.Job>()
-        val answers = HashMap<String, Answer>()
+        // Arrival order: teluguClaimWinner reads the first answer that lists two Telugu sources.
+        val answers = LinkedHashMap<String, Answer>()
         val masters = LinkedHashMap<String, kotlinx.coroutines.Deferred<Resolved?>>()
         var pending = 0
 
@@ -147,8 +153,30 @@ class MultiMoviesResolver(
             }
         }
 
-        // Every source VidBolt listed this call (raw language), complete once the ask phase ends.
-        val listedLanguages = kotlinx.coroutines.CompletableDeferred<List<String?>>()
+        // Each answer's sources (url, raw language) in arrival order, complete once the ask phase ends.
+        val listedSources = kotlinx.coroutines.CompletableDeferred<List<List<Pair<String, String?>>>>()
+        // index.mpd per sacdn source, started as its answer lands (server twin fetchMpd).
+        val mpds = LinkedHashMap<String, kotlinx.coroutines.Deferred<MpdResult>>()
+        // The title's language plan, complete after the ask phase plus at most MPD_TIMEOUT_MS.
+        val langPlan = kotlinx.coroutines.CompletableDeferred<LangPlan>()
+
+        fun mpdFetch(mpdUrl: String) = async {
+            val cap = minOf(MPD_TIMEOUT_MS, left())
+            if (cap <= 0) return@async MpdResult(false, error = "budget spent")
+            try {
+                withTimeoutOrNull(cap) {
+                    val r = http.fetch(Request.Builder().url(mpdUrl).apply { headers.forEach { (k, v) -> header(k, v) } }.build())
+                    when {
+                        !r.ok -> MpdResult(false, error = "HTTP ${r.code}")
+                        !r.body.contains("<MPD") -> MpdResult(false, error = "not an MPD")
+                        else -> MpdResult(true, lang = mpdAudioLang(r.body))
+                    }
+                } ?: MpdResult(false, error = "no answer in ${MPD_TIMEOUT_MS}ms")
+            } catch (x: Exception) {
+                if (x is kotlinx.coroutines.CancellationException) throw x
+                MpdResult(false, error = x.message ?: x.javaClass.simpleName)
+            }
+        }
 
         fun master(url: String, raw: String?) = async {
             val cap = minOf(masterTimeoutMs, left())
@@ -163,15 +191,11 @@ class MultiMoviesResolver(
                 }
             }
             if (m == null || m.levels.isEmpty()) return@async null
-            // "Original" names the TMDB language only when no other source names it
-            // (server originalLanguageFor); the phase ends before any row is read.
-            val lang = if (isOriginal(raw)) {
-                val kept = originalLanguageFor(listedLanguages.await(), originalLang)
-                if (kept == null && com.chitram.app.data.Ranking.knownLanguageName(originalLang) != null) {
-                    android.util.Log.i("Chitram", "[multimovies] \"Original\" not labelled ${com.chitram.app.data.Ranking.knownLanguageName(originalLang)} for $tmdbId: another source names it - stays unlabelled")
-                }
-                sourceLanguage(raw, kept)
-            } else sourceLanguage(raw, originalLang)
+            // "Original" labels nothing (sourceLanguage). The title's plan
+            // (MPD tags, or last-listed-wins when an MPD failed) decides the
+            // language stamped on a lone generic rendition.
+            val d = langPlan.await().sources[masterKey(url)]
+            val lang = if (d != null) d.language else sourceLanguage(raw)
             Resolved(
                 provider = "multimovies",
                 label = "MultiMovies",
@@ -223,7 +247,12 @@ class MultiMoviesResolver(
                     if (ev.code == 429) throttledUntil = System.currentTimeMillis() + THROTTLE_COOLDOWN_MS
                     val named = ev.server
                     if (!throttled && ev.ok && named != null && named !in servers) { servers += named; askServer(named) }
-                    for ((url, lang) in ev.sources) masterKey(url).let { k -> if (k !in masters) masters[k] = master(url, lang) }
+                    for ((url, lang) in ev.sources) masterKey(url).let { k ->
+                        if (k !in masters) {
+                            mpdUrlOf(url)?.let { mpds[k] = mpdFetch(it) }
+                            masters[k] = master(url, lang)
+                        }
+                    }
                 }
                 is EmbedIds -> {
                     val ids = ev.ids
@@ -238,7 +267,7 @@ class MultiMoviesResolver(
         }
         askJobs.forEach { it.cancel() }
         events.close()
-        listedLanguages.complete(answers.values.filter { it.ok }.flatMap { a -> a.sources.map { it.second } })
+        listedSources.complete(answers.values.filter { it.ok }.map { it.sources })
 
         // A 429 is VidBolt limiting our whole IP, not this server: the streak is left as is.
         asked.forEach { if (answers[it]?.code == 429) releaseProbe(it) else recordServer(it, answers[it]?.ok == true) }
@@ -267,6 +296,22 @@ class MultiMoviesResolver(
             throw if (dead) HostDown(err) else err
         }
 
+        val lists = listedSources.await()
+        val plan = mpdLanguagePlan(lists, mpds.mapValues { it.value.await() })
+        if (plan.fallback) {
+            android.util.Log.i("Chitram", "[multimovies] mpd-lang fallback for $tmdbId: ${plan.why} - last listed Telugu wins")
+            val winner = teluguClaimWinner(lists)
+            plan.sources.filterValues { it.drop }.keys.forEach { k ->
+                android.util.Log.i("Chitram", "[multimovies] telugu-claim dropped for $tmdbId: $k listed Telugu, " +
+                    if (!winner.isNullOrEmpty()) "kept $winner (listed later)" else "claims never listed together - none kept")
+            }
+        } else {
+            plan.sources.forEach { (k, d) ->
+                if (d.language != d.listed || d.drop) android.util.Log.i("Chitram", "[multimovies] mpd-lang fix for $tmdbId: $k listed ${d.listed ?: "-"}, mpd ${d.mpd ?: "-"} -> ${if (d.drop) "unverified" else d.language}")
+            }
+        }
+        android.util.Log.i("Chitram", plan.line(tmdbId.toString()))
+        langPlan.complete(plan)
         val done = masters.mapValues { it.value.await() }
         val seen = HashSet<String>()
         val rows = labels.flatMap { l -> answers[l]?.sources.orEmpty() }
@@ -407,31 +452,122 @@ class MultiMoviesResolver(
         internal fun cleanName(name: String?): String =
             (name ?: "").replace(Regex("""^\s*(\[\d+]|\d+[.)])\s*"""), "").replace(Regex("""\s*\(.*\)\s*$"""), "").trim()
 
-        private fun isOriginal(raw: String?) = raw?.trim().equals("original", true)
+        private const val TELUGU = "Telugu"
+
+        /** Cap on each source's index.mpd GET, all in parallel (server mpdTimeoutMs). On a miss the title falls back. */
+        const val MPD_TIMEOUT_MS = 2_500L
+        private const val MPD_HOST = "sacdn.hakunaymatata.com"
+        private val SIGNED = listOf("Policy", "Signature", "Key-Pair-Id")
+        /**
+         * MPD audio `lang` that counts as evidence (server MPD_EVIDENCE). Against
+         * speech ID on 13 titles (2026-11-22): tel 6 of 6, tam/kan/hin 4 of 4;
+         * `eng` 0 of 1 (Vikram's Tamil) and `und` carry no evidence.
+         */
+        private val MPD_EVIDENCE = mapOf("tel" to TELUGU, "te" to TELUGU, "tam" to "Tamil", "ta" to "Tamil",
+            "kan" to "Kannada", "kn" to "Kannada", "hin" to "Hindi", "hi" to "Hindi", "mal" to "Malayalam", "ml" to "Malayalam")
 
         /**
-         * Server originalLanguageFor: "Original" is not always the TMDB original
-         * language (Vidrift's Original for 1261763, TMDB te, is the Tamil track,
-         * 2026-11-21). When another source of the title names that language
-         * itself, [originalLang] is dropped and "Original" stays unlabelled.
-         * `rawLanguages`: every source's raw VidBolt `language`, across servers.
+         * Server mpdUrlOf: the signed index.mpd beside a sacdn DASH master, from
+         * any `?url=` wrapper (the bridge drops the DASH `lang`). The CloudFront
+         * query signs the whole /dash/<id>/ folder. Null when not sacdn or unsigned.
          */
-        internal fun originalLanguageFor(rawLanguages: List<String?>, originalLang: String?): String? {
-            val lang = com.chitram.app.data.Ranking.knownLanguageName(originalLang) ?: return null
-            return if (rawLanguages.any { !isOriginal(it) && sourceLanguage(it) == lang }) null else originalLang
+        internal fun mpdUrlOf(url: String): String? {
+            val layers = mutableListOf<okhttp3.HttpUrl>()
+            var u = url
+            for (i in 0 until 4) {
+                val h = u.toHttpUrlOrNull() ?: break
+                layers += h
+                u = h.queryParameter("url")?.takeIf { it.startsWith("http") } ?: break
+            }
+            val target = layers.lastOrNull() ?: return null
+            if (target.host != MPD_HOST || !Regex("^/dash/[^/]+/").containsMatchIn(target.encodedPath)) return null
+            val from = layers.asReversed().firstOrNull { l -> SIGNED.all { l.queryParameter(it) != null } } ?: return null
+            val q = SIGNED.joinToString("&") { "$it=" + java.net.URLEncoder.encode(from.queryParameter(it)!!, "UTF-8").replace("+", "%20").replace("%7E", "~") }
+            return "https://$MPD_HOST" + target.encodedPath.substringBeforeLast('/') + "/index.mpd" + "?" + q
+        }
+
+        /** Server mpdAudioLang: the one audio AdaptationSet `lang`, lower case, or null (none or several). */
+        internal fun mpdAudioLang(text: String): String? =
+            Regex("""<AdaptationSet\b[^>]*>""").findAll(text).map { it.value }
+                .filter { Regex("""contentType="audio"|mimeType="audio/""").containsMatchIn(it) }
+                .mapNotNull { Regex("""\slang="([^"]*)"""").find(it)?.groupValues?.get(1)?.trim()?.lowercase()?.takeIf(String::isNotEmpty) }
+                .toSet().singleOrNull()
+
+        internal class MpdResult(val ok: Boolean, val lang: String? = null, val error: String? = null)
+        internal class SourcePlan(val listed: String?, var language: String?, var drop: Boolean = false, var reason: String? = null, var mpd: String? = null)
+        internal class LangPlan(val fallback: Boolean, val why: String?, val claims: Int, val tel: Int, val fixed: Int, val sources: Map<String, SourcePlan>) {
+            /** The greppable per-title line (server twin). */
+            fun line(id: String) = "[multimovies] mpd-lang $id claims=$claims tel=$tel fixed=$fixed fallback=${if (fallback) 1 else 0}"
+        }
+
+        /**
+         * Server mpdLanguagePlan. `lists`: each answer's (url, raw language) in
+         * arrival order; `mpd`: masterKey -> result (no entry: no MPD).
+         *  - MPD tel/te: Telugu, whatever the label (Devara "Kurdish sub").
+         *  - Listed Telugu with any other or no tag: Telugu dropped, unverified.
+         *  - A listed language contradicted by tam/kan/hin/mal: the tag.
+         *  - eng, und, no tag: the label stands.
+         * Any MPD failed, or a Telugu claim without one: [teluguClaimWinner] for the whole title.
+         */
+        internal fun mpdLanguagePlan(lists: List<List<Pair<String, String?>>>, mpd: Map<String, MpdResult>): LangPlan {
+            val sources = LinkedHashMap<String, SourcePlan>()
+            for ((url, raw) in lists.flatten()) masterKey(url).let { k -> if (k !in sources) sourceLanguage(raw).let { sources[k] = SourcePlan(it, it) } }
+            val claims = sources.values.count { it.listed == TELUGU }
+            val failed = sources.keys.filter { mpd[it]?.ok == false }
+            val unsigned = sources.filter { (k, s) -> s.listed == TELUGU && k !in mpd }.keys
+            if (failed.isNotEmpty() || unsigned.isNotEmpty()) {
+                val winner = teluguClaimWinner(lists)
+                sources.forEach { (k, s) -> if (s.listed == TELUGU && winner != null && winner != k) { s.language = null; s.drop = true; s.reason = "duplicate" } }
+                val why = listOfNotNull(
+                    failed.takeIf { it.isNotEmpty() }?.joinToString(",", "mpd failed ") { "$it(${mpd[it]?.error})" },
+                    unsigned.takeIf { it.isNotEmpty() }?.joinToString(",", "no mpd for Telugu claim "),
+                ).joinToString("; ")
+                return LangPlan(true, why, claims, 0, 0, sources)
+            }
+            var tel = 0
+            var fixed = 0
+            sources.forEach { (k, s) ->
+                val code = mpd[k]?.lang
+                s.mpd = code
+                val evidence = code?.let { MPD_EVIDENCE[it] }
+                when {
+                    evidence == TELUGU -> { tel++; if (s.listed != TELUGU) { s.language = TELUGU; fixed++ } }
+                    s.listed == TELUGU -> { s.language = null; s.drop = true; s.reason = "mpd"; fixed++ }
+                    evidence != null && s.listed != null && evidence != s.listed -> { s.language = evidence; fixed++ }
+                }
+            }
+            return LangPlan(false, null, claims, tel, fixed, sources)
+        }
+
+        /**
+         * Server teluguClaimWinner. Two sources of one title may each say
+         * "Telugu"; live 2026-11-22, RRR lists 5820588283537016992 and
+         * 5355663801620775816 as Telugu, and speech ID reads the first as Tamil
+         * (ta 0.60) and the second as Telugu (te 1.00), as the owner hears.
+         * Only the LAST Telugu claim in the first answer listing two or more
+         * stands. Claims never listed together: "" (none stands). One claim or
+         * none: null (nothing to drop). `lists`: each answer's (url, raw language).
+         */
+        internal fun teluguClaimWinner(lists: List<List<Pair<String, String?>>>): String? {
+            fun claims(list: List<Pair<String, String?>>) = list.filter { sourceLanguage(it.second) == TELUGU }.map { masterKey(it.first) }.distinct()
+            if (lists.flatMap { claims(it) }.distinct().size < 2) return null
+            for (l in lists) claims(l).let { if (it.size >= 2) return it.last() }
+            return ""
         }
 
         /**
          * VidBolt's per-source `language` when it names a KNOWN audio language
          * (server sourceLanguage + knownLanguage). "<lang> sub/subs/subbed/
          * subtitles" carry the original audio with subtitles: never a language.
-         * "Original" takes the title's original language when the app has it.
-         * Junk like "Hindi dubbed" or "Dual Audio" is null.
+         * "Original" names no language, never the TMDB one: live 2026-11-22,
+         * Vidrift's RRR "Original" (TMDB te) is byte-identical to the "English"
+         * MovieBox source (speech ID ta/hi), Jailer's (TMDB ta) to a Malayalam
+         * one (ml 1.00). Junk like "Hindi dubbed" or "Dual Audio" is null.
          */
-        internal fun sourceLanguage(raw: String?, originalLang: String? = null): String? {
+        internal fun sourceLanguage(raw: String?): String? {
             val v = raw?.trim().orEmpty()
             if (v.isEmpty() || Regex("""\bsub(s|bed|titles?)?$""", RegexOption.IGNORE_CASE).containsMatchIn(v)) return null
-            if (v.equals("original", true)) return com.chitram.app.data.Ranking.knownLanguageName(originalLang)
+            if (v.equals("original", true)) return null
             return com.chitram.app.data.Ranking.knownLanguageName(v)
         }
 

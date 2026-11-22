@@ -14,7 +14,31 @@ import com.chitram.app.data.Source
  * rest of the session.
  */
 object DirectRoute {
+    /** Longest a direct play may go without a first frame, as before. */
     const val FIRST_FRAME_MS = 10_000L
+    /**
+     * A direct play with no media segment finished by now goes to the proxy at
+     * once. Measured 2026-11-22 (phone + emulator, 11 direct starts that framed):
+     * first segment done 1.6-5.7 s after play for 9 of them, 7.4 and 8.0 s for the
+     * other two; proxied rows 1.9-3.3 s. Krack direct (img.rousav.tech): no segment
+     * by 8.8 s, frame only after the 10 s fallback. 4 s would have sent 6 of the 11
+     * good direct starts to the proxy.
+     */
+    const val FIRST_SEGMENT_MS = 6_000L
+
+    /**
+     * The no-frame check at [elapsedMs] after play: the reason to fall back to the
+     * proxy, or null to keep waiting. No segment by [FIRST_SEGMENT_MS] and no byte
+     * for [idleMs] >= [FIRST_SEGMENT_MS] (gap 6.3): fall back; no frame by
+     * [FIRST_FRAME_MS]: fall back, as before.
+     */
+    fun stallReason(elapsedMs: Long, framed: Boolean, segmentLoaded: Boolean, idleMs: Long = elapsedMs): String? = when {
+        framed -> null
+        elapsedMs >= FIRST_FRAME_MS -> "no-first-frame-10s"
+        // Gap 6.3: slow 2G still sending the first segment is not a stall; only a 6 s byte silence is.
+        elapsedMs >= FIRST_SEGMENT_MS && !segmentLoaded && idleMs >= FIRST_SEGMENT_MS -> "no-first-segment-6s"
+        else -> null
+    }
 
     /** Identity of a row across its direct and proxied forms. */
     fun key(s: Source): String = "${s.id}|${s.directUrl.orEmpty()}"
@@ -34,15 +58,18 @@ object DirectRoute {
         return s.copy(url = p, headers = emptyMap(), proxyUrl = null)
     }
 
-    /** Retry the same row via proxy: only a direct play that never reached a frame. */
-    fun shouldFallBack(s: Source?, framed: Boolean): Boolean = isDirect(s) && !framed
+    /**
+     * Retry the same row via proxy: only a direct play that never reached a frame,
+     * and only while the VM (the proxy) is up (gap 6.4); else the normal failover.
+     */
+    fun shouldFallBack(s: Source?, framed: Boolean, vmUp: Boolean = true): Boolean = isDirect(s) && !framed && vmUp
 
     /**
-     * The 10 s no-first-frame check. [playing] is `current` now, which recordAudio
+     * The no-first-frame check ([stallReason]). [playing] is `current` now, which recordAudio
      * may have replaced with a copy, so the row is matched by [key], not identity.
      */
-    fun timerShouldFallBack(playing: Source?, started: Source, framedThisPlay: Boolean): Boolean =
-        playing != null && key(playing) == key(started) && isDirect(playing) && !framedThisPlay
+    fun timerShouldFallBack(playing: Source?, started: Source, framedThisPlay: Boolean, vmUp: Boolean = true): Boolean =
+        playing != null && key(playing) == key(started) && isDirect(playing) && !framedThisPlay && vmUp
 
     /**
      * On-device merge (re-review m-B): the failed request went to the donor's

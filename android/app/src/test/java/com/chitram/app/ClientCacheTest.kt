@@ -233,6 +233,42 @@ class ClientCacheTest {
         assertNull(cache.device(StreamCache.key("tv", 1, 1, 3), OnDeviceResolver.NETMIRROR, "Telugu"))
     }
 
+    /** Gap X10: the kept rows live in their own prefs file, not in the shared `chitram` one. */
+    @Test fun keptRowsHaveTheirOwnPrefsFile() {
+        // Size at the cap: 50 titles, each a Telugu+Hindi row from 3 providers.
+        val row = sample(url = "https://cdn.test/te.m3u8")
+        for (i in 1..StreamCache.MAX_TITLES) for (p in listOf(OnDeviceResolver.CASTLE, OnDeviceResolver.MAPPLE, OnDeviceResolver.NETMIRROR))
+            cache.putDevice(StreamCache.key("movie", i.toLong(), 0, 0), p, "Telugu", listOf(row.copy(id = "$p-$i", provider = p)))
+        val bytes = kv.get(StreamCache.KV_KEY)!!.length
+        println("[X10] streamCache.v1 at the 50-title cap: $bytes chars")
+        assertTrue("a blob this size ($bytes) is rewritten on every put", bytes > 100_000)
+        assertFalse(StreamCache.PREFS_FILE == "chitram")
+        val app = java.io.File("src/main/java/com/chitram/app/App.kt").readText()
+        assertTrue("App gives the StreamCache its own prefs file", app.contains("PrefsKeyValue(this, StreamCache.PREFS_FILE)"))
+        assertTrue("the old copy in the shared file is removed", app.contains("kv.put(StreamCache.KV_KEY, null)"))
+    }
+
+    /** Gap 1.5: a stored config that is not JSON gives the defaults. */
+    @Test fun aStoredConfigThatIsNotJsonGivesTheDefaults() {
+        val k = MemoryKeyValue()
+        k.put(ResolveConfigStore.KEY, "{not json")
+        k.put(ResolveConfigStore.KEY_AT, clock.toString())
+        val s = ResolveConfigStore(client, "https://vm.test" + ResolveConfigStore.PATH, k) { clock }
+        assertEquals(com.chitram.app.resolve.ResolveConfig(), s.current())
+        assertEquals(ResolveConfigStore.FROM_BUILTIN, s.source())
+    }
+
+    /** Gap 1.6: the clock was set back after a save: the copy is refreshed, not kept "fresh" for ever. */
+    @Test fun aClockSetBackRefreshesTheConfig() = runBlocking {
+        val k = MemoryKeyValue()
+        k.put(ResolveConfigStore.KEY, """{"version":4,"mapple":{"enabled":true}}""")
+        k.put(ResolveConfigStore.KEY_AT, (clock + 2 * 86_400_000L).toString())
+        k.put(ResolveConfigStore.KEY_FROM, ResolveConfigStore.FROM_VM)
+        val s = ResolveConfigStore(client, "https://vm.test" + ResolveConfigStore.PATH, k) { clock }
+        s.get()
+        assertTrue("asked the VM: $hits", hits.any { it == "vm.test" + ResolveConfigStore.PATH })
+    }
+
     private fun sample(url: String, onDevice: String? = "castletv") = Source(
         id = "device-castletv", provider = "castletv", label = "Castle", url = url, progressive = false, quality = "1080p",
         levels = listOf(Level(1080, "1080p", 4_000_000, "avc1.640028")), languages = listOf("Telugu", "Hindi"),

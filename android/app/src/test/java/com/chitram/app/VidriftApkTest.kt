@@ -104,23 +104,48 @@ class VidriftApkTest {
         assertEquals(1, rows.count { "Telugu" in langs(it) })
     }
 
-    @Test fun originalLanguageForKeepsTmdbOnlyWhenNoOtherEntryNamesIt() {
+    @Test fun teluguClaimWinnerIsTheLastTeluguEntryWhenTwoOrMoreSayTelugu() {
         fun n(vararg l: String) = l.map { "Orion · $it" }
-        assertEquals("te", VidriftResolver.originalLanguageFor(n("Original", "Hindi"), "te"))
-        assertNull(VidriftResolver.originalLanguageFor(n("Original", "Hindi", "Telugu"), "te"))
-        assertNull(VidriftResolver.originalLanguageFor(n("Original", "Telugu"), "tel"))
-        assertNull(VidriftResolver.originalLanguageFor(n("Original", "Bangla"), "bn"))
-        assertEquals("te", VidriftResolver.originalLanguageFor(n("Original", "Telugu Sub"), "te"))
-        assertNull(VidriftResolver.originalLanguageFor(n("Original"), null))
-        assertNull(VidriftResolver.originalLanguageFor(n("Original"), "xx"))
+        assertEquals(2, VidriftResolver.teluguClaimWinner(n("Telugu", "Hindi", "Telugu")))
+        assertNull(VidriftResolver.teluguClaimWinner(n("Original", "Hindi", "Telugu")))
+        assertNull(VidriftResolver.teluguClaimWinner(n("Telugu", "Telugu Sub")))
+        assertNull("Telugu only", VidriftResolver.teluguClaimWinner(n("Tamil", "Tamil")))
     }
 
-    @Test fun originalKeepsTmdbTeluguWhenThePageHasNoTeluguEntry() = runBlocking {
+    @Test fun dtttOriginalIsNotTeluguEvenWhenThePageHasNoTeluguEntry() = runBlocking {
         val page = dtttPage.replace(Regex("""\{"index":3,[^{}]*"name":"Orion · Telugu"[^{}]*"rungs":\[[^\]]*][^{}]*},"""), "")
         assertTrue("fixture edit removed the Telugu entry", "Orion · Telugu" !in page)
         serve(a, page, dtttIds.associate { "/api/orion/$it/master.m3u8" to original })
         val rows = resolver().resolveAll("movie", 1261763, 0, 0, originalLang = "te")
-        assertEquals(listOf("Telugu"), langs(rows[0]))
+        assertEquals(emptyList<String>(), langs(rows[0]))
+    }
+
+    // Live 2026-11-22: Vidrift's RRR page listed ONE entry, "Orion · Original",
+    // and it was labelled Telugu from TMDB te. Its audio is byte-identical to
+    // MultiMovies' "English" RRR source (speech ID ta/hi; the phone played
+    // lang=und). Jailer (TMDB ta): Original is a Malayalam track (ml 1.00).
+    @Test fun live1122RrrPageWithOnlyOriginalIsNotTelugu() = runBlocking {
+        val page = rrrPage.replace(Regex(""",\{"index":[123],[^{}]*"name":"Orion · (Hindi|Telugu|Bangla)","rungs":\[[^\]]*][^{}]*}"""), "")
+        assertTrue("fixture edit left only Original", !Regex("Orion · (Hindi|Telugu|Bangla)").containsMatchIn(page))
+        serve(a, page, rrrMasters)
+        for (tmdb in listOf("te", "ta")) {
+            val rows = resolver().resolveAll("movie", 579974, 0, 0, originalLang = tmdb)
+            assertEquals(1, rows.size)
+            assertEquals(tmdb, emptyList<String>(), langs(rows[0]))
+            assertNull(rows[0].audio.single().language)
+        }
+        assertEquals(null to "Original", VidriftResolver.pageLanguage("Orion · Original"))
+    }
+
+    @Test fun twoEntriesSayTeluguOnlyTheLastKeepsIt() = runBlocking {
+        serve(a, rrrPage.replace("\"name\":\"Orion · Original\"", "\"name\":\"Orion · Telugu\""), rrrMasters)
+        val rows = resolver().resolveAll("movie", 579974, 0, 0)
+        assertEquals(listOf(emptyList(), listOf("Hindi"), listOf("Telugu"), listOf("Bengali")), rows.map(::langs))
+        assertEquals("vidrift-4160f9215437e11c789d19d826048e8b", rows.single { "Telugu" in langs(it) }.key)
+        // A master LANGUAGE tag is its own evidence and still stands.
+        val tagged = original.replace("NAME=\"Audio\"", "NAME=\"Audio\",LANGUAGE=\"tel\"")
+        assertTrue(tagged.contains("LANGUAGE=\"tel\""))
+        assertEquals(listOf("Telugu"), langs(VidriftResolver.rowFor(VidriftResolver.Entry("Orion · Telugu", ORIG), tagged, "$baseA$ORIG", baseA, dropLabel = true)!!))
     }
 
     @Test fun originalWithoutTmdbLanguageStaysUnlabelled() = runBlocking {
@@ -129,7 +154,7 @@ class VidriftApkTest {
         assertEquals(emptyList<String>(), langs(rows[0]))
         assertNull(rows[0].audio.single().language)
         // An unknown TMDB code is not a language either.
-        assertEquals(null to "Original", VidriftResolver.pageLanguage("Orion · Original", "xx"))
+        assertEquals(null to "Original", VidriftResolver.pageLanguage("Orion · Original"))
     }
 
     @Test fun masterLanguageWinsAndOnlyALoneUntaggedRenditionTakesThePageLabel() {
@@ -140,19 +165,19 @@ class VidriftApkTest {
         assertEquals("several renditions keep what the master states", two, VidriftResolver.withPageLanguage(two, "Telugu"))
         // End to end: LANGUAGE="hin" under "Orion · Telugu".
         val e = VidriftResolver.Entry("Orion · Telugu", TEL)
-        val r = VidriftResolver.rowFor(e, telugu.replace("NAME=\"Audio\"", "NAME=\"Audio\",LANGUAGE=\"hin\""), "$baseA$TEL", baseA, "te")!!
+        val r = VidriftResolver.rowFor(e, telugu.replace("NAME=\"Audio\"", "NAME=\"Audio\",LANGUAGE=\"hin\""), "$baseA$TEL", baseA)!!
         assertEquals(listOf("Hindi"), langs(r))
     }
 
     @Test fun mutedAudioMasterTakesThePageLanguage() {
-        val r = VidriftResolver.rowFor(VidriftResolver.Entry("Orion · Telugu", TEL), noAudio, "$baseA$TEL", baseA, null)!!
+        val r = VidriftResolver.rowFor(VidriftResolver.Entry("Orion · Telugu", TEL), noAudio, "$baseA$TEL", baseA)!!
         assertEquals(listOf("Telugu"), langs(r))
     }
 
     @Test fun subtitledLabelsAreNeverAudioAndBanglaIsBengali() {
-        for (l in listOf("Telugu Sub", "Telugu subs", "Hindi Subbed", "English subtitles")) assertNull(l, VidriftResolver.pageLanguage("Orion · $l", "te").first)
-        assertEquals("Bengali", VidriftResolver.pageLanguage("Orion · Bangla", null).first)
-        assertEquals("Telugu", VidriftResolver.pageLanguage("Orion · Telugu (HQ)", null).first)
+        for (l in listOf("Telugu Sub", "Telugu subs", "Hindi Subbed", "English subtitles")) assertNull(l, VidriftResolver.pageLanguage("Orion · $l").first)
+        assertEquals("Bengali", VidriftResolver.pageLanguage("Orion · Bangla").first)
+        assertEquals("Telugu", VidriftResolver.pageLanguage("Orion · Telugu (HQ)").first)
         assertNull(VidriftResolver.langName("und"))
     }
 

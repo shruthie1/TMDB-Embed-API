@@ -14,7 +14,12 @@ import com.chitram.app.resolve.ResolveConfigStore
 import com.chitram.app.resolve.StreamInterceptor
 import com.chitram.app.resolve.VaplayerResolver
 import kotlinx.coroutines.runBlocking
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -22,6 +27,7 @@ import okhttp3.mockwebserver.RecordedRequest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -104,7 +110,9 @@ class MultiMoviesApkTest {
             ),
         )
         val rows = MultiMoviesResolver(OkHttpClient(), origin = base).resolveAll("movie", 1, 0, 0)
-        assertEquals(listOf(listOf("Tamil"), listOf("Telugu"), listOf("Telugu")), rows.map(::labels))
+        // Three "Telugu" claims: only the last listed (/t) keeps Telugu; /u keeps its own NAME, no language.
+        assertEquals(listOf(listOf("Tamil"), listOf("Track 1"), listOf("Telugu")), rows.map(::labels))
+        assertNull(rows[1].audio.single().language?.takeIf { it != "und" })
     }
 
     @Test fun oneDeadMasterDropsOnlyItsRow() = runBlocking {
@@ -210,18 +218,19 @@ class MultiMoviesApkTest {
         assertEquals(null, MultiMoviesResolver.sourceLanguage("Hindi dubbed"))
         assertEquals(null, MultiMoviesResolver.sourceLanguage("Dual Audio"))
         assertEquals(null, MultiMoviesResolver.sourceLanguage("Original"))
-        assertEquals("Telugu", MultiMoviesResolver.sourceLanguage("Original", originalLang = "te"))
-        assertEquals(null, MultiMoviesResolver.sourceLanguage("Original", originalLang = "xx"))
     }
 
-    @Test fun originalSourceTakesTheTitlesOriginalLanguage() = runBlocking {
+    // Live 2026-11-22: "Original" is not the TMDB language (Vidrift's RRR
+    // Original, TMDB te, is the MovieBox "English" file; Jailer's, TMDB ta, is
+    // Malayalam). Server twin: test/multimovies.test.js.
+    @Test fun originalSourceNeverTakesTheTitlesOriginalLanguage() = runBlocking {
         serve(listOf("/o.m3u8" to "Original"), mapOf("/o.m3u8" to master(generic())))
-        val row = MultiMoviesResolver(OkHttpClient(), origin = base).resolveAll("movie", 579974, 0, 0, originalLang = "te").single()
-        assertEquals(listOf("Telugu"), labels(row))
+        for (tmdb in listOf("te", "ta")) {
+            val row = MultiMoviesResolver(OkHttpClient(), origin = base).resolveAll("movie", 579974, 0, 0, originalLang = tmdb).single()
+            assertEquals(tmdb, emptyList<String>(), labels(row))
+        }
     }
 
-    // Vidrift's "Original" for 1261763 (TMDB te) is the Tamil track (2026-11-21).
-    // Server twin: test/multimovies.test.js originalLanguageFor.
     @Test fun originalSourceStaysUnlabelledWhenAnotherSourceNamesTheLanguage() = runBlocking {
         serve(listOf("/o.m3u8" to "Original", "/te.m3u8" to "Telugu", "/ta.m3u8" to "Tamil"),
             mapOf("/o.m3u8" to master(generic()), "/te.m3u8" to master(generic()), "/ta.m3u8" to master(generic())))
@@ -231,13 +240,31 @@ class MultiMoviesApkTest {
         assertEquals(1, rows.count { "Telugu" in labels(it) })
     }
 
-    @Test fun originalLanguageForFollowsTheServerRule() {
-        assertEquals("te", MultiMoviesResolver.originalLanguageFor(listOf("Original", "Hindi"), "te"))
-        assertEquals(null, MultiMoviesResolver.originalLanguageFor(listOf("Original", "Hindi", "Telugu"), "te"))
-        assertEquals(null, MultiMoviesResolver.originalLanguageFor(listOf("Original", "tel"), "te"))
-        assertEquals("te", MultiMoviesResolver.originalLanguageFor(listOf("Original", "Telugu Sub"), "te"))
-        assertEquals("te", MultiMoviesResolver.originalLanguageFor(listOf("Original", "Original"), "te"))
-        assertEquals(null, MultiMoviesResolver.originalLanguageFor(listOf("Original"), null))
+    // Server twin: test/multimovies.test.js teluguClaimWinner.
+    @Test fun teluguClaimWinnerFollowsTheServerRule() {
+        val a = "https://h/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F5820588283537016992_0_0_1080_h265_795%2Fmaster.m3u8"
+        val b = "https://h/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F5355663801620775816_0_0_1080_h265_623%2Fmaster.m3u8"
+        assertEquals("5355663801620775816", MultiMoviesResolver.teluguClaimWinner(listOf(listOf(a to "Telugu", b to "Telugu"))))
+        assertEquals("5820588283537016992", MultiMoviesResolver.teluguClaimWinner(listOf(listOf(b to "Telugu", a to "tel"))))
+        assertEquals(null, MultiMoviesResolver.teluguClaimWinner(listOf(listOf(a to "Telugu", b to "Hindi"))))
+        assertEquals(null, MultiMoviesResolver.teluguClaimWinner(listOf(listOf(a to "Telugu", b to "Telugu Sub"))))
+        assertEquals(null, MultiMoviesResolver.teluguClaimWinner(listOf(listOf(a to "Telugu", b to "Original"))))
+        assertEquals("never listed together: none kept", "", MultiMoviesResolver.teluguClaimWinner(listOf(listOf(a to "Telugu"), listOf(b to "Telugu"))))
+        assertEquals("one master, two signatures", null, MultiMoviesResolver.teluguClaimWinner(listOf(listOf(a to "Telugu", "$a&Signature=x" to "Telugu"))))
+    }
+
+    // Live 2026-11-22: VidBolt's RRR list (default answer order). Speech ID: the
+    // first "Telugu" (5820...) is Tamil (ta 0.60), the second (5355...) Telugu (te 1.00).
+    @Test fun live1122RrrTwoTeluguSourcesOnlyTheLastKeepsTelugu() = runBlocking {
+        val bridge = Fixtures.read("multimovies/rrr-bridge-telugu.m3u8")
+        val list = listOf("7067694354684856232_0_0_1080_h265_745" to "Bengali", "5820588283537016992_0_0_1080_h265_795" to "Telugu",
+            "2848239607093808728_0_0_1080_h265_905" to "English", "7499853135079687472_0_0_1080_h265_956" to "Hindi",
+            "3648827707632354536_0_0_1080_h265_341" to "Arabic sub", "5355663801620775816_0_0_1080_h265_623" to "Telugu")
+        fun p(id: String) = "/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F${id}%2Fmaster.m3u8"
+        serve(list.map { (id, l) -> p(id) to l }, list.associate { (id, _) -> p(id) to bridge })
+        val rows = MultiMoviesResolver(OkHttpClient(), origin = base).resolveAll("movie", 579974, 0, 0, originalLang = "te")
+        assertEquals(listOf(listOf("Bengali"), emptyList(), listOf("English"), listOf("Hindi"), emptyList(), listOf("Telugu")), rows.map(::labels))
+        assertEquals("multimovies-5355663801620775816", rows.single { "Telugu" in labels(it) }.key)
     }
 
     // ---- Review I4: stable ids from the master url, not the index
@@ -343,7 +370,8 @@ class MultiMoviesApkTest {
     @Test fun everyServerIsAskedAndCallistoAddsTheTeluguRows() = runBlocking {
         val asked = serveRrrAllServers()
         val rows = MultiMoviesResolver(OkHttpClient(), origin = base).resolveAll("movie", 579974, 0, 0)
-        assertEquals(listOf(emptyList(), listOf("Telugu"), listOf("Telugu")), rows.map(::labels))
+        // Both callisto masters say Telugu: only the later one keeps it (teluguClaimWinner).
+        assertEquals(listOf(emptyList(), emptyList(), listOf("Telugu")), rows.map(::labels))
         assertEquals(listOf("multimovies-5820588283537016992", "multimovies-5355663801620775816"), rows.drop(1).map { it.key })
         assertEquals(listOf("callisto", "default", "luna", "orion", "quantum", "quasar", "vega"), asked.sorted())
     }
@@ -463,5 +491,145 @@ class MultiMoviesApkTest {
         resolver.resolveAll("movie", 579974, 0, 0)
         assertEquals(2, MultiMoviesResolver.serverHealth("vega").streak)
         assertEquals(0L, MultiMoviesResolver.serverHealth("vega").until)
+    }
+
+    // ---- MPD audio lang rule (2026-11-22, server twin test/multimovies.test.js).
+    // Real resolve answers for 6 titles, signatures redacted, and the real
+    // Salaar index.mpd with each source's measured `lang` put in. Speech ID
+    // (telugu-rule-check.md): tel 6 of 6, tam/kan/hin 4 of 4.
+
+    private val mpdFix by lazy { kotlinx.serialization.json.Json.parseToJsonElement(Fixtures.read("multimovies/mpd-lang-titles.json")).jsonObject }
+    private val mpdTemplate by lazy { Fixtures.read("multimovies/salaar-7844085959171131184-index.mpd") }
+    private fun mpdWith(lang: String?) = mpdTemplate.replace(" lang=\"tel\"", if (lang != null) " lang=\"$lang\"" else "")
+    private fun sacdnId(u: String) = Regex("""/dash/(\d+)_""").find(java.net.URLDecoder.decode(u, "UTF-8"))?.groupValues?.get(1)
+    private val krackTagged = "#EXTM3U\n" +
+        "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",LANGUAGE=\"kan\",NAME=\"[1] Kannada\",URI=\"k.m3u8\"\n" +
+        "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",LANGUAGE=\"tel\",NAME=\"[4] Telugu\",URI=\"t.m3u8\"\n" +
+        "#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=1280x720,AUDIO=\"a\"\nv720.m3u8\n"
+
+    /** sacdn.hakunaymatata.com goes to the mock server; everything else is untouched. */
+    private val sacdnToMock = OkHttpClient.Builder().addInterceptor { chain ->
+        val r = chain.request()
+        if (r.url.host != "sacdn.hakunaymatata.com") chain.proceed(r)
+        else chain.proceed(r.newBuilder().url(r.url.newBuilder().scheme("http").host(server.hostName).port(server.port).build()).build())
+    }.build()
+
+    /** The captured VidBolt answers for [id], source hosts moved to the mock server. Returns the MPD paths asked. */
+    private fun serveCaptured(id: String, mpd: ((String) -> MockResponse)? = null): MutableList<String> {
+        val answers = mpdFix["titles"]!!.jsonObject[id]!!.jsonObject["answers"]!!.jsonArray.map { it.jsonObject }
+        val tags = mpdFix["mpdAudioLang"]!!.jsonObject
+        fun local(u: String): String { val h = u.toHttpUrl(); return "$base${h.encodedPath}" + (h.encodedQuery?.let { "?$it" } ?: "") }
+        val mpds = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val bridge = Fixtures.read("multimovies/rrr-bridge-telugu.m3u8")
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val path = request.path!!
+                if (path.startsWith("/api/resolve")) {
+                    val label = only(path) ?: "default"
+                    val a = answers.firstOrNull { it["ask"]?.jsonPrimitive?.content == label } ?: return MockResponse().setBody("""{"stream":null}""")
+                    val sources = a["sources"]!!.jsonArray.map { it.jsonObject }
+                    if (sources.isEmpty()) return MockResponse().setBody("""{"stream":null}""")
+                    val list = sources.joinToString(",") { o ->
+                        val lang = o["language"]?.jsonPrimitive?.contentOrNull
+                        """{"url":"${local(o["url"]!!.jsonPrimitive.content)}","kind":"hls","quality":"1080p"${lang?.let { ",\"language\":\"$it\"" } ?: ""}}"""
+                    }
+                    return MockResponse().setBody("""{"stream":{"server":"${a["server"]?.jsonPrimitive?.contentOrNull ?: label}","sources":[$list]}}""")
+                }
+                if (path.startsWith("/dash/") && "/index.mpd" in path) {
+                    mpds += path
+                    return mpd?.invoke(path) ?: MockResponse().setBody(mpdWith(tags[sacdnId(path)]?.jsonPrimitive?.content))
+                }
+                if (path.startsWith("/?url=")) return MockResponse().setBody(bridge)
+                if (path.startsWith("/media/")) return MockResponse().setBody(krackTagged)
+                return MockResponse().setBody("")
+            }
+        }
+        return mpds
+    }
+
+    private suspend fun resolveCaptured(id: String, mpd: ((String) -> MockResponse)? = null): Pair<Map<String, List<String>>, List<String>> {
+        val mpds = serveCaptured(id, mpd)
+        val rows = MultiMoviesResolver(sacdnToMock, origin = base).resolveAll("movie", id.toLong(), 0, 0)
+        return rows.associate { (sacdnId(it.url) ?: it.url) to labels(it) } to mpds.toList()
+    }
+
+    @Test fun mpdLangRrrFirstTeluguIsNotTeluguSecondIs() = runBlocking {
+        val (by, mpds) = resolveCaptured("579974")
+        assertFalse(by["5820588283537016992"].toString(), "Telugu" in by["5820588283537016992"]!!)
+        assertEquals(listOf("Telugu"), by["5355663801620775816"])
+        assertEquals(1, by.values.count { "Telugu" in it })
+        assertEquals("one signed MPD GET per sacdn source", 6, mpds.size)
+        assertTrue(mpds[0], mpds.all { Regex("""^/dash/\d+_[^/]+/index\.mpd\?Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED$""").matches(it) })
+    }
+
+    @Test fun mpdLangPushpaSingleTeluguTaggedTamIsNotTeluguAndNotRelabelled() = runBlocking {
+        val (by, _) = resolveCaptured("690957")
+        assertEquals(emptyList<String>(), by["1120489025439157848"])
+    }
+
+    @Test fun mpdLangHanuManTeluguTaggedUndIsNotTeluguHindiStays() = runBlocking {
+        val (by, _) = resolveCaptured("869760")
+        assertFalse("Telugu" in by["5646656895621416016"]!!)
+        assertEquals(listOf("Hindi"), by["5669817185716291008"])
+    }
+
+    @Test fun mpdLangDevaraKurdishSubTaggedTelBecomesTelugu() = runBlocking {
+        val (by, _) = resolveCaptured("811941")
+        assertEquals(listOf("Telugu"), by["6176354059575264600"])
+        assertEquals(listOf("Telugu"), by["5096152864070746064"])
+    }
+
+    @Test fun mpdLangSalaarKeepsTheTelSourceTelugu() = runBlocking {
+        val (by, mpds) = resolveCaptured("770906")
+        assertEquals(listOf("Telugu"), by["7844085959171131184"])
+        assertFalse("Telugu" in by["891921665641332688"]!!)
+        assertEquals("the 8 callisto sources once each; orion has no MPD", 8, mpds.size)
+    }
+
+    @Test fun mpdLangKgf2KannadaClaimsFollowTheTag() = runBlocking {
+        val (by, mpds) = resolveCaptured("587412")
+        assertEquals(listOf("Kannada"), by["940721918355932584"])
+        assertEquals("und carries no information", listOf("Kannada"), by["2871208402850570248"])
+        assertEquals(listOf("Telugu"), by["68264836194533344"])
+        assertEquals(8, mpds.size)
+    }
+
+    @Test fun mpdLangFailureFallsBackToLastListedWins() = runBlocking {
+        val n = java.util.concurrent.atomic.AtomicInteger()
+        val (by, mpds) = resolveCaptured("579974") {
+            if (n.incrementAndGet() == 1) MockResponse().setBody(mpdWith("tel")).setHeadersDelay(4, java.util.concurrent.TimeUnit.SECONDS)
+            else MockResponse().setResponseCode(503)
+        }
+        assertFalse("Telugu" in by["5820588283537016992"]!!)
+        assertEquals(listOf("Telugu"), by["5355663801620775816"])
+        assertEquals(6, mpds.size)
+    }
+
+    @Test fun mpdLangPlanFollowsTheServerRule() {
+        // Synthetic: KGF2's measured tags, except position 0 ("Kannada", Hindi speech, measured und) is given hin.
+        val kgf = mpdFix["titles"]!!.jsonObject["587412"]!!.jsonObject["answers"]!!.jsonArray.map { a ->
+            a.jsonObject["sources"]!!.jsonArray.map { it.jsonObject["url"]!!.jsonPrimitive.content to it.jsonObject["language"]?.jsonPrimitive?.contentOrNull }
+        }
+        val tags = mapOf("2871208402850570248" to "hin", "940721918355932584" to "kan", "3461436953068011736" to "eng", "1207594074979664368" to "und", "68264836194533344" to "tel")
+        val mpd = kgf.flatten().associate { (u, _) -> MultiMoviesResolver.masterKey(u) to MultiMoviesResolver.Companion.MpdResult(true, tags[MultiMoviesResolver.masterKey(u)]) }
+        val plan = MultiMoviesResolver.mpdLanguagePlan(kgf, mpd)
+        assertEquals("Hindi", plan.sources["2871208402850570248"]!!.language)
+        assertEquals("Kannada", plan.sources["940721918355932584"]!!.language)
+        assertEquals("eng is ignored", "Bengali", plan.sources["3461436953068011736"]!!.language)
+        assertEquals("und is ignored", "Hindi", plan.sources["1207594074979664368"]!!.language)
+        assertEquals("[multimovies] mpd-lang 587412 claims=1 tel=1 fixed=1 fallback=0", plan.line("587412"))
+        val failed = MultiMoviesResolver.mpdLanguagePlan(kgf, mpd + ("940721918355932584" to MultiMoviesResolver.Companion.MpdResult(false, error = "HTTP 503")))
+        assertTrue(failed.fallback)
+        assertEquals("[multimovies] mpd-lang 587412 claims=1 tel=0 fixed=0 fallback=1", failed.line("587412"))
+    }
+
+    @Test fun mpdUrlKeepsTheSignedQueryAndNeedsOne() {
+        val inner = "https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F5355663801620775816_0_0_1080_h265_623%2Fmaster.m3u8"
+        assertEquals("https://sacdn.hakunaymatata.com/dash/5355663801620775816_0_0_1080_h265_623/index.mpd?Policy=P_&Signature=S~x&Key-Pair-Id=K",
+            MultiMoviesResolver.mpdUrlOf("https://old-mode-b611.fykko14.workers.dev/?url=$inner&Policy=P_&Signature=S~x&Key-Pair-Id=K"))
+        assertNull("unsigned", MultiMoviesResolver.mpdUrlOf("https://h/?url=$inner"))
+        assertNull(MultiMoviesResolver.mpdUrlOf("https://img.rousav.tech/media/031fe7b1d27fd6aa800d/index.m3u8?Policy=a&Signature=b&Key-Pair-Id=c"))
+        assertEquals("tel", MultiMoviesResolver.mpdAudioLang(mpdWith("tel")))
+        assertNull(MultiMoviesResolver.mpdAudioLang(mpdWith(null)))
     }
 }

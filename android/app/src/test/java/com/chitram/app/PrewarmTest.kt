@@ -20,6 +20,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import okhttp3.Interceptor
@@ -51,11 +52,16 @@ class PrewarmTest {
     private val hits = CopyOnWriteArrayList<String>()
     private val codecs = CodecSupport { _, _ -> null }
     private var clock = 1_000_000L
+    /** Every host fails on DNS (no network), the local server too. */
+    @Volatile private var down = false
+    /** What the device's connectivity check says. */
+    @Volatile private var offline = false
 
     /** Records every request; the local MockWebServer answers for real, every other host 404s. */
     private val client = OkHttpClient.Builder().addInterceptor(Interceptor { ch ->
         val u = ch.request().url
         hits += "${u.host}${u.encodedPath}"
+        if (down) throw java.net.UnknownHostException(u.host)
         if (u.host == "127.0.0.1" || u.host == "localhost") ch.proceed(ch.request())
         else Response.Builder().request(ch.request()).protocol(Protocol.HTTP_1_1).code(404).message("fake").body("".toResponseBody()).build()
     }).build()
@@ -86,6 +92,7 @@ class PrewarmTest {
             castle = CastleResolver(client, hosts = hosts),
             multimovies = MultiMoviesResolver(client, origin = mm),
             netmirror = NetmirrorResolver(client, now = { clock }),
+            offline = { offline },
         ) { clock }
     }
 
@@ -101,19 +108,20 @@ class PrewarmTest {
         assertEquals(listOf("mapple", "netmirror", "castletv", "multimovies", "vidrift"), od.prewarmNames())
     }
 
-    @Test fun configPrewarmIsPerSectionAndMissingOrBadIsFalse() {
+    @Test fun configPrewarmIsPerSectionAndMissingOrBadIsTheBuiltInDefault() {
         val c = ResolveConfig.parse(
             """{"version":3,"mapple":{"prewarm":true},"vaplayer":{"prewarm":"true"},"netmirror":{"enabled":true},
                "castletv":{"prewarm":false},"multimovies":{"prewarm":1},"vidrift":{"prewarm":true},"showsst":{"prewarm":true}}""")
-        // vaplayer "true" (string) and multimovies 1 are bad: false. netmirror without the field: false.
-        // onetouchtv absent: its default (false).
-        assertEquals(setOf("mapple", "vidrift", "showsst"), c.prewarm)
+        // vaplayer "true" (string) and multimovies 1 are bad: the built-in default (vaplayer off,
+        // multimovies on). netmirror without the field: its default (on). onetouchtv absent: off.
+        // castletv false and showsst true are booleans: they win.
+        assertEquals(setOf("mapple", "vidrift", "showsst", "netmirror", "multimovies"), c.prewarm)
         assertEquals(3, c.version)
-        // The shipped JSON: version 3 and the five defaults on, vaplayer off.
+        // The shipped JSON: version 4 and the five defaults on, vaplayer off.
         for (f in listOf("../routes/resolve-config.json", "../web/public/resolve-config.json", "../../routes/resolve-config.json", "../../web/public/resolve-config.json")) {
             val file = File(f).takeIf { it.exists() } ?: continue
             val shipped = ResolveConfig.parse(file.readText())
-            assertEquals(f, 3, shipped.version)
+            assertEquals(f, 4, shipped.version)
             assertEquals(f, ResolveConfig.DEFAULT_PREWARM, shipped.prewarm)
         }
     }
@@ -141,8 +149,13 @@ class PrewarmTest {
         val late = CompletableDeferred<List<Source>>()
         val jobs = od.launchAll(scope, "movie", 579974, 0, 0, codecs, "Telugu", "RRR", vmDown = true, originalLang = "te", late = late, lateScope = scope)
         val rows = withTimeout(60_000) { jobs.awaitAll() }
-        assertEquals(before, warmed.associateWith(::count))
+        // MultiMovies answered with rows: taken from the prewarm, no new request.
+        for (h in listOf("127.0.0.1", "localhost")) assertEquals(h, before.getValue(h), count(h))
+        // NetMirror failed upstream (HTTP 404, not the network): its job is reused, never a second NetMirror request.
         assertEquals("no second NetMirror request", netmirrorBefore, hits.count { it.contains("mobidetect") })
+        // Gap X2: mapple and castletv ended with 0 rows; Play asks them again.
+        assertTrue(count("mapple.fun") > before.getValue("mapple.fun"))
+        assertTrue(count("api.hlowb.com") > before.getValue("api.hlowb.com"))
         // MultiMovies rows came from the prewarm with their language tags intact.
         val mmRows = rows[od.names(vmDown = true).indexOf(OnDeviceResolver.MULTIMOVIES)]
         assertEquals(2, mmRows.size)
@@ -180,10 +193,97 @@ class PrewarmTest {
         waitPrewarm()
         // Back to the first title inside the TTL: no second NetMirror prewarm.
         assertFalse(OnDeviceResolver.NETMIRROR in od.prewarm("movie", 1, 0, 0, codecs, "Telugu", "A", "te"))
+        // Gap 13.9: not again inside NetMirror's cooldown either.
         clock += OnDeviceResolver.PREWARM_TTL_MS + 1
+        od.cancelPrewarm("movie", 1)
+        assertFalse(OnDeviceResolver.NETMIRROR in od.prewarm("movie", 1, 0, 0, codecs, "Telugu", "A", "te"))
+        clock += com.chitram.app.resolve.NetmirrorConfig().cooldownMs
         od.cancelPrewarm("movie", 1)
         assertTrue(OnDeviceResolver.NETMIRROR in od.prewarm("movie", 1, 0, 0, codecs, "Telugu", "A", "te"))
         waitPrewarm()
+    }
+
+    private fun local() = count("127.0.0.1") + count("localhost")
+
+    /** Gap 13.10: airplane mode, 3 details pages past the dwell, then online: no provider paused. */
+    @Test fun offlinePrewarmNeverOpensABreaker() = runBlocking {
+        down = true; offline = true
+        val n0 = hits.size
+        for (id in 1L..3L) {
+            assertEquals(emptyList<String>(), od.prewarm("movie", id, 0, 0, codecs, "Telugu", "T$id", "te"))
+            waitPrewarm()
+        }
+        assertEquals("an offline prewarm sends nothing", n0, hits.size)
+        // Play while offline: nothing counts toward a breaker.
+        repeat(OnDeviceResolver.BREAKER_FAILS + 1) { for (n in od.names(vmDown = true)) od.resolveAll(n, "movie", 9, 0, 0, codecs, "Telugu", title = "X") }
+        for (n in od.names(vmDown = true)) assertFalse("$n paused", od.isOpen(n))
+        // Online again: Play resolves every provider at once.
+        down = false; offline = false
+        val before = local()
+        assertEquals(2, od.resolveAll(OnDeviceResolver.MULTIMOVIES, "movie", 10, 0, 0, codecs, "Telugu", originalLang = "te").size)
+        assertTrue(local() > before)
+    }
+
+    /** Gap 13.10 boundary: only an offline reading stops the count; a dead host online still counts. */
+    @Test fun aDnsFailureWhileTheDeviceReadsOnlineStillCounts() = runBlocking {
+        down = true
+        // The connectivity check lags: it says online, the DNS fails. A dead host counts (it may be gone).
+        repeat(OnDeviceResolver.BREAKER_FAILS) { od.resolveAll(OnDeviceResolver.CASTLE, "movie", 9, 0, 0, codecs, title = "X") }
+        assertTrue(od.isOpen(OnDeviceResolver.CASTLE))
+    }
+
+    /** Gap X2: prewarm failed on the network, the network came back, Play inside 120 s resolves again. */
+    @Test fun aFailedPrewarmJobIsNotReusedByPlay() = runBlocking {
+        down = true // the connectivity check missed it: the prewarm ran and failed
+        od.prewarm("movie", 579974, 0, 0, codecs, "Telugu", "RRR", "te")
+        waitPrewarm()
+        down = false
+        val before = local()
+        val rows = od.resolveAll(OnDeviceResolver.MULTIMOVIES, "movie", 579974, 0, 0, codecs, "Telugu", originalLang = "te")
+        assertEquals(2, rows.size)
+        assertTrue("Play resolved again", local() > before)
+        assertTrue(rows.any { "Telugu" in it.languages })
+    }
+
+    /** A mapple stand-in: a Hindi row at once, its Telugu row [lateMs] later through [MappleResolver.Later]. */
+    private fun lateMapple(lateMs: Long, calls: java.util.concurrent.atomic.AtomicInteger = java.util.concurrent.atomic.AtomicInteger()) =
+        object : MappleResolver(client, HostBook(MemoryKeyValue()), MemoryKeyValue()) {
+            override suspend fun resolve(cfg: com.chitram.app.resolve.MappleConfig, type: String, tmdbId: Long, season: Int, episode: Int,
+                                         preferred: String, fresh: Boolean, later: Later?): com.chitram.app.resolve.Resolved? {
+                calls.incrementAndGet()
+                fun row(l: String) = com.chitram.app.resolve.Resolved("mapple", "mapple $l", "https://m.test/$l.m3u8", emptyMap(), null, emptyList(), emptyList(), null, key = "mapple-$l", languages = listOf(l))
+                if (later != null) {
+                    later.handedOff = true
+                    later.scope.launch { delay(lateMs); later.deliver(row("Telugu")) }
+                }
+                return row("Hindi")
+            }
+        }
+
+    /** Gap X12: a title only mapple has; its Telugu row comes late. A list entry only, never waited for. */
+    @Test fun aLateMappleTeluguRowJoinsTheListWithoutASwitch() = runBlocking {
+        val kv = MemoryKeyValue()
+        val store = ResolveConfigStore(client, "https://vm.test" + ResolveConfigStore.PATH, kv)
+        val calls = java.util.concurrent.atomic.AtomicInteger()
+        val od2 = OnDeviceResolver(Api(client, base = "https://catalog.test", vmBase = "https://vm.test"), store, lateMapple(1_500, calls),
+            VaplayerResolver(client, HostBook(kv)) { null }, cache = com.chitram.app.resolve.StreamCache(kv) { clock }) { clock }
+        od2.prewarm("movie", 77, 0, 0, codecs, "Telugu", "Only Mapple", "te")
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val late = CompletableDeferred<List<Source>>()
+        val t0 = System.currentTimeMillis()
+        val jobs = od2.launchAll(scope, "movie", 77, 0, 0, codecs, "Telugu", "Only Mapple", late = late, lateScope = scope)
+        val first = withTimeout(10_000) { jobs[0].await() }
+        assertTrue("the start never waits for the late row", System.currentTimeMillis() - t0 < 1_400)
+        assertEquals(listOf("Hindi"), first.single().languages)
+        val lateRows = withTimeout(10_000) { late.await() }
+        assertEquals(listOf("Telugu"), lateRows.single().languages)
+        assertEquals("Play continued the prewarm: one mapple resolve", 1, calls.get())
+        // PlayerVm joins late rows as list entries: play() only when the start had failed.
+        val vm = listOf(File("src/main/java/com/chitram/app/player/PlayerVm.kt"), File("app/src/main/java/com/chitram/app/player/PlayerVm.kt")).first { it.exists() }.readText()
+        val join = vm.substringAfter("private suspend fun joinLate(").substringBefore("\n    }\n")
+        assertEquals(1, Regex("""\bplay\(""").findAll(join).count())
+        assertTrue(join.contains("if (phase is Phase.Failed && sources.isNotEmpty()) { play("))
+        scope.coroutineContext[kotlinx.coroutines.Job]!!.cancel()
     }
 
     @Test fun openBreakerSkipsThatProviderOnly() = runBlocking {

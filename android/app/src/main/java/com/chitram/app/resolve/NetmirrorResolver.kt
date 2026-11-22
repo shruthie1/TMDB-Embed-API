@@ -17,6 +17,9 @@ import okio.ByteString.Companion.decodeBase64
 import java.util.concurrent.TimeUnit
 
 /** TV API protocol, on the viewer's IP. Credentials never travel to the VM or media CDN. */
+/** Gap 13.9: a prewarm spent its half of the window budget; Play keeps the rest. Not a provider failure. */
+class PrewarmShareSpent : java.io.IOException("netmirror: prewarm share of the window budget spent")
+
 class NetmirrorResolver(
     client: OkHttpClient,
     private val otp: () -> String = { "111111" },
@@ -27,6 +30,8 @@ class NetmirrorResolver(
      * otp.php again. Null: memory only. The token is never logged.
      */
     private val kv: com.chitram.app.data.KeyValue? = null,
+    /** Decision log sink; never given a token or an OTP. */
+    private val log: (String) -> Unit = { android.util.Log.i("Chitram", it) },
 ) {
     private val jar = object : CookieJar {
         private val cookies = mutableListOf<Cookie>()
@@ -51,8 +56,14 @@ class NetmirrorResolver(
     private var token: String? = null
     private var tokenUntil = 0L
     private var credential: String? = null
-    /** The API base [token] was issued by; a token from another base is never sent. */
+    /**
+     * The API base that last accepted [token]. After a base change the token is still
+     * tried there first: it is not bound to the base (upstream keeps one global token),
+     * and only a `status:"otp"` answer costs an otp.php call.
+     */
     private var tokenBase: String? = null
+    /** When [token] was issued, for the `token rejected age=` log line only. */
+    private var tokenIssuedAt = 0L
     private var blockedUntil = 0L
 
     /** True while a 429/403, a substituted clip or a refused OTP holds every request back. */
@@ -61,32 +72,50 @@ class NetmirrorResolver(
     init {
         kv?.let { s ->
             val t = s.get(KV_TOKEN); val c = s.get(KV_CREDENTIAL); val b = s.get(KV_BASE); val u = s.get(KV_UNTIL)?.toLongOrNull()
-            if (!t.isNullOrBlank() && c != null && !b.isNullOrBlank() && u != null && u > now()) { token = t; credential = c; tokenBase = b; tokenUntil = u }
+            if (!t.isNullOrBlank() && c != null && !b.isNullOrBlank() && u != null && u > now()) {
+                token = t; credential = c; tokenBase = b; tokenUntil = u
+                tokenIssuedAt = s.get(KV_ISSUED)?.toLongOrNull() ?: issuedAtOf(t) ?: 0L
+            }
         }
     }
 
     private fun clearToken() {
-        token = null; tokenUntil = 0; tokenBase = null
-        kv?.let { s -> listOf(KV_TOKEN, KV_CREDENTIAL, KV_BASE, KV_UNTIL).forEach { s.put(it, null) } }
+        token = null; tokenUntil = 0; tokenBase = null; tokenIssuedAt = 0
+        kv?.let { s -> listOf(KV_TOKEN, KV_CREDENTIAL, KV_BASE, KV_UNTIL, KV_ISSUED).forEach { s.put(it, null) } }
     }
 
     private fun saveToken(value: String, entered: String, base: String, ttlMs: Long) {
-        token = value; credential = entered; tokenBase = base; tokenUntil = now() + ttlMs
-        kv?.let { s -> s.put(KV_TOKEN, value); s.put(KV_CREDENTIAL, entered); s.put(KV_BASE, base); s.put(KV_UNTIL, tokenUntil.toString()) }
+        token = value; credential = entered; tokenBase = base; tokenUntil = now() + ttlMs; tokenIssuedAt = now()
+        kv?.let { s -> s.put(KV_TOKEN, value); s.put(KV_CREDENTIAL, entered); s.put(KV_BASE, base); s.put(KV_UNTIL, tokenUntil.toString()); s.put(KV_ISSUED, tokenIssuedAt.toString()) }
+    }
+
+    /** The token was accepted on [base]: remember that base so a cold start knows where it last worked. */
+    private fun acceptedOn(base: String) {
+        if (token == null || tokenBase == base) return
+        tokenBase = base
+        kv?.put(KV_BASE, base)
     }
     private var bucketAt = 0L
     private var calls = 0
+    /** The resolve holding [lock] is a prewarm (gap 13.9). */
+    @Volatile private var prewarmCall = false
+
+    /** Requests this resolve may reach in the window: a prewarm stops at half, so Play keeps the rest. */
+    private fun limit(cfg: NetmirrorConfig): Int = if (prewarmCall) cfg.maxCalls / 2 else cfg.maxCalls
+
+    /** Gap 13.9: the prewarms' half of this window's requests is spent. */
+    fun prewarmShareSpent(cfg: NetmirrorConfig): Boolean = now() - bucketAt < cfg.budgetWindowMs && calls >= cfg.maxCalls / 2
     private data class Cached(val value: JsonObject, val until: Long)
     private val metadata = linkedMapOf<String, Cached>()
     private val players = linkedMapOf<String, Pair<List<Resolved>, Long>>()
 
-    suspend fun resolve(cfg: NetmirrorConfig, type: String, title: String, year: Int?, season: Int, episode: Int, fresh: Boolean = false, onRow: (Resolved) -> Unit = {}): List<Resolved> = lock.withLock {
+    suspend fun resolve(cfg: NetmirrorConfig, type: String, title: String, year: Int?, season: Int, episode: Int, fresh: Boolean = false, prewarm: Boolean = false, onRow: (Resolved) -> Unit = {}): List<Resolved> = lock.withLock {
         if (!cfg.enabled || title.isBlank()) return@withLock emptyList()
         if (blockedUntil > now()) throw StepException("netmirror", 0, "cooldown active")
+        prewarmCall = prewarm
         if (discoveryDomains != cfg.domains) {
-            // First resolve after a (cold) start: a stored token stays; discover() still drops it
-            // when the API base it belongs to is not the one found now.
-            if (discoveryDomains.isNotEmpty()) clearToken()
+            // A new discovery list may point at a new API base. The token stays: it is
+            // tried on the new base first and renewed only on a `status:"otp"` answer.
             api = null; apiUntil = 0; metadata.clear(); players.clear()
             discoveryDomains = cfg.domains.toList()
         }
@@ -102,7 +131,7 @@ class NetmirrorResolver(
             list
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            if (blockedUntil > now() || calls >= cfg.maxCalls) throw e
+            if (blockedUntil > now() || calls >= limit(cfg)) throw e
             failed = true
             listOf("nf", "pv", "hs")
         }
@@ -148,14 +177,14 @@ class NetmirrorResolver(
                         if (e is CancellationException) throw e
                         failed = true
                         android.util.Log.i("Chitram", "netmirror $ott catalog row failed: ${e.message}")
-                        if (blockedUntil > now() || calls >= cfg.maxCalls) throw e
+                        if (blockedUntil > now() || calls >= limit(cfg)) throw e
                     }
                 }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 failed = true
                 android.util.Log.i("Chitram", "netmirror $ott: ${e.message}")
-                if (blockedUntil > now() || calls >= cfg.maxCalls) break
+                if (blockedUntil > now() || calls >= limit(cfg)) break
             }
         }
         // Never cache a partial result as a complete answer; a fresh resolve may add languages.
@@ -169,7 +198,7 @@ class NetmirrorResolver(
             }
             players[cacheKey] = out.toList() to until
         }
-        if (out.isEmpty() && failed) throw StepException("netmirror", 0, "upstream resolution failed")
+        if (out.isEmpty() && failed) throw if (prewarm && calls >= limit(cfg) && calls < cfg.maxCalls) PrewarmShareSpent() else StepException("netmirror", 0, "upstream resolution failed")
         if (failed) out.map { it.copy(incomplete = true) } else out
     }
 
@@ -184,12 +213,11 @@ class NetmirrorResolver(
                 if ((!url.isHttps && url.host !in listOf("localhost", "127.0.0.1")) || url.username.isNotEmpty() || url.password.isNotEmpty()) continue
                 val next = url.toString().trimEnd('/')
                 if (api != next) metadata.clear()
-                if (tokenBase != null && tokenBase != next) clearToken()
                 api = next; apiUntil = now() + cfg.apiTtlMs
                 return next
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
-                if (blockedUntil > now() || calls >= cfg.maxCalls) throw e
+                if (blockedUntil > now() || calls >= limit(cfg)) throw e
             }
         }
         throw StepException("netmirror discovery", 0, "no usable API")
@@ -197,7 +225,7 @@ class NetmirrorResolver(
 
     private suspend fun authenticate(cfg: NetmirrorConfig, base: String): String {
         val entered = otp()
-        if (tokenUntil > now() && credential == entered && tokenBase == base) token?.let { return it }
+        if (tokenUntil > now() && credential == entered) token?.let { return it }
         clearToken()
         val r = request(cfg, "$base/newtv/otp.php", mapOf("Otp" to entered, "User-Agent" to UA.replace("GatuNewTV", "Gatu")))
         val data = MappleResolver.obj(r.body)
@@ -218,9 +246,12 @@ class NetmirrorResolver(
             val r = request(cfg, "$base$path", extra + mapOf("Ott" to ott, "Usertoken" to value))
             val data = MappleResolver.obj(r.body) ?: throw StepException("netmirror API", r.code, "not JSON")
             if (str(data, "status") == "otp") {
+                val age = if (tokenIssuedAt > 0) (now() - tokenIssuedAt) / 60_000 else -1
+                log("[netmirror] token rejected age=${if (age >= 0) "$age" else "?"}m")
                 clearToken()
                 if (attempt == 1) { blockedUntil = now() + cfg.cooldownMs; throw StepException("netmirror login", 0, "session rejected after renewal") }
             } else {
+                acceptedOn(base)
                 if (str(data, "status") == "error") throw StepException("netmirror API", r.code, "upstream error")
                 if (cache) {
                     if (metadata.size >= 128) metadata.remove(metadata.keys.first())
@@ -277,7 +308,7 @@ class NetmirrorResolver(
     private suspend fun request(cfg: NetmirrorConfig, url: String, headers: Map<String, String>): Reply {
         if (blockedUntil > now()) throw StepException("netmirror", 0, "cooldown active")
         if (now() - bucketAt >= cfg.budgetWindowMs) { bucketAt = now(); calls = 0 }
-        if (calls >= cfg.maxCalls) throw StepException("netmirror", 0, "request budget spent")
+        if (calls >= limit(cfg)) throw if (calls < cfg.maxCalls) PrewarmShareSpent() else StepException("netmirror", 0, "request budget spent")
         calls++
         val r = http.fetch(Request.Builder().url(url).header("User-Agent", UA)
             .header("X-Requested-With", "NetmirrorNewTV v1.0").header("Cache-Control", "no-cache, no-store, must-revalidate")
@@ -292,6 +323,10 @@ class NetmirrorResolver(
         private const val KV_CREDENTIAL = "netmirror.session.otp"
         private const val KV_BASE = "netmirror.session.base"
         private const val KV_UNTIL = "netmirror.session.until"
+        private const val KV_ISSUED = "netmirror.session.issued"
+        /** Part 3 of `<hex>::<hex>::<epoch s>::ni` is the issue time (POC 2026-11-22). */
+        internal fun issuedAtOf(token: String): Long? =
+            token.split("::").getOrNull(2)?.takeIf { it.length == 10 && it.all(Char::isDigit) }?.toLongOrNull()?.times(1000)
         const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:136.0) Gecko/20100101 Firefox/136.0 /OS.GatuNewTV v1.0"
         fun masterMatchesTitle(text: String, id: String): Boolean {
             val ids = text.lines().map(String::trim).filter { it.isNotBlank() && !it.startsWith('#') }

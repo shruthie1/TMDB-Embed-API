@@ -414,10 +414,10 @@ class Api(
 
     suspend fun streams(type: String, id: Long, season: Int = 0, episode: Int = 0, refresh: Boolean = false): StreamsResponse {
         val path = streamsPath(type, id, season, episode, refresh, full = false)
-        // Kept VM answer (30 min): no call. A refresh (a VM row failed) drops it and asks again.
+        // Kept VM answer (30 min): no call. A refresh asks again; the kept answer is
+        // replaced only by the new one (gap 10.5: a failed refresh keeps it).
         val key = com.chitram.app.resolve.StreamCache.key(type, id, season, episode)
-        if (refresh) streamCache?.evictVm(key)
-        else streamCache?.vm(key, full = false)?.let { android.util.Log.i("Chitram", "[cache] vm $type/$id hit: ${it.streams.size} row(s), 0 requests"); return it }
+        if (!refresh) streamCache?.vm(key, full = false)?.let { android.util.Log.i("Chitram", "[cache] vm $type/$id hit: ${it.streams.size} row(s), 0 requests"); return it }
         val h = vm
         if (h != null && !h.allow()) throw VmDown("VM paused for ${(h.openUntil - System.currentTimeMillis()) / 1000}s")
         if (h != null && h.halfOpen && !vmAnswers()) {
@@ -429,7 +429,7 @@ class Api(
             try {
                 val body = hedged(vmClient, noStore(vmBase + path), streamsHedgeMs)
                 h?.onSuccess()
-                return json.decodeFromString(StreamsResponse.serializer(), body).also { streamCache?.putVm(key, full = false, it) }
+                return json.decodeFromString(StreamsResponse.serializer(), body).also { if (refresh) streamCache?.evictVm(key); streamCache?.putVm(key, full = false, it) }
             } catch (e: IOException) {
                 // A 4xx is an answer: the VM is up.
                 if (e is HttpException && e.code < 500) { h?.onSuccess(); throw e }

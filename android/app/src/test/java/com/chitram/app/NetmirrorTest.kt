@@ -138,13 +138,130 @@ class NetmirrorTest {
         assertEquals(2, logins)
     }
 
-    @Test fun aStoredSessionFromAnotherApiBaseCostsExactlyOneOtpCall() = runBlocking {
+    @Test fun aStoredSessionFromAnotherApiBaseIsTriedThereFirstWithNoOtpCall() = runBlocking {
         val kv = MemoryKeyValue()
         resolve(NetmirrorResolver(client, now = { clock }, kv = kv))
         kv.put("netmirror.session.base", "https://other.example")
         assertEquals(3, resolve(NetmirrorResolver(client, now = { clock }, kv = kv)).size)
+        assertEquals("P12: the token is not bound to the base; no otp.php", 1, logins)
+        assertTrue(seen.filter { it.requestUrl!!.encodedPath.endsWith("player.php") }.all { it.getHeader("Usertoken") == "SECRET-1" })
+        assertEquals("rewritten to the base that accepted it", base, kv.get("netmirror.session.base"))
+    }
+
+    @Test fun aTokenRejectedOnTheNewBaseCostsOneOtpCallAndLogsItsAgeNotItself() = runBlocking {
+        val kv = MemoryKeyValue()
+        val lines = CopyOnWriteArrayList<String>()
+        resolve(NetmirrorResolver(client, now = { clock }, kv = kv, log = { lines += it }))
+        kv.put("netmirror.session.base", "https://other.example")
+        clock += 90 * 60_000L
+        reject = 1
+        // New process, same store: the issue time came back from kv.
+        assertEquals(3, resolve(NetmirrorResolver(client, now = { clock }, kv = kv, log = { lines += it })).size)
         assertEquals(2, logins)
-        assertEquals("rewritten to the base that issued it", base, kv.get("netmirror.session.base"))
+        assertEquals(listOf("[netmirror] token rejected age=90m"), lines)
+        assertTrue(lines.none { it.contains("SECRET") })
+        assertEquals("SECRET-2", kv.get("netmirror.session.token"))
+    }
+
+    @Test fun aTokenIsKeptForADayWithNoOtpCall() = runBlocking {
+        val kv = MemoryKeyValue()
+        resolve(NetmirrorResolver(client, now = { clock }, kv = kv))
+        clock += 23 * 60 * 60_000L
+        assertEquals(3, resolve(NetmirrorResolver(client, now = { clock }, kv = kv)).size)
+        assertEquals(1, logins)
+        assertEquals(24 * 60 * 60_000L, NetmirrorConfig().sessionTtlMs)
+    }
+
+    /** Gap 12.3: the served config (VM and web copy) keeps the token a day; a served 86400000 is honoured. */
+    @Test fun servedConfigKeepsTheTokenForADay() = runBlocking {
+        var read = 0
+        for (f in listOf("../routes/resolve-config.json", "../web/public/resolve-config.json", "../../routes/resolve-config.json", "../../web/public/resolve-config.json")) {
+            val file = java.io.File(f).takeIf { it.exists() } ?: continue
+            assertEquals(f, 86_400_000L, ResolveConfig.parse(file.readText()).netmirror.sessionTtlMs)
+            read++
+        }
+        assertTrue("found the shipped JSON", read >= 2)
+        val served = ResolveConfig.parse("""{"version":4,"netmirror":{"sessionTtlMs":86400000}}""").netmirror
+        assertEquals(86_400_000L, served.sessionTtlMs)
+        val kv = MemoryKeyValue()
+        val c = cfg.copy(sessionTtlMs = served.sessionTtlMs)
+        resolve(NetmirrorResolver(client, now = { clock }, kv = kv), c)
+        clock += 23 * 60 * 60_000L
+        assertEquals(3, resolve(NetmirrorResolver(client, now = { clock }, kv = kv), c).size)
+        assertEquals(1, logins)
+    }
+
+    // ---- On-device NetMirror (gaps 2.5, 13.9) ----------------------------------
+    // Every request, whatever its host (the built-in NetMirror domains included),
+    // is answered by the local fake: no request leaves the machine.
+
+    private val redirect = OkHttpClient.Builder().addInterceptor(okhttp3.Interceptor { ch ->
+        val u = ch.request().url
+        val local = u.newBuilder().scheme("http").host(server.hostName).port(server.port).build()
+        ch.proceed(ch.request().newBuilder().url(local).build())
+    }).build()
+    private fun nmCalls() = seen.count { it.requestUrl!!.encodedPath.contains("/newtv/") }
+    private fun onDevice(nm: NetmirrorResolver): OnDeviceResolver {
+        val kv = MemoryKeyValue()
+        // A saved config: only NetMirror prewarms here (mapple off), so only NetMirror requests are counted.
+        kv.put(ResolveConfigStore.KEY, """{"version":4,"mapple":{"prewarm":false},"netmirror":{"prewarm":true,"metadataTtlMs":60000}}""")
+        kv.put(ResolveConfigStore.KEY_AT, System.currentTimeMillis().toString())
+        kv.put(ResolveConfigStore.KEY_FROM, ResolveConfigStore.FROM_VM)
+        val store = ResolveConfigStore(redirect, "https://vm.test" + ResolveConfigStore.PATH, kv)
+        return OnDeviceResolver(null, store, MappleResolver(redirect, HostBook(kv), kv), VaplayerResolver(redirect, HostBook(kv)) { null },
+            netmirror = nm, cache = StreamCache(kv) { clock }) { clock }
+    }
+
+    /** Gap 2.5: NetMirror found no rows for a title; a reopen 121 s later asks it nothing. */
+    @Test fun anEmptyNetmirrorAnswerIsNotAskedAgainOnReopen() = runBlocking {
+        val od = onDevice(NetmirrorResolver(redirect, now = { clock }))
+        assertTrue(od.resolveAll(OnDeviceResolver.NETMIRROR, "movie", 42, 0, 0, codecs, "Telugu", title = "Nowhere Film").isEmpty())
+        val n = nmCalls()
+        assertTrue("the first ask searched", n > 0)
+        clock += 121_000
+        assertTrue(od.resolveAll(OnDeviceResolver.NETMIRROR, "movie", 42, 0, 0, codecs, "Telugu", title = "Nowhere Film").isEmpty())
+        assertEquals("reopen: 0 NetMirror requests", n, nmCalls())
+        assertFalse(OnDeviceResolver.NETMIRROR in od.prewarm("movie", 42, 0, 0, codecs, "Telugu", "Nowhere Film"))
+        assertEquals("prewarm: 0 NetMirror requests", n, nmCalls())
+        // Refresh sources (fresh) asks again (search metadata kept 60 s here, so it is asked anew).
+        od.resolveAll(OnDeviceResolver.NETMIRROR, "movie", 42, 0, 0, codecs, "Telugu", fresh = true, title = "Nowhere Film")
+        assertTrue(nmCalls() > n)
+    }
+
+    /** Gap 13.9: 10 titles browsed past the dwell, then Play: NetMirror still has budget for Play. */
+    @Test fun aBrowseStormLeavesNetmirrorBudgetForPlay() = runBlocking {
+        val nm = NetmirrorResolver(redirect, now = { clock })
+        val od = onDevice(nm)
+        val limit = NetmirrorConfig().maxCalls
+        for (i in 1..10) {
+            od.prewarm("movie", 1000L + i, 0, 0, codecs, "Telugu", "Storm Film $i")
+            kotlinx.coroutines.withTimeout(30_000) { od.prewarmJobs().forEach { runCatching { it.await() } } }
+        }
+        val spent = nmCalls()
+        assertTrue("prewarm spent at most half of $limit: $spent", spent <= limit / 2 + 2)
+        val rows = od.resolveAll(OnDeviceResolver.NETMIRROR, "movie", 2000, 0, 0, codecs, "Telugu", title = "Test Movie")
+        assertFalse(nm.throttled)
+        assertFalse(od.isOpen(OnDeviceResolver.NETMIRROR))
+        assertTrue("Play sent its requests", nmCalls() > spent)
+        assertEquals(3, rows.size)
+    }
+
+    /** Gap 13.9: a prewarm resolve stops at half the window budget; Play's own resolve does not. */
+    @Test fun aPrewarmResolveUsesAtMostHalfTheBudget() = runBlocking {
+        val r = resolver()
+        val c = cfg.copy(maxCalls = 24)
+        var shareSpent = 0
+        for (i in 1..10) {
+            val e = runCatching { r.resolve(c, "movie", "Storm Film $i", 2024, 0, 0, prewarm = true) }.exceptionOrNull()
+            if (e is PrewarmShareSpent) shareSpent++
+        }
+        assertTrue("prewarm stopped at its share", shareSpent > 0)
+        assertEquals(3, resolve(r, c).size)
+    }
+
+    @Test fun issueTimeIsReadFromTheTokenWhenTheStoreHasNone() {
+        assertEquals(1_795_000_000_000L, NetmirrorResolver.issuedAtOf("${"a".repeat(32)}::${"b".repeat(32)}::1795000000::ni"))
+        assertNull(NetmirrorResolver.issuedAtOf("SECRET-1"))
     }
 
     @Test fun aRefusedOtpClearsTheStoredSession() = runBlocking {
@@ -191,13 +308,14 @@ class NetmirrorTest {
         resolve(r)
         assertEquals(2, logins)
     }
-    @Test fun configRotationClearsSessionAndMetadata() = runBlocking {
+    @Test fun configRotationClearsMetadataAndKeepsTheToken() = runBlocking {
         val r = resolver()
         resolve(r)
         apiPrefix = "/v2"
         assertEquals(3, resolve(r, cfg.copy(domains = listOf("$base/other"))).size)
-        assertEquals(2, logins)
-        assertTrue(seen.any { it.requestUrl!!.encodedPath == "/v2/newtv/player.php" })
+        assertEquals("P12: old token tried on the new base first", 1, logins)
+        assertTrue(seen.any { it.requestUrl!!.encodedPath == "/v2/newtv/player.php" && it.getHeader("Usertoken") == "SECRET-1" })
+        assertEquals("metadata cleared: ott.php asked again", 2, seen.count { it.requestUrl!!.encodedPath.endsWith("ott.php") })
     }
     @Test fun rejectsWrongVideoAndPausesNextLookup() = runBlocking {
         clip = true
@@ -352,6 +470,6 @@ class NetmirrorTest {
         val parsed = ResolveConfig.parse("""{"netmirror":{"domains":["http://evil"],"maxCalls":0,"sessionTtlMs":999999999}}""")
         assertEquals(NetmirrorConfig().domains, parsed.netmirror.domains)
         assertEquals(1, parsed.netmirror.maxCalls)
-        assertEquals(3_600_000L, parsed.netmirror.sessionTtlMs)
+        assertEquals(86_400_000L, parsed.netmirror.sessionTtlMs)
     }
 }

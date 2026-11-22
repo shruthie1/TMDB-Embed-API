@@ -5,6 +5,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
@@ -15,6 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.layout.ContentScale
@@ -239,4 +241,29 @@ suspend fun androidx.compose.ui.focus.FocusRequester.focusWhenAttached(frames: I
     }
     androidx.compose.runtime.withFrameNanos { }
     return landed?.invoke() == true
+}
+
+/**
+ * Clock for a "Refresh sources" control: ticks every 500 ms while it is
+ * refreshing, cooling down or showing a result line (live countdown, auto-hide),
+ * then stops.
+ */
+@Composable
+fun rememberRefreshTick(m: com.chitram.app.player.RefreshModel): Long {
+    var now by androidx.compose.runtime.remember { androidx.compose.runtime.mutableLongStateOf(System.currentTimeMillis()) }
+    androidx.compose.runtime.LaunchedEffect(m) {
+        while (true) {
+            now = System.currentTimeMillis()
+            if (!(m.running || m.readyAt > now || m.noteUntil > now)) break
+            kotlinx.coroutines.delay(500)
+        }
+    }
+    return now
+}
+
+/** The "Refresh sources" button glyph: a small spinner while it runs, the refresh icon otherwise. */
+@Composable
+fun RefreshGlyph(running: Boolean, tint: Color, size: androidx.compose.ui.unit.Dp, modifier: Modifier = Modifier) {
+    if (running) androidx.compose.material3.CircularProgressIndicator(color = tint, strokeWidth = 2.dp, modifier = modifier.size(size))
+    else androidx.compose.material3.Icon(androidx.compose.material.icons.Icons.Filled.Refresh, contentDescription = null, tint = tint, modifier = modifier.size(size))
 }

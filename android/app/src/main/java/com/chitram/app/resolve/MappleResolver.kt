@@ -47,7 +47,7 @@ import java.util.concurrent.TimeUnit
  * Timing: one line per resolve, "mapple: timing total=... session=... media=...
  * pow=... fronts=... wait=...", so device time can be read from logcat.
  */
-class MappleResolver(
+open class MappleResolver(
     client: OkHttpClient,
     private val hosts: HostBook,
     private val kv: KeyValue,
@@ -95,7 +95,7 @@ class MappleResolver(
      * `fresh` forces a new session (used to recover a row that failed in playback).
      * `preferred` is the audio language a front must carry to win at once.
      */
-    suspend fun resolve(
+    open suspend fun resolve(
         cfg: MappleConfig, type: String, tmdbId: Long, season: Int = 0, episode: Int = 0,
         preferred: String = "Telugu", fresh: Boolean = false,
         later: Later? = null,

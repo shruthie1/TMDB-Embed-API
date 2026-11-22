@@ -24,10 +24,10 @@ import java.util.concurrent.TimeUnit
  *
  * Language (server twin, exactly): a rendition's own LANGUAGE wins. The page
  * label applies only when the master has exactly ONE untagged AUDIO rendition
- * (or none, audio muxed). "Original" takes [originalLang] (the title's TMDB
- * original_language from the catalog) unless another entry names that
- * language itself ([originalLanguageFor]); unknown stays unlabelled. A label
- * ending in sub/subs/subbed/subtitles is never an audio language.
+ * (or none, audio muxed). "Original" names no language, never the TMDB one
+ * ([pageLanguage]). Of two entries that say Telugu only the last keeps it
+ * ([teluguClaimWinner]). A label ending in sub/subs/subbed/subtitles is never
+ * an audio language.
  *
  * Hosts: tried in order, a dead page moves to the next. The host that last
  * answered goes first while fresh ([HEAL_TTL_MS]), the twin of the server's
@@ -54,7 +54,9 @@ class VidriftResolver(
      * One row per Orion master. Empty for a page that lists none, or a tv
      * request without season/episode (never guess S1E1). Throws when every host
      * failed the page, or every master failed: the caller's breaker counts it.
+     * `originalLang` is accepted for the caller and not used ([pageLanguage]).
      */
+    @Suppress("UNUSED_PARAMETER")
     suspend fun resolveAll(type: String, tmdbId: Long, season: Int, episode: Int, originalLang: String? = null, budgetMs: Long = BUDGET_MS): List<Resolved> = coroutineScope {
         val t0 = System.currentTimeMillis()
         val tv = type == "tv" || type == "series"
@@ -116,15 +118,13 @@ class VidriftResolver(
             return@coroutineScope emptyList()
         }
 
-        // "Original" names the TMDB language only when no other entry names it (server originalLanguageFor).
-        val originalFor = originalLanguageFor(entries.map { it.name }, originalLang)
-        if (originalFor == null && com.chitram.app.data.Ranking.knownLanguageName(originalLang) != null &&
-            entries.any { Regex("""·\s*original\s*$""", RegexOption.IGNORE_CASE).containsMatchIn(it.name) }) {
-            android.util.Log.i("Chitram", "[vidrift] \"Original\" not labelled ${com.chitram.app.data.Ranking.knownLanguageName(originalLang)} for $tmdbId: another entry names it - stays unlabelled")
-        }
+        // Two entries that say Telugu: only the last keeps it (server teluguClaimWinner).
+        val winner = teluguClaimWinner(entries.map { it.name })
 
         // Masters in parallel: the page host first, then the mirrors, inside the budget.
-        val jobs = entries.map { e ->
+        val jobs = entries.mapIndexed { i, e ->
+            val dropLabel = winner != null && i != winner && pageLanguage(e.name).first == "Telugu"
+            if (dropLabel) android.util.Log.i("Chitram", "[vidrift] telugu-claim dropped for $tmdbId: entry $i \"${e.name}\" listed Telugu, kept entry $winner (listed later)")
             async {
                 val errs = mutableListOf<String>()
                 for (base in hosts) {
@@ -135,7 +135,7 @@ class VidriftResolver(
                     val got = try {
                         withTimeoutOrNull(cap) {
                             val r = capped(cap).fetch(Request.Builder().url(url).apply { streamHeaders(base).forEach { (k, v) -> header(k, v) } }.build())
-                            if (!r.ok) "HTTP ${r.code}" else rowFor(e, r.body, url, base, originalFor) ?: "no variants"
+                            if (!r.ok) "HTTP ${r.code}" else rowFor(e, r.body, url, base, dropLabel) ?: "no variants"
                         } ?: "no answer in ${System.currentTimeMillis() - m0}ms"
                     } catch (x: Exception) {
                         if (x is kotlinx.coroutines.CancellationException) throw x
@@ -236,29 +236,28 @@ class VidriftResolver(
 
         /**
          * Server pageLanguage: "Orion · Telugu" -> (Telugu, Telugu). "Orion · Original"
-         * -> the title's original language when known, else (null, "Original").
+         * -> (null, "Original"), always: "Original" is not the TMDB language.
+         * 1261763 (TMDB te): Original is the Tamil track (2026-11-21). Live
+         * 2026-11-22: RRR (TMDB te) listed only Original, labelled Telugu, and its
+         * audio is byte-identical to MultiMovies' "English" RRR source (speech ID
+         * ta/hi, the phone played lang=und); Jailer (TMDB ta) Original is
+         * byte-identical to a MovieBox Malayalam source (ml 1.00).
          */
-        internal fun pageLanguage(name: String?, originalLang: String?): Pair<String?, String?> {
+        internal fun pageLanguage(name: String?): Pair<String?, String?> {
             val label = (name ?: "").replace(Regex("""^.*·\s*"""), "").replace(Regex("""\s*\(.*\)\s*$"""), "").trim()
             if (label.isEmpty()) return null to null
-            if (label.equals("original", true)) {
-                val lang = com.chitram.app.data.Ranking.knownLanguageName(originalLang)
-                return lang to (lang ?: "Original")
-            }
+            if (label.equals("original", true)) return null to "Original"
             val lang = langName(label)
             return lang to lang
         }
 
         /**
-         * Server originalLanguageFor: "Original" is not always the TMDB original
-         * language. 1261763 (TMDB te) lists Original + Tamil + Telugu, and its
-         * Original audio is the Tamil track (byte-identical, owner heard Tamil,
-         * 2026-11-21). When another entry on the page names that language
-         * itself, [originalLang] is dropped: "Original" stays unlabelled.
+         * Server teluguClaimWinner: index of the last entry that says Telugu when
+         * two or more do, else null. Telugu only: a wrong Telugu row plays first.
          */
-        internal fun originalLanguageFor(names: List<String?>, originalLang: String?): String? {
-            val lang = com.chitram.app.data.Ranking.knownLanguageName(originalLang) ?: return null
-            return if (names.any { pageLanguage(it, null).first == lang }) null else originalLang
+        internal fun teluguClaimWinner(names: List<String?>): Int? {
+            val idx = names.indices.filter { pageLanguage(names[it]).first == "Telugu" }
+            return if (idx.size >= 2) idx.last() else null
         }
 
         /**
@@ -277,11 +276,15 @@ class VidriftResolver(
         /** Stable row id: the orion id (same on both hosts), else the multimovies master hash. */
         internal fun rowKey(url: String) = "vidrift-" + (ORION_ID.find(url)?.groupValues?.get(1)?.lowercase() ?: MultiMoviesResolver.masterKey(url))
 
-        /** The row for one fetched master, or null when it has no variants. */
-        internal fun rowFor(e: Entry, text: String, url: String, base: String, originalLang: String?): Resolved? {
+        /**
+         * The row for one fetched master, or null when it has no variants.
+         * [dropLabel]: this entry's Telugu lost to a later entry's; the page
+         * label is not stamped (a master LANGUAGE tag still stands).
+         */
+        internal fun rowFor(e: Entry, text: String, url: String, base: String, dropLabel: Boolean = false): Resolved? {
             val m = Hls.parse(text, url)
             if (m.levels.isEmpty()) return null
-            val (pageLang, _) = pageLanguage(e.name, originalLang)
+            val pageLang = if (dropLabel) null else pageLanguage(e.name).first
             val audio = withPageLanguage(m.audio, pageLang)
             if (m.audio.size == 1 && pageLang != null) {
                 val stated = langName(m.audio[0].language)

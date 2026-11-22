@@ -104,7 +104,8 @@ data class NetmirrorConfig(
     val budgetWindowMs: Long = 5 * 60 * 1000L,
     val cooldownMs: Long = 10 * 60 * 1000L,
     val apiTtlMs: Long = 10 * 60 * 1000L,
-    val sessionTtlMs: Long = 30 * 60 * 1000L,
+    /** Safety net only: the token is kept until an answer says `status:"otp"` (POC 2026-11-22). */
+    val sessionTtlMs: Long = 24 * 60 * 60 * 1000L,
     val metadataTtlMs: Long = 7 * 24 * 60 * 60 * 1000L,
     val playerTtlMs: Long = 30_000,
 )
@@ -122,7 +123,7 @@ data class MultiMoviesConfig(
 )
 
 data class ResolveConfig(
-    val version: Int = 3,
+    val version: Int = 4,
     val ttlSec: Long = 6 * 3600L,
     val mapple: MappleConfig = MappleConfig(),
     val vaplayer: VaplayerConfig = VaplayerConfig(),
@@ -133,10 +134,12 @@ data class ResolveConfig(
     val routes: Map<String, String> = emptyMap(),
     /**
      * On-device providers resolved when a details page opens (prewarm.md), so Play
-     * reuses that work. `<provider>.prewarm` in each section; a section the config
-     * carries with no boolean `prewarm` is false. Absent section: the default.
+     * reuses that work. `<provider>.prewarm` in each section; no boolean `prewarm`
+     * (field or section missing, bad type) means the built-in default.
      */
     val prewarm: Set<String> = DEFAULT_PREWARM,
+    /** At least one section carried a boolean `prewarm`; false: every flag is the built-in default. */
+    val prewarmExplicit: Boolean = false,
 ) {
     companion object {
         /** Owner 2026-11-22: the Telugu workhorses that resolve on the device. */
@@ -171,11 +174,16 @@ data class ResolveConfig(
                     MultiMoviesConfig(bases = o.hosts("bases") ?: d.multimovies.bases, resolvePath = o.path("resolvePath") ?: d.multimovies.resolvePath)
                 } ?: d.multimovies,
                 routes = (root["routes"] as? JsonObject)?.let { routes(it) } ?: d.routes,
-                prewarm = PREWARM_SECTIONS.filter { n ->
-                    (root[n] as? JsonObject)?.let { it.prim("prewarm")?.takeIf { p -> !p.isString }?.booleanOrNull == true } ?: (n in d.prewarm)
-                }.toSet(),
+                // No boolean `prewarm` (absent section, field missing, a string or a number):
+                // the built-in default, never false. A config saved before the flag existed
+                // (6 h ttl) left every provider off (phone 1.2.48, 2026-11-22).
+                prewarm = PREWARM_SECTIONS.filter { n -> prewarmFlag(root, n) ?: (n in DEFAULT_PREWARM) }.toSet(),
+                prewarmExplicit = PREWARM_SECTIONS.any { prewarmFlag(root, it) != null },
             )
         }
+
+        private fun prewarmFlag(root: JsonObject, n: String): Boolean? =
+            (root[n] as? JsonObject)?.prim("prewarm")?.takeIf { !it.isString }?.booleanOrNull
 
         /** Spec words and the server's code words both accepted (none = off, on-device = device). */
         private val APK_ROUTE = mapOf("off" to "off", "none" to "off", "direct" to "direct", "proxy" to "proxy", "device" to "device", "on-device" to "device")
@@ -243,7 +251,7 @@ data class ResolveConfig(
                 budgetWindowMs = o.long("budgetWindowMs")?.coerceIn(60_000, 3_600_000) ?: d.budgetWindowMs,
                 cooldownMs = o.long("cooldownMs")?.coerceIn(60_000, 7_200_000) ?: d.cooldownMs,
                 apiTtlMs = o.long("apiTtlMs")?.coerceIn(60_000, 3_600_000) ?: d.apiTtlMs,
-                sessionTtlMs = o.long("sessionTtlMs")?.coerceIn(60_000, 3_600_000) ?: d.sessionTtlMs,
+                sessionTtlMs = o.long("sessionTtlMs")?.coerceIn(60_000, 86_400_000) ?: d.sessionTtlMs,
                 metadataTtlMs = o.long("metadataTtlMs")?.coerceIn(60_000, 604_800_000) ?: d.metadataTtlMs,
                 playerTtlMs = o.long("playerTtlMs")?.coerceIn(0, 60_000) ?: d.playerTtlMs,
             )
@@ -299,10 +307,14 @@ class ResolveConfigStore(
     /** Cached or default config, no network. */
     fun current(): ResolveConfig = cached()?.cfg ?: ResolveConfig()
 
+    /** Where [current] came from: `vm`, `remote`, or `builtin` (nothing saved). */
+    fun source(): String = cached()?.from ?: FROM_BUILTIN
+
     suspend fun get(): ResolveConfig {
         val c = cached()
-        if (c != null && now() - c.at < lifeMs(c)) return c.cfg
-        if (now() - lastAttempt < RETRY_MS) return c?.cfg ?: ResolveConfig()
+        // Gap 1.6: a negative age (the clock was set back after the save) is stale, not fresh for ever.
+        if (c != null && now() - c.at in 0 until lifeMs(c)) return c.cfg
+        if (now() - lastAttempt in 0 until RETRY_MS) return c?.cfg ?: ResolveConfig()
         val job = synchronized(this) { inflight?.takeIf { it.isActive } ?: scope.async { refresh() }.also { inflight = it } }
         return withTimeoutOrNull(WAIT_MS) { job.await() } ?: current().also {
             android.util.Log.i("Chitram", "resolve-config: no answer in ${WAIT_MS}ms; using ${if (cached() != null) "cached" else "defaults"}, refresh continues")
@@ -314,7 +326,7 @@ class ResolveConfigStore(
         val prev = cached()
         val why = mutableListOf<String>()
         if (vmUp()) fetchOrNull(url, FROM_VM, why)?.let { return it } else why += "vm paused"
-        if (prev != null && prev.from == FROM_VM && now() - prev.at < VM_MAX_AGE_MS) {
+        if (prev != null && prev.from == FROM_VM && now() - prev.at in 0 until VM_MAX_AGE_MS) {
             android.util.Log.i("Chitram", "resolve-config: vm failed (${why.joinToString("; ")}); keeping cached vm copy (age ${(now() - prev.at) / 1000}s), remote not asked")
             return prev.cfg
         }
@@ -369,6 +381,7 @@ class ResolveConfigStore(
         const val KEY_FROM = "resolve.config.from"
         const val FROM_VM = "vm"
         const val FROM_REMOTE = "remote"
+        const val FROM_BUILTIN = "builtin"
         const val RETRY_MS = 10 * 60 * 1000L
         const val FETCH_TIMEOUT_MS = 4000L
         /** Longest a play waits for a config refresh before using the cached copy (review M7). */

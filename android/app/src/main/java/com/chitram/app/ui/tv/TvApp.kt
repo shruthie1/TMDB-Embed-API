@@ -59,6 +59,7 @@ import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Translate
@@ -80,6 +81,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
@@ -812,7 +816,7 @@ private fun TvChip(text: String, selected: Boolean = false, modifier: Modifier =
 }
 
 @Composable
-private fun TvButton(text: String, primary: Boolean, modifier: Modifier = Modifier, icon: ImageVector? = null, onClick: () -> Unit) {
+private fun TvButton(text: String, primary: Boolean, modifier: Modifier = Modifier, icon: ImageVector? = null, busy: Boolean = false, onClick: () -> Unit) {
     val src = remember { MutableInteractionSource() }
     val focused by src.collectIsFocusedAsState()
     Button(
@@ -832,7 +836,8 @@ private fun TvButton(text: String, primary: Boolean, modifier: Modifier = Modifi
         contentPadding = PaddingValues(horizontal = TvWeb.BTN_PAD_X.px),
         interactionSource = src,
     ) {
-        if (icon != null) Icon(icon, null, Modifier.padding(end = 4.dp).size(TvWeb.BTN_FONT.px), tint = LocalContentColor.current)
+        if (busy) com.chitram.app.ui.common.RefreshGlyph(true, LocalContentColor.current, TvWeb.BTN_FONT.px, Modifier.padding(end = 6.dp))
+        else if (icon != null) Icon(icon, null, Modifier.padding(end = 4.dp).size(TvWeb.BTN_FONT.px), tint = LocalContentColor.current)
         Text(text, fontSize = TvWeb.BTN_FONT.pxSp, fontWeight = FontWeight.SemiBold)
     }
 }
@@ -844,8 +849,13 @@ private fun TvButton(text: String, primary: Boolean, modifier: Modifier = Modifi
 private fun TvDetail(nav: Nav, type: String, id: Long) {
     val vm: DetailVm = viewModel(key = "detail-$type-$id")
     LaunchedEffect(type, id) { vm.load(type, id) }
+    // P13: leaving before the dwell ends means no prewarm. A return re-arms it (load -> rewarm).
+    DisposableEffect(type, id) { onDispose { vm.leftPage() } }
     val t = vm.full
     val playFocus = remember { FocusRequester() }
+    // P13: the page puts focus on Play itself when it opens; that first focus is not the
+    // viewer's choice. A later focus on Play (the viewer moved back to it) starts the prewarm now.
+    val playFocusCount = remember { intArrayOf(0) }
     Box(Modifier.fillMaxSize()) {
         // Hero backdrop, matched to the web .hero-art (owner, 2026-11-21: rewrite,
         // stop patching; refined to match the HOME carousel fade, which the owner
@@ -934,13 +944,27 @@ private fun TvDetail(nav: Nav, type: String, id: Long) {
                     // Lined up with the text column, clear of the poster (web padding-left 198px).
                     Row(Modifier.padding(start = GUTTER + (if (t.poster != null) (TvWeb.DETAIL_POSTER_W + TvWeb.DETAIL_POSTER_GAP).px else 0.dp), top = 6.dp, bottom = TvWeb.DETAIL_PAD_BOTTOM.px),
                         horizontalArrangement = Arrangement.spacedBy(TvWeb.ACTION_GAP.px)) {
-                        TvButton(vm.playLabel(), primary = true, modifier = Modifier.focusRequester(playFocus).onFocusChanged { if (it.isFocused) scope.launch { detailList.animateScrollToItem(0) } }, icon = Icons.Filled.PlayArrow) {
+                        TvButton(vm.playLabel(), primary = true, modifier = Modifier.focusRequester(playFocus).onFocusChanged {
+                            if (it.isFocused) {
+                                scope.launch { detailList.animateScrollToItem(0) }
+                                if (++playFocusCount[0] > 1) vm.playFocused()
+                            }
+                        }, icon = Icons.Filled.PlayArrow) {
                             vm.playRequest()?.let { nav.push(Screen.Player(it)) }
                         }
                         if (vm.canStartOver) TvButton("Start over", primary = false, icon = Icons.Filled.Replay) {
                             vm.playRequest(fromStart = true)?.let { nav.push(Screen.Player(it)) }
                         }
                         TvButton(if (vm.inList) "In My List" else "My List", primary = false, icon = if (vm.inList) Icons.Filled.Check else Icons.Filled.Add) { vm.toggleList() }
+                        // Secondary, after Play and My List; stays focusable in cooldown (a press says when).
+                        val rm = vm.refreshModel
+                        val rNow = com.chitram.app.ui.common.rememberRefreshTick(rm)
+                        val rLabel = rm.label(rNow)
+                        val rNote = rm.noteAt(rNow) ?: if (rm.running) rm.chips() else ""
+                        TvButton(rLabel, primary = false, icon = Icons.Filled.Refresh, busy = rm.running,
+                            modifier = Modifier.semantics { contentDescription = listOf(rLabel, rNote).filter { it.isNotEmpty() }.joinToString(". ") }) { vm.refreshSources() }
+                        if (rNote.isNotEmpty()) Text(rNote, color = Tok.textMuted, fontSize = TvWeb.BTN_FONT.pxSp, maxLines = 1,
+                            modifier = Modifier.align(Alignment.CenterVertically).semantics { liveRegion = androidx.compose.ui.semantics.LiveRegionMode.Polite })
                     }
                 }
                 if (t.mediaType == "tv" && t.seasonList.isNotEmpty()) {

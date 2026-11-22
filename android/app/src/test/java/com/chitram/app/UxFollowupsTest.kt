@@ -32,7 +32,9 @@ class UxFollowupsTest {
         assertTrue(load.contains("if (t.mediaType != \"tv\") prewarm(t, 0, 0)"))
         assertTrue(load.contains("prewarm(t, ps, pe)"))
         val helper = fn(detail, "prewarm")
-        assertTrue("off the main thread", helper.contains("viewModelScope.launch(Dispatchers.IO)"))
+        // P13: the start waits for the dwell; the dwell timer (and so the start) runs off the main thread.
+        assertTrue("after the dwell", helper.contains("dwell.arm {"))
+        assertTrue("off the main thread", vms.substringAfter("class PrewarmDwell").substringBefore("class DetailVm").contains("context: kotlin.coroutines.CoroutineContext = Dispatchers.IO"))
         assertTrue("failure is silent, on-device only", helper.contains("runCatching { g.onDevice.prewarm("))
         assertFalse("no VM prefetch left", vms.contains("prefetchStreams"))
         assertFalse("no VM prefetch left", src("data/Api.kt").contains("prefetch", ignoreCase = true))

@@ -44,13 +44,28 @@ class V122Test {
         assertEquals(listOf("CastleTV-1080p", "OneTouchTV-720p"), out)
     }
 
-    @Test fun manualPinWins() {
+    // Gap 8.5 ruling (owner rule "language still wins"): a manual pin leads only
+    // inside the viewer's language, or overall when no row is in that language.
+    @Test fun aManualHindiPickDoesNotBeatATeluguRow() {
         val out = rank(
             raw("OneTouchTV", "720p", listOf("Telugu")),
             raw("CastleTV", "1080p", listOf("Hindi")),
             pin = "CastleTV", manual = true,
         )
+        assertEquals(listOf("OneTouchTV-720p", "CastleTV-1080p"), out)
+    }
+
+    @Test fun manualPinWinsInsideTheViewersLanguage() {
+        val out = rank(
+            raw("OneTouchTV", "720p", listOf("Telugu"), sel = true),
+            raw("CastleTV", "1080p", listOf("Telugu")),
+            pin = "CastleTV", manual = true,
+        )
+        // A manual pick leads even ahead of the best selectable-audio row of its part.
         assertEquals(listOf("CastleTV-1080p", "OneTouchTV-720p"), out)
+        // No row in the viewer's language: the manual pick leads overall.
+        assertEquals(listOf("CastleTV-1080p", "OneTouchTV-720p"),
+            rank(raw("OneTouchTV", "720p", listOf("Hindi"), sel = true), raw("CastleTV", "1080p", listOf("Tamil")), pin = "CastleTV", manual = true))
     }
 
     @Test fun pinStoreKeepsTheManualFlag() {

@@ -11,6 +11,7 @@ import com.chitram.app.data.LastProviderStore
 import com.chitram.app.data.MyListStore
 import com.chitram.app.data.PlayerPrefs
 import com.chitram.app.data.PrefsKeyValue
+import com.chitram.app.resolve.StreamCache
 import com.chitram.app.data.ProgressStore
 import com.chitram.app.data.RecentSearchStore
 import com.chitram.app.player.Device
@@ -36,6 +37,10 @@ class App : Application(), ImageLoaderFactory {
     lateinit var playerPrefs: PlayerPrefs
     lateinit var resolveConfig: ResolveConfigStore
     lateinit var onDevice: OnDeviceResolver
+    /** HLS playlist bodies kept in memory with the kept rows (PlaylistCache). */
+    val playlists = com.chitram.app.resolve.PlaylistCache()
+    /** "Refresh sources": one per title per 30 s, shared by the details page and the player. */
+    lateinit var refresh: com.chitram.app.resolve.SourceRefresh
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     val codecs = MediaCodecSupport()
     var isTv = false
@@ -46,7 +51,12 @@ class App : Application(), ImageLoaderFactory {
         instance = this
         val kv = PrefsKeyValue(this)
         // Resolved rows (VM and on-device) kept 30 min, so a reopen or a second Play fetches nothing.
-        val streamCache = com.chitram.app.resolve.StreamCache(kv)
+        // Gap X10: in their own prefs file. At the 50-title cap the blob is large, and
+        // every put rewrites its whole file: the shared `chitram` file stays small.
+        val streamCache = StreamCache(PrefsKeyValue(this, StreamCache.PREFS_FILE))
+        // The copy builds up to 1.2.49 kept in the shared file.
+        kv.put(StreamCache.KV_KEY, null)
+        val cm = runCatching { getSystemService(android.net.ConnectivityManager::class.java) }.getOrNull()
         api = Api(Api.buildClient(), httpCache = Api.httpCache(cacheDir), vm = com.chitram.app.data.VmHealth(kv), streamCache = streamCache)
         prefs = LanguagePrefs(kv)
         progress = ProgressStore(kv)
@@ -71,8 +81,32 @@ class App : Application(), ImageLoaderFactory {
             multimovies = com.chitram.app.resolve.MultiMoviesResolver(api.client, hosts = hosts, config = { resolveConfig.current().multimovies }),
             netmirror = com.chitram.app.resolve.NetmirrorResolver(api.client, otp = { kv.get("netmirror.otp") ?: "111111" }, kv = kv),
             cache = streamCache,
+            playlists = playlists,
+            warmPlaylists = { row, preferred -> warmPlaylists(row, preferred) },
+            offline = { com.chitram.app.player.NetState.offline(cm) },
+            metered = { com.chitram.app.player.NetState.metered(cm) },
         )
+        refresh = com.chitram.app.resolve.SourceRefresh(onDevice, vm = { t, i, s, e -> api.streams(t, i, s, e, refresh = true) }, vmUp = { api.vmUp })
         appScope.launch { resolveConfig.get() }
+    }
+
+    /** Gap 3.7: Android asks for memory back (Fire TV Stick, 1 GB): the kept playlists go (PlaylistCache.trim). */
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        val n = playlists.trim(level)
+        if (n > 0) android.util.Log.i("Chitram", "[playlist] trim level=$level: $n kept playlist(s) dropped")
+    }
+
+    /** Prewarm's top row: its master and first playlists into memory, no segments. Never a VM url. */
+    private suspend fun warmPlaylists(row: com.chitram.app.data.Source, preferred: String) {
+        val host = com.chitram.app.player.DirectRoute.host(row.url)
+        if (host == com.chitram.app.player.DirectRoute.host(com.chitram.app.data.Api.VM) || row.progressive) return
+        val t0 = System.currentTimeMillis()
+        val done = kotlinx.coroutines.withContext(Dispatchers.IO) {
+            com.chitram.app.resolve.PlaylistInterceptor.warm(api.client, playlists, row.url, row.headers, row.segmentToken,
+                com.chitram.app.player.PlayerVm.isoFor(preferred).toList())
+        }
+        if (done) android.util.Log.i("Chitram", "[playlist] warmed ${row.provider} $host master in ${System.currentTimeMillis() - t0}ms")
     }
 
     /**

@@ -65,6 +65,20 @@ class StreamCache(private val kv: KeyValue?, private val now: () -> Long = Syste
     /** A VM row failed in playback, or the VM was asked to refresh: drop both VM answers for this title. */
     fun evictVm(title: String) = edit(title) { slots -> slots - VM - VM_FULL }
 
+    /** "Refresh sources": drop every slot of this title (all providers, all languages, both VM answers). */
+    fun evictTitle(title: String) = synchronized(lock) {
+        load()
+        if (titles.remove(title) != null) save()
+    }
+
+    /** Urls of every live row kept for [title] (device and VM): what a refresh compares against. */
+    fun urls(title: String): Set<String> = synchronized(lock) {
+        load()
+        val at = now()
+        titles[title]?.slots?.values.orEmpty().filter { it.until > at }
+            .flatMap { s -> s.rows.map { it.url } + s.vm?.streams.orEmpty().mapNotNull { it.url } }.toSet()
+    }
+
     private fun live(title: String, slot: String): Slot? = synchronized(lock) {
         load()
         val s = titles[title]?.slots?.get(slot) ?: return null
@@ -128,6 +142,7 @@ class StreamCache(private val kv: KeyValue?, private val now: () -> Long = Syste
         /** A row is treated as dead this long before its url's stated expiry (lib/urlExpiry.js DEFAULT_SKEW_MS). */
         const val EXPIRY_SKEW_MS = 30_000L
         const val KV_KEY = "streamCache.v1"
+        const val PREFS_FILE = "chitram.streams"
         private const val VM = "vm"
         private const val VM_FULL = "vm:full"
         private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
@@ -147,7 +162,8 @@ class StreamCache(private val kv: KeyValue?, private val now: () -> Long = Syste
  * 30 days back .. 366 days ahead is not an expiry.
  */
 object UrlExpiry {
-    private val PARAM = Regex("""(?:^|[?&#;])(?:e|exp|expire|expires)=(\d{9,13})(?=$|[&#;])""")
+    /** Names read case-insensitively, as lib/urlExpiry.js does (`/gi`): CastleTV signs with `Expires=`. */
+    private val PARAM = Regex("""(?:^|[?&#;])(?:e|exp|expire|expires)=(\d{9,13})(?=$|[&#;])""", RegexOption.IGNORE_CASE)
     private val TOKEN = Regex("""internal_token=v\d+\.(\d{13})(?!\d)""")
     private const val MAX_PAST_MS = 30L * 24 * 60 * 60 * 1000
     private const val MAX_FUTURE_MS = 366L * 24 * 60 * 60 * 1000

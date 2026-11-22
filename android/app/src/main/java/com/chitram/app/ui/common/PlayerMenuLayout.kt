@@ -36,13 +36,14 @@ internal fun tvAnchoredMenu(width: Float, height: Float): TvAnchoredMenu {
     return TvAnchoredMenu(minWidth, maxOf(minWidth, minOf(width * 0.5f, maxWidth)), minOf(356.4f, height - margin * 2).coerceAtLeast(1f), margin)
 }
 
-internal enum class MenuTap { Drill, Check, Close, Choose, Fit }
+internal enum class MenuTap { Drill, Check, Close, Choose, Fit, Refresh }
 
 /** A tap on a sheet row. Re-tapping the selected row only closes the sheet (A2); dim rows stay tappable. */
 internal fun menuTap(item: com.chitram.app.player.MenuItem?): MenuTap = when {
     item == null -> MenuTap.Choose
     item.key.startsWith("group:") -> MenuTap.Drill
     item.key == "check:netmirror" -> MenuTap.Check
+    item.key == com.chitram.app.player.REFRESH_KEY -> MenuTap.Refresh
     item.selected -> MenuTap.Close
     item.key.startsWith(FIT_KEY) -> MenuTap.Fit
     else -> MenuTap.Choose

@@ -357,9 +357,12 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
 
         vm.nextUp?.let { next -> NextUpCard(next, isTv, onPlay = { vm.start(next) }, onDismiss = { vm.dismissNext(); controls = true }) }
 
+        // Live countdown and auto-hiding result line on the "Refresh sources" row.
+        var refreshTick by remember { mutableLongStateOf(System.currentTimeMillis()) }
+        LaunchedEffect(menu == Menu.Server) { while (menu == Menu.Server) { refreshTick = System.currentTimeMillis(); delay(500) } }
         menu?.let { m ->
             val items = when (m) {
-                Menu.Server -> vm.serverItems(serverProvider)
+                Menu.Server -> vm.serverItems(serverProvider, refreshTick)
                 Menu.Audio -> vm.audioItems()
                 // TV has no bar fit button: picture fit is a section of the Quality sheet.
                 Menu.Quality -> if (isTv) vm.qualityItems() + fitItems(fit) else vm.qualityItems()
@@ -375,6 +378,8 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
                             if (serverProvider.equals("netmirror", true) && vm.serverItems(serverProvider).isEmpty()) vm.checkNetmirror()
                         }
                         MenuTap.Check -> vm.checkNetmirror()
+                        // Stays in the list; focus stays on the row (same key) through refreshing and cooldown.
+                        MenuTap.Refresh -> { vm.refreshSources(); refreshTick = System.currentTimeMillis() }
                         // TV picture fit: apply and stay in the sheet. Row keys do not change,
                         // so focus stays on the picked row (never falls to Play/Pause).
                         MenuTap.Fit -> VideoFit.parse(key.removePrefix(FIT_KEY))?.let { fit = it; playerPrefs.save(isTv, it) }
@@ -423,8 +428,8 @@ private fun LoadingScreen(r: PlayRequest, vm: PlayerVm, isTv: Boolean, details: 
     val detailsFocus = remember { FocusRequester() }
     val retryFocus = remember { FocusRequester() }
     var focusRow by remember { mutableStateOf<String?>(null) }
-    // Initial TV focus: Details while loading; Try again on the end card (unchanged end-card behaviour).
-    LaunchedEffect(failed) { if (isTv) runCatching { if (failed) retryFocus.requestFocus() else detailsFocus.requestFocus() } }
+    // Initial TV focus: Details while loading; Refresh sources on the failure card (LoadingModel.tvFocus).
+    LaunchedEffect(failed) { if (isTv) runCatching { if (LoadingModel.tvFocus(v) == LoadingModel.Focus.REFRESH) retryFocus.requestFocus() else detailsFocus.requestFocus() } }
     var wasOpen by remember { mutableStateOf(false) }
     LaunchedEffect(details) {
         if (isTv && wasOpen && !details) runCatching { detailsFocus.requestFocus() }
@@ -455,7 +460,14 @@ private fun LoadingScreen(r: PlayRequest, vm: PlayerVm, isTv: Boolean, details: 
                         )
                     }
                     Row(Modifier.padding(top = 20.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        if (isTv) PillButton("Back", icon = Glyphs.back, onClick = onBack)
+                        if (v.showRefresh) {
+                            val m = vm.refreshModel
+                            val label = m.label(tick)
+                            PillButton(label, primary = true, icon = Glyphs.restart, busy = m.running,
+                                modifier = Modifier.focusRequester(retryFocus).semantics { contentDescription = listOfNotNull(label, m.noteAt(tick)).joinToString(". ") },
+                                onClick = { vm.refreshSources() })
+                            PillButton("Back", icon = Glyphs.back, onClick = onBack)
+                        } else if (isTv) PillButton("Back", icon = Glyphs.back, onClick = onBack)
                         if (v.showChooser) PillButton("Choose a server", icon = Glyphs.server) {
                             onChooseServer()
                         }
@@ -464,6 +476,13 @@ private fun LoadingScreen(r: PlayRequest, vm: PlayerVm, isTv: Boolean, details: 
                             if (details) "Details ⌃" else "Details ⌄",
                             modifier = Modifier.focusRequester(detailsFocus).semantics { stateDescription = if (details) "Expanded" else "Collapsed" },
                         ) { focusRow = null; onDetails(!details) }
+                    }
+                    if (v.showRefresh) {
+                        val m = vm.refreshModel
+                        // Result line (auto-hides after 3 s) or the providers answering so far.
+                        val line = m.noteAt(tick) ?: if (m.running) m.chips() else ""
+                        BasicText(line, style = TextStyle(color = Tok.textMuted, fontSize = 14.sp, textAlign = TextAlign.Center),
+                            modifier = Modifier.padding(top = 10.dp).semantics { liveRegion = LiveRegionMode.Polite })
                     }
                 }
             }
@@ -790,7 +809,7 @@ private fun NextUpCard(next: PlayRequest, isTv: Boolean, onPlay: () -> Unit, onD
 
 /** Focus-aware pill (see Focus): white fill, dark ink, shadow; no scale in the player. */
 @Composable
-fun PillButton(text: String, modifier: Modifier = Modifier, primary: Boolean = false, icon: ImageVector? = null, onClick: () -> Unit) {
+fun PillButton(text: String, modifier: Modifier = Modifier, primary: Boolean = false, icon: ImageVector? = null, busy: Boolean = false, onClick: () -> Unit) {
     val src = remember { MutableInteractionSource() }
     val focused by src.collectIsFocusedAsState()
     val bg = if (focused) Focus.fill else if (primary) Focus.primaryButton else Tok.fill2
@@ -806,8 +825,9 @@ fun PillButton(text: String, modifier: Modifier = Modifier, primary: Boolean = f
             .padding(horizontal = 16.dp, vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        if (icon != null) Icon(icon, contentDescription = null, tint = fg, modifier = Modifier.size(18.dp).padding(end = 2.dp))
-        BasicText(text, style = TextStyle(color = fg, fontSize = 15.sp, fontWeight = FontWeight.Medium), modifier = Modifier.padding(start = if (icon != null) 4.dp else 0.dp))
+        if (busy) CircularProgressIndicator(color = fg, strokeWidth = 2.dp, modifier = Modifier.size(16.dp).clearAndSetSemantics { })
+        else if (icon != null) Icon(icon, contentDescription = null, tint = fg, modifier = Modifier.size(18.dp).padding(end = 2.dp))
+        BasicText(text, style = TextStyle(color = fg, fontSize = 15.sp, fontWeight = FontWeight.Medium), modifier = Modifier.padding(start = if (icon != null || busy) 4.dp else 0.dp))
     }
 }
 
@@ -917,13 +937,20 @@ private fun MenuPanel(menu: Menu, items: List<MenuItem>, isTv: Boolean, anchor: 
                             .background(if (focused) Focus.fill else if (item.selected) Tok.fill2 else Color.Transparent)
                             // Press feedback on touch only; TV keeps the white focus fill.
                             .clickable(interactionSource = src, indication = if (isTv) null else ripple(color = Color.White)) { picks++; onPick(item.key) }
-                            .semantics { stateDescription = if (item.selected) "Selected" else "Not selected" }
+                            .semantics {
+                                if (item.key == com.chitram.app.player.REFRESH_KEY) { contentDescription = "${item.label}. ${item.detail}"; role = Role.Button; liveRegion = LiveRegionMode.Polite }
+                                else stateDescription = if (item.selected) "Selected" else "Not selected"
+                            }
                             .heightIn(min = if (isTv) 56.dp else 40.dp)
                             .padding(horizontal = if (isTv) 12.dp else 10.dp, vertical = if (isTv) 10.dp else 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Box(Modifier.size(if (isTv) 20.dp else 16.dp), contentAlignment = Alignment.Center) {
-                            if (item.selected) Icon(Glyphs.check, contentDescription = "Selected", tint = if (focused) Focus.ink else Tok.text, modifier = Modifier.size(if (isTv) 18.dp else 14.dp))
+                            // "Refresh sources": a small spinner while it runs, the refresh glyph otherwise.
+                            if (item.key == com.chitram.app.player.REFRESH_KEY) {
+                                if (item.label == com.chitram.app.player.RefreshModel.Copy.RUNNING) CircularProgressIndicator(color = if (focused) Focus.ink else Tok.accent, strokeWidth = 2.dp, modifier = Modifier.size(if (isTv) 16.dp else 13.dp).clearAndSetSemantics { })
+                                else Icon(Glyphs.restart, contentDescription = null, tint = if (focused) Focus.ink else Tok.text, modifier = Modifier.size(if (isTv) 18.dp else 14.dp))
+                            } else if (item.selected) Icon(Glyphs.check, contentDescription = "Selected", tint = if (focused) Focus.ink else Tok.text, modifier = Modifier.size(if (isTv) 18.dp else 14.dp))
                         }
                         Spacer(Modifier.width(if (isTv) 12.dp else 8.dp))
                         Column(Modifier.weight(1f)) {

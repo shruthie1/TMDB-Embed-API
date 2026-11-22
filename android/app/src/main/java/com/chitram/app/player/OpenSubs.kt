@@ -133,7 +133,26 @@ object OpenSubs {
         return bestOf(all, TELUGU, "Telugu", "te", runtimeMin, MAX_TELUGU) + bestOf(all, ENGLISH, "English", "en", runtimeMin, MAX_ENGLISH)
     }
 
+    /** A title's caption list, kept in memory as long as its rows (StreamCache.TTL_MS). */
+    const val KEEP_MS = 30 * 60 * 1000L
+    private val kept = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, List<Track>>>()
+
     /** Never throws; empty list when the addon is slow, down or has nothing. */
+    /**
+     * [fetch] for Play: a list that came back is kept [KEEP_MS], so a second Play of
+     * the title starts with its captions and never waits for them (RRR second Play,
+     * phone 1.2.48: the start waited 0.93 s for this fetch).
+     */
+    suspend fun fetchKept(client: OkHttpClient, imdbId: String?, season: Int, episode: Int, runtimeMin: Int?, base: String = BASE,
+                          now: () -> Long = System::currentTimeMillis): List<Track> {
+        val p = path(imdbId, season, episode) ?: return emptyList()
+        val k = "$base$p|$runtimeMin"
+        kept[k]?.takeIf { now() - it.first < KEEP_MS }?.let { return it.second }
+        return fetch(client, imdbId, season, episode, runtimeMin, base).also {
+            if (it.isNotEmpty()) { kept.entries.removeIf { e -> now() - e.value.first >= KEEP_MS }; kept[k] = now() to it }
+        }
+    }
+
     suspend fun fetch(client: OkHttpClient, imdbId: String?, season: Int, episode: Int, runtimeMin: Int?, base: String = BASE): List<Track> {
         val p = path(imdbId, season, episode) ?: return emptyList()
         return try {

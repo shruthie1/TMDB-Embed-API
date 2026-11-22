@@ -1,0 +1,499 @@
+{
+ "captured": "2026-11-22",
+ "signatures": "Policy, Signature and Key-Pair-Id replaced with REDACTED; other hosts query stripped",
+ "mpdAudioLang": {
+  "5820588283537016992": "und",
+  "5355663801620775816": "tel",
+  "891921665641332688": "und",
+  "7844085959171131184": "tel",
+  "110422441486418248": "tam",
+  "2871208402850570248": "und",
+  "940721918355932584": "kan",
+  "68264836194533344": "tel",
+  "6176354059575264600": "tel",
+  "5096152864070746064": "tel",
+  "1120489025439157848": "tam",
+  "5646656895621416016": "und",
+  "5669817185716291008": "hin",
+  "2421927280063697640": "tel",
+  "8773757339527790736": "eng"
+ },
+ "mpdAudioLangNote": "sacdn ids not listed here were not measured; tests serve their MPD with no lang attribute",
+ "titles": {
+  "690957": {
+   "title": "Pushpa: The Rise",
+   "answers": [
+    {
+     "ask": "quasar",
+     "status": 200,
+     "server": null,
+     "sources": []
+    },
+    {
+     "ask": "vega",
+     "status": 200,
+     "server": null,
+     "sources": []
+    },
+    {
+     "ask": "orion",
+     "status": 200,
+     "server": null,
+     "sources": []
+    },
+    {
+     "ask": "default",
+     "status": 200,
+     "server": "callisto",
+     "sources": [
+      {
+       "language": "Hindi",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://dash-hls-bridge.johndoeshcmc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F1210444511629951112_0_0_1080_h265_54%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      },
+      {
+       "language": "Arabic sub",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://dash-hls-bridge.johndoeshmc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F661867378501895800_0_0_1080_h265_309%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      },
+      {
+       "language": "Telugu",
+       "kind": "hls",
+       "quality": "720p",
+       "url": "https://dash-hls-bridge.johndoesemc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F1120489025439157848_0_0_1080_h265_579%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      },
+      {
+       "language": "English",
+       "kind": "hls",
+       "quality": "480p",
+       "url": "https://dash-hls-bridge.johndoeshcmc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F891380899193970696_0_0_720_h265_620%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      }
+     ]
+    },
+    {
+     "ask": "=movie&id=690957&only=callisto",
+     "status": 200,
+     "server": null,
+     "sources": []
+    }
+   ]
+  },
+  "869760": {
+   "title": "Hanu-Man",
+   "answers": [
+    {
+     "ask": "vega",
+     "status": 200,
+     "server": null,
+     "sources": []
+    },
+    {
+     "ask": "quasar",
+     "status": 200,
+     "server": null,
+     "sources": []
+    },
+    {
+     "ask": "orion",
+     "status": 200,
+     "server": null,
+     "sources": []
+    },
+    {
+     "ask": "default",
+     "status": 200,
+     "server": "callisto",
+     "sources": [
+      {
+       "language": "Telugu",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://hakunamatata.rousav.tech/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F5646656895621416016_0_0_1080_h265_482%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      },
+      {
+       "language": "Hindi",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://dash-hls-bridge.johndoesemc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F5669817185716291008_0_0_1080_h265_277%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      }
+     ]
+    },
+    {
+     "ask": "callisto",
+     "status": 200,
+     "server": "callisto",
+     "sources": [
+      {
+       "language": "Telugu",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://hakunamatata.rousav.tech/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F5646656895621416016_0_0_1080_h265_482%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      },
+      {
+       "language": "Hindi",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://dash-hls-bridge.johndoesemc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F5669817185716291008_0_0_1080_h265_277%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      }
+     ]
+    }
+   ]
+  },
+  "811941": {
+   "title": "Devara Part 1",
+   "answers": [
+    {
+     "ask": "vega",
+     "status": 200,
+     "server": null,
+     "sources": []
+    },
+    {
+     "ask": "quasar",
+     "status": 200,
+     "server": null,
+     "sources": []
+    },
+    {
+     "ask": "callisto",
+     "status": 200,
+     "server": "callisto",
+     "sources": [
+      {
+       "language": "Hindi",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://dash-hls-bridge.johndoesfmc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F425600823822091720_0_0_1080_h265_273%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      },
+      {
+       "language": "Kurdish sub",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://dash-hls-bridge.johndoesemc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F6176354059575264600_0_0_1080_h265_616%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      },
+      {
+       "language": "Telugu",
+       "kind": "hls",
+       "quality": "360p",
+       "url": "https://old-mode-b611.fykko14.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F5096152864070746064_0_0_360_h265_753%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      }
+     ]
+    },
+    {
+     "ask": "orion",
+     "status": 200,
+     "server": "orion",
+     "sources": [
+      {
+       "language": null,
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://img.rousav.tech/media/cd3bcb801eb766098b9d/index.m3u8"
+      }
+     ]
+    },
+    {
+     "ask": "default",
+     "status": 200,
+     "server": "orion",
+     "sources": [
+      {
+       "language": null,
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://img.rousav.tech/media/cd3bcb801eb766098b9d/index.m3u8"
+      }
+     ]
+    },
+    {
+     "ask": "luna",
+     "status": 200,
+     "server": null,
+     "sources": []
+    }
+   ]
+  },
+  "770906": {
+   "title": "Salaar",
+   "answers": [
+    {
+     "ask": "vega",
+     "status": 200,
+     "server": null,
+     "sources": []
+    },
+    {
+     "ask": "quasar",
+     "status": 200,
+     "server": null,
+     "sources": []
+    },
+    {
+     "ask": "callisto",
+     "status": 200,
+     "server": "callisto",
+     "sources": [
+      {
+       "language": "Hindi",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://dash-hls-bridge.johndoesdmc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F5188708306566669208_0_0_1080_h265_682%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      },
+      {
+       "language": "Telugu",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://dash-hls-bridge.johndoesemc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F891921665641332688_0_0_1080_h265_942%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      },
+      {
+       "language": "Kannada",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://dash-hls-bridge.johndoesfmc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F7878322427682849776_0_0_1080_h265_152%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      },
+      {
+       "language": "Malayalam",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://dash-hls-bridge.johndoesemc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F3554022360477041552_0_0_1080_h265_441%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      },
+      {
+       "language": "Kurdish sub",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://dash-hls-bridge.johndoesbmc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F3149377657586993832_0_0_1080_h265_301%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      },
+      {
+       "language": "Arabic sub",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://hakunamatata.streamrip.fun/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F110422441486418248_0_0_1080_h265_703%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      },
+      {
+       "language": "Tamil",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://dash-hls-bridge.johndoesgmc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F583124350040245232_0_0_1080_h265_106%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      },
+      {
+       "language": "Telugu",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://hakunamatata.rousav.tech/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F7844085959171131184_0_0_1080_h265_74%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      }
+     ]
+    },
+    {
+     "ask": "default",
+     "status": 200,
+     "server": "orion",
+     "sources": [
+      {
+       "language": null,
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://img.rousav.tech/media/031fe7b1d27fd6aa800d/index.m3u8"
+      }
+     ]
+    },
+    {
+     "ask": "orion",
+     "status": 200,
+     "server": "orion",
+     "sources": [
+      {
+       "language": null,
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://img.rousav.tech/media/031fe7b1d27fd6aa800d/index.m3u8"
+      }
+     ]
+    }
+   ]
+  },
+  "587412": {
+   "title": "KGF Chapter 2",
+   "answers": [
+    {
+     "ask": "vega",
+     "status": 200,
+     "server": null,
+     "sources": []
+    },
+    {
+     "ask": "quasar",
+     "status": 200,
+     "server": null,
+     "sources": []
+    },
+    {
+     "ask": "orion",
+     "status": 200,
+     "server": null,
+     "sources": []
+    },
+    {
+     "ask": "callisto",
+     "status": 200,
+     "server": "callisto",
+     "sources": [
+      {
+       "language": "Kannada",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://hakunamatata.rousav.tech/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F2871208402850570248_0_0_1080_h265_261%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      },
+      {
+       "language": "Kannada",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://dash-hls-bridge.johndoesgmc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F940721918355932584_0_0_1080_h265_721%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      },
+      {
+       "language": "Bengali",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://dash-hls-bridge.johndoeslight.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F3461436953068011736_0_0_1080_h265_723%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      },
+      {
+       "language": "Arabic sub",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://dash-hls-bridge.johndoeslight.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F4554461523980289656_0_0_1080_h265_904%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      },
+      {
+       "language": "Hindi",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://dash-hls-bridge.johndoesgmc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F1207594074979664368_0_0_1080_h265_835%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      },
+      {
+       "language": "Malayalam",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://hakunamatata.streamrip.fun/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F8378109836134942688_0_0_1080_h265_370%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      },
+      {
+       "language": "Telugu",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://dash-hls-bridge.johndoesdmc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F68264836194533344_0_0_1080_h265_168%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      },
+      {
+       "language": "Tamil",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://dash-hls-bridge.johndoesfmc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F4278145325367459808_0_0_1080_h265_658%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      }
+     ]
+    },
+    {
+     "ask": "default",
+     "status": 200,
+     "server": "callisto",
+     "sources": [
+      {
+       "language": "Kannada",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://hakunamatata.rousav.tech/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F2871208402850570248_0_0_1080_h265_261%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      },
+      {
+       "language": "Kannada",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://dash-hls-bridge.johndoesgmc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F940721918355932584_0_0_1080_h265_721%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      },
+      {
+       "language": "Bengali",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://dash-hls-bridge.johndoeslight.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F3461436953068011736_0_0_1080_h265_723%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      },
+      {
+       "language": "Arabic sub",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://dash-hls-bridge.johndoeslight.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F4554461523980289656_0_0_1080_h265_904%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      },
+      {
+       "language": "Hindi",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://dash-hls-bridge.johndoesgmc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F1207594074979664368_0_0_1080_h265_835%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      },
+      {
+       "language": "Malayalam",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://hakunamatata.streamrip.fun/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F8378109836134942688_0_0_1080_h265_370%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      },
+      {
+       "language": "Telugu",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://dash-hls-bridge.johndoesdmc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F68264836194533344_0_0_1080_h265_168%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      },
+      {
+       "language": "Tamil",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://dash-hls-bridge.johndoesfmc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F4278145325367459808_0_0_1080_h265_658%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      }
+     ]
+    }
+   ]
+  },
+  "579974": {
+   "title": "RRR",
+   "note": "rebuilt from the 2026-11-22 rows in VidBolt callisto order (Bengali, Telugu, English, Hindi, Arabic sub, Telugu)",
+   "answers": [
+    {
+     "ask": "callisto",
+     "status": 200,
+     "server": "callisto",
+     "sources": [
+      {
+       "language": "Bengali",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://dash-hls-bridge.johndoesdmc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F7067694354684856232_0_0_1080_h265_745%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      },
+      {
+       "language": "Telugu",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://dash-hls-bridge.johndoesdmc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F5820588283537016992_0_0_1080_h265_795%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      },
+      {
+       "language": "English",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://dash-hls-bridge.johndoesdmc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F2848239607093808728_0_0_1080_h265_905%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      },
+      {
+       "language": "Hindi",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://dash-hls-bridge.johndoesdmc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F7499853135079687472_0_0_1080_h265_956%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      },
+      {
+       "language": "Arabic sub",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://dash-hls-bridge.johndoesdmc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F3648827707632354536_0_0_1080_h265_341%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      },
+      {
+       "language": "Telugu",
+       "kind": "hls",
+       "quality": "1080p",
+       "url": "https://dash-hls-bridge.johndoesdmc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F5355663801620775816_0_0_1080_h265_623%2Fmaster.m3u8&Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED"
+      }
+     ]
+    }
+   ]
+  }
+ }
+}

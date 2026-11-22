@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
@@ -98,6 +99,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -418,6 +422,8 @@ private fun BackButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
 private fun PhoneDetail(nav: Nav, type: String, id: Long, rowPoster: String? = null, cardTitle: String? = null, cardBackdrop: String? = null) {
     val vm: DetailVm = viewModel(key = "detail-$type-$id")
     LaunchedEffect(type, id) { vm.load(type, id) }
+    // P13: leaving before the dwell ends means no prewarm. A return re-arms it (load -> rewarm).
+    androidx.compose.runtime.DisposableEffect(type, id) { onDispose { vm.leftPage() } }
     var toast by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(toast) { if (toast != null) { delay(2200); toast = null } }
     val t = vm.full
@@ -484,6 +490,20 @@ private fun PhoneDetail(nav: Nav, type: String, id: Long, rowPoster: String? = n
                             Icon(if (vm.inList) Icons.Filled.Check else Icons.Filled.Add, null, Modifier.size(18.dp), tint = Tok.text); Spacer(Modifier.width(6.dp))
                             Text(if (vm.inList) "In My List" else "My List", color = Tok.text)
                         }
+                    }
+                    // Secondary: Play's links asked anew (RefreshModel). Result line hides after 3 s.
+                    val rm = vm.refreshModel
+                    val rNow = com.chitram.app.ui.common.rememberRefreshTick(rm)
+                    val rLabel = rm.label(rNow)
+                    val rNote = rm.noteAt(rNow) ?: if (rm.running) rm.chips() else ""
+                    Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        androidx.compose.material3.TextButton(onClick = { vm.refreshSources() },
+                            modifier = Modifier.heightIn(min = 48.dp).semantics { contentDescription = listOf(rLabel, rNote).filter { it.isNotEmpty() }.joinToString(". ") }) {
+                            com.chitram.app.ui.common.RefreshGlyph(rm.running, Tok.textSecondary, 16.dp)
+                            Spacer(Modifier.width(6.dp)); Text(rLabel, color = Tok.textSecondary, fontSize = 14.sp)
+                        }
+                        if (rNote.isNotEmpty()) Text(rNote, color = Tok.textMuted, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f).semantics { liveRegion = androidx.compose.ui.semantics.LiveRegionMode.Polite })
                     }
                     t.overview?.takeIf { it.isNotBlank() }?.let { ov ->
                         var open by rememberSaveable { mutableStateOf(false) }

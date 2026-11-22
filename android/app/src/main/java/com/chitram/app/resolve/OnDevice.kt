@@ -7,6 +7,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
@@ -48,6 +49,20 @@ class OnDeviceResolver(
     },
     /** Rows kept 30 min on the device (StreamCache); null keeps no rows (tests). */
     private val cache: StreamCache? = null,
+    /** Playlist bodies kept with the rows (PlaylistCache); dropped with them. */
+    private val playlists: PlaylistCache? = null,
+    /**
+     * Prewarm done: fetch the top-ranked row's master and first playlists into
+     * [playlists] (no segments). Null: no warm-up (tests). Never given a VM url.
+     */
+    private val warmPlaylists: (suspend (Source, String) -> Unit)? = null,
+    /**
+     * The device has no network (NetState). Gap 13.10: a resolve or prewarm then
+     * sends nothing, and a no-network error never counts toward a breaker.
+     */
+    private val offline: () -> Boolean = { false },
+    /** The active network is metered (mobile data). Gap 3.8: no playlist warm-up then. */
+    private val metered: () -> Boolean = { false },
     // Last: callers pass the clock as a trailing lambda.
     private val now: () -> Long = System::currentTimeMillis,
 ) {
@@ -94,30 +109,46 @@ class OnDeviceResolver(
                            later: MappleResolver.Later? = null): List<Source> {
         val c = cache ?: return resolveAllNow(name, type, id, season, episode, codecs, preferred, fresh, title, originalLang, later)
         val key = StreamCache.key(type, id, season, episode)
-        if (fresh) c.evictDevice(key, name)
-        else c.device(key, name, preferred)?.let { rows ->
+        // Gap 10.5: a fresh resolve keeps the old rows until its own answer is known.
+        if (!fresh) c.device(key, name, preferred)?.let { rows ->
             // mapple's late preferred-language row is kept in the same slot: nothing more comes.
             later?.deliver(null)
             android.util.Log.i("Chitram", "[cache] $name $type/$id hit: ${rows.size} row(s), 0 requests")
             return rows
         }
-        if (later == null) return resolveAllNow(name, type, id, season, episode, codecs, preferred, fresh, title, originalLang, null).also { c.putDevice(key, name, preferred, it) }
+        if (later == null) {
+            val out = kotlin.coroutines.coroutineContext[Outcome] ?: Outcome()
+            return withContext(out) { resolveAllNow(name, type, id, season, episode, codecs, preferred, fresh, title, originalLang, null) }.also { keep(c, key, name, preferred, it, fresh, out) }
+        }
         // mapple: keep its first rows and the late row together, once the late outcome is known,
         // so a kept slot never lacks the preferred-language row a live resolve would add.
         val first = kotlinx.coroutines.CompletableDeferred<List<Source>>()
         val lateRow = kotlinx.coroutines.CompletableDeferred<Source?>()
         val tap = MappleResolver.Later(later.scope) { r -> lateRow.complete(r?.let { toSource(it, codecs) }); later.deliver(r) }
+        val out = kotlin.coroutines.coroutineContext[Outcome] ?: Outcome()
         later.scope.launch {
             val rows = first.await()
             val extra = if (tap.handedOff) lateRow.await() else null
-            c.putDevice(key, name, preferred, rows + listOfNotNull(extra))
+            keep(c, key, name, preferred, rows + listOfNotNull(extra), fresh, out)
         }
         return try {
-            resolveAllNow(name, type, id, season, episode, codecs, preferred, fresh, title, originalLang, tap).also { first.complete(it) }
+            withContext(out) { resolveAllNow(name, type, id, season, episode, codecs, preferred, fresh, title, originalLang, tap) }.also { first.complete(it) }
         } finally {
             later.handedOff = tap.handedOff
             first.complete(emptyList())
         }
+    }
+
+    /**
+     * Keeps a resolve's rows. Rows replace the kept ones. Gap 10.5: a fresh resolve
+     * that failed (network, budget, offline) keeps the old rows; a clean empty
+     * answer drops them (the provider no longer has the title).
+     */
+    private fun keep(c: StreamCache, key: String, name: String, preferred: String, rows: List<Source>, fresh: Boolean, out: Outcome) {
+        if (rows.isNotEmpty()) { if (fresh) c.evictDevice(key, name); c.putDevice(key, name, preferred, rows); return }
+        if (!fresh) return
+        if (out.failed || offline()) android.util.Log.i("Chitram", "[refresh] $name $key failed: kept rows stay")
+        else c.evictDevice(key, name)
     }
 
     private suspend fun resolveAllNow(name: String, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, preferred: String, fresh: Boolean, title: String?, originalLang: String?,
@@ -129,7 +160,14 @@ class OnDeviceResolver(
         if (name == SHOWSST || name == ONETOUCH) return resolveRows(name, type, id, season, episode, codecs, fresh, title)
         if (name != NETMIRROR) return listOfNotNull(resolveOne(name, type, id, season, episode, codecs, preferred, fresh, title, later))
         if (!fresh && isOpen(name)) return emptyList()
-        return guarded(name) {
+        val titleKey = "$type:$id:$season:$episode"
+        if (!fresh && netmirrorEmpty(titleKey)) {
+            android.util.Log.i("Chitram", "on-device netmirror: $type/$id had no rows ${(now() - (netmirrorNoRows[titleKey] ?: 0)) / 1000}s ago, not asked")
+            return emptyList()
+        }
+        var searched = false
+        val prewarming = kotlin.coroutines.coroutineContext[Prewarming] != null
+        val got = guarded(name) {
             val cfg = cfgNow().netmirror
             if (!cfg.enabled) return@guarded emptyList()
             var timedOut = true
@@ -142,14 +180,23 @@ class OnDeviceResolver(
                     }
                 }?.takeIf { it.first.isNotBlank() }
                     ?: title?.let { Triple(it, null, null) }
-                val result = if (t == null) emptyList() else netmirror?.resolve(cfg, type, t.first, t.second, season, episode, fresh) { completed += it }.orEmpty()
+                val result = if (t == null) emptyList() else netmirror?.resolve(cfg, type, t.first, t.second, season, episode, fresh, prewarm = prewarming) { completed += it }.orEmpty()
+                searched = t != null && netmirror != null
                 timedOut = false
                 result
             }
             if (timedOut && completed.isEmpty()) throw StepException(name, 0, "budget ${cfg.budgetMs}ms spent")
             (rows ?: completed.map { it.copy(incomplete = true) }).map { toSource(it, codecs) }
-        }.orEmpty()
+        }
+        // Gap 2.5: a clean "not on NetMirror" is remembered NO_ROWS_MS; rows clear the mark.
+        if (got != null && got.isEmpty() && searched) netmirrorNoRows[titleKey] = now()
+        else if (!got.isNullOrEmpty()) netmirrorNoRows.remove(titleKey)
+        return got.orEmpty()
     }
+
+    /** Gap 2.5: NetMirror titles that answered "no rows", with when. Memory only. */
+    private val netmirrorNoRows = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private fun netmirrorEmpty(titleKey: String): Boolean = netmirrorNoRows[titleKey]?.let { now() - it in 0 until NETMIRROR_NO_ROWS_MS } == true
 
     /** Every VidBolt source as its own row (one per language master): never only the first. */
     private suspend fun resolveMultiMovies(type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, fresh: Boolean, originalLang: String?): List<Source> {
@@ -269,21 +316,40 @@ class OnDeviceResolver(
         companion object Key : kotlin.coroutines.CoroutineContext.Key<Prewarming>
     }
 
+    /**
+     * What a resolve ended with, set by [guarded]: a failure, and whether it was
+     * the network (no route, DNS, refused, or the device offline). Gap X2: a
+     * finished prewarm job that failed is not reused by Play.
+     */
+    internal class Outcome : kotlin.coroutines.AbstractCoroutineContextElement(Outcome) {
+        companion object Key : kotlin.coroutines.CoroutineContext.Key<Outcome>
+        @Volatile var failed = false
+        @Volatile var network = false
+    }
+
     /** Config for a resolve: a prewarm never fetches it (the fetch goes to the VM). */
     private suspend fun cfgNow(): ResolveConfig =
         if (kotlin.coroutines.coroutineContext[Prewarming] != null) config.current() else config.get()
 
     /** One provider's prewarm: its rows, plus mapple's background preferred-language row. */
-    private class Warm(val at: Long, val rows: Deferred<List<Source>>, val late: kotlinx.coroutines.CompletableDeferred<Resolved?>?)
+    private class Warm(val at: Long, val rows: Deferred<List<Source>>, val late: kotlinx.coroutines.CompletableDeferred<Resolved?>?, val outcome: Outcome = Outcome())
     private val warm = java.util.concurrent.ConcurrentHashMap<String, Warm>()
     private val warmScope = CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO)
-    /** NetMirror titles prewarmed, with when: never again inside PREWARM_TTL_MS. */
+    /** NetMirror titles prewarmed, with when: never again inside PREWARM_TTL_MS or NetMirror's cooldown (gap 13.9). */
     private val netmirrorWarmed = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     private fun warmTitle(type: String, id: Long, season: Int, episode: Int, preferred: String) = "$type:$id:$season:$episode:${preferred.lowercase()}"
 
     /** Providers a prewarm starts: config `prewarm` true and a resolver on this device. */
-    fun prewarmNames(): List<String> = config.current().prewarm.let { on -> names(vmDown = true).filter { it in on } }
+    fun prewarmNames(): List<String> {
+        val cfg = config.current()
+        val names = names(vmDown = true).filter { it in cfg.prewarm }
+        val line = prewarmLine(names, if (cfg.prewarmExplicit) config.source() else ResolveConfigStore.FROM_BUILTIN)
+        if (prewarmLogged.getAndSet(line) != line) android.util.Log.i("Chitram", line)
+        return names
+    }
+    /** The last `prewarm: providers=` line logged: printed once, again only when it changes. */
+    private val prewarmLogged = java.util.concurrent.atomic.AtomicReference<String?>(null)
 
     /**
      * Details page opened: start the on-device resolve of every prewarm provider for
@@ -294,26 +360,41 @@ class OnDeviceResolver(
      * never delays another. Another title's unclaimed jobs are cancelled: one
      * title is prewarmed at a time, so at most one NetMirror prewarm is in flight.
      */
-    fun prewarm(type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, preferred: String = "Telugu", title: String? = null, originalLang: String? = null): List<String> {
+    fun prewarm(type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, preferred: String = "Telugu", title: String? = null, originalLang: String? = null,
+                first: String? = null): List<String> {
         val t = warmTitle(type, id, season, episode, preferred)
         val at = now()
         warm.entries.removeIf { (k, w) ->
             (!k.startsWith("$t|") || at - w.at > PREWARM_TTL_MS).also { drop -> if (drop) { w.rows.cancel(); w.late?.cancel() } }
         }
-        netmirrorWarmed.entries.removeIf { at - it.value > PREWARM_TTL_MS }
+        // Gap 13.10: no network, nothing to warm; no request, no breaker count.
+        if (offline()) { android.util.Log.i("Chitram", "prewarm: $type/$id offline, skipped"); return emptyList() }
+        val nmCfg = config.current().netmirror
+        val nmGuardMs = maxOf(PREWARM_TTL_MS, nmCfg.cooldownMs)
+        netmirrorWarmed.entries.removeIf { at - it.value !in 0 until nmGuardMs }
         val started = mutableListOf<String>()
         val kept = mutableListOf<String>()
-        for (n in prewarmNames()) {
+        val jobs = mutableListOf<Deferred<List<Source>>>()
+        // The title's last provider (LastProviderStore) starts first.
+        val lead = nameFor(first)
+        for (n in prewarmNames().let { all -> if (lead != null && lead in all) listOf(lead) + (all - lead) else all }) {
             val k = "$t|$n"
             // Rows kept from an earlier resolve: nothing to warm, 0 requests.
             if (cache?.hasDevice(StreamCache.key(type, id, season, episode), n, preferred) == true) { kept += n; continue }
             if (warm.containsKey(k)) continue
             // Breaker open: the provider is paused for Play too; nothing to warm.
             if (isOpen(n)) continue
-            if (n == NETMIRROR && netmirrorWarmed.putIfAbsent("$type:$id:$season:$episode", at) != null) continue
+            if (n == NETMIRROR) {
+                // Gap 2.5: NetMirror said "no rows" for this title a short while ago.
+                if (netmirrorEmpty("$type:$id:$season:$episode")) continue
+                // Gap 13.9: the prewarm share of the window budget is spent; Play keeps the rest.
+                if (netmirror?.prewarmShareSpent(nmCfg) == true) { android.util.Log.i("Chitram", "prewarm: netmirror $type/$id skipped, prewarm share of the request budget spent"); continue }
+                if (netmirrorWarmed.putIfAbsent("$type:$id:$season:$episode", at) != null) continue
+            }
             val late = if (n == MAPPLE) kotlinx.coroutines.CompletableDeferred<Resolved?>() else null
             val later = late?.let { l -> MappleResolver.Later(warmScope) { r -> l.complete(r) } }
-            val job = warmScope.async(Prewarming(), start = kotlinx.coroutines.CoroutineStart.LAZY) {
+            val outcome = Outcome()
+            val job = warmScope.async(Prewarming() + outcome, start = kotlinx.coroutines.CoroutineStart.LAZY) {
                 val t0 = now()
                 try {
                     resolveAll(n, type, id, season, episode, codecs, preferred, fresh = false, title = title, originalLang = originalLang, later = later).also { rows ->
@@ -327,10 +408,12 @@ class OnDeviceResolver(
                     if (later != null && !later.handedOff) late?.complete(null)
                 }
             }
-            warm[k] = Warm(at, job, late)
+            warm[k] = Warm(at, job, late, outcome)
             job.start()
+            jobs += job
             started += n
         }
+        if (started.isNotEmpty() || kept.isNotEmpty()) warmTop(type, id, season, episode, preferred, jobs)
         if (kept.isNotEmpty()) android.util.Log.i("Chitram", "prewarm: $type/$id s$season e$episode kept rows, skipped ${kept.joinToString(",")}")
         if (started.isNotEmpty()) android.util.Log.i("Chitram", "prewarm: $type/$id s$season e$episode started ${started.joinToString(",")}")
         return started
@@ -341,13 +424,21 @@ class OnDeviceResolver(
      * Play starts each of them (even one it would otherwise start only when the VM
      * fails) so its rows join the first list at once.
      */
-    fun prewarmedNames(type: String, id: Long, season: Int, episode: Int, preferred: String): List<String> {
+    fun prewarmedNames(type: String, id: Long, season: Int, episode: Int, preferred: String): List<String> =
+        warmSplit(type, id, season, episode, preferred).let { (kept, jobs) -> names(vmDown = true).filter { it in kept || it in jobs } }
+
+    /**
+     * [prewarmedNames] in two parts, each in launch order: providers whose rows are
+     * kept (StreamCache, 0 requests), and providers with a live prewarm job.
+     */
+    fun warmSplit(type: String, id: Long, season: Int, episode: Int, preferred: String): Pair<List<String>, List<String>> {
         val t = warmTitle(type, id, season, episode, preferred)
         val at = now()
         val key = StreamCache.key(type, id, season, episode)
-        return names(vmDown = true).filter { n ->
-            warm["$t|$n"]?.let { at - it.at <= PREWARM_TTL_MS && !it.rows.isCancelled } == true || cache?.hasDevice(key, n, preferred) == true
-        }
+        val all = names(vmDown = true)
+        val kept = all.filter { n -> cache?.hasDevice(key, n, preferred) == true }
+        val jobs = all.filter { n -> n !in kept && warm["$t|$n"]?.let { at - it.at <= PREWARM_TTL_MS && !it.rows.isCancelled } == true }
+        return kept to jobs
     }
 
     /**
@@ -360,7 +451,88 @@ class OnDeviceResolver(
         val key = StreamCache.key(type, id, season, episode)
         val n = row.onDevice?.let(::nameFor)
         if (n != null) c.evictDevice(key, n) else if (row.onDevice == null) c.evictVm(key) else return
+        dropPlaylists(listOfNotNull(row.url, row.directUrl, row.proxyUrl))
         android.util.Log.i("Chitram", "[cache] ${row.provider} $type/$id failed in playback: kept ${n ?: "vm"} rows dropped")
+    }
+
+    /**
+     * "Refresh sources": forget everything kept for this title and episode, so no
+     * stored row and no prewarm job answers the next resolve. Returns the urls
+     * that were kept (the refresh compares the new answer against them).
+     */
+    fun forgetTitle(type: String, id: Long, season: Int, episode: Int): Set<String> {
+        val key = StreamCache.key(type, id, season, episode)
+        // Gap 10.5: the kept rows stay until a provider's new answer replaces them
+        // (resolveAll fresh); a failed refresh keeps them.
+        val kept = cache?.urls(key).orEmpty()
+        val prefix = "$type:$id:$season:$episode:"
+        warm.entries.removeIf { (k, w) -> k.startsWith(prefix).also { if (it) { w.rows.cancel(); w.late?.cancel() } } }
+        netmirrorNoRows.remove("$type:$id:$season:$episode")
+        android.util.Log.i("Chitram", "[refresh] $type/$id s$season e$episode: ${kept.size} kept url(s) stay until new rows come, prewarm jobs dropped")
+        return kept
+    }
+
+    /** A refresh answered: drop the playlists of kept urls the new answer no longer has. */
+    fun dropOldPlaylists(kept: Set<String>, fresh: Set<String>) = dropPlaylists(kept - fresh)
+
+    /**
+     * "Refresh sources": every provider in [names] resolves anew, in parallel
+     * (fresh: no kept rows, no prewarm job, no NetMirror answer memo; its session
+     * token and single-flight lock stay). mapple's preferred-language row is
+     * awaited too, so the Telugu row a Play would add is in the answer. Each
+     * provider's count goes to [onProvider] as it lands. The rows are kept again
+     * (StreamCache) by [resolveAll].
+     */
+    suspend fun refreshAll(names: List<String>, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, preferred: String = "Telugu", title: String? = null, originalLang: String? = null,
+                           onProvider: (String, Int) -> Unit = { _, _ -> }): List<Source> = kotlinx.coroutines.coroutineScope {
+        val late = kotlinx.coroutines.CompletableDeferred<List<Source>>()
+        // mapple's background search lives here; cancelled once the wait below ends.
+        val bg = kotlinx.coroutines.SupervisorJob(coroutineContext[kotlinx.coroutines.Job])
+        val lateScope = CoroutineScope(coroutineContext + bg)
+        val jobs = names.map { n ->
+            val later = if (n == MAPPLE) MappleResolver.Later(lateScope) { r -> late.complete(listOfNotNull(r?.let { toSource(it, codecs) })) } else null
+            async {
+                val rows = resolveAll(n, type, id, season, episode, codecs, preferred, fresh = true, title = title, originalLang = originalLang, later = later)
+                if (later != null && !later.handedOff) late.complete(emptyList())
+                onProvider(n, rows.size)
+                rows
+            }
+        }
+        if (MAPPLE !in names) late.complete(emptyList())
+        val rows = jobs.flatMap { it.await() }
+        val lateRows = withTimeoutOrNull(REFRESH_LATE_WAIT_MS) { late.await() }
+        // Done: let the cache write of mapple's slot finish. Timed out: stop the search.
+        if (lateRows == null) bg.cancel() else bg.complete()
+        val extra = lateRows.orEmpty().filter { e -> rows.none { it.url == e.url } }
+        if (extra.isNotEmpty()) onProvider(MAPPLE, extra.size + rows.count { nameFor(it.onDevice) == MAPPLE })
+        rows + extra
+    }
+
+    private fun dropPlaylists(urls: Collection<String>) {
+        val p = playlists ?: return
+        val n = urls.sumOf { p.evict(it) }
+        if (n > 0) android.util.Log.i("Chitram", "[playlist] $n kept playlist(s) dropped with their rows")
+    }
+
+    /**
+     * After the prewarm: the rows it kept or resolved, ranked as Play ranks the
+     * device rows; the first one's playlists are fetched into memory. VM urls are
+     * skipped (the prewarm never loads the VM).
+     */
+    private fun warmTop(type: String, id: Long, season: Int, episode: Int, preferred: String, jobs: List<Deferred<List<Source>>>) {
+        val warmUp = warmPlaylists ?: return
+        // Gap 3.8 (owner rule: cut data on browse): rows only on mobile data, no playlists.
+        if (metered()) { android.util.Log.i("Chitram", "[playlist] warm skipped: metered network"); return }
+        val key = StreamCache.key(type, id, season, episode)
+        warmScope.launch(Prewarming()) {
+            val fresh = jobs.flatMap { j -> runCatching { j.await() }.getOrDefault(emptyList()) }
+            val kept = names(vmDown = true).flatMap { n -> cache?.device(key, n, preferred).orEmpty() }
+            val top = com.chitram.app.data.Ranking.rank((fresh + kept).distinctBy { it.url }.filter { !it.unsupported }, preferred).firstOrNull() ?: return@launch
+            runCatching { warmUp(top, preferred) }.onFailure {
+                if (it is kotlinx.coroutines.CancellationException) throw it
+                android.util.Log.i("Chitram", "[playlist] warm ${top.provider} failed: ${it.javaClass.simpleName}")
+            }
+        }
     }
 
     /** Unclaimed prewarm jobs (tests). */
@@ -375,8 +547,27 @@ class OnDeviceResolver(
     private fun claimWarm(name: String, type: String, id: Long, season: Int, episode: Int, preferred: String): Warm? {
         val w = warm.remove("${warmTitle(type, id, season, episode, preferred)}|$name") ?: return null
         if (now() - w.at > PREWARM_TTL_MS || w.rows.isCancelled) { w.rows.cancel(); w.late?.cancel(); return null }
+        if (unusable(name, w)) {
+            w.late?.cancel()
+            android.util.Log.i("Chitram", "prewarm: $name $type/$id job ended with 0 rows (${if (w.outcome.network) "network" else if (w.outcome.failed) "failed" else "empty"}), resolving again")
+            return null
+        }
         android.util.Log.i("Chitram", "prewarm: $name $type/$id reused (age ${now() - w.at}ms, ${if (w.rows.isCompleted) "done" else "in flight"})")
         return w
+    }
+
+    /**
+     * Gap X2: a finished prewarm job with 0 rows is not reused when it failed on
+     * the network (or offline), for every provider; nor when it was empty or
+     * failed, for every provider but NetMirror. A NetMirror upstream failure is
+     * reused (fewest NetMirror requests); its clean empty is the no-rows mark.
+     */
+    private fun unusable(name: String, w: Warm): Boolean {
+        if (!w.rows.isCompleted || w.rows.isCancelled) return false
+        val rows = runCatching { w.rows.getCompleted() }.getOrNull()
+        if (!rows.isNullOrEmpty()) return false
+        if (w.outcome.network) return true
+        return name != NETMIRROR
     }
 
     /** Play's rows from a prewarm job; mapple's late row goes through Play's own [later], as a list entry only. */
@@ -397,6 +588,13 @@ class OnDeviceResolver(
 
     private suspend fun <T> guarded(name: String, block: suspend () -> T?): T? {
         val t0 = now()
+        val out = kotlin.coroutines.coroutineContext[Outcome]
+        // Gap 13.10: no network: send nothing, count nothing.
+        if (offline()) {
+            out?.apply { failed = true; network = true }
+            android.util.Log.i("Chitram", "on-device $name: offline, skipped")
+            return null
+        }
         return try {
             block().also {
                 breakers.remove(name)
@@ -404,6 +602,13 @@ class OnDeviceResolver(
             }
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
+            val net = isNetwork(e)
+            out?.apply { failed = true; network = network || net || offline() }
+            // Gap 13.10: the device went offline mid-resolve, or a prewarm hit its share: not the provider's fault.
+            if (offline() || e is PrewarmShareSpent) {
+                android.util.Log.i("Chitram", "on-device $name failed in ${now() - t0}ms, not counted (${if (offline()) "offline" else "prewarm share spent"}): ${e.message}")
+                return null
+            }
             val b = breakers.getOrPut(name) { Breaker() }
             synchronized(b) {
                 b.fails++
@@ -447,9 +652,24 @@ class OnDeviceResolver(
             VIDRIFT -> VIDRIFT
             else -> null
         }
+        /** `[race] cache hit:` (kept rows) and `[race] continuing prewarm:` (live jobs), each only when not empty. */
+        fun raceLines(kept: List<String>, jobs: List<String>): List<String> =
+            listOfNotNull(kept.takeIf { it.isNotEmpty() }?.let { "[race] cache hit: ${it.joinToString(",")}" },
+                jobs.takeIf { it.isNotEmpty() }?.let { "[race] continuing prewarm: ${it.joinToString(",")}" })
+        /** Greppable once-per-change line: which providers prewarm, and whose config said so. */
+        fun prewarmLine(names: List<String>, source: String): String = "prewarm: providers=${names.joinToString(",").ifEmpty { "none" }} source=$source"
         /** A prewarm job older than this is not reused (signed links age). */
         const val PREWARM_TTL_MS = 120_000L
+        /** A refresh waits this long for mapple's late preferred-language row after every provider answered. */
+        const val REFRESH_LATE_WAIT_MS = 15_000L
+        /** Gap 2.5: NetMirror's "no rows" for a title holds this long (a Refresh asks anyway). */
+        const val NETMIRROR_NO_ROWS_MS = 10 * 60 * 1000L
         const val BREAKER_FAILS = 3
+
+        /** No route to the host: DNS, refused, unreachable (also as a cause). */
+        fun isNetwork(e: Throwable): Boolean = generateSequence(e) { it.cause }.take(5).any {
+            it is java.net.UnknownHostException || it is java.net.ConnectException || it is java.net.NoRouteToHostException
+        }
         const val BREAKER_OPEN_MS = 5 * 60 * 1000L
         const val BREAKER_MAX_MS = 30 * 60 * 1000L
 

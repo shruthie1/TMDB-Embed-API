@@ -81,6 +81,9 @@ data class PlayRequest(
 /** [group]: a sheet sub-heading ("In this stream" / "Other servers"); rows with the same group sit under one label. */
 data class MenuItem(val key: String, val label: String, val detail: String = "", val selected: Boolean = false, val dim: Boolean = false, val group: String = "")
 
+/** Source list row key of "Refresh sources" (MenuTap.Refresh). */
+internal const val REFRESH_KEY = "refresh:sources"
+
 internal fun streamCount(n: Int) = if (n == 1) "1 stream" else "$n streams"
 
 /** Runs a NetMirror check and says what it found, so the tap is never silent. */
@@ -144,15 +147,23 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     private var resolveStartMs = 0L
 
     /** The player's base client: the shared pool, plus the castle-demux master codec fill (MasterCodecs). */
-    private val playerHttp: okhttp3.OkHttpClient = g.api.client.newBuilder().addInterceptor(MasterCodecs).build()
+    private val playerHttp: okhttp3.OkHttpClient = com.chitram.app.resolve.PlaylistInterceptor.attach(
+        g.api.client.newBuilder().addInterceptor(MasterCodecs).build(), g.playlists) { isoFor(desiredAudio()).toList() }
+
+    /** First-play timing (fix D): master / variant / seg0 logged once per play(), first frame once per tap. Before [player]: its data sources report bytes to it. */
+    private val loadMarks = LoadMarks()
+
+    /** Start cap: a lower rendition until each play's first frame (StartCapMeter). */
+    private val startMeter = StartCapMeter(androidx.media3.exoplayer.upstream.DefaultBandwidthMeter.getSingletonInstance(app))
 
     val player: ExoPlayer = ExoPlayer.Builder(
         app,
         (if (Device.isTv(app)) NoKeyframeSkipRenderersFactory(app) else DefaultRenderersFactory(app)).setEnableDecoderFallback(true),
     )
-        .setMediaSourceFactory(DefaultMediaSourceFactory(OkHttpDataSource.Factory(playerHttp)))
+        .setMediaSourceFactory(DefaultMediaSourceFactory(OkHttpDataSource.Factory(playerHttp).setTransferListener(loadMarks.bytes)))
         // Smaller buffer than the default: the 2018 stick has 1.5 GB RAM.
         .setLoadControl(DefaultLoadControl.Builder().setBufferDurationsMs(15_000, 40_000, 1_500, 3_000).build())
+        .setBandwidthMeter(startMeter)
         .setSeekBackIncrementMs(10_000)
         .setSeekForwardIncrementMs(10_000)
         .build()
@@ -201,8 +212,6 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
      * and not identity (recordAudio replaces `current` with a copy).
      */
     private var framedThisPlay = false
-    /** First-play timing (fix D): master / variant / seg0 logged once per play(), first frame once per tap. */
-    private val loadMarks = LoadMarks()
     /** Lines traced for this play (LoadTrace): before the first frame only, at most LoadTrace.MAX. */
     private var traced = 0
     private fun trace(event: String, detail: String) {
@@ -283,13 +292,14 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                     journey.ready(journeyScreen())
                     // "<L> audio added from <server>." is said once the pair is ready, not wiped by it.
                     if (!offline) { notice = addedNotice ?: ""; addedNotice = null }
-                    current?.let { request?.let { r -> g.lastProvider.put(r.type, r.id, it.provider, manual = it.id == manualPickId) } }
                 }
                 if (state == Player.STATE_ENDED) onEnded()
             }
             override fun onVideoSizeChanged(size: VideoSize) { videoSize = size }
             override fun onRenderedFirstFrame() {
                 framedThisPlay = true; directJob?.cancel(); markFramed()
+                startMeter.capped = false
+                current?.let { watchPlayed(it) }
                 if (!firstFrameLogged && requestedAt > 0) {
                     firstFrameLogged = true
                     val now = System.currentTimeMillis()
@@ -455,6 +465,8 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         if (request?.id != r.id || request?.type != r.type) selectedAudioLanguage = null
         request = r
         netmirrorNote = null
+        refreshJob?.cancel()
+        refreshModel = RefreshModel()
         languageTrial = null
         languageFallback = null
         runEffects(journey.drop())
@@ -475,7 +487,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         resetStart()
         subs = emptyList()
         subsJob?.cancel()
-        val job = viewModelScope.async { OpenSubs.fetch(g.api.client, r.imdbId, r.season, r.episode, r.runtimeMin) }
+        val job = viewModelScope.async { OpenSubs.fetchKept(g.api.client, r.imdbId, r.season, r.episode, r.runtimeMin) }
         subsJob = job
         // Late captions reach the next row put on screen (failover or a manual switch).
         viewModelScope.launch { val t = job.await(); if (request == r) { subs = t; android.util.Log.i("Chitram", "[subs] ${t.size} tracks: ${t.joinToString { it.label }}") } }
@@ -509,7 +521,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             LoadingModel.Check(LoadingModel.CHECK_SERVER, "Chitram server", t0)
         resolveJob = viewModelScope.launch {
             // A remembered provider leads only inside the viewer's language unless it was picked by hand (A8).
-            val saved = g.lastProvider.get(r.type, r.id)
+            val saved = g.lastProvider.get(r.type, r.id, r.season, r.episode)
             val pin = keepProvider ?: saved?.provider
             val manualPin = keepProvider != null || saved?.manual == true
             val preferred = g.prefs.preferredAudio()
@@ -518,7 +530,8 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             val names = g.onDevice.names(vmDown)
             // prewarm.md: providers the details page already resolved. Each continues from that job;
             // one Play would start only on a VM failure (multimovies, vidrift) joins the first list now.
-            val warmNames = if (keep) emptyList() else g.onDevice.prewarmedNames(r.type, r.id, r.season, r.episode, preferred)
+            val (keptNames, jobNames) = if (keep) emptyList<String>() to emptyList() else g.onDevice.warmSplit(r.type, r.id, r.season, r.episode, preferred)
+            val warmNames = g.onDevice.names(vmDown = true).filter { it in keptNames || it in jobNames }
             val warmExtra = warmNames.filter { it !in names }
             val device = if (keep) deviceJobs else {
                 val bg = kotlinx.coroutines.SupervisorJob(viewModelScope.coroutineContext[Job])
@@ -535,7 +548,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             }
             deviceJobs = device
             val warmJobs = if (keep) emptyList() else device.zip(names + warmExtra).filter { (_, n) -> n in warmNames }.map { it.first }
-            if (warmNames.isNotEmpty()) android.util.Log.i("Chitram", "[race] continuing prewarm: ${warmNames.joinToString(",")}")
+            OnDeviceResolver.raceLines(keptNames, jobNames).forEach { android.util.Log.i("Chitram", it) }
             vmJob?.cancel()
             fullJob?.cancel()
             // A9: set when the VM answered partial or a provider threw; read after the answer lands.
@@ -582,7 +595,41 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                 phase = Phase.Failed(backendError?.let { "Could not reach the server (${it.message ?: it.javaClass.simpleName})." } ?: "No playable source found.")
                 return@launch
             }
-            if (phase == Phase.Resolving) play(sources.first(), startMs)
+            if (phase == Phase.Resolving) {
+                // The provider that last played this title starts first, inside the viewer's language (LastPlayed).
+                val last = if (keepProvider == null) LastPlayed.startRow(sources, saved, preferred) else null
+                if (keepProvider == null && saved != null) android.util.Log.i("Chitram", LastPlayed.line(r.type, r.id, saved.provider, if (last != null) "hit" else "miss"))
+                lastHitId = last?.id
+                play(last ?: sources.first(), startMs)
+            }
+        }
+    }
+
+    /** Row id started because it was the title's last provider; a failure of it is logged `[last] .. failed`. */
+    private var lastHitId: String? = null
+    private var playedJob: Job? = null
+
+    /**
+     * Remembers the provider once its row, on screen since its first frame, has
+     * played LastProviderStore.PLAYED_MS: a row that dies in the first seconds
+     * never becomes the title's start row.
+     */
+    private fun watchPlayed(row: Source) {
+        val r = request ?: return
+        playedJob?.cancel()
+        val framedAt = player.currentPosition.coerceAtLeast(0)
+        val manual = row.id == manualPickId
+        playedJob = viewModelScope.launch {
+            while (true) {
+                delay(1_000)
+                val same = current?.id == row.id && request == r
+                if (!same) return@launch
+                if (LastPlayed.played(framedAt, player.currentPosition, same)) {
+                    g.lastProvider.put(r.type, r.id, row.provider, manual = manual, season = r.season, episode = r.episode)
+                    android.util.Log.i("Chitram", LastPlayed.line(r.type, r.id, row.provider, "saved"))
+                    return@launch
+                }
+            }
         }
     }
 
@@ -674,6 +721,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         if (row.directUrl != null) android.util.Log.i("Chitram", DirectRoute.logLine(if (DirectRoute.isDirect(s)) "direct" else "proxy", s,
             "reason=" + if (DirectRoute.isDirect(s)) "config-direct" else "direct-failed-before"))
         framedThisPlay = false
+        startMeter.capped = true
         loadMarks.reset()
         traced = 0
         directJob?.cancel()
@@ -736,9 +784,23 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         status = ""
         startNoPictureGuard(s)
         if (DirectRoute.isDirect(s)) directJob = viewModelScope.launch {
-            delay(DirectRoute.FIRST_FRAME_MS)
-            val playing = current
-            if (playing != null && DirectRoute.timerShouldFallBack(playing, s, framedThisPlay)) directFallBack(playing, player.currentPosition.coerceAtLeast(0), "no-first-frame-10s")
+            // No segment and no byte for 6 s, or no frame by 10 s: the same row via the proxy
+            // (DirectRoute.stallReason). Checked every 500 ms from 6 s to 10 s (gap 6.3).
+            delay(DirectRoute.FIRST_SEGMENT_MS - (System.currentTimeMillis() - playStartedAt).coerceAtLeast(0))
+            while (true) {
+                val t = System.currentTimeMillis()
+                val at = t - playStartedAt
+                val why = DirectRoute.stallReason(at, framedThisPlay, loadMarks.segmentLoaded, idleMs = t - maxOf(loadMarks.lastBytesAt, playStartedAt))
+                if (why != null) {
+                    val playing = current
+                    val up = g.api.vmUp
+                    if (!up) android.util.Log.i("Chitram", DirectRoute.logLine("direct-stalled", s, "reason=$why fallback=none vm=down"))
+                    if (playing != null && DirectRoute.timerShouldFallBack(playing, s, framedThisPlay, vmUp = up)) directFallBack(playing, player.currentPosition.coerceAtLeast(0), why)
+                    return@launch
+                }
+                if (framedThisPlay || at >= DirectRoute.FIRST_FRAME_MS) return@launch
+                delay(minOf(500L, DirectRoute.FIRST_FRAME_MS - at).coerceAtLeast(1))
+            }
         }
     }
 
@@ -762,13 +824,15 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     private fun sourceFor(s: Source, item: MediaItem): androidx.media3.exoplayer.source.MediaSource {
         val swap = if (TsAudioSwap.wanted(s)) TsAudioSwap(desiredAudio()) else null
         // A backend row playing direct (DirectRoute) carries the provider's headers.
-        if (PlayPolicy.usesBaseClient(s, swap != null)) return DefaultMediaSourceFactory(OkHttpDataSource.Factory(playerHttp)).createMediaSource(item)
+        if (PlayPolicy.usesBaseClient(s, swap != null)) return DefaultMediaSourceFactory(OkHttpDataSource.Factory(playerHttp).setTransferListener(loadMarks.bytes)).createMediaSource(item)
         val streamClient = StreamInterceptor.playerClient(g.api.client, s.headers, s.segmentToken, PlayPolicy.connectTimeoutMs(s))
             .let { c -> if (swap == null) c else c.newBuilder().addInterceptor(swap).build() }
+            // Innermost: kept playlists from memory, a master's first playlists in parallel (PlaylistCache).
+            .let { c -> com.chitram.app.resolve.PlaylistInterceptor.attach(c, g.playlists) { isoFor(desiredAudio()).toList() } }
         if (swap != null) android.util.Log.i("Chitram", "[tsaudio] ${s.provider}: swapping in ${g.prefs.preferredAudio()} from ${s.languages.joinToString("/")}")
         val http = OkHttpDataSource.Factory(okhttp3.Call.Factory { req ->
             if (subs.any { it.url == req.url.toString() }) g.api.client.newCall(req) else streamClient.newCall(req)
-        })
+        }).setTransferListener(loadMarks.bytes)
         return DefaultMediaSourceFactory(http).createMediaSource(item)
     }
 
@@ -821,7 +885,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         // On-device merge: a donor request failed. The donor's fault, not the
         // picture's route: next donor first, the picture stays direct (m-B).
         if (!pairFused && DirectRoute.donorAtFault(http?.dataSpec?.uri?.toString(), cur, pairedAudio) && pairFailed("${e.errorCodeName}", pos)) return
-        if (DirectRoute.shouldFallBack(cur, framed = framedThisPlay) && cur != null) {
+        if (DirectRoute.shouldFallBack(cur, framed = framedThisPlay, vmUp = g.api.vmUp) && cur != null) {
             directFallBack(cur, pos, "${e.errorCodeName}${http?.responseCode?.let { "-$it" } ?: ""}")
             return
         }
@@ -1021,6 +1085,10 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         val before = attempts
         endAttempt(LoadingModel.RowState.FAILED, why)
         val failed = current
+        if (failed != null && failed.id == lastHitId) {
+            lastHitId = null
+            request?.let { r -> android.util.Log.i("Chitram", LastPlayed.line(r.type, r.id, failed.provider, "failed")) }
+        }
         if (failed != null) {
             tried += failed.id
             report(failed, ok = false, reason = reason)
@@ -1082,7 +1150,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     private fun judgeDead(s: Source, alive: Boolean, reason: String, why: String, directWhy: String) {
         judged = true // play() resets it; never `landed` (checkRuntime would report ok)
         android.util.Log.i("Chitram", "[switch] ${s.provider} dead: $reason")
-        if (!isOffline() && DirectRoute.shouldFallBack(s, framed = framedThisPlay)) {
+        if (!isOffline() && DirectRoute.shouldFallBack(s, framed = framedThisPlay, vmUp = g.api.vmUp)) {
             directFallBack(s, player.currentPosition.coerceAtLeast(0), directWhy)
             return
         }
@@ -1169,22 +1237,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
 
     // ---- Offline (U8, web Player.jsx offline banner) -------------------------
 
-    private fun isOffline(): Boolean = try {
-        val c = cm
-        if (c == null) false else {
-            fun caps(n: Network?): NetCaps? = n?.let { c.getNetworkCapabilities(it) }?.let {
-                NetCaps(
-                    internet = it.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET),
-                    vpn = it.hasTransport(NetworkCapabilities.TRANSPORT_VPN),
-                )
-            }
-            val active = caps(c.activeNetwork)
-            // allNetworks is only needed for a VPN without INTERNET (API 21+; deprecated at 31, still works).
-            @Suppress("DEPRECATION")
-            val all = if (active?.vpn == true && !active.internet) c.allNetworks.mapNotNull { caps(it) } else emptyList()
-            !NetState.online(active, all)
-        }
-    } catch (_: Exception) { false }
+    private fun isOffline(): Boolean = NetState.offline(cm)
 
     private fun goOffline() {
         if (offline) return
@@ -1326,6 +1379,8 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         fullJob?.cancel()
         guardJob?.cancel()
         subsJob?.cancel()
+        refreshJob?.cancel()
+        refreshModel = RefreshModel()
         pendingResolveMs = null
         failedWhileOffline = false
         offline = false
@@ -1370,8 +1425,13 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         labels = emptyMap()
     }
 
+    /** [Ranking.sharedTeluguMasters] lines already logged this screen. */
+    private val sharedLogged = HashSet<String>()
+
     private fun putSources(list: List<Source>) {
         sources = list.map { source -> discoveredAudio[source.id]?.let { source.copy(languages = it, audioLanguages = it, selectableAudio = it.size > 1) } ?: source }
+        // Gap 9.10: two providers calling one master "Telugu" is logged for review; no tag changes.
+        Ranking.sharedTeluguMasters(sources).filter { sharedLogged.add(it) }.forEach { android.util.Log.i("Chitram", it) }
         labels = LoadingModel.labelRows(labels, sources)
     }
 
@@ -1457,11 +1517,13 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
 
     // ---- Menus ---------------------------------------------------------------
 
-    fun serverItems(provider: String? = null): List<MenuItem> {
-        if (provider == null) return sources.groupBy { it.provider.lowercase() }.map { (_, rows) ->
+    fun serverItems(provider: String? = null, now: Long = System.currentTimeMillis()): List<MenuItem> {
+        // While refreshing, the old rows stay in place, dimmed, until the new list replaces them in one update.
+        val dim = refreshModel.running
+        if (provider == null) return listOf(refreshItem(now)) + sources.groupBy { it.provider.lowercase() }.map { (_, rows) ->
             val name = rows.first().provider
             val languages = rows.flatMap(AudioChoice::languages).distinct().take(3).joinToString(", ")
-            MenuItem("group:$name", name, listOf(streamCount(rows.size), languages).filter { it.isNotEmpty() }.joinToString(" · "), rows.any { it.id == current?.id })
+            MenuItem("group:$name", name, listOf(streamCount(rows.size), languages).filter { it.isNotEmpty() }.joinToString(" · "), rows.any { it.id == current?.id }, dim = dim)
         } + if (sources.none { it.provider.equals("netmirror", true) }) listOf(MenuItem("group:NetMirror", "NetMirror", "Check streams on demand")) else emptyList()
         val rows = Ranking.menuOrder(sources.filter { it.provider.equals(provider, true) })
         // Owner: nested rows of one provider are told apart by a short host tag (ServerTag).
@@ -1472,7 +1534,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             val detail = listOfNotNull(source.netmirrorCatalog, quality, languages, tags[source.id],
                 if (source.incomplete) "More streams pending" else null,
                 if (source.unsupported) "Not supported here" else null).joinToString(" · ")
-            MenuItem("src:${source.id}", label(source), detail, source.id == current?.id, source.unsupported)
+            MenuItem("src:${source.id}", label(source), detail, source.id == current?.id, source.unsupported || dim)
         }
     }
 
@@ -1495,6 +1557,87 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                 netmirrorNote = note
             } finally { checkingNetmirror = false }
         }
+    }
+
+    // ---- Refresh sources (RefreshModel) -----------------------------------------
+
+    /** The "Refresh sources" control: source list top row and the failure card. */
+    var refreshModel by mutableStateOf(RefreshModel()); private set
+    private var refreshJob: Job? = null
+
+    /**
+     * On demand: every kept row of this title is dropped, every provider and the
+     * VM (refresh=1) asked anew, and the new rows replace the list in one update.
+     * What plays keeps playing; only a source that already failed (failure card)
+     * gives way to the best new row. One per title per 30 s.
+     */
+    fun refreshSources() {
+        val r = request ?: return
+        if (refreshModel.running) return
+        val now = System.currentTimeMillis()
+        val readyAt = g.refresh.readyAt(r.type, r.id, r.season, r.episode)
+        if (readyAt > now) { refreshModel = refreshModel.blocked(now, readyAt); return }
+        refreshModel = refreshModel.start(now, now + com.chitram.app.resolve.SourceRefresh.COOLDOWN_MS)
+        val before = sources.map { it.url }.toSet()
+        val preferred = g.prefs.preferredAudio()
+        refreshJob = viewModelScope.launch {
+            val res = try {
+                g.refresh.run(r.type, r.id, r.season, r.episode, g.codecs, preferred, r.title, r.originalLang,
+                    also = sources.mapNotNull { it.onDevice }, onProvider = { n, c -> if (request == r) refreshModel = refreshModel.answered(n, c) })
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                null
+            }
+            if (request != r) return@launch
+            val t = System.currentTimeMillis()
+            when (res) {
+                is com.chitram.app.resolve.SourceRefresh.Throttled -> refreshModel = refreshModel.blocked(t, res.readyAt)
+                null -> refreshModel = refreshModel.finish(t, RefreshModel.Copy.FAILED)
+                is com.chitram.app.resolve.SourceRefresh.Done -> applyRefresh(r, res, before, preferred)
+            }
+        }
+    }
+
+    private fun applyRefresh(r: PlayRequest, res: com.chitram.app.resolve.SourceRefresh.Done, before: Set<String>, preferred: String) {
+        val t = System.currentTimeMillis()
+        val saved = g.lastProvider.get(r.type, r.id, r.season, r.episode)
+        val pin = saved?.provider
+        val manual = saved?.manual == true
+        val vmRows = res.vm?.let { Ranking.fromResponse(it, preferred, g.codecs, pin, manual = manual) }.orEmpty()
+        val (shown, twinMap) = StartRace.splitTwins(vmRows, res.device)
+        val errored = phase is Phase.Failed
+        // The playing row stays in the list (selected) even when the new answer lacks it; nothing switches.
+        val plan = RefreshModel.apply(Ranking.merge(vmRows, shown, preferred, pin, manual), res.failed, current, errored) { l, cur -> Ranking.merge(l, listOf(cur), preferred, pin, manual) }
+        val list = plan.list
+        if (list == null) {
+            // Nothing came back: the old list stays as it is.
+            refreshModel = refreshModel.finish(t, RefreshModel.outcome(before, emptyList(), res.failed, preferred))
+            return
+        }
+        // Rows still joining from the start would bring old urls back.
+        lateJobs.forEach { it.cancel() }
+        fullJob?.cancel()
+        twins = twinMap
+        putSources(list)
+        listReady = true
+        refreshModel = refreshModel.finish(t, RefreshModel.outcome(before, list, false, preferred))
+        android.util.Log.i("Chitram", "[refresh] list replaced: ${list.size} row(s); playing ${if (errored) "none (failed)" else current?.provider ?: "none"}")
+        plan.start?.let { first ->
+            tried.clear()
+            reresolved.clear()
+            refreshedOnce = false
+            attempts = emptyList()
+            resetStart()
+            notice = ""
+            play(sources.firstOrNull { it.id == first.id } ?: first, g.progress.resumeMs(r.type, r.id, r.season, r.episode))
+        }
+    }
+
+    /** The source list's first row: "Refresh sources", its state, and what it found. */
+    fun refreshItem(now: Long): MenuItem {
+        val m = refreshModel
+        val detail = m.noteAt(now) ?: if (m.running) m.chips().ifEmpty { RefreshModel.Copy.PLAYBACK_CONTINUES } else RefreshModel.Copy.PLAYBACK_CONTINUES
+        return MenuItem(REFRESH_KEY, m.label(now), detail)
     }
 
     private fun groups(type: Int) = tracks.groups.filter { it.type == type }
@@ -1780,7 +1923,21 @@ private class NoKeyframeSkipVideoRenderer(
 internal class LoadMarks {
     private var manifests = 0
     private var seg0 = false
-    fun reset() { manifests = 0; seg0 = false }
+    /** A media or init segment finished loading since [reset] (DirectRoute.stallReason). */
+    val segmentLoaded: Boolean get() = seg0
+    /** When the last stream byte arrived (gap 6.3); 0 before any. */
+    @Volatile var lastBytesAt = 0L
+        private set
+    /** Every stream data source reports its bytes here. */
+    val bytes = object : androidx.media3.datasource.TransferListener {
+        override fun onTransferInitializing(source: androidx.media3.datasource.DataSource, dataSpec: androidx.media3.datasource.DataSpec, isNetwork: Boolean) = Unit
+        override fun onTransferStart(source: androidx.media3.datasource.DataSource, dataSpec: androidx.media3.datasource.DataSpec, isNetwork: Boolean) = Unit
+        override fun onBytesTransferred(source: androidx.media3.datasource.DataSource, dataSpec: androidx.media3.datasource.DataSpec, isNetwork: Boolean, bytesTransferred: Int) {
+            if (isNetwork && bytesTransferred > 0) lastBytesAt = System.currentTimeMillis()
+        }
+        override fun onTransferEnd(source: androidx.media3.datasource.DataSource, dataSpec: androidx.media3.datasource.DataSpec, isNetwork: Boolean) = Unit
+    }
+    fun reset() { manifests = 0; seg0 = false; lastBytesAt = 0L }
     fun mark(dataType: Int): String? = when (dataType) {
         androidx.media3.common.C.DATA_TYPE_MANIFEST -> when (++manifests) { 1 -> "master"; 2 -> "variant"; else -> null }
         androidx.media3.common.C.DATA_TYPE_MEDIA, androidx.media3.common.C.DATA_TYPE_MEDIA_INITIALIZATION ->

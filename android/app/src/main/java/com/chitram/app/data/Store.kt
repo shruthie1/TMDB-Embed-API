@@ -2,6 +2,7 @@ package com.chitram.app.data
 
 import android.content.Context
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.MapSerializer
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
@@ -12,8 +13,8 @@ interface KeyValue {
     fun put(key: String, value: String?)
 }
 
-class PrefsKeyValue(context: Context) : KeyValue {
-    private val sp = context.getSharedPreferences("chitram", Context.MODE_PRIVATE)
+class PrefsKeyValue(context: Context, name: String = "chitram") : KeyValue {
+    private val sp = context.getSharedPreferences(name, Context.MODE_PRIVATE)
     override fun get(key: String): String? = sp.getString(key, null)
     override fun put(key: String, value: String?) {
         sp.edit().apply { if (value == null) remove(key) else putString(key, value) }.apply()
@@ -223,22 +224,68 @@ class MyListStore(private val kv: KeyValue, private val now: () -> Long = System
 
 /** Last provider that played each title: a preference, never a filter. */
 /**
- * The provider that last played a title. `manual`: the viewer picked it in the
- * Server menu or Details, so a resume keeps it even in another language (A8).
- * Stored as "provider" (auto, also the pre-1.2.2 format) or "provider|manual".
+ * The provider that last played a title (owner 2026-11-22: every title remembers
+ * the provider it last played on, and the next Play starts there). Kept per
+ * title: a film by id, an episode by id + season + episode, with a per-series
+ * entry so a new episode falls back to the show's last provider. Written only
+ * after the row reached its first frame and played [PLAYED_MS]. At most
+ * [MAX_ENTRIES] entries in one kv value; the oldest go first.
+ * `manual`: the viewer picked it in the Server menu or Details, so a resume
+ * keeps it even in another language (A8). Values written by builds before
+ * 1.2.49 (`lastProvider:<type>:<id>`, "provider" or "provider|manual") are
+ * still read when no new entry exists.
  */
-class LastProviderStore(private val kv: KeyValue) {
+class LastProviderStore(private val kv: KeyValue, private val now: () -> Long = System::currentTimeMillis) {
     data class Pin(val provider: String, val manual: Boolean)
 
-    fun get(type: String, id: Long): Pin? {
+    @Serializable
+    private data class Entry(val k: String, val p: String, val m: Boolean = false, val at: Long = 0)
+
+    private val lock = Any()
+    private var entries: MutableList<Entry>? = null
+
+    /** The episode's own entry, else the show's, else a value from an older build. */
+    fun get(type: String, id: Long, season: Int = 0, episode: Int = 0): Pin? = synchronized(lock) {
+        val list = load()
+        val keys = keys(type, id, season, episode)
+        keys.firstNotNullOfOrNull { k -> list.lastOrNull { it.k == k } }?.let { return Pin(it.p, it.m) }
         val v = kv.get("lastProvider:$type:$id")?.takeIf { it.isNotEmpty() } ?: return null
         return if (v.endsWith(MANUAL)) Pin(v.removeSuffix(MANUAL), true) else Pin(v, false)
     }
 
-    fun put(type: String, id: Long, provider: String, manual: Boolean = false) =
-        kv.put("lastProvider:$type:$id", provider + if (manual) MANUAL else "")
+    fun put(type: String, id: Long, provider: String, manual: Boolean = false, season: Int = 0, episode: Int = 0) = synchronized(lock) {
+        val list = load()
+        val at = now()
+        for (k in keys(type, id, season, episode).reversed()) {
+            list.removeAll { it.k == k }
+            list += Entry(k, provider, manual, at)
+        }
+        while (list.size > MAX_ENTRIES) list.removeAt(0)
+        kv.put(KV_KEY, json.encodeToString(ListSerializer(Entry.serializer()), list))
+    }
 
-    private companion object { const val MANUAL = "|manual" }
+    /** Titles remembered (tests). */
+    internal fun size(): Int = synchronized(lock) { load().size }
+
+    private fun load(): MutableList<Entry> = entries ?: (kv.get(KV_KEY)?.let {
+        runCatching { json.decodeFromString(ListSerializer(Entry.serializer()), it) }.getOrNull()
+    }.orEmpty().toMutableList().also { entries = it })
+
+    /** Most specific first: the episode, then the show. A film has one key. */
+    private fun keys(type: String, id: Long, season: Int, episode: Int): List<String> {
+        val tv = type == "tv" || type == "series"
+        return if (!tv) listOf("movie:$id") else if (season > 0 || episode > 0) listOf("tv:$id:$season:$episode", "tv:$id") else listOf("tv:$id")
+    }
+
+    companion object {
+        private const val MANUAL = "|manual"
+        const val KV_KEY = "lastProvider.v2"
+        /** Owner: at least 200 titles. */
+        const val MAX_ENTRIES = 400
+        /** A row counts as "played" after this much playback past its first frame. */
+        const val PLAYED_MS = 10_000L
+        private val json = Json { ignoreUnknownKeys = true }
+    }
 }
 
 /**

@@ -235,6 +235,64 @@ class HomeVm : ViewModel() {
         get() = heroTitles?.firstOrNull() ?: rows.firstOrNull { !it.personal && it.titles.isNotEmpty() }?.titles?.firstOrNull()
 }
 
+/**
+ * Details-page prewarm waits [dwellMs] on the page (P13). A quick look-and-leave
+ * costs 0 provider requests. [fire] starts it at once (Play pressed, or TV Play
+ * focused by the user); [leave] drops it. Thread-safe: the timer runs on [context].
+ */
+class PrewarmDwell(
+    private val scope: kotlinx.coroutines.CoroutineScope,
+    private val dwellMs: Long = DWELL_MS,
+    private val context: kotlin.coroutines.CoroutineContext = Dispatchers.IO,
+    private val now: () -> Long = System::currentTimeMillis,
+    private val wait: suspend (Long) -> Unit = { delay(it) },
+    private val log: (String) -> Unit = { android.util.Log.i("Chitram", it) },
+) {
+    private var pending: (() -> Unit)? = null
+    private var timer: Job? = null
+    private var armedAt = 0L
+
+    val armed: Boolean get() = synchronized(this) { pending != null }
+
+    /** Replaces any pending start; [start] runs after the dwell unless [leave] comes first. */
+    fun arm(start: () -> Unit) {
+        val t = synchronized(this) {
+            timer?.cancel()
+            pending = start; armedAt = now()
+            scope.launch(context, start = kotlinx.coroutines.CoroutineStart.LAZY) { wait(dwellMs); fire() }.also { timer = it }
+        }
+        t.start()
+    }
+
+    /** Starts the pending prewarm now, on the caller's thread. False when nothing was pending. */
+    fun fire(): Boolean {
+        val (start, ms) = synchronized(this) {
+            val p = pending ?: return false
+            pending = null
+            // From the timer itself this cancels its own job; [start] does not suspend, so it still runs.
+            timer?.cancel(); timer = null
+            p to (now() - armedAt)
+        }
+        log("prewarm: dwell ${ms} start")
+        start()
+        return true
+    }
+
+    /** Page left: a prewarm still waiting never starts. */
+    fun leave(why: String = "left before dwell") {
+        val dropped = synchronized(this) {
+            timer?.cancel(); timer = null
+            (pending != null).also { pending = null }
+        }
+        if (dropped) log("prewarm: $why")
+    }
+
+    companion object {
+        /** Time on the details page before the prewarm starts (PENDING-WORK P13). */
+        const val DWELL_MS = 1_500L
+    }
+}
+
 class DetailVm : ViewModel() {
     private val g = App.instance
     var full by mutableStateOf<TitleFull?>(null); private set
@@ -251,7 +309,14 @@ class DetailVm : ViewModel() {
 
     fun load(type: String, id: Long) {
         val k = "$type:$id"
-        if (key == k) { refreshLocal(); return }
+        when (reopen(sameTitle = key == k, loaded = full != null, failed = error != null)) {
+            Reopen.WAIT -> { refreshLocal(); return }
+            // Back on the page (from Play or another title): prewarm again. Providers with kept rows
+            // or a live job are skipped inside OnDeviceResolver.prewarm, so this costs 0 requests then.
+            Reopen.PREWARM -> { refreshLocal(); full?.let { rewarm(it) }; return }
+            // A failed page retries when it is opened again.
+            Reopen.LOAD -> { error = null }
+        }
         key = k
         viewModelScope.launch {
             similar = runCatching { g.api.similar(type, id) }.getOrDefault(emptyList())
@@ -272,26 +337,109 @@ class DetailVm : ViewModel() {
         }
     }
 
+    /** The same episode Play opens now (next up may have moved since the first load). */
+    private fun rewarm(t: TitleFull) {
+        if (t.mediaType != "tv") { prewarm(t, 0, 0); return }
+        val (ps, pe) = prefetchEpisode(g.progress.nextUp(t.tmdbId, t.seasonList), t.seasonList)
+        prewarm(t, ps, pe)
+    }
+
     /**
-     * Fire-and-forget on-device resolve of the config's prewarm providers, off the
-     * main thread. No VM call: Play reuses the jobs, the VM is asked only on Play.
+     * On-device resolve of the config's prewarm providers, after [PrewarmDwell.DWELL_MS]
+     * on the page (P13); the first load and a reopen alike. The dwell timer runs off
+     * the main thread. No VM call: Play reuses the jobs, the VM is asked only on Play.
      * Never blocks the page; any failure is dropped and Play resolves as usual.
      */
     private fun prewarm(t: TitleFull, season: Int, episode: Int) {
         warmed = t.mediaType to t.tmdbId
-        viewModelScope.launch(Dispatchers.IO) {
-            runCatching { g.onDevice.prewarm(t.mediaType, t.tmdbId, season, episode, g.codecs, g.prefs.preferredAudio(), t.title, t.originalLang) }
+        playTarget = season to episode
+        dwell.arm {
+            // The title's last provider (LastProviderStore) is started first.
+            val first = g.lastProvider.get(t.mediaType, t.tmdbId, season, episode)?.provider
+            runCatching { g.onDevice.prewarm(t.mediaType, t.tmdbId, season, episode, g.codecs, g.prefs.preferredAudio(), t.title, t.originalLang, first = first) }
                 .onFailure { android.util.Log.i("Chitram", "prewarm: skipped: ${it.javaClass.simpleName}") }
         }
     }
+    private val dwell = PrewarmDwell(viewModelScope)
+
+    /** TV: the user moved focus onto Play. The prewarm starts now, not after the dwell. */
+    fun playFocused() { dwell.fire() }
+
+    /** The details screen left composition (another page, back): a waiting prewarm never starts. */
+    fun leftPage() = dwell.leave()
+
+    /**
+     * Play pressed inside the dwell: the waiting prewarm starts now, on this thread, so its
+     * jobs exist before the player resolves and Play continues from them (prewarm.md).
+     * Play for another episode drops it: the player resolves that episode itself.
+     */
+    private fun warmForPlay(target: Pair<Int, Int>) {
+        if (target == playTarget) dwell.fire() else dwell.leave("dropped, Play opens another episode")
+    }
     private var warmed: Pair<String, Long>? = null
+    /** Season and episode Play opens (0/0 for a film): what "Refresh sources" refreshes. */
+    private var playTarget: Pair<Int, Int>? = null
+
+    /** "Refresh sources" next to Play (RefreshModel). */
+    var refreshModel by mutableStateOf(com.chitram.app.player.RefreshModel()); private set
+    private var refreshJob: Job? = null
+
+    /**
+     * Drops every kept row of the title Play opens, asks every provider and the
+     * VM (refresh=1) anew and keeps the new rows, so Play starts from them. No
+     * list on this page: the result line says what came back. One per 30 s.
+     */
+    fun refreshSources() {
+        val t = full ?: return
+        val (season, episode) = playTarget ?: return
+        if (refreshModel.running) return
+        val now = System.currentTimeMillis()
+        val readyAt = g.refresh.readyAt(t.mediaType, t.tmdbId, season, episode)
+        if (readyAt > now) { refreshModel = refreshModel.blocked(now, readyAt); return }
+        refreshModel = refreshModel.start(now, now + com.chitram.app.resolve.SourceRefresh.COOLDOWN_MS)
+        val preferred = g.prefs.preferredAudio()
+        refreshJob = viewModelScope.launch {
+            val res = try {
+                g.refresh.run(t.mediaType, t.tmdbId, season, episode, g.codecs, preferred, t.title, t.originalLang,
+                    onProvider = { n, c -> refreshModel = refreshModel.answered(n, c) })
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                null
+            }
+            val at = System.currentTimeMillis()
+            refreshModel = when (res) {
+                is com.chitram.app.resolve.SourceRefresh.Throttled -> refreshModel.blocked(at, res.readyAt)
+                null -> refreshModel.finish(at, com.chitram.app.player.RefreshModel.Copy.FAILED)
+                is com.chitram.app.resolve.SourceRefresh.Done -> {
+                    val vmRows = res.vm?.let { com.chitram.app.data.Ranking.fromResponse(it, preferred, g.codecs) }.orEmpty()
+                    val rows = com.chitram.app.data.Ranking.merge(vmRows, res.device, preferred)
+                    refreshModel.finish(at, com.chitram.app.player.RefreshModel.outcome(res.kept, rows, res.failed, preferred))
+                }
+            }
+        }
+    }
 
     /** Page gone (back out): jobs Play did not take are cancelled; a job Play took is untouched. */
     override fun onCleared() {
+        dwell.leave()
         warmed?.let { (type, id) -> runCatching { g.onDevice.cancelPrewarm(type, id) } }
     }
 
+    /** What [load] does for a title: a fresh load, a new prewarm, or nothing (the first load is still running). */
+    enum class Reopen { LOAD, PREWARM, WAIT }
+
     companion object {
+        /**
+         * A different title, or the same one whose load failed: load (retry). The same
+         * title already loaded: prewarm again. The same title still loading: wait.
+         */
+        fun reopen(sameTitle: Boolean, loaded: Boolean, failed: Boolean): Reopen = when {
+            !sameTitle -> Reopen.LOAD
+            loaded -> Reopen.PREWARM
+            failed -> Reopen.LOAD
+            else -> Reopen.WAIT
+        }
+
         /** The episode Play opens with no tap on an episode: next up, else S(first)E1 (playRequest). */
         fun prefetchEpisode(next: Progress?, seasons: List<SeasonInfo>?): Pair<Int, Int> =
             next?.let { it.season to it.episode }
@@ -345,9 +493,13 @@ class DetailVm : ViewModel() {
 
     fun playRequest(ep: Episode? = null, fromStart: Boolean = false): PlayRequest? {
         val t = full ?: return null
-        if (t.mediaType != "tv") return PlayRequest("movie", t.tmdbId, t.title, poster = t.poster, backdrop = t.backdrop, overview = t.overview, fromStart = fromStart, imdbId = t.imdbId, runtimeMin = t.runtimeMin, originalLang = t.originalLang)
+        if (t.mediaType != "tv") {
+            warmForPlay(0 to 0)
+            return PlayRequest("movie", t.tmdbId, t.title, poster = t.poster, backdrop = t.backdrop, overview = t.overview, fromStart = fromStart, imdbId = t.imdbId, runtimeMin = t.runtimeMin, originalLang = t.originalLang)
+        }
         val e = ep ?: resume?.let { r -> Episode(r.episode, r.season, r.epTitle ?: episodes.firstOrNull { it.season == r.season && it.episode == r.episode }?.title ?: "") }
             ?: episodes.firstOrNull() ?: Episode(1, season)
+        warmForPlay(e.season to e.episode)
         return PlayRequest("tv", t.tmdbId, t.title, e.season, e.episode, t.poster, t.backdrop, e.title.ifEmpty { null }, t.seasonList, t.overview, fromStart = fromStart, imdbId = t.imdbId, runtimeMin = e.runtimeMin ?: t.runtimeMin, originalLang = t.originalLang)
     }
 }

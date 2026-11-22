@@ -122,4 +122,23 @@ class RankingTest {
         assertEquals(null, MediaCodecSupport.familyOf(null, null))
         assertEquals("hevc", MediaCodecSupport.familyOf("HEVC", null))
     }
+
+    private fun te(provider: String, url: String, langs: List<String> = listOf("Telugu")) = com.chitram.app.data.Source(
+        "$provider-1", provider, provider, url, false, "1080p", emptyList(), langs, false, false, emptyList(), null, null, false)
+
+    /** Gap 9.10: two providers each call the same master "Telugu": logged for review, no tag changed. */
+    @Test fun twoProvidersCallingOneMasterTeluguIsLogged() {
+        val a = te("CastleTV", "https://cdn.test/movie/abc/master.m3u8?token=1")
+        val b = te("Vidrift", "https://cdn.test/movie/abc/master.m3u8?token=2")
+        val c = te("MultiMovies", "https://other.test/x.m3u8")
+        val lines = Ranking.sharedTeluguMasters(listOf(a, b, c))
+        assertEquals(listOf("[lang] shared-telugu-master cdn.test/movie/abc/master.m3u8 providers=CastleTV,Vidrift"), lines)
+        // One provider listing it twice, or a non-Telugu row on the same master: nothing to say.
+        assertEquals(emptyList<String>(), Ranking.sharedTeluguMasters(listOf(a, a.copy(id = "x"), c)))
+        assertEquals(emptyList<String>(), Ranking.sharedTeluguMasters(listOf(a, te("Vidrift", b.url, listOf("Tamil")))))
+        // The tags stay as they came (unknown over wrong needs evidence, not a guess).
+        assertEquals(listOf("Telugu"), a.languages)
+        val vm = java.io.File("src/main/java/com/chitram/app/player/PlayerVm.kt").readText()
+        assertTrue("PlayerVm logs the check", vm.contains("Ranking.sharedTeluguMasters("))
+    }
 }

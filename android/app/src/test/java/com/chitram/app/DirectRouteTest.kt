@@ -93,6 +93,31 @@ class DirectRouteTest {
         assertEquals(10_000L, DirectRoute.FIRST_FRAME_MS)
     }
 
+    /** Gap 6.3: slow 2G, the first segment is still arriving at 6 s: not a stall. */
+    @Test fun bytesStillArrivingAt6sIsNotAStall() {
+        // Bytes came 300 ms ago: keep waiting.
+        assertNull(DirectRoute.stallReason(6_000, framed = false, segmentLoaded = false, idleMs = 300))
+        assertNull(DirectRoute.stallReason(8_000, framed = false, segmentLoaded = false, idleMs = 5_999))
+        // No byte for 6 s: the direct host is dead or stuck.
+        assertEquals("no-first-segment-6s", DirectRoute.stallReason(8_000, framed = false, segmentLoaded = false, idleMs = 6_000))
+        // The 10 s no-frame rule stays, bytes or not.
+        assertEquals("no-first-frame-10s", DirectRoute.stallReason(10_000, framed = false, segmentLoaded = false, idleMs = 100))
+        val vm = java.io.File("src/main/java/com/chitram/app/player/PlayerVm.kt").readText()
+        assertTrue("every stream data source reports bytes", Regex("""addTransferListener|setTransferListener""").findAll(vm).count() >= 1)
+        assertTrue("the timer passes the idle time", vm.contains("idleMs ="))
+    }
+
+    /** Gap 6.4: the VM is known down: a direct row does not fall back to the dead proxy. */
+    @Test fun noProxyFallBackWhenTheVmIsDown() {
+        val d = DirectRoute.forPlay(Ranking.toSource(parse(castle), 0, codecs)!!, emptySet())
+        assertTrue(DirectRoute.shouldFallBack(d, framed = false, vmUp = true))
+        assertFalse(DirectRoute.shouldFallBack(d, framed = false, vmUp = false))
+        assertFalse(DirectRoute.timerShouldFallBack(playing = d, started = d, framedThisPlay = false, vmUp = false))
+        assertTrue(DirectRoute.timerShouldFallBack(playing = d, started = d, framedThisPlay = false, vmUp = true))
+        val vm = java.io.File("src/main/java/com/chitram/app/player/PlayerVm.kt").readText()
+        assertEquals("every fallback check is told the VM state", 3, Regex("""FallBack\([^)]*vmUp = """).findAll(vm).count())
+    }
+
     @Test fun netmirrorUnchangedRetryComparesTheProxiedIdentity() {
         val nm = Ranking.toSource(parse("""{"url":"https://vm.example/ts-proxy?url=a","provider":"NetMirror","container":"mp4",
             "directUrl":"https://bcdn.example/a.mp4","directHeaders":{"Referer":"https://r/"},"route":{"web":"proxy","apk":"direct"}}"""), 0, codecs)!!
