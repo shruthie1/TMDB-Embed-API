@@ -22,6 +22,12 @@ import { cappedTtlMs } from './urlExpiry';
 
 export const STREAM_CACHE_TTL_MS = 30 * 60 * 1000;
 export const STREAM_CACHE_MAX_TITLES = 50;
+/**
+ * A partial answer (a provider still running or failed, an incomplete row) is
+ * kept this long, APK parity 2026-11-22: a second Play starts at once on its
+ * rows. A complete answer replaces it (lib/backend.js keepStreamsAnswer).
+ */
+export const PARTIAL_CACHE_TTL_MS = 5 * 60 * 1000;
 const STORE_KEY = 'chitram:streamCache:v1';
 
 /** @type {Map<string, {w: number, slots: Record<string, {until: number, value: any}>}> | null} */
@@ -100,9 +106,18 @@ export function hasSlot(key, slot, now = Date.now()) {
   return Boolean(v && now < v.until);
 }
 
-/** Store a value. Returns false when its URLs are already (nearly) dead. */
-export function putSlot(key, slot, value, now = Date.now()) {
-  const ttl = cappedTtlMs(STREAM_CACHE_TTL_MS, urlsOf(value), undefined, now);
+/** The live value, or null. Silent and side-effect free: for write decisions. */
+export function peekSlot(key, slot, now = Date.now()) {
+  const v = load(now).get(key)?.slots?.[slot];
+  return v && now < v.until ? v.value : null;
+}
+
+/**
+ * Store a value. Returns false when its URLs are already (nearly) dead.
+ * `maxTtlMs` shortens the life (a partial answer: PARTIAL_CACHE_TTL_MS).
+ */
+export function putSlot(key, slot, value, now = Date.now(), { maxTtlMs = STREAM_CACHE_TTL_MS } = {}) {
+  const ttl = cappedTtlMs(Math.min(STREAM_CACHE_TTL_MS, maxTtlMs), urlsOf(value), undefined, now);
   if (!(ttl > 0)) { log(`[cache] skip ${key}#${slot} url-expiry`); return false; }
   const m = load(now);
   const e = m.get(key) || { w: now, slots: {} };

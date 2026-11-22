@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { fetchTitle, fetchTitleFull, poster } from '../../../../lib/api';
+import { fetchTitle, fetchTitleFull, fetchSimilar, poster, TITLE_HEDGE_MS } from '../../../../lib/api';
 import { posterSources } from '../../../../lib/posterSources';
 import TitleLogo from '../../../../components/TitleLogo';
 import dynamic from 'next/dynamic';
@@ -136,8 +136,11 @@ export default function TitlePage() {
     setLoadError(null);
     // Fast record first for an early paint, but it is only worth the extra
     // request while it actually arrives sooner; the full one overwrites it.
-    const fast = fetchTitle(type, id).then(r => { if (alive && r.ok) setT(v => v ?? r.body); return r; });
-    fetchTitleFull(type, id).then(async r => {
+    // Both records hedge (APK parity 2026-11-22): no answer in 2.5 s sends a
+    // second request, first answer wins. Each leg times out at 10 s and
+    // retries once, so a dead connection ends in the retry screen, not a hang.
+    const fast = fetchTitle(type, id, { hedgeMs: TITLE_HEDGE_MS }).then(r => { if (alive && r.ok) setT(v => v ?? r.body); return r; });
+    fetchTitleFull(type, id, { hedgeMs: TITLE_HEDGE_MS }).then(async r => {
       if (!alive) return;
       if (!r.ok) {
         const f = await fast;
@@ -150,9 +153,8 @@ export default function TitlePage() {
       setT(r.body); setFull(true);
       if (type === 'tv') setResume(getNextUp(tmdbId, r.body.seasonList));
     });
-    fetch(`/api/similar/${type}/${id}`).then(r => r.json())
-      .then(d => { if (alive) setSimilar(d.titles || []); })
-      .catch(() => { if (alive) setSimilar([]); });
+    fetchSimilar(type, id)
+      .then(r => { if (alive) setSimilar(r.ok ? (r.body?.titles || []) : []); });
     setResume(type === 'tv' ? getNextUp(tmdbId) : getProgress(type, tmdbId));
     // seasonList arrives with the full record; recompute so a season/series
     // boundary is respected (S1E7 -> S2E1, never S1E8).

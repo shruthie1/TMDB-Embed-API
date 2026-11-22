@@ -87,29 +87,41 @@ export function logoUrl(path) {
   return poster(path, 'w500');
 }
 
-async function getJson(url, { timeoutMs = 15000, signal } = {}) {
-  // Home's first rows may already be on the way from the HTML (earlyRows.js).
-  const early = takeEarly(url);
-  if (early) {
-    const res = await early;
-    if (res && !signal?.aborted) return res;
-  }
+/**
+ * Every JSON call: a timeout (JSON_TIMEOUT_MS) and ONE retry (APK parity,
+ * 2026-11-22). The phone hung 30 s on /api/title/.../full over a dead pooled
+ * connection; a dead request now ends at ~10 s and the retry opens a fresh
+ * one. Retried: a network error, our own timeout, 5xx and 429. Not retried: a
+ * 4xx or a caller cancel. A timeout reports `timedOut: true` (never
+ * `aborted`), so the page shows its retry state instead of hanging.
+ *
+ * `hedgeMs` (the title page): no answer after that long sends a second
+ * request; the first ok answer wins and the other is aborted.
+ */
+export const JSON_TIMEOUT_MS = 10000;
+export const TITLE_HEDGE_MS = 2500;
+
+async function getJsonOnce(url, { timeoutMs, signal }) {
   const ctrl = new AbortController();
+  let timedOut = false;
   // Always abort WITH a reason: a bare abort() reports as "signal is aborted
   // without reason" in Next's dev overlay even though the catch below handles
   // it. See lib/abortReason.js.
-  const timer = setTimeout(() => ctrl.abort(abortReason(`timeout after ${timeoutMs}ms`)), timeoutMs);
+  const timer = setTimeout(() => { timedOut = true; ctrl.abort(abortReason(`timeout after ${timeoutMs}ms`)); }, timeoutMs);
   const onAbort = () => ctrl.abort(signal.reason ?? abortReason('caller cancelled'));
-  if (signal) signal.addEventListener('abort', onAbort, { once: true });
+  if (signal) {
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+  }
   try {
     const res = await fetch(url, { signal: ctrl.signal });
     if (!res.ok) return { ok: false, status: res.status, body: await res.json().catch(() => null) };
     return { ok: true, status: res.status, body: await res.json() };
   } catch (err) {
-    // Every abort used to report as 'timeout', including a caller cancel on
-    // unmount - so a navigation away looked like a slow backend in the log.
-    // The reason now says which it was.
-    if (isAbort(err)) return { ok: false, status: 0, aborted: true, error: err.message || 'cancelled' };
+    if (timedOut) return { ok: false, status: 0, timedOut: true, error: `timeout after ${timeoutMs}ms` };
+    // A caller cancel (unmount, a lost hedge) says so, so a navigation away
+    // never looks like a slow backend in the log.
+    if (isAbort(err) || signal?.aborted) return { ok: false, status: 0, aborted: true, error: err.message || 'cancelled' };
     return { ok: false, status: 0, error: err.message };
   } finally {
     clearTimeout(timer);
@@ -119,6 +131,60 @@ async function getJson(url, { timeoutMs = 15000, signal } = {}) {
   }
 }
 
+const worthRetry = (r) => !r.ok && !r.aborted && (r.status === 0 || r.status >= 500 || r.status === 429);
+
+async function getJsonRetry(url, opts) {
+  const first = await getJsonOnce(url, opts);
+  if (!worthRetry(first) || opts.signal?.aborted) return first;
+  try { console.info(`[api] retry ${url} after ${first.timedOut ? 'timeout' : first.status || first.error}`); } catch { /* none */ }
+  return getJsonOnce(url, opts);
+}
+
+/** Two racing requests: the second starts after hedgeMs without an answer. */
+function getJsonHedged(url, opts, hedgeMs) {
+  const legs = [new AbortController(), new AbortController()];
+  const onAbort = () => legs.forEach((c) => c.abort(opts.signal.reason ?? abortReason('caller cancelled')));
+  if (opts.signal) opts.signal.addEventListener('abort', onAbort, { once: true });
+  return new Promise((resolve) => {
+    let done = false;
+    let hedge = null;
+    let pending = 1;
+    let lastFail = null;
+    const finish = (r, winner) => {
+      if (done) return;
+      done = true;
+      clearTimeout(hedge);
+      legs.forEach((c, i) => { if (i !== winner) c.abort(abortReason('hedge lost')); });
+      if (opts.signal) opts.signal.removeEventListener('abort', onAbort);
+      resolve(r);
+    };
+    const leg = (i) => getJsonRetry(url, { timeoutMs: opts.timeoutMs, signal: legs[i].signal }).then((r) => {
+      if (r.ok || r.status) { finish(r, i); return; }
+      lastFail = r;
+      pending -= 1;
+      if (pending === 0) finish(lastFail, i);
+    });
+    hedge = setTimeout(() => {
+      if (done) return;
+      pending += 1;
+      try { console.info(`[api] hedge ${url} after ${hedgeMs}ms`); } catch { /* none */ }
+      leg(1);
+    }, hedgeMs);
+    leg(0);
+  });
+}
+
+async function getJson(url, { timeoutMs = JSON_TIMEOUT_MS, signal, hedgeMs = 0 } = {}) {
+  // Home's first rows may already be on the way from the HTML (earlyRows.js).
+  const early = takeEarly(url);
+  if (early) {
+    const res = await early;
+    if (res && !signal?.aborted) return res;
+  }
+  if (hedgeMs > 0) return getJsonHedged(url, { timeoutMs, signal }, hedgeMs);
+  return getJsonRetry(url, { timeoutMs, signal });
+}
+
 /** Fast record for cards: Cinemeta-first, ~0.02s warm. */
 export const fetchTitle = (type, id, opts) =>
   getJson(`/api/title/${type}/${id}`, opts);
@@ -126,6 +192,10 @@ export const fetchTitle = (type, id, opts) =>
 /** Full record for the detail page: adds runtime, genres, language. */
 export const fetchTitleFull = (type, id, opts) =>
   getJson(`/api/title/${type}/${id}/full`, opts);
+
+/** "More like this" for the title page. */
+export const fetchSimilar = (type, id, opts) =>
+  getJson(`/api/similar/${type}/${id}`, opts);
 
 /** `opts.query` is a prepared query string, e.g. prefsQuery(getPrefs()). */
 export const fetchRow = (kind, opts = {}) =>

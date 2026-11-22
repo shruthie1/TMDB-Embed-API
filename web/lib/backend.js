@@ -27,7 +27,7 @@
 // point a local UI at a remote backend.
 import { abortReason } from './abortReason';
 import { isUnsupported } from './player/codecSupport';
-import { titleKey, getSlot, hasSlot, putSlot, dropTitle } from './streamCache';
+import { titleKey, getSlot, hasSlot, peekSlot, putSlot, dropTitle, PARTIAL_CACHE_TTL_MS } from './streamCache';
 import { clearPlaylists } from './player/playlistCache';
 
 const BASE = process.env.NEXT_PUBLIC_API_BASE || '';
@@ -84,26 +84,45 @@ async function getJsonWithRetry(path, opts) {
 }
 
 /**
- * Per-title cache of the last COMPLETE /api/streams answer (P15, 2026-11-22).
+ * Per-title cache of the last /api/streams answer (P15, 2026-11-22).
  *
  * The request is no-store (signed urls), so every replay of a title re-ran the
- * whole provider fan-out (2-10s). The answer now lives 30 min in the client
- * stream cache (lib/streamCache.js: memory + localStorage, cut short by the
- * earliest URL expiry, 50 titles), matching the APK. A partial early answer
- * (the backend marks it) is never cached, so the next ask picks up the late
- * rows. Nor is an answer where a provider errored (`providerErrors`).
- * A failed row drops the title (forgetTitleStreams), and a refresh skips and
- * replaces the slot.
+ * whole provider fan-out (2-10s). The answer now lives in the client stream
+ * cache (lib/streamCache.js: memory + localStorage, cut short by the earliest
+ * URL expiry, 50 titles), matching the APK.
+ *
+ * A complete answer lives 30 min. A PARTIAL one (`partial` early answer, a
+ * provider in `providerErrors`, an `incomplete` row) lives 5 min (APK parity
+ * fix, 2026-11-22): it used to be dropped, so every Play refetched. Its replay
+ * still asks ?full=1 in the background (resolveLive), and that complete answer
+ * replaces it. A partial never replaces a kept complete answer. An empty
+ * answer is never kept. A failed row drops the title (forgetTitleStreams), and
+ * a refresh skips and replaces the slot.
  */
 const VM_SLOT = 'vm';
 const cacheKey = (type, id, season, episode) => titleKey(type, id, season, episode);
-const cacheable = (d) => !d?.partial && Array.isArray(d?.streams) && d.streams.length > 0
-  // A provider threw on this answer (backend lists it in providerErrors).
-  // Caching it would hide that server for 30 minutes after a short blip.
-  && !(Array.isArray(d.providerErrors) && d.providerErrors.length);
+const hasRows = (d) => Array.isArray(d?.streams) && d.streams.length > 0;
+export function isPartialAnswer(d) {
+  return Boolean(d?.partial || d?.providerError)
+    || (Array.isArray(d?.providerErrors) && d.providerErrors.length > 0)
+    || (Array.isArray(d?.streams) && d.streams.some((s) => s?.incomplete));
+}
 function cacheGet(key) { return getSlot(key, VM_SLOT); }
 function cachePut(key, d, slot = VM_SLOT) {
-  try { if (cacheable(d)) putSlot(key, slot, d); } catch { /* no cache, still plays */ }
+  try {
+    if (!hasRows(d)) return;
+    if (!isPartialAnswer(d)) { putSlot(key, slot, d); return; }
+    const kept = peekSlot(key, slot);
+    if (kept && !isPartialAnswer(kept)) { console.info(`[cache] keep-complete ${key}#${slot} partial-ignored`); return; }
+    if (putSlot(key, slot, d, undefined, { maxTtlMs: PARTIAL_CACHE_TTL_MS })) {
+      console.info(`[cache] put ${key}#${slot} partial ttl=${PARTIAL_CACHE_TTL_MS / 1000}s`);
+    }
+  } catch { /* no cache, still plays */ }
+}
+
+/** Keep one /api/streams answer for a title (same rules as a resolve). */
+export function keepStreamsAnswer(type, id, d, { season = 0, episode = 0 } = {}) {
+  cachePut(cacheKey(type, id, season, episode), d);
 }
 
 /** A row of this title failed to play: its kept rows go, the next ask is fresh. */

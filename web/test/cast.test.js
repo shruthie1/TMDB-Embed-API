@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
-  WVC_PACKAGE, wvcSchemeLink, wvcIntentLink, castLink, canCast, isAndroidChrome, castBody, prepareCast,
+  WVC_PACKAGE, HLS_MIME, castMime, wvcSchemeLink, wvcIntentLink, castLink, canCast, isAndroidChrome, castBody, prepareCast,
 } from '../lib/cast';
 
 // C3 (docs/PENDING-WORK.md): cast to a TV through Web Video Caster (WVC).
@@ -26,7 +26,7 @@ describe('WVC links', () => {
     expect(q.get('url')).toBe(URL1);
     expect(q.get('title')).toBe('Devara: Part 1');
     expect(q.get('poster')).toBe(META.poster);
-    expect(q.get('mime_type')).toBe('application/x-mpegURL');
+    expect(q.get('mime_type')).toBe('application/vnd.apple.mpegurl');
     // WVC's own examples use %20, not '+'.
     expect(link).not.toContain('+');
     expect(link).toContain('Devara%3A%20Part%201');
@@ -37,12 +37,34 @@ describe('WVC links', () => {
     expect(link).toMatch(/^intent:\/\/tmdb-187-127-137-163\.sslip\.io\/cast\/0123456789abcdef01234567\.m3u8#Intent;/);
     expect(link).toContain('scheme=https;');
     expect(link).toContain('action=android.intent.action.VIEW;');
-    expect(link).toContain('type=application/x-mpegURL;');
+    expect(link).toContain('type=application/vnd.apple.mpegurl;');
     expect(link).toContain(`package=${WVC_PACKAGE};`);
     expect(link).toContain(`S.title=${encodeURIComponent('Devara: Part 1')};`);
     expect(link).toContain(`S.poster=${encodeURIComponent(META.poster)};`);
     expect(link).toContain(`S.browser_fallback_url=${encodeURIComponent(`https://play.google.com/store/apps/details?id=${WVC_PACKAGE}`)};`);
     expect(link.endsWith(';end')).toBe(true);
+  });
+
+  // Measured on the phone 2026-11-22 (cmd package query-activities, WVC 6.2.0):
+  // application/x-mpegURL matches NO WVC activity (MIME match is
+  // case-sensitive), so Chrome took S.browser_fallback_url = the Play Store
+  // with WVC installed. These types match .WebBrowser.
+  const WVC_MATCHING = ['application/vnd.apple.mpegurl', 'application/x-mpegurl', 'video/mp4'];
+  it('the intent type is lowercase and one WVC matches', () => {
+    expect(HLS_MIME).toBe('application/vnd.apple.mpegurl');
+    for (const mime of [undefined, 'application/x-mpegURL', 'VIDEO/MP4']) {
+      const type = wvcIntentLink(URL1, { ...META, mime }).match(/;type=([^;]+);/)[1];
+      expect(type).toBe(type.toLowerCase());
+      expect(WVC_MATCHING).toContain(type);
+      const q = new URLSearchParams(wvcSchemeLink(URL1, { ...META, mime }).split('?')[1]);
+      expect(WVC_MATCHING).toContain(q.get('mime_type'));
+    }
+  });
+
+  it('a DASH type never reaches an intent: application/dash+xml matches nothing', () => {
+    expect(() => castMime('application/dash+xml')).toThrow(/VM HLS/);
+    expect(() => wvcIntentLink('https://x/index.mpd', { mime: 'application/dash+xml' })).toThrow(/VM HLS/);
+    expect(castMime('application/x-mpegURL')).toBe('application/vnd.apple.mpegurl');
   });
 
   it('Android Chrome gets the intent link, other phones the scheme link', () => {

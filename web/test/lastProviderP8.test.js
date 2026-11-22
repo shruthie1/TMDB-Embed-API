@@ -101,4 +101,20 @@ describe('start on the remembered provider (language wins)', () => {
     const done = await new Promise((r) => resolveLive('movie', 90, { provider: 'OneTouchTV', onDone: r, onFail: r }));
     expect(done.provider).toBe('OneTouchTV');
   });
+
+  // APK parity 2026-11-22: the remembered provider never delays the start.
+  it('a remembered provider missing from a partial answer: start at once on the ready Telugu row', async () => {
+    const answer = { success: true, partial: true, providerTimings: {}, streams: [
+      { url: 'https://cdn/c.m3u8', provider: 'CastleTV', container: 'hls', languages: ['Telugu'] },
+    ] };
+    let full = null;
+    const f = vi.fn((u) => (String(u).includes('full=1')
+      ? new Promise((r) => { full = r; }) // NetMirror still running: never answers in this test
+      : Promise.resolve({ ok: true, status: 200, json: async () => answer })));
+    vi.stubGlobal('fetch', f);
+    const done = await new Promise((r) => resolveLive('movie', 91, { provider: 'NetMirror', onDone: r, onFail: r, onMore: () => {} }));
+    expect(done.provider).toBe('CastleTV');
+    expect(full).not.toBeNull(); // the follow-up runs in the background, after the start
+    expect(logs).toContain('[last] movie:91:0:0 provider=NetMirror miss reason=not-in-list');
+  });
 });

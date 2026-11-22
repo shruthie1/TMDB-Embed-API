@@ -162,10 +162,14 @@ describe('client stream cache (P15)', () => {
     expect(getSlot(key, 'vm')?.streams?.[0]?.url).toBe(CASTLE.url);
   });
 
-  it('a partial answer or a provider error is not kept', async () => {
+  it('a provider-error answer is kept for 5 min only (APK parity 2026-11-22)', async () => {
+    const now = vi.spyOn(Date, 'now');
+    now.mockReturnValue(7_000_000);
     const f = vi.fn(async () => res(body([CASTLE], { providerErrors: ['castletv'] })));
     vi.stubGlobal('fetch', f);
     await run(710);
+    expect(getSlot(titleKey('movie', 710), 'vm')?.streams?.length).toBe(1);
+    now.mockReturnValue(7_000_000 + 5 * 60 * 1000 + 1);
     expect(getSlot(titleKey('movie', 710), 'vm')).toBeNull();
   });
 

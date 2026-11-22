@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Row } from '../components/Row';
 import Hero from '../components/Hero';
-import { fetchRow, fetchTitleFull } from '../lib/api';
+import { fetchRow, fetchTitleFull, fetchSimilar } from '../lib/api';
 import { getContinueWatching, getSeeds } from '../lib/progress';
 import { getList } from '../lib/list';
 import { warmContinueWatching } from '../lib/prefetch';
@@ -95,8 +95,8 @@ export default function Home() {
     const seeds = getSeeds(3);
     if (seeds.length) {
       Promise.all(seeds.map(sd =>
-        fetch(`/api/similar/${sd.mediaType}/${sd.tmdbId}`)
-          .then(r => (r.ok ? r.json() : null))
+        fetchSimilar(sd.mediaType, sd.tmdbId)
+          .then(r => (r.ok ? r.body : null))
           .then(d => (d?.titles?.length
             ? { key: `rec-${sd.mediaType}-${sd.tmdbId}`,
                 label: `Because you watched ${sd.title}`, titles: d.titles }

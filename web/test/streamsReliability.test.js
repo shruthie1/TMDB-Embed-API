@@ -77,20 +77,22 @@ describe('per-title session cache', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it('a partial early answer is not cached, so the next ask gets the full list', async () => {
+  // APK parity 2026-11-22: a partial answer is kept 5 min so a replay starts
+  // at once; the replay's full=1 follow-up (with onMore) replaces it.
+  it('a partial early answer is kept (5 min): the replay starts with no request', async () => {
     const fetchMock = vi.fn().mockResolvedValue(res(200, body([STREAM], { partial: true })));
     vi.stubGlobal('fetch', fetchMock);
     await run({ id: 23 });
     await run({ id: 23 });
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('an answer with a provider error is not cached, so the next ask retries that provider', async () => {
+  it('an answer with a provider error is kept (5 min) too', async () => {
     const fetchMock = vi.fn().mockResolvedValue(res(200, body([STREAM], { providerErrors: ['onetouchtv'] })));
     vi.stubGlobal('fetch', fetchMock);
     await run({ id: 25 });
     await run({ id: 25 });
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('an empty providerErrors list is still cached', async () => {
