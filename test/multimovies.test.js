@@ -684,7 +684,8 @@ test('live 11-22 Jailer multi-audio master: every tagged language kept, Telugu f
 const MPD_FIX = require('./fixtures/multimovies/mpd-lang-titles.json');
 const MPD_TEMPLATE = require('fs').readFileSync(require('path').join(__dirname, 'fixtures', 'multimovies', 'salaar-7844085959171131184-index.mpd'), 'utf8');
 const mpdWith = (lang) => MPD_TEMPLATE.replace(' lang="tel"', lang ? ` lang="${lang}"` : '');
-const sacdnId = (u) => (/\/dash\/(\d+)_/.exec(decodeURIComponent(String(u))) || [])[1];
+// Bridge rows name the sacdn folder; dash-direct rows (/mm/hls/<id>/) its id.
+const sacdnId = (u) => (/\/dash\/(\d+)_/.exec(decodeURIComponent(String(u))) || /\/mm\/hls\/(\d+)\//.exec(String(u)) || [])[1];
 
 // VidBolt answers as captured; every bridge master is the RRR single "Audio"
 // master; orion masters are Krack's tagged multi master. `mpd`: 'fixture'
@@ -809,4 +810,104 @@ test('mpd-lang: index.mpd URL from any wrapper keeps the signed query; unsigned 
     assert.equal(mpdAudioLang(mpdWith('tel')), 'tel');
     assert.equal(mpdAudioLang(mpdWith(null)), null);
     assert.equal(mpdAudioLang(mpdWith('TAM')), 'tam');
+});
+
+// ---- dash-direct (P21, 2026-11-22): the dash-hls-bridge answers 429 (Cloudflare
+// 1027, out of quota). /dash/ sources play from VM playlists built from their
+// index.mpd; /hls/ sources (no MPD) keep the bridge. Real KGF 2 MPD (tel).
+const NATIVE_FETCH = global.fetch;
+const KGF2_MPD = require('fs').readFileSync(require('path').join(__dirname, 'fixtures', 'multimovies', 'kgf2-68264836194533344-index.mpd'), 'utf8');
+const DASH_SRC = {
+    language: 'Telugu', kind: 'hls', quality: '1080p',
+    url: 'https://dash-hls-bridge.johndoesemc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F68264836194533344_0_0_1080_h265_168%2Fmaster.m3u8&Policy=eyJTdGF0ZW1lbnQiOlt7IkNvbmRpdGlvbiI6eyJEYXRlTGVzc1RoYW4iOnsiQVdTOkVwb2NoVGltZSI6NDEwMjQ0NDgwMH19fV19&Signature=SIGd&Key-Pair-Id=KP',
+};
+const HLS_SRC = {
+    language: 'English', kind: 'hls', quality: '720p',
+    url: 'https://dash-hls-bridge.john1mc.workers.dev/?url=https%3A%2F%2Fsacdn.hakunaymatata.com%2Fhls%2F330483265830305744-0-0-720-982%2Fmaster.m3u8&Policy=P&Signature=SIGh&Key-Pair-Id=KP',
+};
+function dashVidbolt({ mpd = () => new Response(KGF2_MPD, { status: 200 }), dashBridge = () => new Response('error code: 1027', { status: 429 }) } = {}) {
+    return [
+        [/\/api\/resolve/, (u) => new Response(resolveBody(serverOf(u) || 'callisto', serverOf(u) ? null : [DASH_SRC, HLS_SRC]), { status: 200 })],
+        [/vidbolt\.xyz\/movie\//, ''],
+        [/sacdn\.hakunaymatata\.com\/.*index\.mpd/, mpd],
+        [/\?url=https%3A%2F%2Fsacdn\.hakunaymatata\.com%2Fdash%2F/, dashBridge],
+        [/\?url=https%3A%2F%2Fsacdn\.hakunaymatata\.com%2Fhls%2F/, () => new Response(RRR_BRIDGE, { status: 200 })],
+    ];
+}
+function withBase(t, base) {
+    const saved = process.env.PUBLIC_BASE_URL;
+    process.env.PUBLIC_BASE_URL = base;
+    t.after(() => { if (saved === undefined) delete process.env.PUBLIC_BASE_URL; else process.env.PUBLIC_BASE_URL = saved; });
+}
+
+test('dash-direct: a /dash/ source becomes a VM /mm/hls/ row (no bridge GET, bridge 429 irrelevant); /hls/ keeps the bridge', async (t) => {
+    withBase(t, 'https://vm.test');
+    const mm = freshMM(t, { mpdTimeoutMs: 300 });
+    const lines = logLines(t);
+    const calls = stubVidbolt(t, dashVidbolt());
+    const rows = await mm.getMultimoviesStreams('587412', 'movie');
+    assert.equal(rows.length, 2, lines.join('\n'));
+    const dash = rows.find((r) => r.url.includes('/mm/hls/'));
+    const hls = rows.find((r) => r !== dash);
+    assert.match(dash.url, /^https:\/\/vm\.test\/mm\/hls\/68264836194533344\/master\.m3u8\?s=[\w-]+&e=4102444800&l=Telugu$/);
+    assert.deepEqual(dash.headers, {}, 'VM route and sacdn need no request headers');
+    assert.equal(dash.__noProxy, true, 'never wrapped in /m3u8-proxy');
+    assert.equal(dash.videoCodec, 'hevc');
+    assert.equal(dash.codecs, null, 'no bare hev1 CODECS on the row (web codecSupport probes the family)');
+    assert.deepEqual(dash.levels.map((l) => l.height), [1080, 720, 480]);
+    const n = normaliseStream(dash);
+    assert.deepEqual(n.languages, ['Telugu']);
+    assert.equal(n.selectableAudio, true);
+    assert.equal(hls.url, HLS_SRC.url, '/hls/ source: the bridge master, as before');
+    assert.equal(calls.filter((u) => /%2Fdash%2F68264836194533344/.test(u) && /workers\.dev/.test(u)).length, 0, 'the dash bridge is never asked');
+    assert.equal(calls.filter((u) => /index\.mpd/.test(u)).length, 1, 'one MPD GET, for the /dash/ source only');
+    assert.ok(lines.includes('[multimovies] dash-direct 587412 sources=1 bridge=1'), lines.join('\n'));
+    assert.ok(lines.includes('[multimovies] mpd-lang 587412 claims=1 tel=1 fixed=0 fallback=0'), lines.join('\n'));
+    assert.ok(!lines.join('\n').includes('SIGd'), 'no signature in logs');
+});
+
+test('dash-direct liveness is the MPD GET: 403 or no video Representation -> bridge path (here 429 -> dropped)', async (t) => {
+    withBase(t, 'https://vm.test');
+    for (const [label, mpd] of [
+        ['403', () => new Response('denied', { status: 403 })],
+        ['audio only', () => new Response(KGF2_MPD.replace(/<AdaptationSet[^>]*contentType="video"[\s\S]*?<\/AdaptationSet>/, ''), { status: 200 })],
+    ]) {
+        await t.test(label, async (st) => {
+            const mm = freshMM(st, { mpdTimeoutMs: 300 });
+            const lines = logLines(st);
+            const calls = stubVidbolt(st, dashVidbolt({ mpd }));
+            const rows = await mm.getMultimoviesStreams('587412', 'movie');
+            assert.deepEqual(rows.map((r) => r.url), [HLS_SRC.url], lines.join('\n'));
+            assert.equal(calls.filter((u) => /%2Fdash%2F68264836194533344/.test(u) && /workers\.dev/.test(u)).length, 1, 'bridge tried once');
+            assert.ok(lines.some((l) => /^\[multimovies\] mpd unreadable for 587412 68264836194533344: .* - bridge path$/.test(l)), lines.join('\n'));
+            assert.ok(lines.some((l) => /master unreadable for 587412, dropped: HTTP 429/.test(l)));
+            assert.ok(lines.includes('[multimovies] dash-direct 587412 sources=0 bridge=1'));
+        });
+    }
+});
+
+test('dash-direct row passes segment verify: master -> lowest variant -> sacdn init, through the VM route', async (t) => {
+    const express = require('express');
+    const mmDash = require('../lib/media/mmDash');
+    const { verifyOne, verifiable } = require('../lib/media/segmentVerify');
+    const app = express();
+    mmDash.registerMmDashRoutes(app);
+    const server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+    const base = `http://127.0.0.1:${server.address().port}`;
+    withBase(t, base);
+    const savedDeps = mmDash._deps.fetch;
+    const init = require('fs').readFileSync(require('path').join(__dirname, 'fixtures', 'multimovies', 'kgf2-init-stream0.m4s'));
+    mmDash._deps.fetch = async (u) => (/init-stream/.test(u) ? new Response(init, { status: 200 }) : new Response(KGF2_MPD, { status: 200 }));
+    t.after(() => { mmDash._deps.fetch = savedDeps; mmDash._clear(); server.close(); });
+    const mm = freshMM(t, { mpdTimeoutMs: 300 });
+    logLines(t);
+    stubVidbolt(t, dashVidbolt());
+    const dash = (await mm.getMultimoviesStreams('587412', 'movie')).find((r) => r.url.includes('/mm/hls/'));
+    assert.ok(verifiable(dash, base), 'own /mm/hls/ rows are verified, other own routes are skipped');
+    assert.ok(!verifiable({ url: `${base}/castle-demux/x/master.m3u8` }, base));
+    // The VM route is real; sacdn is stubbed (init segment bytes).
+    global.fetch = async (u, o) => (String(u).startsWith(base) ? NATIVE_FETCH(u, o)
+        : new Response(init, { status: 206 }));
+    const v = await verifyOne(dash);
+    assert.equal(v.ok, true, JSON.stringify(v));
 });

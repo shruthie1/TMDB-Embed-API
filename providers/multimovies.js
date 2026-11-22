@@ -37,6 +37,8 @@
 // listing; one with no 2xx answer inside AUDIO_TIMEOUT_MS leaves audio[].
 
 const hls = require('../lib/media/hlsManifest');
+const mmDash = require('../lib/media/mmDash');
+const mpdHls = require('../lib/media/mpdHls');
 const { knownLanguage } = require('../utils/streamSchema');
 
 // EVERY VIDBOLT SERVER. /api/resolve with no server choice walks VidBolt's
@@ -599,8 +601,49 @@ async function getMultimoviesStreams(tmdbId, mediaType = 'movie', seasonNum = nu
     const phase = new AbortController();
     const stepSignal = () => AbortSignal.any([phase.signal, AbortSignal.timeout(Math.max(1, Math.min(_config.resolveStepMs, left())))]);
 
+    // A /dash/ source -> one dash-direct row, or null when its index.mpd GET
+    // failed (then masterJob tries the bridge as before). Liveness is that
+    // GET: 200 and a video Representation. The bridge is not asked.
+    const dashJob = async (src, k) => {
+        const m = await mpds.get(k);
+        if (!m || !m.ok) {
+            // No usable MPD: the old bridge path, so no row is lost to it.
+            console.log(`[multimovies] mpd unreadable for ${tmdbId} ${k}: ${(m && m.error) || 'no mpd'} - bridge path`);
+            return null;
+        }
+        const plan = await langPlan();
+        const d = plan.sources.get(k);
+        // The plan decides (mpd-lang rule). Only in its fallback (another
+        // source's MPD failed) does this source's own MPD tag win, as evidence.
+        const own = plan.fallback && m.lang ? MPD_EVIDENCE[m.lang] || null : null;
+        const language = own || (d ? (d.drop ? null : d.language) : sourceLanguage(src));
+        const vmUrl = mmDash.masterUrlFor(mmDash.envBase(), m.mpdUrl, language || '-');
+        // The row's master: the route's shape, one untagged "Audio" rendition
+        // so streamFromMaster stamps `language` exactly as on bridge rows.
+        const rowMaster = mpdHls.masterPlaylist(m.parsed, (rep) => `${vmUrl.split('?')[0].replace(/master\.m3u8$/, '')}${rep.id}.m3u8`,
+            { language: { code: null, name: 'Audio' } });
+        const row = streamFromMaster(src, rowMaster, vmUrl, null,
+            own ? { language: own } : d ? { language: d.language, dropLabel: d.drop, reason: d.reason } : null);
+        if (!row) return null;
+        const vcodec = m.parsed.reps.find((r) => r.kind === 'video' && r.codecs);
+        row.videoCodec = hls.videoCodecFamily(vcodec && vcodec.codecs) || videoCodecOf('', src.url);
+        // VM route + sacdn segments need no request headers; the route serves
+        // its own playlists, so /m3u8-proxy never wraps it.
+        row.headers = {};
+        row.__noProxy = true;
+        row.dashDirect = true;
+        console.log(`[multimovies] master lists ${row.audio.length} audio rendition(s): `
+            + `${row.audio.map((a) => a.language || '?').join('/')} - selectable (dash-direct, mpd ${m.lang || '-'})`);
+        return row;
+    };
+
     // One master -> one row (or null). Starts as soon as its server answers.
     const masterJob = async (src) => {
+        const dk = masterKey(src.url);
+        if (mpdUrlOf(src.url) && mpds.has(dk)) {
+            const direct = await dashJob(src, dk);
+            if (direct) return direct;
+        }
         let text;
         try {
             const cap = Math.min(MASTER_TIMEOUT_MS, left());
@@ -659,7 +702,10 @@ async function getMultimoviesStreams(tmdbId, mediaType = 'movie', seasonNum = nu
             if (!r.ok) { if (r.body && r.body.cancel) r.body.cancel().catch(() => {}); return { ok: false, error: `HTTP ${r.status}` }; }
             const text = await r.text();
             if (!/<MPD\b/.test(text)) return { ok: false, error: 'not an MPD' };
-            return { ok: true, lang: mpdAudioLang(text) };
+            // Kept for the /mm/hls route; throws when no video Representation.
+            let parsed;
+            try { parsed = mmDash.rememberMpd(mpdUrl, text); } catch (e) { return { ok: false, error: e.message }; }
+            return { ok: true, lang: mpdAudioLang(text), mpdUrl, parsed };
         } catch (e) {
             return { ok: false, error: e && e.name === 'TimeoutError' ? `no answer in ${_config.mpdTimeoutMs}ms` : (e && e.message) || String(e) };
         }
@@ -812,6 +858,8 @@ async function getMultimoviesStreams(tmdbId, mediaType = 'movie', seasonNum = nu
         }
     }
     partial(out);
+    const direct = out.filter((r) => r.dashDirect).length;
+    console.log(`[multimovies] dash-direct ${tmdbId} sources=${direct} bridge=${out.length - direct}`);
     console.log(`[multimovies] Got ${out.length} stream(s) for ${tmdbId} in ${Date.now() - t0}ms`);
     return out;
 }

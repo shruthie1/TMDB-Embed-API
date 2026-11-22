@@ -16,7 +16,7 @@ const { listProviders, getProvider, getCookieStats, PROVIDER_DEADLINE_MS } = req
 const { QUALITIES: STREAM_QUALITIES, normaliseStream, normaliseStreams } = require('./utils/streamSchema');
 const { resolveMany } = require('./lib/media/capabilities');
 const streamHeaders = require('./lib/media/streamHeaders');
-const { verifyTopStreams, prewarmTopStreams } = require('./lib/media/segmentVerify');
+const { verifyTopStreams, prewarmTopStreams, verifiable: verifiableRow } = require('./lib/media/segmentVerify');
 const { registerCapabilityRoutes } = require('./routes/capabilities');
 const { createProxyRoutes, processStreamsForProxy } = require('./proxy/proxyServer');
 const { routeStreams, surfaceAllows, surfaceOf, surfaceOnDevice } = require('./lib/routing/providerRoutes');
@@ -736,6 +736,9 @@ registerRebaseRoute(app);
 registerPairRoute(app);
 // Cast to a TV through Web Video Caster: long-lived single-audio masters.
 require('./lib/media/castRoutes').registerCastRoutes(app);
+// MultiMovies dash-direct: HLS playlists from a signed sacdn index.mpd
+// (lib/media/mmDash.js), in place of the out-of-quota dash-hls-bridge.
+require('./lib/media/mmDash').registerMmDashRoutes(app);
 // The Android app's resolver override config: built-in
 // routes/resolve-config.json < remote RESOLVE_CONFIG_URL < verified heals
 // (lib/selfheal/config.js). start() fetches the remote now and every ttlSec;
@@ -920,7 +923,7 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
           ...[...landed].filter(([n]) => n !== GATE_PROVIDER).flatMap(([, r]) => r)];
         rows = applyFilters(urlExpiry.dropExpiredStreams(rows), 'aggregate', config.minQualities, config.excludeCodecs);
         rows = sortStreamsCanonically(rows, { tmdbId, type, season, episode });
-        const top = rows.filter((x) => x && typeof x.url === 'string' && !x.url.startsWith(serverUrlEarly))
+        const top = rows.filter((x) => verifiableRow(x, serverUrlEarly))
           .slice(0, 3).map((x) => x.url).join('\n');
         if (!top || top === prewarmedTop) return;
         prewarmedTop = top;
