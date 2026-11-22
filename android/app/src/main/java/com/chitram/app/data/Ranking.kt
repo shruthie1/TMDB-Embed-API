@@ -52,6 +52,11 @@ data class Source(
     val directHeaders: Map<String, String> = emptyMap(),
     /** Set while this row plays direct: the proxied url to fall back to (player.DirectRoute). */
     val proxyUrl: String? = null,
+    /**
+     * [url] is a DASH MPD (media3 DASH, MimeTypes.APPLICATION_MPD). Defaults to
+     * false so rows cached before 1.2.50 still parse (StreamCache).
+     */
+    val dash: Boolean = false,
 )
 
 /** Answers "can this device decode this video codec family?" null = unknown. */
@@ -61,6 +66,7 @@ fun interface CodecSupport {
 
 object Ranking {
     private val HLS_URL = Regex("""\.m3u8(\?|$)""", RegexOption.IGNORE_CASE)
+    private val DASH_URL = Regex("""\.mpd(\?|$)""", RegexOption.IGNORE_CASE)
     private val HLS_PROXY = Regex("""m3u8-proxy|[?&]url=[^&]*m3u8""", RegexOption.IGNORE_CASE)
     private val HEIGHT = Regex("""(\d{3,4})p""")
 
@@ -244,6 +250,13 @@ object Ranking {
         return HLS_URL.containsMatchIn(u) || HLS_PROXY.containsMatchIn(u)
     }
 
+    /** A DASH MPD row: `container: "dash"`, or an .mpd url when no container is given. Played as MPD, never progressive. */
+    fun isDash(s: RawStream): Boolean {
+        val c = s.container?.lowercase().orEmpty()
+        if (c.isNotEmpty()) return c == "dash"
+        return DASH_URL.containsMatchIn(s.url.orEmpty())
+    }
+
     fun toSource(s: RawStream, i: Int, codecs: CodecSupport): Source? {
         val url = s.url
         if (url.isNullOrEmpty()) return null
@@ -276,7 +289,8 @@ object Ranking {
             provider = provider,
             label = s.title ?: s.provider ?: "Stream",
             url = url,
-            progressive = !isHls(s),
+            progressive = !isHls(s) && !isDash(s),
+            dash = isDash(s),
             quality = s.quality ?: "Auto",
             levels = s.levels,
             languages = languages,

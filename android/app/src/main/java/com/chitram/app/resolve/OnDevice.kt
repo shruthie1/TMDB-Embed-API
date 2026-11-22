@@ -699,6 +699,7 @@ class OnDeviceResolver(
                 onDevice = r.provider,
                 headers = r.headers,
                 segmentToken = r.segmentToken,
+                dash = r.dash,
             )
         }
     }

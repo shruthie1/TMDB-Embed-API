@@ -100,7 +100,7 @@ class App : Application(), ImageLoaderFactory {
     /** Prewarm's top row: its master and first playlists into memory, no segments. Never a VM url. */
     private suspend fun warmPlaylists(row: com.chitram.app.data.Source, preferred: String) {
         val host = com.chitram.app.player.DirectRoute.host(row.url)
-        if (host == com.chitram.app.player.DirectRoute.host(com.chitram.app.data.Api.VM) || row.progressive) return
+        if (host == com.chitram.app.player.DirectRoute.host(com.chitram.app.data.Api.VM) || row.progressive || row.dash) return
         val t0 = System.currentTimeMillis()
         val done = kotlinx.coroutines.withContext(Dispatchers.IO) {
             com.chitram.app.resolve.PlaylistInterceptor.warm(api.client, playlists, row.url, row.headers, row.segmentToken,

@@ -39,7 +39,7 @@ object CastProxy {
             android.util.Log.w("Chitram", "[lanproxy] no Wi-Fi address, casting ${s.provider} directly")
             return null
         }
-        val client = StreamInterceptor.client(base, s.headers, s.segmentToken)
+        val client = StreamInterceptor.forRow(base, s)
             .let { c -> if (TsAudioSwap.wanted(s)) c.newBuilder().addInterceptor(TsAudioSwap(preferredAudio)).build() else c }
         val app = ctx.applicationContext
         lateinit var p: LanProxy

@@ -78,8 +78,15 @@ object PlayPolicy {
      * needs its short connect timeout (review R2-M6): before, that row took
      * the base 15 s client.
      */
+    /** The MediaItem mime type for a row: MPD for a DASH row, HLS otherwise, null for a progressive file (media3 sniffs it). */
+    fun mimeFor(s: Source): String? = when {
+        s.dash -> androidx.media3.common.MimeTypes.APPLICATION_MPD
+        s.progressive -> null
+        else -> androidx.media3.common.MimeTypes.APPLICATION_M3U8
+    }
+
     fun usesBaseClient(s: Source, tsSwap: Boolean): Boolean =
-        s.onDevice == null && !tsSwap && s.headers.isEmpty() && s.segmentToken == null && connectTimeoutMs(s) == null
+        s.onDevice == null && !tsSwap && !s.dash && s.headers.isEmpty() && s.segmentToken == null && connectTimeoutMs(s) == null
 
     /** True when the url's target (after any `?url=` wrapper) is an HLS playlist path. */
     private fun hlsTarget(url: String): Boolean {

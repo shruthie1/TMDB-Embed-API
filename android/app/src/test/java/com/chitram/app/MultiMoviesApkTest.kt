@@ -595,11 +595,16 @@ class MultiMoviesApkTest {
     }
 
     @Test fun mpdLangFailureFallsBackToLastListedWins() = runBlocking {
-        val n = java.util.concurrent.atomic.AtomicInteger()
-        val (by, mpds) = resolveCaptured("579974") {
-            if (n.incrementAndGet() == 1) MockResponse().setBody(mpdWith("tel")).setHeadersDelay(4, java.util.concurrent.TimeUnit.SECONDS)
-            else MockResponse().setResponseCode(503)
+        // 1.2.50 dash-direct: the MPD is the row's liveness check, so a failed MPD
+        // drops its own row; the title still falls back to last-listed-Telugu-wins.
+        val telugu = setOf("5820588283537016992", "5355663801620775816")
+        // The first listed source (Bengali, not a Telugu claim) has its MPD fail.
+        val dead = mpdFix["titles"]!!.jsonObject["579974"]!!.jsonObject["answers"]!!.jsonArray.first().jsonObject["sources"]!!.jsonArray
+            .map { sacdnId(it.jsonObject["url"]!!.jsonPrimitive.content)!! }.first { it !in telugu }
+        val (by, mpds) = resolveCaptured("579974") { path ->
+            if (sacdnId(path) == dead) MockResponse().setResponseCode(503) else MockResponse().setBody(mpdWith("tel"))
         }
+        assertNull("the source whose MPD failed is not a row", by[dead])
         assertFalse("Telugu" in by["5820588283537016992"]!!)
         assertEquals(listOf("Telugu"), by["5355663801620775816"])
         assertEquals(6, mpds.size)

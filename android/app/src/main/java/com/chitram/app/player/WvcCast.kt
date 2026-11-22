@@ -29,6 +29,7 @@ object WvcCast {
     private const val STORE_MARKET = "market://details?id=$PACKAGE"
     private const val STORE_WEB = "https://play.google.com/store/apps/details?id=$PACKAGE"
     const val HLS_MIME = "application/x-mpegurl"
+    const val DASH_MIME = "application/dash+xml"
     private val NEEDED = listOf("Referer", "Origin", "User-Agent")
 
     data class Spec(
@@ -63,7 +64,7 @@ object WvcCast {
             // Lowercase: Android matches intent MIME types case-sensitively, and
             // WVC registers application/x-mpegurl. "x-mpegURL" found no activity
             // and fell through to the Play Store (owner report, 1.2.0).
-            mime = if (s.progressive) "video/mp4" else HLS_MIME,
+            mime = when { s.dash -> DASH_MIME; s.progressive -> "video/mp4"; else -> HLS_MIME },
             title = title,
             poster = Api.image(r.poster, "w500"),
             headers = headers,

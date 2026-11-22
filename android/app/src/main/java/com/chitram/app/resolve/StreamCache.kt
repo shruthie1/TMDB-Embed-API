@@ -181,8 +181,23 @@ object UrlExpiry {
             PARAM.findAll(s).forEach { consider(it.groupValues[1]) }
             TOKEN.findAll(s).forEach { consider(it.groupValues[1]) }
         }
+        cloudFrontPolicyExpiry(url)?.let { consider(it.toString()) }
         return best
     }
+
+    /**
+     * CloudFront custom policy (MultiMovies sacdn, 1.2.50): `Policy=` is the
+     * policy JSON in CloudFront base64 (`-` `_` `~` for `+` `=` `/`); its
+     * DateLessThan AWS:EpochTime is when the signature stops working.
+     */
+    private fun cloudFrontPolicyExpiry(url: String): Long? {
+        val raw = CF_POLICY.find(url)?.groupValues?.get(1) ?: return null
+        val b64 = java.net.URLDecoder.decode(raw, "UTF-8").replace('-', '+').replace('_', '=').replace('~', '/')
+        val json = runCatching { okio.ByteString.Companion.run { b64.decodeBase64() }?.utf8() }.getOrNull() ?: return null
+        return CF_EPOCH.find(json)?.groupValues?.get(1)?.toLongOrNull()
+    }
+    private val CF_POLICY = Regex("""[?&]Policy=([^&#]+)""")
+    private val CF_EPOCH = Regex(""""DateLessThan"\s*:\s*\{\s*"AWS:EpochTime"\s*:\s*(\d{9,13})""")
 
     private fun decodedForms(url: String): List<String> {
         val forms = mutableListOf(url)

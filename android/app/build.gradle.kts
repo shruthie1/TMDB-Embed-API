@@ -22,8 +22,8 @@ android {
         applicationId = "com.chitram.app"
         minSdk = 25
         targetSdk = 35
-        versionCode = 62
-        versionName = "1.2.49"
+        versionCode = 63
+        versionName = "1.2.50"
         // Only ship the locales and densities we use.
         resourceConfigurations += listOf("en")
     }
@@ -91,6 +91,8 @@ dependencies {
 
     implementation("androidx.media3:media3-exoplayer:1.5.1")
     implementation("androidx.media3:media3-exoplayer-hls:1.5.1")
+    // MultiMovies dash-direct (1.2.50): sacdn index.mpd without the dash-hls-bridge.
+    implementation("androidx.media3:media3-exoplayer-dash:1.5.1")
     implementation("androidx.media3:media3-datasource-okhttp:1.5.1")
     implementation("androidx.media3:media3-session:1.5.1")
 

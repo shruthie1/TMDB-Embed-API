@@ -18,7 +18,10 @@ import java.util.concurrent.TimeUnit
 /**
  * MultiMovies (VidBolt), resolved on the device (port of providers/multimovies.js).
  * Used when the VM is down or its multimovies row failed: one JSON call gives the
- * HLS master, whose EXT-X-MEDIA renditions carry the languages.
+ * HLS master, whose EXT-X-MEDIA renditions carry the languages. Since 1.2.50 a
+ * sacdn `/dash/` source is a dash-direct row: its signed index.mpd, played with
+ * media3 DASH (StreamInterceptor signs the segments); `/hls/` sources keep the
+ * bridge master.
  *
  * Not ported: the server's dead-audio-rendition probe and its "segments disguised
  * as images" probe. A row that cannot play fails in the player and the start
@@ -157,11 +160,13 @@ class MultiMoviesResolver(
         val listedSources = kotlinx.coroutines.CompletableDeferred<List<List<Pair<String, String?>>>>()
         // index.mpd per sacdn source, started as its answer lands (server twin fetchMpd).
         val mpds = LinkedHashMap<String, kotlinx.coroutines.Deferred<MpdResult>>()
-        // The title's language plan, complete after the ask phase plus at most MPD_TIMEOUT_MS.
+        // The title's language plan, complete after the ask phase plus at most masterTimeoutMs (the MPD GETs).
         val langPlan = kotlinx.coroutines.CompletableDeferred<LangPlan>()
 
+        // One GET per MPD: the language evidence AND, for a dash-direct row, its liveness
+        // (200 with a Representation). Capped like a master: the MPD is now the row's master.
         fun mpdFetch(mpdUrl: String) = async {
-            val cap = minOf(MPD_TIMEOUT_MS, left())
+            val cap = minOf(masterTimeoutMs, left())
             if (cap <= 0) return@async MpdResult(false, error = "budget spent")
             try {
                 withTimeoutOrNull(cap) {
@@ -169,9 +174,9 @@ class MultiMoviesResolver(
                     when {
                         !r.ok -> MpdResult(false, error = "HTTP ${r.code}")
                         !r.body.contains("<MPD") -> MpdResult(false, error = "not an MPD")
-                        else -> MpdResult(true, lang = mpdAudioLang(r.body))
+                        else -> mpdInfo(r.body)
                     }
-                } ?: MpdResult(false, error = "no answer in ${MPD_TIMEOUT_MS}ms")
+                } ?: MpdResult(false, error = "no answer in ${cap}ms")
             } catch (x: Exception) {
                 if (x is kotlinx.coroutines.CancellationException) throw x
                 MpdResult(false, error = x.message ?: x.javaClass.simpleName)
@@ -207,6 +212,33 @@ class MultiMoviesResolver(
                 codecs = m.codecs,
                 // Stable id from the master (review I4): a re-resolve in another order keeps each row's language.
                 key = "multimovies-${masterKey(url)}",
+            )
+        }
+
+        // A sacdn /dash/ source plays its signed index.mpd directly (media3 DASH): the
+        // bridge master is not fetched (dash-hls-bridge out of quota, CF 1027, 2026-11-22).
+        // Its row lives when the MPD answered 200 with a Representation.
+        fun dashRow(k: String, mpdUrl: String, raw: String?, mpd: kotlinx.coroutines.Deferred<MpdResult>) = async {
+            val m = mpd.await()
+            if (!m.ok) {
+                android.util.Log.i("Chitram", "[multimovies] dash-direct $tmdbId $k dropped: ${m.error}")
+                return@async null
+            }
+            val d = langPlan.await().sources[k]
+            val lang = if (d != null) d.language else sourceLanguage(raw)
+            Resolved(
+                provider = "multimovies",
+                label = "MultiMovies",
+                url = mpdUrl,
+                headers = headers,
+                segmentToken = null,
+                // One audio AdaptationSet, named like the bridge's lone "Audio"
+                // rendition, so the plan's language is stamped the same way.
+                audio = withSourceLanguage(listOf(AudioTrack(null, "Audio", true)), lang),
+                levels = m.levels.sortedByDescending { it.height },
+                codecs = m.codecs,
+                key = "multimovies-$k",
+                dash = true,
             )
         }
 
@@ -249,8 +281,12 @@ class MultiMoviesResolver(
                     if (!throttled && ev.ok && named != null && named !in servers) { servers += named; askServer(named) }
                     for ((url, lang) in ev.sources) masterKey(url).let { k ->
                         if (k !in masters) {
-                            mpdUrlOf(url)?.let { mpds[k] = mpdFetch(it) }
-                            masters[k] = master(url, lang)
+                            val mpdUrl = mpdUrlOf(url)
+                            if (mpdUrl != null) {
+                                val f = mpdFetch(mpdUrl)
+                                mpds[k] = f
+                                masters[k] = dashRow(k, mpdUrl, lang, f)
+                            } else masters[k] = master(url, lang)
                         }
                     }
                 }
@@ -317,6 +353,7 @@ class MultiMoviesResolver(
         val rows = labels.flatMap { l -> answers[l]?.sources.orEmpty() }
             .mapNotNull { (url, _) -> masterKey(url).takeIf { seen.add(it) }?.let { done[it] } }
         android.util.Log.i("Chitram", "[multimovies] ${rows.size} of ${masters.size} master(s) for $tmdbId in ${System.currentTimeMillis() - t0}ms")
+        android.util.Log.i("Chitram", "[multimovies] dash-direct $tmdbId sources=${rows.count { it.dash }} bridge=${rows.count { !it.dash && unwrap(it.url) != it.url }}")
         rows
     }
 
@@ -454,7 +491,11 @@ class MultiMoviesResolver(
 
         private const val TELUGU = "Telugu"
 
-        /** Cap on each source's index.mpd GET, all in parallel (server mpdTimeoutMs). On a miss the title falls back. */
+        /**
+         * Server mpdTimeoutMs, kept for reference. Since 1.2.50 the device caps each
+         * index.mpd GET at the master cap instead: the MPD is a dash-direct row's
+         * liveness check, so a slow-but-alive MPD must not drop the row.
+         */
         const val MPD_TIMEOUT_MS = 2_500L
         private const val MPD_HOST = "sacdn.hakunaymatata.com"
         private val SIGNED = listOf("Policy", "Signature", "Key-Pair-Id")
@@ -493,7 +534,30 @@ class MultiMoviesResolver(
                 .mapNotNull { Regex("""\slang="([^"]*)"""").find(it)?.groupValues?.get(1)?.trim()?.lowercase()?.takeIf(String::isNotEmpty) }
                 .toSet().singleOrNull()
 
-        internal class MpdResult(val ok: Boolean, val lang: String? = null, val error: String? = null)
+        internal class MpdResult(val ok: Boolean, val lang: String? = null, val error: String? = null,
+                                 val levels: List<com.chitram.app.data.Level> = emptyList(), val codecs: String? = null)
+
+        private val REPRESENTATION = Regex("""<Representation\b[^>]*>""")
+        private fun attr(tag: String, name: String) = Regex("""\s$name="([^"]*)"""").find(tag)?.groupValues?.get(1)
+
+        /**
+         * A 200 MPD body: alive when it lists at least one Representation. Video
+         * Representations (with a height) become levels, highest first; codecs are
+         * the distinct video then audio codec strings ("hev1,mp4a.40.2"), so a
+         * device without HEVC ranks the row last (CodecSupport). The audio `lang`
+         * feeds the language plan.
+         */
+        internal fun mpdInfo(text: String): MpdResult {
+            val reps = REPRESENTATION.findAll(text).map { it.value }.toList()
+            if (reps.isEmpty()) return MpdResult(false, error = "no Representation")
+            val video = reps.filter { attr(it, "height") != null }
+            val levels = video.mapNotNull { r ->
+                val h = attr(r, "height")?.toIntOrNull() ?: return@mapNotNull null
+                com.chitram.app.data.Level(height = h, quality = "${h}p", bandwidth = attr(r, "bandwidth")?.toLongOrNull() ?: 0, codecs = attr(r, "codecs"))
+            }
+            val codecs = (video + reps.filter { it !in video }).mapNotNull { attr(it, "codecs") }.distinct().joinToString(",").ifEmpty { null }
+            return MpdResult(true, lang = mpdAudioLang(text), levels = levels, codecs = codecs)
+        }
         internal class SourcePlan(val listed: String?, var language: String?, var drop: Boolean = false, var reason: String? = null, var mpd: String? = null)
         internal class LangPlan(val fallback: Boolean, val why: String?, val claims: Int, val tel: Int, val fixed: Int, val sources: Map<String, SourcePlan>) {
             /** The greppable per-title line (server twin). */

@@ -129,9 +129,19 @@ object HybridPair {
     suspend fun mediaSeconds(url: String, progressive: Boolean, fetch: suspend (String) -> String?): Double? {
         if (progressive) return null
         val text = fetch(url) ?: return null
+        mpdSeconds(text)?.let { return it }
         playlistSeconds(text)?.let { return it }
         val variant = com.chitram.app.resolve.Hls.parse(text, url).firstVariant ?: return null
         return fetch(variant)?.let(::playlistSeconds)
+    }
+
+    /** A DASH MPD's mediaPresentationDuration (PT#H#M#S), in seconds; null when [text] is not an MPD or has none. */
+    fun mpdSeconds(text: String): Double? {
+        if (!text.contains("<MPD")) return null
+        val d = Regex("""mediaPresentationDuration="P(?:(\d+(?:\.\d+)?)D)?T?(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?"""").find(text) ?: return null
+        val (day, h, m, s) = d.destructured
+        val total = (day.toDoubleOrNull() ?: 0.0) * 86400 + (h.toDoubleOrNull() ?: 0.0) * 3600 + (m.toDoubleOrNull() ?: 0.0) * 60 + (s.toDoubleOrNull() ?: 0.0)
+        return total.takeIf { it > 0 }
     }
 
     /** Null when the two halves agree within [DURATION_TOLERANCE_S] (server rule: refuse when delta > tolerance), else why not. */

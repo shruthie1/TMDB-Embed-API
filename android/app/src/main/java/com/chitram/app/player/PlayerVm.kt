@@ -756,7 +756,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         }
         val item = MediaItem.Builder()
             .setUri(s.url)
-            .apply { if (!s.progressive) setMimeType(MimeTypes.APPLICATION_M3U8) }
+            .apply { PlayPolicy.mimeFor(s)?.let { setMimeType(it) } }
             .setSubtitleConfigurations(external + own)
             .setMediaMetadata(metadata(request))
             .build()
@@ -770,7 +770,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         if (pairAudio != null && !fused) {
             // H13: picture first, Telugu second. Each half keeps its own headers, token and swap.
             val audioItem = MediaItem.Builder().setUri(pairAudio.url)
-                .apply { if (!pairAudio.progressive) setMimeType(MimeTypes.APPLICATION_M3U8) }.build()
+                .apply { PlayPolicy.mimeFor(pairAudio)?.let { setMimeType(it) } }.build()
             android.util.Log.i("Chitram", "[hybrid] ${s.provider} video + ${pairAudio.provider} ${desiredAudio()} audio, offset ${HybridPair.OFFSET_US}us")
             player.setMediaSource(HybridPair.merge(sourceFor(s, item), sourceFor(pairAudio, audioItem)), startMs)
         } else if (s.onDevice != null || TsAudioSwap.wanted(s) || s.headers.isNotEmpty()) {
@@ -825,7 +825,9 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         val swap = if (TsAudioSwap.wanted(s)) TsAudioSwap(desiredAudio()) else null
         // A backend row playing direct (DirectRoute) carries the provider's headers.
         if (PlayPolicy.usesBaseClient(s, swap != null)) return DefaultMediaSourceFactory(OkHttpDataSource.Factory(playerHttp).setTransferListener(loadMarks.bytes)).createMediaSource(item)
-        val streamClient = StreamInterceptor.playerClient(g.api.client, s.headers, s.segmentToken, PlayPolicy.connectTimeoutMs(s))
+        // A DASH row (MultiMovies sacdn MPD): its signature on every sacdn segment, its language in the MPD.
+        val streamClient = StreamInterceptor.playerClient(g.api.client, s.headers, s.segmentToken, PlayPolicy.connectTimeoutMs(s),
+            signedFrom = StreamInterceptor.signedFrom(s), audioLang = StreamInterceptor.audioLangOf(s))
             .let { c -> if (swap == null) c else c.newBuilder().addInterceptor(swap).build() }
             // Innermost: kept playlists from memory, a master's first playlists in parallel (PlaylistCache).
             .let { c -> com.chitram.app.resolve.PlaylistInterceptor.attach(c, g.playlists) { isoFor(desiredAudio()).toList() } }
@@ -964,7 +966,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             return false
         }
         val why = HybridPair.deviceGate(picture, donor) { s ->
-            val c = StreamInterceptor.client(g.api.client, s.headers, s.segmentToken)
+            val c = StreamInterceptor.forRow(g.api.client, s)
             ({ url: String -> g.api.text(c, url) })
         }
         android.util.Log.i("Chitram", "[addaudio] device merge ${picture.provider}+${donor.provider}: ${why ?: "durations agree"}")
@@ -1503,7 +1505,8 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         player.pause()
         saveProgress()
         // C5: an on-device row goes through the phone's LAN proxy (headers + token added here).
-        val lan = if (s.onDevice == null) null else withContext(Dispatchers.IO) {
+        // A DASH row is not proxied: LanProxy rewrites HLS playlists only (its MPD would lose the segment paths).
+        val lan = if (s.onDevice == null || s.dash) null else withContext(Dispatchers.IO) {
             try { CastProxy.start(getApplication(), s, g.api.client, g.prefs.preferredAudio()) } catch (e: Exception) {
                 android.util.Log.w("Chitram", "[lanproxy] start failed: ${e.javaClass.simpleName}: ${e.message}"); null
             }
