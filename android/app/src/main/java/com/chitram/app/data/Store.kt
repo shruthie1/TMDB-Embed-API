@@ -309,7 +309,7 @@ enum class VideoFit(val label: String, val resizeMode: Int) {
 
 /** Player choices kept across sessions. */
 class PlayerPrefs(private val kv: KeyValue) {
-    companion object { const val FIT = "player:fit"; const val TV_FIT = "player:fitTv" }
+    companion object { const val FIT = "player:fit"; const val TV_FIT = "player:fitTv"; const val SUBS = "player:subs" }
     /** The viewer's last phone choice, or null before they pick one. */
     var fit: VideoFit?
         get() = VideoFit.parse(kv.get(FIT))
@@ -328,4 +328,9 @@ class PlayerPrefs(private val kv: KeyValue) {
     fun fitFor(isTv: Boolean): VideoFit = if (isTv) tvFit ?: VideoFit.FitWidth else fit ?: VideoFit.FitWidth
 
     fun save(isTv: Boolean, v: VideoFit) { if (isTv) tvFit = v else fit = v }
+
+    /** Subtitles on/off, client-wide, from the last explicit pick; null = never chosen (SubsPolicy). */
+    var subsOn: Boolean?
+        get() = when (kv.get(SUBS)) { "on" -> true; "off" -> false; else -> null }
+        set(v) = kv.put(SUBS, v?.let { if (it) "on" else "off" })
 }

@@ -753,15 +753,21 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         deliveredThisPlay = false
         runtimeDone = false
         // OpenSubtitles first (Telugu, then English), then any the provider row carries.
-        val external = subs.map { t ->
+        val ownSubs = PlayPolicy.sideloadable(s.subtitles).take(12)
+        // Client-wide subtitles choice (SubsPolicy): one decision per start, every path.
+        val subsStart = SubsPolicy.start(g.playerPrefs.subsOn, subs.size + ownSubs.size)
+        if (subsStart.blockedByViewer && (subs.isNotEmpty() || ownSubs.isNotEmpty()))
+            android.util.Log.i("Chitram", SubsPolicy.logLine(request?.title ?: s.id))
+        val flag = { i: Int -> if (i == subsStart.defaultIndex) C.SELECTION_FLAG_DEFAULT else 0 }
+        val external = subs.mapIndexed { i, t ->
             MediaItem.SubtitleConfiguration.Builder(Uri.parse(t.url))
-                .setMimeType(MimeTypes.APPLICATION_SUBRIP).setLabel(t.label).setLanguage(t.lang).build()
+                .setMimeType(MimeTypes.APPLICATION_SUBRIP).setLabel(t.label).setLanguage(t.lang).setSelectionFlags(flag(i)).build()
         }
         // An HLS subtitle playlist is not a caption file: never sideloaded (PlayPolicy.sideloadable).
-        val own = PlayPolicy.sideloadable(s.subtitles).take(12).map { sub ->
+        val own = ownSubs.mapIndexed { i, sub ->
             val mime = if (sub.url.contains(".srt", ignoreCase = true)) MimeTypes.APPLICATION_SUBRIP else MimeTypes.TEXT_VTT
             MediaItem.SubtitleConfiguration.Builder(Uri.parse(sub.url))
-                .setMimeType(mime).setLabel(sub.lang ?: "Subtitles").setLanguage(sub.lang?.lowercase()).build()
+                .setMimeType(mime).setLabel(sub.lang ?: "Subtitles").setLanguage(sub.lang?.lowercase()).setSelectionFlags(flag(subs.size + i)).build()
         }
         val item = MediaItem.Builder()
             .setUri(s.url)
@@ -770,11 +776,12 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             .setMediaMetadata(metadata(request))
             .build()
         audioPickedFor = null
-        // Prefer the viewer's language inside multi-audio masters; subtitles off by default.
+        // Prefer the viewer's language inside multi-audio masters. Text is off unless the
+        // viewer last turned subtitles on (SubsPolicy); off also mutes HLS DEFAULT subtitles.
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             .clearOverrides()
             .setPreferredAudioLanguages(*isoFor(desiredAudio()))
-            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, subsStart.textDisabled)
             .build()
         if (pairAudio != null && !fused) {
             // H13: picture first, Telugu second. Each half keeps its own headers, token and swap.
@@ -1860,9 +1867,11 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             "q" -> if (p[1] == "auto") player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().clearOverridesOfType(C.TRACK_TYPE_VIDEO).build()
                    else override(C.TRACK_TYPE_VIDEO, p[1].toInt(), p[2].toInt())
             "sub" -> if (p[1] == "off") {
+                SubsPolicy.picked(g.playerPrefs, on = false)
                 player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
                 cues = ""
             } else {
+                SubsPolicy.picked(g.playerPrefs, on = true)
                 player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false).build()
                 override(C.TRACK_TYPE_TEXT, p[1].toInt(), p[2].toInt())
             }
