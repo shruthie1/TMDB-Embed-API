@@ -197,3 +197,31 @@ test('route: l=- withholds LANGUAGE; bad, foreign or expired sources are refused
     assert.equal((await get(expired)).status, 410);
     assert.equal(calls.length, n, 'no upstream fetch for a refused source');
 });
+
+// P23 cast watch (2026-11-22): the APK casts this route with c=<token> and
+// polls /mm/hls/cast/<token> to learn whether the receiver went past the master.
+test('cast watch: c= rides to every playlist URL; the receiver master and video playlist fetches are recorded', async (t) => {
+    const { base, mm } = await serve(t);
+    const exp = Math.floor(Date.now() / 1000) + 7200;
+    const c = '0123456789abcdef0123';
+    const masterUrl = mm.masterUrlFor(base, signedMpd(exp), 'Telugu', c);
+    assert.match(masterUrl, /&c=0123456789abcdef0123$/);
+    const none = await get(`${base}/mm/hls/cast/${c}`);
+    assert.equal(none.status, 200);
+    assert.deepEqual(JSON.parse(none.body), { master: null, video: null, audio: null, receiver: null });
+    const m = await get(masterUrl, { 'user-agent': 'WVC-Receiver/1.0 (VIDAA)' });
+    const uris = m.body.split('\n').filter((l) => l.startsWith(base) || /URI="/.test(l)).map((l) => (/URI="([^"]+)"/.exec(l) || [null, l])[1]);
+    assert.ok(uris.length >= 4 && uris.every((u) => u.includes(`&c=${c}`)), 'token on every playlist URL');
+    const afterMaster = JSON.parse((await get(`${base}/mm/hls/cast/${c}`)).body);
+    assert.ok(afterMaster.master > 0 && afterMaster.video === null);
+    assert.match(afterMaster.receiver, /^[0-9a-f]{12}$/, 'receiver id is a short hash of the user agent');
+    await get(m.body.split('\n').find((l) => l.startsWith(`${base}/mm/hls/68264836194533344/2.m3u8`)));
+    const afterVideo = JSON.parse((await get(`${base}/mm/hls/cast/${c}`)).body);
+    assert.ok(afterVideo.video >= afterMaster.master);
+    assert.equal(afterVideo.audio, null);
+    assert.equal((await get(`${base}/mm/hls/cast/not-hex!`)).status, 400);
+    // No token: nothing recorded, URLs unchanged.
+    const plain = mm.masterUrlFor(base, signedMpd(exp), 'Telugu');
+    assert.ok(!plain.includes('c='));
+    assert.ok(!(await get(plain)).body.includes('c='));
+});
