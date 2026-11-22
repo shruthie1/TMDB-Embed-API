@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { _resetStreamCache } from '../lib/streamCache';
 import { resolveLive, STREAMS_RETRY_DELAYS_MS } from '../lib/backend';
 import { fatalAction } from '../lib/player/fatalPolicy';
 
@@ -24,6 +25,8 @@ function run(opts = {}) {
 
 beforeEach(() => {
   vi.stubGlobal('sessionStorage', memoryStorage());
+  vi.stubGlobal('localStorage', memoryStorage());
+  _resetStreamCache();
   // No real waiting between retries in tests.
   STREAMS_RETRY_DELAYS_MS.splice(0, STREAMS_RETRY_DELAYS_MS.length, 1, 1);
 });
@@ -57,7 +60,7 @@ describe('/api/streams retries', () => {
 });
 
 describe('per-title session cache', () => {
-  it('a replay of the same title is served from sessionStorage', async () => {
+  it('a replay of the same title is served from the client stream cache', async () => {
     const fetchMock = vi.fn().mockResolvedValue(res(200, body([STREAM])));
     vi.stubGlobal('fetch', fetchMock);
     await run({ id: 21 });
@@ -104,7 +107,7 @@ describe('per-title session cache', () => {
     const fetchMock = vi.fn().mockResolvedValue(res(200, body([STREAM])));
     vi.stubGlobal('fetch', fetchMock);
     await run({ id: 24 });
-    now.mockReturnValue(1_000_000 + 10 * 60 * 1000);
+    now.mockReturnValue(1_000_000 + 31 * 60 * 1000);
     await run({ id: 24 });
     expect(fetchMock).toHaveBeenCalledTimes(2);
     now.mockRestore();

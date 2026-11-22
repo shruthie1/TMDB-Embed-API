@@ -13,6 +13,10 @@ import { Button, Badge, Skeleton, Toast } from '../../../../components/ui';
 import { getProgress, getNextUp } from '../../../../lib/progress';
 import { inList, toggleList } from '../../../../lib/list';
 import { prewarmStreams } from '../../../../lib/backend';
+import { prewarmClientProviders } from '../../../../lib/clientPrewarm';
+import { createDwell } from '../../../../lib/prewarmDwell';
+import { useRefreshSources } from '../../../../lib/player/useRefreshSources';
+import RefreshSources from '../../../../components/RefreshSources';
 import { languageName } from '../../../../lib/subtitles';
 import Icon from '../../../../components/Icon';
 import { HeroInnerSkeleton, FactsSkeleton, useTitleSeed } from '../../../../components/TitleSkeleton';
@@ -122,6 +126,11 @@ export default function TitlePage() {
     window.scrollTo(0, 0);
   }, [type, id]);
 
+  // When this title's page opened: the prewarm dwell (P13) counts from here.
+  const openedAtRef = useRef(0);
+  useEffect(() => { openedAtRef.current = Date.now(); }, [type, id]);
+  const dwellRef = useRef(null);
+
   useEffect(() => {
     let alive = true;
     setLoadError(null);
@@ -163,7 +172,18 @@ export default function TitlePage() {
       : {};
     // Same key the Player's resolve uses (title.mediaType/tmdbId), so Play
     // joins this request or reads its cached answer.
-    const timer = setTimeout(() => prewarmStreams(t.mediaType, t.tmdbId, target), 700);
+    // P13: only after ~1.5 s on this page, or at once on hover/focus of Play
+    // (dwellRef.now). Leaving sooner cancels it: browsing costs no request.
+    // P14: the browser-side providers (OneTouchTV) warm at the same moment.
+    const dwell = createDwell({
+      openedAt: openedAtRef.current || Date.now(),
+      start: () => {
+        prewarmStreams(t.mediaType, t.tmdbId, target);
+        prewarmClientProviders(t.mediaType, t.tmdbId, target);
+      },
+    });
+    dwellRef.current = dwell;
+    dwell.arm();
     // The player and hls.js (about 180kB) download during the same reading
     // dwell, so Play waits only for media. Not at once: fetched with the
     // record they took a phone's bandwidth from the backdrop and poster
@@ -174,8 +194,17 @@ export default function TitlePage() {
     };
     if (document.readyState === 'complete') loadCode();
     else window.addEventListener('load', loadCode, { once: true });
-    return () => { clearTimeout(timer); clearTimeout(code); window.removeEventListener('load', loadCode); };
+    return () => {
+      dwell.cancel();
+      if (dwellRef.current === dwell) dwellRef.current = null;
+      clearTimeout(code); window.removeEventListener('load', loadCode);
+    };
   }, [t, full, type, tmdbId, resume?.season, resume?.episode]);
+
+  // "Refresh sources" next to Play: the episode Play opens (same key as the
+  // prewarm above), asked anew with refresh=1; Play then starts from it.
+  const refreshTarget = type === 'tv' ? { season: resume?.season ?? 1, episode: resume?.episode ?? 1 } : { season: 0, episode: 0 };
+  const refreshSources = useRefreshSources({ mediaType: t?.mediaType || type, tmdbId, ...refreshTarget });
 
   // Stable so the Player's next-episode lookup does not refetch each render.
   const playNext = useCallback((next) => {
@@ -316,7 +345,9 @@ export default function TitlePage() {
               element could not do. */}
           <div className="hero-actions">
             <div className="actions" data-focus-group="">
-              <Button variant="primary" icon="play" onClick={() => setPlay(playTarget)}>
+              <Button variant="primary" icon="play" onClick={() => setPlay(playTarget)}
+                      onPointerEnter={() => dwellRef.current?.now()}
+                      onFocus={() => dwellRef.current?.now()}>
                 {playLabel}
               </Button>
               {resume?.resume && (
@@ -328,6 +359,7 @@ export default function TitlePage() {
               <Button icon={saved ? 'check' : 'plus'} onClick={onSave} aria-pressed={saved}>
                 {saved ? 'In My List' : 'My List'}
               </Button>
+              <RefreshSources r={refreshSources} />
             </div>
           </div>
         </div>

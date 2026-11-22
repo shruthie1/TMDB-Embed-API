@@ -1,4 +1,5 @@
 'use client';
+import RefreshSources from '../RefreshSources';
 import { audioLanguageKey, languageSourceIndex } from '../../lib/player/languageSources';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { audioOptions } from '../../lib/player/audioOptions';
@@ -61,6 +62,8 @@ export default function TvBar({
   // still plays the stream and fills audioTracks.
   onAddAudio, playingLanguages = null,
   sourcesPending = false, onClose, onCheckSources, checkingSources = false,
+  // "Refresh sources" (useRefreshSources): first in the Server row.
+  refreshSources = null,
   fit = 'width', onSetFit,
   subs = [], currentSub, onPickSub, subLoading = false,
 }) {
@@ -243,13 +246,14 @@ export default function TvBar({
             makes every row's first button share one left edge - with the
             buttons as direct children of a flex row they could not. */}
         <div className="tvbar-btns">
+          {refreshSources && <RefreshSources r={refreshSources} className="tvbar-btn" />}
           {sources.map(s => (
             // `key={s.provider}` collided whenever one provider ships several
             // streams - CastleTV returns one PER LANGUAGE, so 628241 rendered
             // five buttons under one key and React warned it may omit some.
             // `id` is the stream identity the rest of the player already uses.
             <button key={s.id ?? s.provider} type="button"
-                    className={`tvbar-btn focusable ${isCurrent(s, currentSourceId, currentSource) ? 'on' : ''}`}
+                    className={`tvbar-btn focusable ${isCurrent(s, currentSourceId, currentSource) ? 'on' : ''}${refreshSources?.running ? ' dim' : ''}`}
                     data-focus=""
                     aria-pressed={isCurrent(s, currentSourceId, currentSource)}
                     onClick={() => { onPickSource?.(s); rearm.current(); }}>

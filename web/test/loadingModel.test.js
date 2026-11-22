@@ -58,8 +58,10 @@ describe('loadingModel timing rules', () => {
     const v = loadingView(input(90000, { listReady: true, failed: true,
       attempts: list.map((s) => A(s.id, 0, 1, RowState.FAILED, Reason.NO_ANSWER)) }));
     expect(v.phase).toBe(Phase.FAILED);
-    expect(v.showTryAgain).toBe(true);
-    expect(v.headline).toBe("Couldn't start Devara Part 1");
+    // Refresh sources (owner 2026-11-22) replaces Try again on the failure card.
+    expect(v.showTryAgain).toBe(false);
+    expect(v.showRefresh).toBe(true);
+    expect(v.headline).toBe("Couldn't play this title");
     expect(v.detail).toBe('We tried 5 sources. None of them played.');
   });
 });

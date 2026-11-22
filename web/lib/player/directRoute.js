@@ -13,6 +13,11 @@
  */
 
 export const DIRECT_FIRST_FRAME_MS = 10000;
+// P6 (2026-11-22): before the first frame, a direct row that has received NO
+// bytes for this long goes to the proxy now instead of waiting out the 10 s
+// cap (Krack on 1.2.48: multimovies direct sat 10 s, total 15.9 s). A slow row
+// that IS receiving bytes keeps the 10 s cap.
+export const DIRECT_NO_BYTES_MS = 4000;
 
 const failed = new Set();
 const rowKey = (s) => `${s?.id ?? ''}|${s?.webDirectUrl ?? ''}`;

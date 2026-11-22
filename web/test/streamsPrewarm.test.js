@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { _resetStreamCache } from '../lib/streamCache';
 import { resolveLive, prewarmStreams, STREAMS_RETRY_DELAYS_MS } from '../lib/backend';
 
 // The title page warms /api/streams while the viewer reads; Play joins that
@@ -25,6 +26,8 @@ function run(id, extra = {}) {
 
 beforeEach(() => {
   vi.stubGlobal('sessionStorage', memoryStorage());
+  vi.stubGlobal('localStorage', memoryStorage());
+  _resetStreamCache();
   STREAMS_RETRY_DELAYS_MS.splice(0, STREAMS_RETRY_DELAYS_MS.length, 1, 1);
 });
 afterEach(() => vi.unstubAllGlobals());

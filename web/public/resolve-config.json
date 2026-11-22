@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 4,
   "ttlSec": 21600,
   "mapple": {
     "enabled": true,
@@ -99,7 +99,7 @@
     "budgetWindowMs": 300000,
     "cooldownMs": 600000,
     "apiTtlMs": 600000,
-    "sessionTtlMs": 1800000,
+    "sessionTtlMs": 86400000,
     "metadataTtlMs": 604800000,
     "playerTtlMs": 30000,
     "prewarm": true

@@ -154,3 +154,27 @@ describe('useHls — audio', () => {
     expect(api.currentAudio).toBe(1);
   });
 });
+
+// P5 (2026-11-22): the first fragment comes from a rung <= 720p (the cheapest
+// one), then ABR climbs. Measured on the APK: a first 1080p segment was
+// 2.4 MB / 1.9 s. The audio track is never touched by this.
+describe('useHls — first frame at <= 720p', () => {
+  it('auto start picks the cheapest rung, even when the master lists it last', async () => {
+    harness({ masterUrl: 'https://x/m.m3u8' });
+    await flush();
+    act(() => {
+      made.last.startLevel = -1;
+      made.last.audioTrack = 2;
+      made.last.levels = [
+        { height: 1080, bitrate: 5_000_000 }, { height: 720, bitrate: 2_800_000 }, { height: 480, bitrate: 1_200_000 }];
+      made.last.emit('m');
+    });
+    const start = made.last.levels[made.last.startLevel];
+    expect(start.height).toBeLessThanOrEqual(720);
+    expect(start.height).toBe(480);
+    expect(made.last.audioTrack).toBe(2);   // unchanged
+    // Only the start: ABR stays in charge after it.
+    expect(made.last.autoLevelCapping).toBe(-1);
+    expect(made.last.currentLevel).toBe(-1);
+  });
+});

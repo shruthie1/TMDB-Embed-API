@@ -227,6 +227,7 @@ export default function PlayerControls({
   visible = true, onReveal, onHide, onMenuChange, menuOpen = null, tv = false,
   sources = [], currentSource, currentSourceId = null, onPickSource, sourcesPending = false,
   labels = null, onCheckSources, checkingSources = false, onPickLanguage, audioSources = sources,
+  refreshSources = null,
   audioSync = null,
   subs = [], currentSub = null, onPickSub, subLoading = false,
   fit = 'width', onCycleFit, onSetFit,
@@ -629,6 +630,7 @@ export default function PlayerControls({
           <VideoMenu choices={serverList} currentId={currentSourceId}
                      currentSource={currentSource}
                      onCheckSources={onCheckSources} checkingSources={checkingSources}
+                     refresh={refreshSources}
                      onPick={(c) => {
                        openMenu(null);
                        if (c?.embed) onPickEmbed?.(c);

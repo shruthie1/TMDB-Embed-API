@@ -4,12 +4,14 @@ import PlayerControls from './PlayerControls';
 import VideoMenu from './player/VideoMenu';
 import { audioLanguageKey, displayAudioTracks, isKnownAudioLanguage, languageSwitchCandidates, sourceAudioLanguages, trackAudioLanguage } from '../lib/player/languageSources';
 import { Loading, NextUp, PlayerError } from './player/overlays';
+import { useRefreshSources } from '../lib/player/useRefreshSources';
+import { refreshAutoStart } from '../lib/player/refreshModel';
 import TvBar from './player/TvBar';
 import Icon from './Icon';
 import { listSources, poster, reportPlayback } from '../lib/api';
 import { isTv as isTvMode, readOverride } from '../lib/dpad';
 import { isVidaa, mediaKeyAction, MEDIA_SEEK_SECS, tvPlayerKey } from '../lib/tvKeys';
-import { forgetProvider, rememberProvider } from '../lib/lastProvider';
+import { forgetProvider, rememberProvider, playedTimer } from '../lib/lastProvider';
 import { abortReason } from '../lib/abortReason';
 import useAudioSync from '../lib/player/useAudioSync';
 import useNetmirrorSources from '../lib/player/useNetmirrorSources';
@@ -32,7 +34,7 @@ import {
 import { createWarmScheduler } from '../lib/player/warmSources';
 import useNoPictureGuard from '../lib/player/useNoPictureGuard';
 import useStartupSwitch from '../lib/player/useStartupSwitch';
-import { pairSources, listSources as listBackendSources } from '../lib/backend';
+import { pairSources, listSources as listBackendSources, forgetTitleStreams } from '../lib/backend';
 import { canCast, castBody, prepareCast } from '../lib/cast';
 import { pairDecodable } from '../lib/player/codecSupport';
 import { pairDonors } from '../lib/player/addAudio';
@@ -162,6 +164,17 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   currentSourceRef.current = currentSource;
   currentSourceIdRef.current = currentSourceId;
 
+  // "Refresh sources" (owner 2026-11-22): the source list's first row and the
+  // failure card. Playback goes on; only the failure card starts the best new
+  // row (refreshRowsRef, set beside retryAll below).
+  const refreshRowsRef = useRef(null);
+  const refreshBefore = useCallback(() => sourceListRef.current.map((s) => s.masterUrl), []);
+  const refreshOnRows = useCallback((rows, answer) => refreshRowsRef.current?.(rows, answer), []);
+  const refreshSources = useRefreshSources({
+    mediaType: title.mediaType, tmdbId: title.tmdbId, season, episode,
+    before: refreshBefore, onRows: refreshOnRows,
+  });
+
   // The VaPlayer embed is on the stage (see vaEmbed below). Declared here
   // because the key handler must step aside while it is.
   const [embedOn, setEmbedOn] = useState(false);
@@ -216,10 +229,6 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   // a fresh url for the same row brings it back.
   const [sourceChooserOpen, setSourceChooserOpen] = useState(false);
   useEffect(() => setSourceChooserOpen(false), [title.mediaType, title.tmdbId, season, episode]);
-  const closeSourceChooser = () => {
-    setSourceChooserOpen(false);
-    playerRef.current?.querySelector('[data-action="choose-server"]')?.focus();
-  };
   const [failedUrls, setFailedUrls] = useState(() => new Set());
   // What the menus offer: every row except the ones that failed a switch.
   const menuSources = useMemo(
@@ -393,6 +402,8 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       markDead(deadSources.current,
         { id: resolve.currentSourceId, provider: resolve.currentSource });
       forgetProvider(title.mediaType, title.tmdbId, resolve.currentSource, season, episode);
+      // Its kept rows may be stale: the next resolve of this title is fresh.
+      forgetTitleStreams(title.mediaType, title.tmdbId, { season, episode, reason: 'row-failed' });
       // We are abandoning this source, so say why. Without this the knowledge
       // dies with the tab and the same bad source is chosen again next time.
       reportPlayback({ ...reportCtx.current, ...reportMetrics(), ok: false, reason });
@@ -428,11 +439,26 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     if (runtimeVerdict(title.runtimeMin, videoRef.current?.duration) !== 'ok') return false;
     reportedRef.current = true;
     const c = reportCtx.current;
-    rememberProvider(c.mediaType, c.tmdbId, c.provider, c.season, c.episode);
+    // The last provider is remembered after 10 s of real play (P8), by the
+    // timeupdate effect below, not here.
     reportPlayback({ ...c, ...(firstFrameMetricsRef.current || reportMetrics()),
       provider: c.provider, ok: true });
     return true;
   }, [title.runtimeMin, reportMetrics]);
+
+  // P8: remember the provider once this stream has PLAYED 10 s (seeks do not
+  // count). A runtime mismatch (wrong film) is never remembered.
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!stream?.provider || !v) return undefined;
+    const reached = playedTimer();
+    const onTime = () => {
+      if (!reached(v.currentTime) || runtimeMismatchRef.current) return;
+      rememberProvider(title.mediaType, title.tmdbId, stream.provider, season, episode);
+    };
+    v.addEventListener('timeupdate', onTime);
+    return () => v.removeEventListener('timeupdate', onTime);
+  }, [stream, title.mediaType, title.tmdbId, season, episode]);
 
   const onFatal = useCallback((data, hls) => {
     if (addAudioJourney.deviceFailed()) return; // add-audio: restore, check next
@@ -855,6 +881,11 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
 
   /** The player root — the element that goes fullscreen, and the cue-lift base. */
   const playerRef = useRef(null);
+  // Declared after playerRef (no-use-before-define broke `next build`).
+  const closeSourceChooser = () => {
+    setSourceChooserOpen(false);
+    playerRef.current?.querySelector('[data-action="choose-server"]')?.focus();
+  };
   // aria-modal: Tab stays in the player instead of walking to the page behind.
   useFocusTrap(playerRef);
   const revealControls = controls.reveal;
@@ -1597,6 +1628,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     switchGuard.landed();
     const failed = m.target;
     forgetProvider(title.mediaType, title.tmdbId, failed.provider, season, episode);
+    forgetTitleStreams(title.mediaType, title.tmdbId, { season, episode, reason: 'switch-failed' });
     reportPlayback({ ...reportCtx.current, ...reportMetrics(), provider: failed.provider,
       ok: false, reason: `switch: ${reason}` });
     if (failed.masterUrl) setFailedUrls((prev) => new Set(prev).add(failed.masterUrl));
@@ -2046,6 +2078,22 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     resolve.load(true);
   }, [resolve, putAttempts]);
   retryAllRef.current = retryAll;
+  // A refresh came back with rows. Failure card: start the best one from that
+  // answer, with retryAll's resets and no second request. Anything else: the
+  // list is replaced in one update and what plays keeps playing.
+  refreshRowsRef.current = (rows, answer) => {
+    if (refreshAutoStart(Boolean(resolve.error), rows)) {
+      playAtRef.current = Date.now();
+      searchAtRef.current = playAtRef.current;
+      firstListSizeRef.current = 0;
+      pendingReasonRef.current = null;
+      putAttempts([]);
+      resumeAt.current = retryResumeAt(videoRef.current?.currentTime, lastPlayedAtRef.current);
+      resolve.load(false, { prefetched: answer });
+    } else {
+      resolve.replaceSources(rows, currentSourceIdRef.current);
+    }
+  };
   // A row picked in Details plays at once, like the Servers menu. It ends a
   // switch still being judged (the viewer's pick wins over an automatic
   // advance), then goes through pickSource like every other manual pick, so
@@ -2115,6 +2163,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
           sourcesPending={sourcesPending}
           onCheckSources={netmirrorSources.check}
           checkingSources={netmirrorSources.loading}
+          refreshSources={refreshSources}
           audioTracks={menuAudioTracks}
           currentAudio={hls.currentAudio}
           onPickAudio={hls.pickAudio}
@@ -2163,6 +2212,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
           sourcesPending={sourcesPending}
           onCheckSources={netmirrorSources.check}
           checkingSources={netmirrorSources.loading}
+          refreshSources={refreshSources}
           onPickSource={pickSource}
           levels={hls.levels}
           currentLevel={hls.currentLevel}
@@ -2263,6 +2313,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
         <div className="player-loading-menu" onClick={closeSourceChooser}>
           <VideoMenu choices={videoChoices(sources)} currentId={currentSourceId} currentSource={currentSource}
             open onToggle={closeSourceChooser} onCheckSources={netmirrorSources.check} checkingSources={netmirrorSources.loading}
+            refresh={refreshSources}
             onPick={choice => { closeSourceChooser(); if (choice.source) pickFromLoading(choice.source.id); }} />
         </div>
       )}
@@ -2277,7 +2328,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       {error && !embedOn && (
         <PlayerError error={error} embeds={embeds}
           headline={loadView.headline} detail={attempts.length ? loadView.detail : null}
-          onRetry={retryAll} onClose={onClose} />
+          onRetry={retryAll} onClose={onClose} refresh={refreshSources} />
       )}
       {ep.ended && ep.nextEp && !error && (
         <NextUp ep={ep.nextEp}

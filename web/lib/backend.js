@@ -27,6 +27,8 @@
 // point a local UI at a remote backend.
 import { abortReason } from './abortReason';
 import { isUnsupported } from './player/codecSupport';
+import { titleKey, getSlot, hasSlot, putSlot, dropTitle } from './streamCache';
+import { clearPlaylists } from './player/playlistCache';
 
 const BASE = process.env.NEXT_PUBLIC_API_BASE || '';
 
@@ -82,36 +84,33 @@ async function getJsonWithRetry(path, opts) {
 }
 
 /**
- * Per-title cache of the last COMPLETE /api/streams answer, in sessionStorage.
+ * Per-title cache of the last COMPLETE /api/streams answer (P15, 2026-11-22).
  *
- * The request is no-store (signed urls), so every replay of a title, every
- * back-navigation and every episode re-open re-ran the whole provider fan-out
- * (2-10s). Kept 4 minutes: under the backend's own 300s browser TTL and well
- * under the providers' signed-url lifetimes. A partial early answer (the
- * backend marks it) is never cached, so the next ask picks up the late rows.
- * Nor is an answer where a provider errored (`providerErrors`).
- * A stale url is handled by the player: a 403 re-resolves with refresh, which
- * skips this cache. Storage failures (private mode, quota) are ignored.
+ * The request is no-store (signed urls), so every replay of a title re-ran the
+ * whole provider fan-out (2-10s). The answer now lives 30 min in the client
+ * stream cache (lib/streamCache.js: memory + localStorage, cut short by the
+ * earliest URL expiry, 50 titles), matching the APK. A partial early answer
+ * (the backend marks it) is never cached, so the next ask picks up the late
+ * rows. Nor is an answer where a provider errored (`providerErrors`).
+ * A failed row drops the title (forgetTitleStreams), and a refresh skips and
+ * replaces the slot.
  */
-const STREAMS_CACHE_TTL_MS = 4 * 60 * 1000;
-const cacheKey = (type, id, season, episode) => `chitram:streams:${type}:${id}:${season || 0}:${episode || 0}`;
-function cacheGet(key) {
-  try {
-    const raw = globalThis.sessionStorage?.getItem(key);
-    if (!raw) return null;
-    const { at, d } = JSON.parse(raw);
-    if (!(Date.now() - at < STREAMS_CACHE_TTL_MS)) { globalThis.sessionStorage.removeItem(key); return null; }
-    return d;
-  } catch { return null; }
+const VM_SLOT = 'vm';
+const cacheKey = (type, id, season, episode) => titleKey(type, id, season, episode);
+const cacheable = (d) => !d?.partial && Array.isArray(d?.streams) && d.streams.length > 0
+  // A provider threw on this answer (backend lists it in providerErrors).
+  // Caching it would hide that server for 30 minutes after a short blip.
+  && !(Array.isArray(d.providerErrors) && d.providerErrors.length);
+function cacheGet(key) { return getSlot(key, VM_SLOT); }
+function cachePut(key, d, slot = VM_SLOT) {
+  try { if (cacheable(d)) putSlot(key, slot, d); } catch { /* no cache, still plays */ }
 }
-function cachePut(key, d) {
-  try {
-    if (d?.partial || !Array.isArray(d?.streams) || !d.streams.length) return;
-    // A provider threw on this answer (backend lists it in providerErrors).
-    // Caching it would hide that server for 4 minutes after a short blip.
-    if (Array.isArray(d.providerErrors) && d.providerErrors.length) return;
-    globalThis.sessionStorage?.setItem(key, JSON.stringify({ at: Date.now(), d }));
-  } catch { /* private mode or quota: no cache, still plays */ }
+
+/** A row of this title failed to play: its kept rows go, the next ask is fresh. */
+export function forgetTitleStreams(type, id, { season = 0, episode = 0, reason = '' } = {}) {
+  dropTitle(cacheKey(type, id, season, episode), reason);
+  // Kept playlist text belongs to those rows' urls (P3): drop it with them.
+  clearPlaylists();
 }
 
 /**
@@ -135,16 +134,46 @@ function fetchStreamsShared(key, path) {
 }
 
 /**
+ * "Refresh sources" (owner 2026-11-22): drop this title's kept answer and ask
+ * the VM ONCE with refresh=1 (no retry: one tap is one request). The new
+ * answer replaces the kept one, so Play and the player start from it. Never
+ * joins a running warm request: a refresh exists to mint new signed urls.
+ * Resolves to the raw answer; throws when the VM fails.
+ */
+export async function refreshStreams(type, id, { season = 0, episode = 0, signal } = {}) {
+  const key = cacheKey(type, id, season, episode);
+  const d = await getJson(endpoint(type, id, { season, episode, refresh: true }), { timeoutMs: 120000, signal });
+  // Gap 10.5: the kept rows stay until a new answer arrives (an offline or
+  // failed refresh throws above and keeps them). Then every slot of the title
+  // goes: VM, NetMirror lookup and browser rows.
+  dropTitle(key, 'refresh');
+  cachePut(key, d);
+  return d;
+}
+
+/**
  * Start resolving a title the viewer has opened, before Play is pressed.
  *
  * Only for the title page, which is a strong play intent. Hover and D-pad
  * dwell stay on the no-op in lib/prefetch.js: a row of cards must not start a
  * fan-out for every title the pointer crosses. Fire-and-forget.
  */
+/** One greppable line per prewarm decision: `[prewarm] <provider> <what>`. */
+export function logPrewarm(provider, what) {
+  try { console.info(`[prewarm] ${provider} ${what}`); } catch { /* never breaks a page */ }
+}
+
+/** Gap 13.10: the browser says it has no network. A prewarm then sends nothing. */
+export function browserOffline() {
+  try { return typeof navigator !== 'undefined' && navigator.onLine === false; } catch { return false; }
+}
+
 export function prewarmStreams(type, id, { season = 0, episode = 0 } = {}) {
   if (!id) return;
   const key = cacheKey(type, id, season, episode);
-  if (cacheGet(key) || inflight.has(key)) return;
+  if (browserOffline()) { logPrewarm('vm', 'skip offline'); return; }
+  if (hasSlot(key, VM_SLOT) || inflight.has(key)) { logPrewarm('vm', 'skip kept-or-running'); return; }
+  logPrewarm('vm', 'start');
   fetchStreamsShared(key, endpoint(type, id, { season, episode })).catch(() => {});
 }
 
@@ -257,15 +286,17 @@ export function sourceHeight(s) {
  * quality and learned playback outcomes. Resolution never crosses a tier. A
  * working stream in the wrong language is still worse than a smaller correct one.
  */
+export function sourceTier(s) {
+  const preferred = (s.languages || []).includes(PREFERRED_LANGUAGE);
+  if (s.hybrid) return 0;
+  if (preferred && s.selectableAudio) return 1;
+  if (preferred) return 2;
+  if (s.selectableAudio) return 3;
+  return 4;
+}
+
 export function rankSources(sources) {
-  const tier = (s) => {
-    const preferred = (s.languages || []).includes(PREFERRED_LANGUAGE);
-    if (s.hybrid) return 0;
-    if (preferred && s.selectableAudio) return 1;
-    if (preferred) return 2;
-    if (s.selectableAudio) return 3;
-    return 4;
-  };
+  const tier = sourceTier;
   return [...sources].sort((a, b) => {
     // A row this browser cannot decode loses to every row it can, whatever
     // its tier: a black picture in the right language is not a result.
@@ -320,14 +351,55 @@ export function sourcesFromResponse(d) {
   }).filter(Boolean));
 }
 
-/** Fetch and adapt every playable source for a title. */
+/**
+ * Fetch and adapt every playable source for a title.
+ *
+ * A per-provider ask without refresh (the NetMirror lookup after playback
+ * starts) is kept 30 min like the main answer, so a second Play makes no
+ * request. A refresh ask never reads or writes the cache.
+ */
 export async function listSources(type, id, opts = {}) {
+  const slot = opts.provider && !opts.refresh ? `vm:${String(opts.provider).toLowerCase()}` : null;
+  const key = slot ? cacheKey(type, id, opts.season, opts.episode) : null;
   try {
+    const kept = slot ? getSlot(key, slot) : null;
+    if (kept) return sourcesFromResponse(kept);
     const d = await getJson(endpoint(type, id, opts), opts);
+    if (slot) cachePut(key, d, slot);
     return sourcesFromResponse(d);
   } catch {
     return null; // null = "could not ask", [] = "asked, none exist"
   }
+}
+
+/**
+ * Start on the remembered provider (P8), never at the cost of the language.
+ *
+ * `sources` arrive ranked (rankSources: language tier first). The remembered
+ * provider is a NAME, and a provider can return several rows (CastleTV: five
+ * on Devara, only one the demux master with the audio menu). So its first row
+ * moves to the front ONLY when it sits in the same tier as the current top
+ * row: same language situation, same selectable-audio state, decodable. A
+ * Hindi row of the remembered provider never jumps a Telugu row, and a stale
+ * pin can never hide the language switcher. Otherwise the order is unchanged.
+ *
+ * Logs `[last] <key> provider=<p> hit|miss`.
+ */
+export function applyLastProvider(sources, provider, key = '') {
+  if (!provider || !Array.isArray(sources) || !sources.length) return sources;
+  const want = String(provider).toLowerCase();
+  const top = sources[0];
+  const at = sources.findIndex((s) => String(s.provider).toLowerCase() === want
+    && !s.unsupported && sourceTier(s) === sourceTier(top));
+  const log = (what) => { try { console.info(`[last] ${key} provider=${provider} ${what}`); } catch { /* never breaks play */ } };
+  if (at < 0) {
+    const any = sources.some((s) => String(s.provider).toLowerCase() === want);
+    log(`miss reason=${any ? 'not-in-chosen-language' : 'not-in-list'}`);
+    return sources;
+  }
+  log('hit');
+  if (at === 0) return sources;
+  return [sources[at], ...sources.slice(0, at), ...sources.slice(at + 1)];
 }
 
 /**
@@ -345,9 +417,12 @@ export async function listSources(type, id, opts = {}) {
 export function resolveLive(type, id, {
   season = 0, episode = 0, provider = null, refresh = false,
   onEvent, onDone, onFail, onMore, clientFallback = null,
+  // An answer "Refresh sources" already fetched: used as is, no request.
+  prefetched = null,
 } = {}) {
   const ac = new AbortController();
   let settled = false;
+  const emit = (e) => { if (!settled && onEvent) onEvent({ ...e, at: Date.now() }); };
 
   // The VM failed or had nothing: rows the browser can resolve itself
   // (lib/oneTouchClient.js) before the failure reaches the viewer. Rows come
@@ -367,8 +442,6 @@ export function resolveLive(type, id, {
       .catch(() => { if (!ac.signal.aborted) onFail?.(err); });
   };
 
-  const emit = (e) => { if (!settled && onEvent) onEvent({ ...e, at: Date.now() }); };
-
   // `provider` is the viewer's LAST-USED provider, remembered per title. It is
   // a PREFERENCE, not a filter.
   //
@@ -384,8 +457,8 @@ export function resolveLive(type, id, {
   emit({ type: 'wave-start', providers: ['all enabled providers'] });
 
   const key = cacheKey(type, id, season, episode);
-  const cached = refresh ? null : cacheGet(key);
-  if (cached) emit({ type: 'cache-hit', provider: 'list from this session' });
+  const cached = prefetched || (refresh ? null : cacheGet(key));
+  if (cached && !prefetched) emit({ type: 'cache-hit', provider: 'list from this session' });
   (cached ? Promise.resolve(cached)
     : refresh
       ? getJsonWithRetry(endpoint(type, id, { season, episode, provider: null, refresh }),
@@ -394,27 +467,9 @@ export function resolveLive(type, id, {
     .then((d) => {
       if (settled) return;
       let sources = sourcesFromResponse(d);
-      // Honour the remembered provider by ORDER, now that it no longer
-      // restricts the fan-out. Everything else keeps rankSources' ranking.
-      // The remembered provider is a NAME, and a name no longer identifies a
-      // row: measured on 811941 (Devara), CastleTV returns five rows and only
-      // ONE is the demux master carrying the audio menu. Honouring the pin
-      // must never promote a worse row of the same provider ahead of a better
-      // one, or the language switcher silently disappears on replay - which is
-      // exactly what a stale "CastleTV" pin did.
-      //
-      // So reorder by provider, but keep rankSources' order inside each half
-      // AND never let the pin outrank a row that offers selectable audio.
-      if (provider) {
-        const want = String(provider).toLowerCase();
-        const isWanted = (s) => String(s.provider).toLowerCase() === want;
-        // Nor may it lift a row this browser cannot decode: those stay last.
-        const best = sources.find((s) => s.selectableAudio && !s.unsupported) || null;
-        const pinned = sources.filter((s) => isWanted(s) && s !== best && !s.unsupported);
-        const rest = sources.filter((s) => !isWanted(s) && s !== best && !s.unsupported);
-        const last = sources.filter((s) => s.unsupported);
-        sources = [...(best ? [best] : []), ...pinned, ...rest, ...last];
-      }
+      // Honour the remembered provider by ORDER (P8). See applyLastProvider:
+      // the language choice always wins over the remembered provider.
+      sources = applyLastProvider(sources, provider, cacheKey(type, id, season, episode));
 
       // Report per provider from what actually came back. The backend also
       // returns providerTimings, so these numbers are measured, not guessed.

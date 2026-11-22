@@ -5,11 +5,14 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 // unchanged from the original.
 import { resolveLive as resolveStreamLive } from '../backend';
 import { getLastProvider } from '../lastProvider';
-import { resolveOneTouchRows } from '../oneTouchClient';
+import { oneTouchRowsCached } from '../clientPrewarm';
+import { keepPlayingRow } from './refreshModel';
 
-// The VM failed or found nothing: OneTouchTV resolved in this browser.
+// The VM failed or found nothing: OneTouchTV resolved in this browser. Rows a
+// details-page prewarm already kept (30 min) cost no request; a prewarm still
+// running is joined.
 const browserFallback = (type, tmdbId, { season, episode, signal }) =>
-  resolveOneTouchRows({ type, tmdbId, season, episode, signal });
+  oneTouchRowsCached({ type, tmdbId, season, episode, signal });
 
 /** Real server events -> human sentences. Reports fact, not a timed guess. */
 export function describe(e) {
@@ -177,7 +180,7 @@ export function useResolve({ mediaType, tmdbId, season = 0, episode = 0 }) {
   // timed as its own fresh wait rather than against the original press.
   const requestedAt = useRef(null);
 
-  const load = useCallback((refresh = false) => {
+  const load = useCallback((refresh = false, { prefetched = null } = {}) => {
     if (!ready) return;
     // The moment the viewer is actually waiting from.
     //
@@ -195,12 +198,15 @@ export function useResolve({ mediaType, tmdbId, season = 0, episode = 0 }) {
     setError(null); setStage(0); setLog([]); setProviders([]);
     setRefreshing(Boolean(refresh));
     setSourcesPending(true);
+    // "Refresh sources" after a failure: its answer replaces the old rows.
+    if (prefetched) setSources([]);
     cancelRef.current?.();
 
     cancelRef.current = resolveStreamLive(mediaType, tmdbId, {
       season, episode,
       provider: getLastProvider(mediaType, tmdbId, season, episode),
       refresh,
+      prefetched,
       clientFallback: browserFallback,
       onEvent: (e) => {
         // Every validated provider is switchable: the event carries its own
@@ -365,7 +371,23 @@ export function useResolve({ mediaType, tmdbId, season = 0, episode = 0 }) {
     setSources(prev => prev.map(s => (s.id === id ? { ...s, ...fresh, id: s.id } : s)));
   }, []);
 
+  /**
+   * "Refresh sources" while a source plays: the new rows replace the list in
+   * one update, in their ranked (Telugu-first) order. The playing row is never
+   * touched: when the new answer lacks it, it stays in the list so the menu
+   * still ticks it. `stream` is not changed, so playback goes on.
+   */
+  const replaceSources = useCallback((fresh, keepId = null) => {
+    if (!fresh?.length) return;
+    setSources((prev) => {
+      const next = fresh.map((src) => ({ ...src, best: bestLabel(src.variants, null),
+        audioTracks: src.audioTracks ?? [], codecs: src.codecs ?? null }));
+      return keepPlayingRow(prev, next, keepId);
+    });
+    setSourcesPending(false);
+  }, []);
+
   return { stream, sources, currentSource, currentSourceId, sourcesPending, log, stage, error, providers, refreshing,
-           mergeSources, replaceSource, requestedAt,
+           mergeSources, replaceSource, replaceSources, requestedAt,
            load, switchSource, setError };
 }

@@ -9,6 +9,12 @@ import { heightOf } from './trackChoices';
  * still loading: it shows only after 30s with no source list, or on the end
  * card. From 30s with a list and no frame, "Choose a server" opens Details.
  */
+/** Failure card headlines (LoadingModel.Copy COULDNT_PLAY / NO_SOURCES). */
+export const FAIL_COPY = Object.freeze({ COULDNT_PLAY: "Couldn't play this title", NO_SOURCES: 'No sources found yet' });
+
+/** Where TV focus starts: Refresh sources on the failure card, Details while loading (LoadingModel.tvFocus). */
+export const tvFocus = (v) => (v?.showRefresh ? 'refresh' : 'details');
+
 export const LOADING_SLOW_HINT_MS = 15000;
 export const LOADING_CHOOSER_MS = 30000;
 export const LOADING_RETRY_MS = 30000;
@@ -209,15 +215,19 @@ export function loadingView(i) {
 
   const rows = list == null ? checkRows(i) : sourceRows(i, list, label, preferred);
   const footer = `Started ${secs(t)}s ago${list != null ? ` · ${k} of ${n} tried` : ''}`;
-  const view = (phase, headline, detail, showChooser, showTryAgain) =>
-    ({ phase, headline, detail, showChooser, showTryAgain, rows, footer });
+  const view = (phase, headline, detail, showChooser, showTryAgain, showRefresh = false) =>
+    ({ phase, headline, detail, showChooser, showTryAgain, rows, footer, showRefresh });
 
   if (i.failed) {
     const distinct = new Set(triedAttempts.map((a) => a.id)).size;
     const detail = distinct > 0
       ? `We tried ${distinct} sources. None of them played.`
       : (i.failMessage || 'No playable source found.');
-    return view(Phase.FAILED, `Couldn't start ${i.title}`, detail, false, true);
+    // "Refresh sources" (primary) replaces Try again on the failure card (owner
+    // 2026-11-22). Every source failed: "Couldn't play this title". None at all:
+    // "No sources found yet". Same words as LoadingModel.kt.
+    const headline = distinct === 0 && !list?.length ? FAIL_COPY.NO_SOURCES : FAIL_COPY.COULDNT_PLAY;
+    return view(Phase.FAILED, headline, detail, false, false, true);
   }
   const chooser = list != null && !i.framed && t >= LOADING_CHOOSER_MS;
   const cur = attempts[attempts.length - 1];

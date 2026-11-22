@@ -3,7 +3,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { playableUrl, proxiedSegment, PREFERRED_LANGUAGE } from '../backend';
 import { languageName } from '../subtitles';
 import { probeTsAudio, swapPids } from './tsAudio';
-import { planPlayUrl, isEarlyFailure, markDirectFailed, logRoute, DIRECT_FIRST_FRAME_MS } from './directRoute';
+import { planPlayUrl, isEarlyFailure, markDirectFailed, logRoute, DIRECT_FIRST_FRAME_MS, DIRECT_NO_BYTES_MS } from './directRoute';
+import { cachedPlaylistLoader } from './playlistCache';
 
 /**
  * HLS allows every audio rendition to be marked DEFAULT=NO. That is valid
@@ -53,6 +54,9 @@ export function initialAudioTrack(tracks = [], preferredLanguage = PREFERRED_LAN
 export function muxedAudioLoader(Base, muxed) {
   return class MuxedAudioLoader extends Base {
     load(context, config, callbacks) {
+      // Byte probe for the direct-route stall check (P6): XhrLoader keeps
+      // stats.loaded current from onprogress while a fragment downloads.
+      try { muxed.loaders?.add(this); } catch { /* probe is optional */ }
       const onSuccess = callbacks.onSuccess;
       super.load(context, config, {
         ...callbacks,
@@ -125,8 +129,24 @@ export function useHls({ videoRef, stream, onFatal, onHlsReady, onRouteFallback,
     logRoute(plan.mode, stream, `reason=${plan.reason}`);
     let firstFrame = false;
     let frameTimer = null;
+    // P6: a direct row with NO bytes for DIRECT_NO_BYTES_MS (4 s) before the
+    // first frame falls back to the proxy then, not at the 10 s cap. Bytes
+    // are playlist responses, fragment progress and <video> 'progress'.
+    let byteTimer = null;
+    let lastBytesAt = 0;
+    let byteCount = 0;
+    const noteBytes = () => { lastBytesAt = Date.now(); };
+    const fragBytes = () => {
+      let n = 0;
+      for (const l of muxedRef.current?.loaders || []) n += Number(l?.stats?.loaded) || 0;
+      return n;
+    };
+    const stopByteWatch = () => { clearInterval(byteTimer); byteTimer = null; video.removeEventListener('progress', noteBytes); };
     let fellBack = false;
-    const onFirstFrame = () => { firstFrame = true; clearTimeout(frameTimer); };
+    const onFirstFrame = () => {
+      firstFrame = true; clearTimeout(frameTimer); stopByteWatch();
+      try { muxedRef.current?.loaders?.clear(); } catch { /* probe is optional */ }
+    };
     video.addEventListener('loadeddata', onFirstFrame);
     let onNativeError = null;
     const dropNativeWatch = () => {
@@ -138,6 +158,7 @@ export function useHls({ videoRef, stream, onFatal, onHlsReady, onRouteFallback,
       if (fellBack || cancelled || firstFrame) return;
       fellBack = true;
       clearTimeout(frameTimer);
+      stopByteWatch();
       dropNativeWatch();
       markDirectFailed(stream);
       logRoute('direct-failed', stream, `reason=${why} fallback=proxy`);
@@ -154,6 +175,15 @@ export function useHls({ videoRef, stream, onFatal, onHlsReady, onRouteFallback,
     const armDirect = (mode, native) => {
       if (mode !== 'direct') return;
       frameTimer = setTimeout(() => fallBack('no-first-frame-10s'), DIRECT_FIRST_FRAME_MS);
+      lastBytesAt = Date.now();
+      byteCount = 0;
+      video.addEventListener('progress', noteBytes);
+      byteTimer = setInterval(() => {
+        if (firstFrame || fellBack || cancelled) { stopByteWatch(); return; }
+        const n = fragBytes();
+        if (n > byteCount) { byteCount = n; noteBytes(); }
+        if (Date.now() - lastBytesAt >= DIRECT_NO_BYTES_MS) fallBack('no-bytes-4s');
+      }, 250);
       if (native) {
         onNativeError = () => fallBack('media-error');
         video.addEventListener('error', onNativeError);
@@ -204,7 +234,7 @@ export function useHls({ videoRef, stream, onFatal, onHlsReady, onRouteFallback,
       // its own, so a real #EXT-X-MEDIA graph always wins.
       let hls = null;
       const muxed = {
-        tracks: null, slot: -1, pid: -1, probes: 0,
+        tracks: null, slot: -1, pid: -1, probes: 0, loaders: new Set(),
         active() { return Array.isArray(this.tracks) && this.tracks.length > 1; },
         transform(response, ctx) {
           if (ctx?.frag?.type !== 'main' || !(response?.data instanceof ArrayBuffer)) return;
@@ -233,8 +263,11 @@ export function useHls({ videoRef, stream, onFatal, onHlsReady, onRouteFallback,
       };
       muxedRef.current = muxed;
       const base = cbRef.current.config?.fLoader || Hls.DefaultConfig?.loader;
+      // P3: playlists of kept rows come from memory (playlistCache.js).
+      const pBase = cbRef.current.config?.pLoader || Hls.DefaultConfig?.loader;
       hls = new Hls(base
-        ? { ...cbRef.current.config, fLoader: muxedAudioLoader(base, muxed) }
+        ? { ...cbRef.current.config, fLoader: muxedAudioLoader(base, muxed),
+          ...(pBase ? { pLoader: cachedPlaylistLoader(pBase) } : {}) }
         : cbRef.current.config);
       hlsRef.current = hls;
       cbRef.current.onHlsReady?.(hls);
@@ -313,6 +346,10 @@ export function useHls({ videoRef, stream, onFatal, onHlsReady, onRouteFallback,
           hls.startLevel = lowest;
         }
       });
+      for (const ev of [Hls.Events.MANIFEST_LOADED, Hls.Events.LEVEL_LOADED,
+        Hls.Events.AUDIO_TRACK_LOADED, Hls.Events.FRAG_LOADED]) {
+        if (ev) hls.on(ev, noteBytes);
+      }
       hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, (_e, data) => {
         applyAudio(data?.audioTracks);
         if (!muxed.active()) setCurrentAudio(hls.audioTrack >= 0 ? hls.audioTrack : initialAudioTrack(data?.audioTracks || [], wantLangRef.current));
@@ -395,6 +432,7 @@ export function useHls({ videoRef, stream, onFatal, onHlsReady, onRouteFallback,
     return () => {
       cancelled = true;
       clearTimeout(frameTimer);
+      stopByteWatch();
       dropNativeWatch();
       video.removeEventListener('loadeddata', onFirstFrame);
       // Detach the old MediaSource from the element before the next provider

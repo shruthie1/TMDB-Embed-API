@@ -5,8 +5,10 @@ import { act, render } from '@testing-library/react';
 const made = { all: [] };
 class FakeHls {
   static Events = { MANIFEST_PARSED: 'm', LEVEL_SWITCHED: 's', ERROR: 'e',
-    AUDIO_TRACKS_UPDATED: 'atu', AUDIO_TRACK_SWITCHED: 'ats' };
+    AUDIO_TRACKS_UPDATED: 'atu', AUDIO_TRACK_SWITCHED: 'ats', MANIFEST_LOADED: 'ml', FRAG_LOADED: 'fl' };
   static isSupported = () => true;
+  // A loader base so the hook wraps fLoader/pLoader as with real hls.js.
+  static DefaultConfig = { loader: class { constructor() { this.stats = { loaded: 0 }; } load() {} abort() {} destroy() {} } };
   constructor(cfg) { this.cfg = cfg; this.levels = []; this.audioTracks = []; this.audioTrack = 0;
     this.h = {}; this.destroyed = false; made.all.push(this); }
   on(ev, fn) { (this.h[ev] ||= []).push(fn); }
@@ -110,10 +112,14 @@ describe('useHls web-direct routing', () => {
 
   it('no first frame within 10 s on direct -> proxy fallback', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: false });
-    harness(stream);
+    const { video } = harness(stream);
     await flush();
     expect(last().src).toBe(DIRECT);
-    await act(async () => { vi.advanceTimersByTime(10001); });
+    // Bytes keep arriving (slow, not stalled), so only the 10 s cap applies.
+    for (let i = 0; i < 10; i++) {
+      await act(async () => { video.dispatchEvent(new Event('progress')); vi.advanceTimersByTime(1000); });
+    }
+    await act(async () => { vi.advanceTimersByTime(1); });
     await flush();
     expect(last().src).toBe(PROXY);
     expect(logs.some((l) => /reason=no-first-frame-10s/.test(l))).toBe(true);
@@ -141,5 +147,55 @@ describe('useHls web-direct routing', () => {
     act(() => { video.dispatchEvent(new Event('error')); });
     expect(video.getAttribute('src')).toBe('https://vm.example/ts-proxy?url=y');
     expect(onFatal).not.toHaveBeenCalled();
+  });
+});
+
+// P6 (2026-11-22): a direct row with NO bytes for 4 s before the first frame
+// goes to the proxy at 4 s, not at the 10 s cap. A slow row that is receiving
+// bytes keeps going.
+describe('useHls direct stall: no bytes for 4 s', () => {
+  const stream = { id: 'MultiMovies-0', provider: 'MultiMovies', masterUrl: PROXY, webDirectUrl: DIRECT };
+
+  it('no bytes at all -> proxy at 4 s', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    const { onRouteFallback } = harness(stream);
+    await flush();
+    expect(last().src).toBe(DIRECT);
+    await act(async () => { vi.advanceTimersByTime(3900); });
+    expect(last().src).toBe(DIRECT);
+    await act(async () => { vi.advanceTimersByTime(200); });
+    await flush();
+    expect(last().src).toBe(PROXY);
+    expect(onRouteFallback).toHaveBeenCalledWith('no-bytes-4s');
+    expect(logs.some((l) => /direct-failed .*reason=no-bytes-4s fallback=proxy/.test(l))).toBe(true);
+  });
+
+  it('a playlist arrived, then nothing for 4 s -> proxy', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    harness(stream);
+    await flush();
+    await act(async () => { vi.advanceTimersByTime(2000); });
+    act(() => last().emit('ml', {}));          // MANIFEST_LOADED = bytes
+    await act(async () => { vi.advanceTimersByTime(3900); });
+    expect(last().src).toBe(DIRECT);
+    await act(async () => { vi.advanceTimersByTime(200); });
+    await flush();
+    expect(last().src).toBe(PROXY);
+  });
+
+  it('fragment bytes flowing (loader stats) keep the direct row past 4 s', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    harness(stream);
+    await flush();
+    // The fragment loader the hook wraps: its stats.loaded grows from onprogress.
+    const Loader = last().cfg.fLoader;
+    expect(Loader).toBeTruthy();
+    const l = new Loader();
+    l.load({ frag: { type: 'main' } }, {}, { onSuccess() {} });
+    for (let i = 1; i <= 8; i++) {
+      l.stats.loaded = i * 100_000;
+      await act(async () => { vi.advanceTimersByTime(1000); });
+    }
+    expect(last().src).toBe(DIRECT);
   });
 });

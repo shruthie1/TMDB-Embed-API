@@ -3380,3 +3380,17 @@ html[data-tv="true"] .pmenu-item:focus .pmenu-marker{color:var(--ink)}
   filter:drop-shadow(0 2px 12px rgba(0,0,0,.45));
 }
 @media (max-width:559px){ .title-logo{width:min(100%,17rem);height:84px} }
+
+/* "Refresh sources" (components/RefreshSources.jsx). Secondary next to Play;
+   the result line wraps under it on a phone. Cooldown stays focusable. */
+.refresh-src{display:inline-flex;align-items:center;flex-wrap:wrap;gap:var(--space-2) var(--space-3)}
+.refresh-btn[aria-disabled="true"]{opacity:.72}
+.refresh-btn[aria-disabled="true"]:focus-visible{opacity:1}
+.refresh-note{color:var(--color-text-muted);font-size:13px;min-height:1em}
+.refresh-note:empty{display:none}
+.refresh-spin{width:14px;height:14px;flex:none;border-radius:50%;border:2px solid currentColor;border-right-color:transparent;animation:refresh-spin .8s linear infinite}
+@keyframes refresh-spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.refresh-spin{animation:none;border-right-color:currentColor;opacity:.6}}
+
+.ov-actions .refresh-src{justify-content:center}
+.tvbar-btn.dim{opacity:.5}

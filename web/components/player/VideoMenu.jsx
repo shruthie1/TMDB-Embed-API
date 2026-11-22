@@ -41,6 +41,8 @@ export default function VideoMenu({
   choices = [], currentId, currentSource = null, onPick,
   open, onToggle, onTouch, onCheckSources, checkingSources = false,
   provider: providerProp, onProvider,
+  // "Refresh sources" (useRefreshSources): the list's first row.
+  refresh = null,
 }) {
   // The drilled provider can be owned by the parent (PlayerControls), so the
   // player's Back goes up one level before it closes the sheet (APK back()).
@@ -122,13 +124,25 @@ export default function VideoMenu({
 
       {open && !only && (
         <PlayerMenu title={provider || 'Server'} icon="server" onClose={onToggle} onBack={provider ? goBack : null} focusLabel={focusLabel} onTouch={onTouch}>
+          {!provider && refresh && (
+            // Stays focusable through refreshing and cooldown; a press in the cooldown says when.
+            <button role="menuitem" className="pmenu-item focusable" data-focus="" data-action="refresh-sources"
+                    aria-busy={refresh.running || undefined} aria-disabled={refresh.state !== 'idle' ? 'true' : undefined}
+                    onClick={refresh.refresh}>
+              <span className="pmenu-marker" aria-hidden="true">{refresh.running ? <span className="refresh-spin" /> : <Icon name="restart" size={14} />}</span>
+              <span className="pmenu-copy">
+                <span className="pmenu-text">{refresh.label}</span>
+                <span className="pmenu-meta" role="status" aria-live="polite">{refresh.note || 'Current playback continues'}</span>
+              </span>
+            </button>
+          )}
           {!provider && [...groups].map(([name, rows]) => (
-            <MenuRow key={name} label={name} meta={describe(rows)} selected={rows.some(c => choices.indexOf(c) === selectedIndex)}
+            <MenuRow key={name} label={name} meta={describe(rows)} dim={refresh?.running} selected={rows.some(c => choices.indexOf(c) === selectedIndex)}
               onClick={() => { if (rows.length === 1 && rows[0].embed) { if (choices.indexOf(rows[0]) === selectedIndex) onToggle?.(); else onPick?.(rows[0]); } else { setFocusLabel(null); setProvider(name); if (!rows.length && name.toLowerCase() === 'netmirror') onCheckSources?.(); } }} />
           ))}
           {provider && providerRows.map(c => {
             const i = choices.indexOf(c);
-            return <MenuRow key={`${c.id}-${i}`} label={labels[i]} meta={[c.source?.netmirrorCatalog, maxOf(c), c.embed ? '' : (sourceAudioLanguages(c.source).join(', ') || 'Unknown audio')].filter(Boolean).join(' · ')} selected={i === selectedIndex} dim={c.unsupported}
+            return <MenuRow key={`${c.id}-${i}`} label={labels[i]} meta={[c.source?.netmirrorCatalog, maxOf(c), c.embed ? '' : (sourceAudioLanguages(c.source).join(', ') || 'Unknown audio')].filter(Boolean).join(' · ')} selected={i === selectedIndex} dim={c.unsupported || refresh?.running}
               // APK A2: the playing row only closes the sheet.
               onClick={() => (i === selectedIndex ? onToggle?.() : onPick?.(c))} />;
           })}
