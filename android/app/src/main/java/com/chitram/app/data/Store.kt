@@ -52,13 +52,29 @@ class LanguagePrefs(private val kv: KeyValue) {
         }
     }
 
-    /** True once the viewer picked or skipped on first run. */
+    /** True once a choice is saved (seeded on first run, or a Languages save). */
     fun hasPrefs(): Boolean = kv.get(KEY) != null
+
+    /**
+     * Owner: no first-run language popup. A new install saves every supported
+     * language, Telugu first, so Telugu-first ranking is unchanged. The viewer
+     * changes them only from the Languages tab. Saved prefs are left alone.
+     */
+    fun seedDefault() { if (!hasPrefs()) save(LANGS.map { it.code }) }
 
     /** The chosen codes. Empty = skipped. */
     fun langs(): List<String> = kv.get(KEY)?.split(',')?.let { clean(it) } ?: emptyList()
 
     fun save(langs: List<String>) { kv.put(KEY, clean(langs).joinToString(",")) }
+
+    /**
+     * Languages screen save: the chosen set in the supported order (te, ta, hi,
+     * ml, kn), not tap order. Re-adding Telugu keeps it first in Home rows.
+     */
+    fun saveChosen(langs: Collection<String>) {
+        val picked = clean(langs.toList()).toSet()
+        save(LANGS.map { it.code }.filter { it in picked })
+    }
 
     /** The languages rows and search use: the choice, or all of them. */
     fun effective(): List<String> = langs().ifEmpty { LANGS.map { it.code } }

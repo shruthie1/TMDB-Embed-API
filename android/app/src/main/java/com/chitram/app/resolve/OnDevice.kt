@@ -84,13 +84,15 @@ class OnDeviceResolver(
 
     suspend fun resolveAll(name: String, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, preferred: String = "Telugu", fresh: Boolean = false, title: String? = null, originalLang: String? = null,
                            later: MappleResolver.Later? = null): List<Source> {
+        // Play after a details-page prewarm: continue from that work, never a second fetch.
+        if (!fresh && kotlin.coroutines.coroutineContext[Prewarming] == null) claimWarm(name, type, id, season, episode, preferred)?.let { w -> return awaitWarm(name, w, later) }
         if (name == MULTIMOVIES) return resolveMultiMovies(type, id, season, episode, codecs, fresh, originalLang)
         if (name == VIDRIFT) return resolveVidrift(type, id, season, episode, codecs, fresh, originalLang)
         if (name == SHOWSST || name == ONETOUCH) return resolveRows(name, type, id, season, episode, codecs, fresh, title)
         if (name != NETMIRROR) return listOfNotNull(resolveOne(name, type, id, season, episode, codecs, preferred, fresh, title, later))
         if (!fresh && isOpen(name)) return emptyList()
         return guarded(name) {
-            val cfg = config.get().netmirror
+            val cfg = cfgNow().netmirror
             if (!cfg.enabled) return@guarded emptyList()
             var timedOut = true
             val completed = mutableListOf<Resolved>()
@@ -179,7 +181,7 @@ class OnDeviceResolver(
             return null
         }
         return guarded(name) {
-            val all = config.get()
+            val all = cfgNow()
             when (name) {
                 MAPPLE -> {
                     val cfg = all.mapple
@@ -220,6 +222,119 @@ class OnDeviceResolver(
                 }
             }
         }?.let { toSource(it, codecs) }
+    }
+
+    // ---- prewarm (prewarm.md) -------------------------------------------------
+
+    /** Marks a prewarm resolve: config from cache only, so it sends nothing to the VM. */
+    private class Prewarming : kotlin.coroutines.AbstractCoroutineContextElement(Prewarming) {
+        companion object Key : kotlin.coroutines.CoroutineContext.Key<Prewarming>
+    }
+
+    /** Config for a resolve: a prewarm never fetches it (the fetch goes to the VM). */
+    private suspend fun cfgNow(): ResolveConfig =
+        if (kotlin.coroutines.coroutineContext[Prewarming] != null) config.current() else config.get()
+
+    /** One provider's prewarm: its rows, plus mapple's background preferred-language row. */
+    private class Warm(val at: Long, val rows: Deferred<List<Source>>, val late: kotlinx.coroutines.CompletableDeferred<Resolved?>?)
+    private val warm = java.util.concurrent.ConcurrentHashMap<String, Warm>()
+    private val warmScope = CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO)
+    /** NetMirror titles prewarmed, with when: never again inside PREWARM_TTL_MS. */
+    private val netmirrorWarmed = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    private fun warmTitle(type: String, id: Long, season: Int, episode: Int, preferred: String) = "$type:$id:$season:$episode:${preferred.lowercase()}"
+
+    /** Providers a prewarm starts: config `prewarm` true and a resolver on this device. */
+    fun prewarmNames(): List<String> = config.current().prewarm.let { on -> names(vmDown = true).filter { it in on } }
+
+    /**
+     * Details page opened: start the on-device resolve of every prewarm provider for
+     * the title Play would open, in parallel, off the main thread, and keep each
+     * job for PREWARM_TTL_MS. Play's [resolveAll] then awaits the job instead of
+     * fetching again. Never calls the VM (config from cache, catalog from Vercel).
+     * Each provider keeps its own budget and breaker; one slow or failing provider
+     * never delays another. Another title's unclaimed jobs are cancelled: one
+     * title is prewarmed at a time, so at most one NetMirror prewarm is in flight.
+     */
+    fun prewarm(type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, preferred: String = "Telugu", title: String? = null, originalLang: String? = null): List<String> {
+        val t = warmTitle(type, id, season, episode, preferred)
+        val at = now()
+        warm.entries.removeIf { (k, w) ->
+            (!k.startsWith("$t|") || at - w.at > PREWARM_TTL_MS).also { drop -> if (drop) { w.rows.cancel(); w.late?.cancel() } }
+        }
+        netmirrorWarmed.entries.removeIf { at - it.value > PREWARM_TTL_MS }
+        val started = mutableListOf<String>()
+        for (n in prewarmNames()) {
+            val k = "$t|$n"
+            if (warm.containsKey(k)) continue
+            // Breaker open: the provider is paused for Play too; nothing to warm.
+            if (isOpen(n)) continue
+            if (n == NETMIRROR && netmirrorWarmed.putIfAbsent("$type:$id:$season:$episode", at) != null) continue
+            val late = if (n == MAPPLE) kotlinx.coroutines.CompletableDeferred<Resolved?>() else null
+            val later = late?.let { l -> MappleResolver.Later(warmScope) { r -> l.complete(r) } }
+            val job = warmScope.async(Prewarming(), start = kotlinx.coroutines.CoroutineStart.LAZY) {
+                val t0 = now()
+                try {
+                    resolveAll(n, type, id, season, episode, codecs, preferred, fresh = false, title = title, originalLang = originalLang, later = later).also { rows ->
+                        if (n == NETMIRROR) android.util.Log.i("Chitram", "prewarm: netmirror $type/$id result=${if (rows.isNotEmpty()) "rows" else if (netmirror?.throttled == true) "throttled" else "error"} ms=${now() - t0} rows=${rows.size}")
+                    }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    if (n == NETMIRROR) android.util.Log.i("Chitram", "prewarm: netmirror $type/$id result=cancelled ms=${now() - t0} rows=0")
+                    throw e
+                } finally {
+                    // No background search live (none, or cancelled first): nothing more comes.
+                    if (later != null && !later.handedOff) late?.complete(null)
+                }
+            }
+            warm[k] = Warm(at, job, late)
+            job.start()
+            started += n
+        }
+        if (started.isNotEmpty()) android.util.Log.i("Chitram", "prewarm: $type/$id s$season e$episode started ${started.joinToString(",")}")
+        return started
+    }
+
+    /**
+     * Providers with a fresh prewarm job for this Play, not yet taken, in launch order.
+     * Play starts each of them (even one it would otherwise start only when the VM
+     * fails) so its rows join the first list at once.
+     */
+    fun prewarmedNames(type: String, id: Long, season: Int, episode: Int, preferred: String): List<String> {
+        val t = warmTitle(type, id, season, episode, preferred)
+        val at = now()
+        return names(vmDown = true).filter { n -> warm["$t|$n"]?.let { at - it.at <= PREWARM_TTL_MS && !it.rows.isCancelled } == true }
+    }
+
+    /** Unclaimed prewarm jobs (tests). */
+    internal fun prewarmJobs(): List<Deferred<List<Source>>> = warm.values.map { it.rows }
+
+    /** Details page left: cancel this title's prewarm jobs Play has not taken. */
+    fun cancelPrewarm(type: String, id: Long) {
+        warm.entries.removeIf { (k, w) -> k.startsWith("$type:$id:").also { if (it) { w.rows.cancel(); w.late?.cancel() } } }
+    }
+
+    /** Takes this provider's prewarm job for this title, once; null when none is fresh. */
+    private fun claimWarm(name: String, type: String, id: Long, season: Int, episode: Int, preferred: String): Warm? {
+        val w = warm.remove("${warmTitle(type, id, season, episode, preferred)}|$name") ?: return null
+        if (now() - w.at > PREWARM_TTL_MS || w.rows.isCancelled) { w.rows.cancel(); w.late?.cancel(); return null }
+        android.util.Log.i("Chitram", "prewarm: $name $type/$id reused (age ${now() - w.at}ms, ${if (w.rows.isCompleted) "done" else "in flight"})")
+        return w
+    }
+
+    /** Play's rows from a prewarm job; mapple's late row goes through Play's own [later], as a list entry only. */
+    private suspend fun awaitWarm(name: String, w: Warm, later: MappleResolver.Later?): List<Source> {
+        if (later != null) {
+            val l = w.late
+            if (l == null) later.deliver(null) else {
+                later.handedOff = true
+                l.invokeOnCompletion { cause -> later.deliver(if (cause == null) l.getCompleted() else null) }
+            }
+        }
+        return try { w.rows.await() } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException && !w.rows.isCancelled) throw e
+            android.util.Log.i("Chitram", "prewarm: $name job ended without rows: ${e.javaClass.simpleName}")
+            emptyList()
+        }
     }
 
     private suspend fun <T> guarded(name: String, block: suspend () -> T?): T? {
@@ -274,6 +389,8 @@ class OnDeviceResolver(
             VIDRIFT -> VIDRIFT
             else -> null
         }
+        /** A prewarm job older than this is not reused (signed links age). */
+        const val PREWARM_TTL_MS = 120_000L
         const val BREAKER_FAILS = 3
         const val BREAKER_OPEN_MS = 5 * 60 * 1000L
         const val BREAKER_MAX_MS = 30 * 60 * 1000L

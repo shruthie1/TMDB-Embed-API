@@ -22,8 +22,9 @@ class MainActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.dark(0xFF06070C.toInt()), // 3-button nav otherwise got a light scrim
         )
         setContent {
-            // First run asks for languages (with Skip), as on the web.
-            val nav = remember { Nav(if (app.prefs.hasPrefs()) Screen.Home else Screen.Langs(firstRun = true)) }
+            // No first-run language picker: a new install starts with every
+            // language (Telugu first) and opens Home. Languages tab changes them.
+            val nav = remember { app.prefs.seedDefault(); Nav(Screen.Home) }
             if (app.isTv) TvApp(nav) else PhoneApp(nav)
         }
     }

@@ -178,9 +178,12 @@ sealed interface Screen {
     data object Home : Screen
     data object Search : Screen
     data object MyList : Screen
-    data class Langs(val firstRun: Boolean) : Screen
-    /** `poster`: the TMDB path the opener already shows, reused so the header is a cache hit. */
-    data class Detail(val type: String, val id: Long, val poster: String? = null) : Screen
+    data object Langs : Screen
+    /**
+     * `poster`: the TMDB path the opener already shows, reused so the header is a cache hit.
+     * `title`/`backdrop`: the tapped card's, shown at once while the title loads.
+     */
+    data class Detail(val type: String, val id: Long, val poster: String? = null, val title: String? = null, val backdrop: String? = null) : Screen
     data class Person(val id: Long, val name: String = "") : Screen
     /** Browse with filters; `initial` comes from a row's "See all". */
     data class Browse(val initial: com.chitram.app.data.BrowseFilters = com.chitram.app.data.BrowseFilters()) : Screen

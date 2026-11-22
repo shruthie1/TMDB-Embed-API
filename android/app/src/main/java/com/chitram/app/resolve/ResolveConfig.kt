@@ -122,7 +122,7 @@ data class MultiMoviesConfig(
 )
 
 data class ResolveConfig(
-    val version: Int = 1,
+    val version: Int = 3,
     val ttlSec: Long = 6 * 3600L,
     val mapple: MappleConfig = MappleConfig(),
     val vaplayer: VaplayerConfig = VaplayerConfig(),
@@ -131,8 +131,18 @@ data class ResolveConfig(
     val multimovies: MultiMoviesConfig = MultiMoviesConfig(),
     /** routes.<provider>.apk: off | direct | proxy | device. Invalid or missing entries are left out. */
     val routes: Map<String, String> = emptyMap(),
+    /**
+     * On-device providers resolved when a details page opens (prewarm.md), so Play
+     * reuses that work. `<provider>.prewarm` in each section; a section the config
+     * carries with no boolean `prewarm` is false. Absent section: the default.
+     */
+    val prewarm: Set<String> = DEFAULT_PREWARM,
 ) {
     companion object {
+        /** Owner 2026-11-22: the Telugu workhorses that resolve on the device. */
+        val DEFAULT_PREWARM = setOf("mapple", "vidrift", "multimovies", "castletv", "netmirror")
+        /** Sections that may carry `prewarm` (every on-device provider). */
+        private val PREWARM_SECTIONS = listOf("mapple", "vaplayer", "netmirror", "castletv", "multimovies", "vidrift", "showsst", "onetouchtv")
         private val json = Json { ignoreUnknownKeys = true; isLenient = true }
         private val SECTIONS = listOf("mapple", "vaplayer", "netmirror", "castletv", "multimovies")
 
@@ -161,6 +171,9 @@ data class ResolveConfig(
                     MultiMoviesConfig(bases = o.hosts("bases") ?: d.multimovies.bases, resolvePath = o.path("resolvePath") ?: d.multimovies.resolvePath)
                 } ?: d.multimovies,
                 routes = (root["routes"] as? JsonObject)?.let { routes(it) } ?: d.routes,
+                prewarm = PREWARM_SECTIONS.filter { n ->
+                    (root[n] as? JsonObject)?.let { it.prim("prewarm")?.takeIf { p -> !p.isString }?.booleanOrNull == true } ?: (n in d.prewarm)
+                }.toSet(),
             )
         }
 

@@ -99,7 +99,7 @@ class FirstPlayFixesTest {
 
     @Test fun playerVmWiresExtrasIntoTheRaceAndJoinsThemLate() {
         val vm = listOf(File("src/main/java/com/chitram/app/player/PlayerVm.kt"), File("app/src/main/java/com/chitram/app/player/PlayerVm.kt")).first { it.exists() }.readText()
-        assertTrue(vm.contains("firstMany(vm, device, preferred, extras ="))
+        assertTrue(vm.contains("firstMany(vm, device, preferred, warm = warmJobs, extras ="))
         assertTrue("late joins cover jobs started in the race", vm.contains("lateJobs = (deviceJobs + listOfNotNull(deviceLate))"))
     }
 

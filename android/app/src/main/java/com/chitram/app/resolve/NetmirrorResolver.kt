@@ -21,6 +21,12 @@ class NetmirrorResolver(
     client: OkHttpClient,
     private val otp: () -> String = { "111111" },
     private val now: () -> Long = System::currentTimeMillis,
+    /**
+     * Keeps the otp.php session (token, the OTP it was issued for, expiry and the
+     * API base it belongs to) across process death, so a cold start does not call
+     * otp.php again. Null: memory only. The token is never logged.
+     */
+    private val kv: com.chitram.app.data.KeyValue? = null,
 ) {
     private val jar = object : CookieJar {
         private val cookies = mutableListOf<Cookie>()
@@ -45,7 +51,29 @@ class NetmirrorResolver(
     private var token: String? = null
     private var tokenUntil = 0L
     private var credential: String? = null
+    /** The API base [token] was issued by; a token from another base is never sent. */
+    private var tokenBase: String? = null
     private var blockedUntil = 0L
+
+    /** True while a 429/403, a substituted clip or a refused OTP holds every request back. */
+    val throttled: Boolean get() = blockedUntil > now()
+
+    init {
+        kv?.let { s ->
+            val t = s.get(KV_TOKEN); val c = s.get(KV_CREDENTIAL); val b = s.get(KV_BASE); val u = s.get(KV_UNTIL)?.toLongOrNull()
+            if (!t.isNullOrBlank() && c != null && !b.isNullOrBlank() && u != null && u > now()) { token = t; credential = c; tokenBase = b; tokenUntil = u }
+        }
+    }
+
+    private fun clearToken() {
+        token = null; tokenUntil = 0; tokenBase = null
+        kv?.let { s -> listOf(KV_TOKEN, KV_CREDENTIAL, KV_BASE, KV_UNTIL).forEach { s.put(it, null) } }
+    }
+
+    private fun saveToken(value: String, entered: String, base: String, ttlMs: Long) {
+        token = value; credential = entered; tokenBase = base; tokenUntil = now() + ttlMs
+        kv?.let { s -> s.put(KV_TOKEN, value); s.put(KV_CREDENTIAL, entered); s.put(KV_BASE, base); s.put(KV_UNTIL, tokenUntil.toString()) }
+    }
     private var bucketAt = 0L
     private var calls = 0
     private data class Cached(val value: JsonObject, val until: Long)
@@ -56,7 +84,10 @@ class NetmirrorResolver(
         if (!cfg.enabled || title.isBlank()) return@withLock emptyList()
         if (blockedUntil > now()) throw StepException("netmirror", 0, "cooldown active")
         if (discoveryDomains != cfg.domains) {
-            api = null; apiUntil = 0; token = null; tokenUntil = 0; metadata.clear(); players.clear()
+            // First resolve after a (cold) start: a stored token stays; discover() still drops it
+            // when the API base it belongs to is not the one found now.
+            if (discoveryDomains.isNotEmpty()) clearToken()
+            api = null; apiUntil = 0; metadata.clear(); players.clear()
             discoveryDomains = cfg.domains.toList()
         }
         val cacheKey = "${cfg.domains}|$type|$title|$year|$season|$episode"
@@ -152,7 +183,8 @@ class NetmirrorResolver(
                 val url = decoded.toHttpUrlOrNull() ?: continue
                 if ((!url.isHttps && url.host !in listOf("localhost", "127.0.0.1")) || url.username.isNotEmpty() || url.password.isNotEmpty()) continue
                 val next = url.toString().trimEnd('/')
-                if (api != next) { token = null; tokenUntil = 0; metadata.clear() }
+                if (api != next) metadata.clear()
+                if (tokenBase != null && tokenBase != next) clearToken()
                 api = next; apiUntil = now() + cfg.apiTtlMs
                 return next
             } catch (e: Exception) {
@@ -165,8 +197,8 @@ class NetmirrorResolver(
 
     private suspend fun authenticate(cfg: NetmirrorConfig, base: String): String {
         val entered = otp()
-        if (tokenUntil > now() && credential == entered) token?.let { return it }
-        token = null; tokenUntil = 0
+        if (tokenUntil > now() && credential == entered && tokenBase == base) token?.let { return it }
+        clearToken()
         val r = request(cfg, "$base/newtv/otp.php", mapOf("Otp" to entered, "User-Agent" to UA.replace("GatuNewTV", "Gatu")))
         val data = MappleResolver.obj(r.body)
         val value = data?.let { str(it, "usertoken") }
@@ -174,7 +206,7 @@ class NetmirrorResolver(
             blockedUntil = now() + cfg.cooldownMs
             throw StepException("netmirror login", r.code, "OTP not accepted")
         }
-        token = value; credential = entered; tokenUntil = now() + cfg.sessionTtlMs
+        saveToken(value, entered, base, cfg.sessionTtlMs)
         return value
     }
 
@@ -186,7 +218,7 @@ class NetmirrorResolver(
             val r = request(cfg, "$base$path", extra + mapOf("Ott" to ott, "Usertoken" to value))
             val data = MappleResolver.obj(r.body) ?: throw StepException("netmirror API", r.code, "not JSON")
             if (str(data, "status") == "otp") {
-                token = null; tokenUntil = 0
+                clearToken()
                 if (attempt == 1) { blockedUntil = now() + cfg.cooldownMs; throw StepException("netmirror login", 0, "session rejected after renewal") }
             } else {
                 if (str(data, "status") == "error") throw StepException("netmirror API", r.code, "upstream error")
@@ -256,6 +288,10 @@ class NetmirrorResolver(
     }
 
     companion object {
+        private const val KV_TOKEN = "netmirror.session.token"
+        private const val KV_CREDENTIAL = "netmirror.session.otp"
+        private const val KV_BASE = "netmirror.session.base"
+        private const val KV_UNTIL = "netmirror.session.until"
         const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:136.0) Gecko/20100101 Firefox/136.0 /OS.GatuNewTV v1.0"
         fun masterMatchesTitle(text: String, id: String): Boolean {
             val ids = text.lines().map(String::trim).filter { it.isNotBlank() && !it.startsWith('#') }

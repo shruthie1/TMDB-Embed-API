@@ -120,6 +120,42 @@ class NetmirrorTest {
         assertEquals(3, seen.count { it.requestUrl!!.encodedPath.endsWith("search.php") })
         assertEquals(6, seen.count { it.requestUrl!!.encodedPath.endsWith("player.php") })
     }
+    @Test fun aColdStartReusesTheStoredOtpSessionWithNoOtpCall() = runBlocking {
+        val kv = MemoryKeyValue()
+        assertEquals(3, resolve(NetmirrorResolver(client, now = { clock }, kv = kv)).size)
+        assertEquals(1, logins)
+        // New process, same store: 0 otp.php calls, the stored token is sent.
+        assertEquals(3, resolve(NetmirrorResolver(client, now = { clock }, kv = kv)).size)
+        assertEquals(1, logins)
+        assertTrue(seen.filter { it.requestUrl!!.encodedPath.endsWith("player.php") }.all { it.getHeader("Usertoken") == "SECRET-1" })
+    }
+
+    @Test fun anExpiredStoredSessionCostsExactlyOneOtpCall() = runBlocking {
+        val kv = MemoryKeyValue()
+        resolve(NetmirrorResolver(client, now = { clock }, kv = kv))
+        clock += NetmirrorConfig().sessionTtlMs + 1
+        assertEquals(3, resolve(NetmirrorResolver(client, now = { clock }, kv = kv)).size)
+        assertEquals(2, logins)
+    }
+
+    @Test fun aStoredSessionFromAnotherApiBaseCostsExactlyOneOtpCall() = runBlocking {
+        val kv = MemoryKeyValue()
+        resolve(NetmirrorResolver(client, now = { clock }, kv = kv))
+        kv.put("netmirror.session.base", "https://other.example")
+        assertEquals(3, resolve(NetmirrorResolver(client, now = { clock }, kv = kv)).size)
+        assertEquals(2, logins)
+        assertEquals("rewritten to the base that issued it", base, kv.get("netmirror.session.base"))
+    }
+
+    @Test fun aRefusedOtpClearsTheStoredSession() = runBlocking {
+        val kv = MemoryKeyValue()
+        resolve(NetmirrorResolver(client, now = { clock }, kv = kv))
+        clock += NetmirrorConfig().sessionTtlMs + 1
+        loginError = true
+        assertTrue(runCatching { resolve(NetmirrorResolver(client, now = { clock }, kv = kv)) }.isFailure)
+        assertTrue(kv.map.keys.none { it.startsWith("netmirror.session.") })
+    }
+
     @Test fun otpRenewsOnCatalogDiscoveryThenContinuesWithPostAndPlayer() = runBlocking {
         reject = 1
         assertEquals(3, resolve(resolver()).size)

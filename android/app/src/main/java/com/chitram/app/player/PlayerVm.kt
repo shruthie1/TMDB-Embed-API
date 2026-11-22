@@ -143,11 +143,14 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     var labels by mutableStateOf<Map<String, String>>(emptyMap()); private set
     private var resolveStartMs = 0L
 
+    /** The player's base client: the shared pool, plus the castle-demux master codec fill (MasterCodecs). */
+    private val playerHttp: okhttp3.OkHttpClient = g.api.client.newBuilder().addInterceptor(MasterCodecs).build()
+
     val player: ExoPlayer = ExoPlayer.Builder(
         app,
         (if (Device.isTv(app)) NoKeyframeSkipRenderersFactory(app) else DefaultRenderersFactory(app)).setEnableDecoderFallback(true),
     )
-        .setMediaSourceFactory(DefaultMediaSourceFactory(OkHttpDataSource.Factory(g.api.client)))
+        .setMediaSourceFactory(DefaultMediaSourceFactory(OkHttpDataSource.Factory(playerHttp)))
         // Smaller buffer than the default: the 2018 stick has 1.5 GB RAM.
         .setLoadControl(DefaultLoadControl.Builder().setBufferDurationsMs(15_000, 40_000, 1_500, 3_000).build())
         .setSeekBackIncrementMs(10_000)
@@ -200,6 +203,13 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     private var framedThisPlay = false
     /** First-play timing (fix D): master / variant / seg0 logged once per play(), first frame once per tap. */
     private val loadMarks = LoadMarks()
+    /** Lines traced for this play (LoadTrace): before the first frame only, at most LoadTrace.MAX. */
+    private var traced = 0
+    private fun trace(event: String, detail: String) {
+        if (framedThisPlay || playStartedAt == 0L || traced >= LoadTrace.MAX) return
+        traced++
+        android.util.Log.i("Chitram", LoadTrace.line(event, System.currentTimeMillis() - playStartedAt, detail))
+    }
     private var firstFrameLogged = false
     private var directJob: Job? = null
     /** H13: the Telugu row merged under the playing picture, or null. */
@@ -297,15 +307,47 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                 mediaLoadData: androidx.media3.exoplayer.source.MediaLoadData,
                 error: java.io.IOException,
                 wasCanceled: Boolean,
-            ) { if (!wasCanceled) onLoadFailed(loadEventInfo.uri.toString(), error) }
+            ) {
+                trace("load-error", LoadTrace.load(mediaLoadData.dataType, mediaLoadData.trackType, mediaLoadData.trackFormat?.language, loadEventInfo.loadDurationMs, loadEventInfo.bytesLoaded, loadEventInfo.uri.toString()) +
+                    " " + LoadTrace.error(error) + if (wasCanceled) " canceled" else "")
+                if (!wasCanceled) onLoadFailed(loadEventInfo.uri.toString(), error)
+            }
+            override fun onLoadStarted(
+                eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+                loadEventInfo: androidx.media3.exoplayer.source.LoadEventInfo,
+                mediaLoadData: androidx.media3.exoplayer.source.MediaLoadData,
+            ) { trace("load-start", LoadTrace.load(mediaLoadData.dataType, mediaLoadData.trackType, mediaLoadData.trackFormat?.language, -1, -1, loadEventInfo.uri.toString())) }
+            override fun onLoadCanceled(
+                eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+                loadEventInfo: androidx.media3.exoplayer.source.LoadEventInfo,
+                mediaLoadData: androidx.media3.exoplayer.source.MediaLoadData,
+            ) { trace("load-cancel", LoadTrace.load(mediaLoadData.dataType, mediaLoadData.trackType, mediaLoadData.trackFormat?.language, loadEventInfo.loadDurationMs, loadEventInfo.bytesLoaded, loadEventInfo.uri.toString())) }
             override fun onLoadCompleted(
                 eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
                 loadEventInfo: androidx.media3.exoplayer.source.LoadEventInfo,
                 mediaLoadData: androidx.media3.exoplayer.source.MediaLoadData,
             ) {
+                trace("load-done", LoadTrace.load(mediaLoadData.dataType, mediaLoadData.trackType, mediaLoadData.trackFormat?.language, loadEventInfo.loadDurationMs, loadEventInfo.bytesLoaded, loadEventInfo.uri.toString()))
                 val kind = loadMarks.mark(mediaLoadData.dataType) ?: return
                 android.util.Log.i("Chitram", loadLine(kind, loadEventInfo.loadDurationMs, System.currentTimeMillis() - playStartedAt, loadEventInfo.uri.toString()))
             }
+            override fun onVideoInputFormatChanged(
+                eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+                format: androidx.media3.common.Format,
+                decoderReuseEvaluation: androidx.media3.exoplayer.DecoderReuseEvaluation?,
+            ) { trace("video-format", "${format.sampleMimeType} ${format.width}x${format.height}") }
+            override fun onAudioInputFormatChanged(
+                eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+                format: androidx.media3.common.Format,
+                decoderReuseEvaluation: androidx.media3.exoplayer.DecoderReuseEvaluation?,
+            ) { trace("audio-format", "${format.sampleMimeType} lang=${format.language}") }
+            override fun onPlaybackStateChanged(eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime, state: Int) {
+                trace("state", LoadTrace.state(state) + " pos=${player.currentPosition} buffered=${player.bufferedPosition}")
+            }
+            override fun onPositionDiscontinuity(
+                eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+                oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int,
+            ) { trace("discontinuity", "reason=$reason ${oldPosition.positionMs}->${newPosition.positionMs}") }
         })
         viewModelScope.launch {
             var n = 0
@@ -474,19 +516,26 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             // VM breaker open: no VM call, MultiMovies, showsst and OneTouchTV resolve on the device instead.
             val vmDown = !g.api.vmUp
             val names = g.onDevice.names(vmDown)
+            // prewarm.md: providers the details page already resolved. Each continues from that job;
+            // one Play would start only on a VM failure (multimovies, vidrift) joins the first list now.
+            val warmNames = if (keep) emptyList() else g.onDevice.prewarmedNames(r.type, r.id, r.season, r.episode, preferred)
+            val warmExtra = warmNames.filter { it !in names }
             val device = if (keep) deviceJobs else {
                 val bg = kotlinx.coroutines.SupervisorJob(viewModelScope.coroutineContext[Job])
                 val late = kotlinx.coroutines.CompletableDeferred<List<Source>>()
                 deviceBg = bg
                 deviceLate = late
                 g.onDevice.launchAll(viewModelScope, r.type, r.id, r.season, r.episode, g.codecs, preferred, r.title, vmDown, r.originalLang,
-                    late = late, lateScope = kotlinx.coroutines.CoroutineScope(viewModelScope.coroutineContext + bg))
+                    late = late, lateScope = kotlinx.coroutines.CoroutineScope(viewModelScope.coroutineContext + bg)) +
+                    warmExtra.map { n -> viewModelScope.async { g.onDevice.resolveAll(n, r.type, r.id, r.season, r.episode, g.codecs, preferred, title = r.title, originalLang = r.originalLang) } }
             }.also { d ->
                 if (keep) return@also
-                deviceNames = names
-                d.zip(names).forEach { (job, n) -> watchCheck(job, n, t0) }
+                deviceNames = names + warmExtra
+                d.zip(names + warmExtra).forEach { (job, n) -> watchCheck(job, n, t0) }
             }
             deviceJobs = device
+            val warmJobs = if (keep) emptyList() else device.zip(names + warmExtra).filter { (_, n) -> n in warmNames }.map { it.first }
+            if (warmNames.isNotEmpty()) android.util.Log.i("Chitram", "[race] continuing prewarm: ${warmNames.joinToString(",")}")
             vmJob?.cancel()
             fullJob?.cancel()
             // A9: set when the VM answered partial or a provider threw; read after the answer lands.
@@ -500,7 +549,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             vmJob = vm
             if (vm == null) android.util.Log.i("Chitram", "[vm] paused: starting from device rows only")
             // Fix A: VM-down-only providers start once the VM fails or its lead ends with no row in the viewer's language.
-            val first = StartRace().firstMany(vm, device, preferred, extras = if (vm == null) null else { why ->
+            val first = StartRace().firstMany(vm, device, preferred, warm = warmJobs, extras = if (vm == null) null else { why ->
                 startVmDownJobs(r, preferred, t0, vmDownExtras(g.onDevice.names(vmDown = true), g.onDevice.names(vmDown = false), deviceNames), why)
             })
             val backend = first.backend
@@ -626,6 +675,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             "reason=" + if (DirectRoute.isDirect(s)) "config-direct" else "direct-failed-before"))
         framedThisPlay = false
         loadMarks.reset()
+        traced = 0
         directJob?.cancel()
         // Another picture replaces the run's: no late donor answer may land on it.
         if (pairAudio == null) runEffects(journey.otherPicture(s.id))
@@ -712,7 +762,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     private fun sourceFor(s: Source, item: MediaItem): androidx.media3.exoplayer.source.MediaSource {
         val swap = if (TsAudioSwap.wanted(s)) TsAudioSwap(desiredAudio()) else null
         // A backend row playing direct (DirectRoute) carries the provider's headers.
-        if (PlayPolicy.usesBaseClient(s, swap != null)) return DefaultMediaSourceFactory(OkHttpDataSource.Factory(g.api.client)).createMediaSource(item)
+        if (PlayPolicy.usesBaseClient(s, swap != null)) return DefaultMediaSourceFactory(OkHttpDataSource.Factory(playerHttp)).createMediaSource(item)
         val streamClient = StreamInterceptor.playerClient(g.api.client, s.headers, s.segmentToken, PlayPolicy.connectTimeoutMs(s))
             .let { c -> if (swap == null) c else c.newBuilder().addInterceptor(swap).build() }
         if (swap != null) android.util.Log.i("Chitram", "[tsaudio] ${s.provider}: swapping in ${g.prefs.preferredAudio()} from ${s.languages.joinToString("/")}")
@@ -1727,5 +1777,40 @@ internal class LoadMarks {
         androidx.media3.common.C.DATA_TYPE_MEDIA, androidx.media3.common.C.DATA_TYPE_MEDIA_INITIALIZATION ->
             if (seg0) null else { seg0 = true; "seg0" }
         else -> null
+    }
+}
+
+/**
+ * Before-first-frame trace (`play: trace +<ms> <event> <detail>`): every load
+ * start, finish, cancel and error, the renderer formats and the state changes,
+ * so a slow start shows which request or step the time went to.
+ */
+internal object LoadTrace {
+    const val MAX = 60
+    fun line(event: String, sincePlayMs: Long, detail: String): String = "play: trace +${sincePlayMs}ms $event $detail"
+    fun load(dataType: Int, trackType: Int, lang: String?, loadMs: Long, bytes: Long, uri: String): String {
+        val data = when (dataType) {
+            androidx.media3.common.C.DATA_TYPE_MANIFEST -> "manifest"
+            androidx.media3.common.C.DATA_TYPE_MEDIA -> "media"
+            androidx.media3.common.C.DATA_TYPE_MEDIA_INITIALIZATION -> "init"
+            else -> "data$dataType"
+        }
+        val track = when (trackType) {
+            androidx.media3.common.C.TRACK_TYPE_VIDEO -> "video"
+            androidx.media3.common.C.TRACK_TYPE_AUDIO -> "audio"
+            androidx.media3.common.C.TRACK_TYPE_TEXT -> "text"
+            androidx.media3.common.C.TRACK_TYPE_DEFAULT -> "muxed"
+            else -> "t$trackType"
+        }
+        val tail = uri.substringAfter("://").substringAfter('/', "").substringBefore('?').takeLast(40)
+        return "$data/$track" + (lang?.let { " lang=$it" } ?: "") +
+            (if (loadMs >= 0) " ${loadMs}ms" else "") + (if (bytes >= 0) " ${bytes}B" else "") + " ${DirectRoute.host(uri)}/$tail"
+    }
+    fun error(e: Throwable): String {
+        val code = generateSequence(e) { it.cause }.filterIsInstance<androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException>().firstOrNull()?.responseCode
+        return (code?.let { "http=$it " } ?: "") + e.javaClass.simpleName
+    }
+    fun state(s: Int): String = when (s) {
+        Player.STATE_IDLE -> "IDLE"; Player.STATE_BUFFERING -> "BUFFERING"; Player.STATE_READY -> "READY"; Player.STATE_ENDED -> "ENDED"; else -> "S$s"
     }
 }

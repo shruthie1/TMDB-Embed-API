@@ -100,6 +100,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -163,7 +164,7 @@ fun PhoneApp(nav: Nav) {
             PlayerScreen(top.req, isTv = false, onBack = { nav.pop() })
             return@MaterialTheme
         }
-        val showBar = top == Screen.Home || top == Screen.Search || top == Screen.MyList || top is Screen.Browse || (top is Screen.Langs && !top.firstRun)
+        val showBar = top == Screen.Home || top == Screen.Search || top == Screen.MyList || top is Screen.Browse || top == Screen.Langs
         // Edge to edge: each screen owns its top inset (the backdrop runs under
         // the status bar). Scaffold adds none, so nothing is padded twice.
         Scaffold(
@@ -176,7 +177,7 @@ fun PhoneApp(nav: Nav) {
                         Tab(Screen.Search, "Search", Icons.Filled.Search, Icons.Outlined.Search),
                         Tab(Screen.Browse(), "Browse", Icons.Filled.Tune, Icons.Filled.Tune),
                         Tab(Screen.MyList, "My list", Icons.Filled.Bookmark, Icons.Filled.BookmarkBorder),
-                        Tab(Screen.Langs(false), "Languages", Icons.Filled.Translate, Icons.Filled.Translate),
+                        Tab(Screen.Langs, "Languages", Icons.Filled.Translate, Icons.Filled.Translate),
                     ).forEach { tab ->
                         val on = when (tab.screen) {
                             is Screen.Browse -> top is Screen.Browse
@@ -200,8 +201,8 @@ fun PhoneApp(nav: Nav) {
                     Screen.Search -> PhoneSearch(nav)
                     Screen.MyList -> PhoneMyList(nav)
                     is Screen.Browse -> PhoneBrowse(nav, top.initial)
-                    is Screen.Langs -> PhoneLangs(top.firstRun) { if (top.firstRun) nav.replaceAll(Screen.Home) else nav.pop() }
-                    is Screen.Detail -> PhoneDetail(nav, top.type, top.id, top.poster)
+                    is Screen.Langs -> PhoneLangs { nav.pop() }
+                    is Screen.Detail -> PhoneDetail(nav, top.type, top.id, top.poster, top.title, top.backdrop)
                     is Screen.Person -> PhonePerson(nav, top.id, top.name)
                     is Screen.Player -> Unit
                 }
@@ -218,7 +219,7 @@ private fun Nav.open(t: Title) {
     // URLs, so they are cache hits by then. A title opened from the hero has
     // only its backdrop cached, which is why the small poster used to lag.
     prefetchArt(App.instance, t.poster to Api.POSTER_PHONE, t.backdrop to Api.BACKDROP_PHONE)
-    push(Screen.Detail(t.mediaType, t.tmdbId, t.poster))
+    push(Screen.Detail(t.mediaType, t.tmdbId, t.poster, t.title.takeIf { it.isNotBlank() }, t.backdrop))
 }
 
 // ---- Home -------------------------------------------------------------------
@@ -342,15 +343,21 @@ private fun PhoneRow(row: HomeRow, nav: Nav, onRetry: () -> Unit) {
             else -> null
         }
         RowHeader(row.label, seeAll)
+        // Every state is one card tall (an invisible skeleton reserves it), so a row
+        // never changes height as it loads, fails or loses titles, and Home stays put.
         if (row.error) {
-            Row(Modifier.padding(horizontal = GUTTER), verticalAlignment = Alignment.CenterVertically) {
-                Text("Couldn't load this section.", color = Tok.textMuted, fontSize = 14.sp)
-                TextButton(onClick = onRetry) { Text("Retry", color = Color.White) }
+            Box(Modifier.padding(horizontal = GUTTER), contentAlignment = Alignment.CenterStart) {
+                CardSkeleton(CARD_W, Modifier.alpha(0f))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Couldn't load this section.", color = Tok.textMuted, fontSize = 14.sp)
+                    TextButton(onClick = onRetry) { Text("Retry", color = Color.White) }
+                }
             }
             return@Column
         }
         LazyRow(contentPadding = PaddingValues(horizontal = GUTTER), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             if (row.loading) items(6) { CardSkeleton(CARD_W) }
+            else if (row.titles.isEmpty()) item(key = "reserve") { CardSkeleton(CARD_W, Modifier.alpha(0f)) }
             else itemsIndexed(row.titles, key = { _, t -> t.key }) { i, t ->
                 PosterCard(t, Modifier.width(CARD_W), progress = row.progress[t.key], rank = if (row.ranked) i + 1 else null) { nav.open(t) }
             }
@@ -359,11 +366,13 @@ private fun PhoneRow(row: HomeRow, nav: Nav, onRetry: () -> Unit) {
 }
 
 @Composable
-private fun CardSkeleton(width: Dp) {
-    Column(Modifier.width(width)) {
+private fun CardSkeleton(width: Dp, modifier: Modifier = Modifier) {
+    // Same lines as PosterCard (12 sp title, 11 sp meta, 6 dp gap), so a loaded row
+    // is exactly as tall as its skeleton. The pills are blank text lines.
+    Column(modifier.width(width)) {
         Box(Modifier.fillMaxWidth().aspectRatio(2f / 3f).background(Tok.surfaceSolid, Tok.radiusMd))
-        Box(Modifier.padding(top = 8.dp).fillMaxWidth(0.8f).height(10.dp).background(Tok.fill1, Tok.pill))
-        Box(Modifier.padding(top = 6.dp).fillMaxWidth(0.4f).height(8.dp).background(Tok.fill1, Tok.pill))
+        Text(" ", fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1, modifier = Modifier.padding(top = 6.dp).fillMaxWidth(0.8f).background(Tok.fill1, Tok.pill))
+        Text(" ", fontSize = 11.sp, maxLines = 1, modifier = Modifier.fillMaxWidth(0.4f).background(Tok.fill1, Tok.pill))
     }
 }
 
@@ -406,7 +415,7 @@ private fun BackButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun PhoneDetail(nav: Nav, type: String, id: Long, rowPoster: String? = null) {
+private fun PhoneDetail(nav: Nav, type: String, id: Long, rowPoster: String? = null, cardTitle: String? = null, cardBackdrop: String? = null) {
     val vm: DetailVm = viewModel(key = "detail-$type-$id")
     LaunchedEffect(type, id) { vm.load(type, id) }
     var toast by remember { mutableStateOf<String?>(null) }
@@ -418,13 +427,8 @@ private fun PhoneDetail(nav: Nav, type: String, id: Long, rowPoster: String? = n
     val pastArt by remember(detailList) { derivedStateOf { detailList.firstVisibleItemIndex > 0 || detailList.firstVisibleItemScrollOffset > 420 } }
     Box(Modifier.fillMaxSize()) {
         if (t == null) {
-            Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-                if (vm.error == null) CircularProgressIndicator(color = Tok.accent, strokeWidth = 3.dp)
-                else {
-                    Text(vm.error!!, color = Tok.textMuted)
-                    TextButton(onClick = { vm.retry() }) { Text("Try again", color = Color.White) }
-                }
-            }
+            // Never blank: the loaded layout's shape, with the tapped card's art and title.
+            DetailSkeleton(cardTitle, cardBackdrop, rowPoster, vm.error) { vm.retry() }
         } else LazyColumn(state = detailList, contentPadding = PaddingValues(bottom = 48.dp)) {
             item(key = "art") {
                 // Backdrop runs under the status bar; poster and title sit on its fade.
@@ -573,6 +577,55 @@ private fun PhoneDetail(nav: Nav, type: String, id: Long, rowPoster: String? = n
     }
 }
 
+/**
+ * Detail loading state, like the TV DetailSkeleton: the same backdrop block, poster,
+ * title, meta, Play and My List buttons and overview lines as the loaded page, so
+ * nothing jumps when the title lands. Art and title come from the tapped card when
+ * known (both are Coil cache hits). On error the message and Try again replace
+ * the overview lines.
+ */
+@Composable
+private fun DetailSkeleton(title: String?, backdrop: String?, poster: String?, error: String?, onRetry: () -> Unit) {
+    val pill = Tok.surfaceSolid
+    Column(Modifier.fillMaxSize()) {
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val cfg = LocalConfiguration.current
+            val wideArtH = maxWidth * 9f / 16f + 40.dp
+            val artH = if (cfg.orientation == Configuration.ORIENTATION_LANDSCAPE) wideArtH.coerceAtMost(cfg.screenHeightDp.dp * 0.45f) else wideArtH
+            val topInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+            val drop = artH * 0.15f
+            Box(Modifier.fillMaxWidth().height(topInset + artH + 96.dp)) {
+                val art = Modifier.padding(top = topInset + drop).fillMaxWidth().height(artH)
+                if (backdrop != null) Art(backdrop, Api.BACKDROP_PHONE, art, alignment = BiasAlignment(0f, -0.85f))
+                else Box(art.background(Tok.surfaceSolid))
+                Box(art.background(Brush.verticalGradient(0f to Tok.bg, 0.06f to Tok.bg.copy(alpha = 0.7f), 0.3f to Color.Transparent, 0.7f to Tok.bg.copy(alpha = 0.6f), 1f to Tok.bg)))
+                Row(Modifier.align(Alignment.BottomStart).padding(horizontal = GUTTER), verticalAlignment = Alignment.Bottom) {
+                    Box(Modifier.width(104.dp).aspectRatio(2f / 3f).clip(Tok.radiusMd).background(pill).border(1.dp, Tok.border, Tok.radiusMd)) {
+                        if (poster != null) Art(poster, Api.POSTER_PHONE, Modifier.fillMaxSize(), title)
+                    }
+                    Column(Modifier.padding(start = 14.dp).weight(1f)) {
+                        if (!title.isNullOrBlank()) Text(title, fontSize = 24.sp, lineHeight = 28.sp, fontWeight = FontWeight.Bold, color = Tok.text, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                        else Box(Modifier.fillMaxWidth(0.7f).height(24.dp).background(pill, Tok.radiusMd))
+                    }
+                }
+            }
+        }
+        Column(Modifier.padding(horizontal = GUTTER)) {
+            Box(Modifier.padding(top = 14.dp).width(160.dp).height(14.dp).background(pill, Tok.pill))
+            Box(Modifier.fillMaxWidth().padding(top = 16.dp).height(48.dp).background(pill, Tok.pill))
+            Box(Modifier.fillMaxWidth().padding(top = 8.dp).height(40.dp).background(pill, Tok.pill))
+            if (error == null) {
+                listOf(1f, 0.95f, 0.9f, 0.6f).forEachIndexed { i, w ->
+                    Box(Modifier.padding(top = if (i == 0) 20.dp else 8.dp).fillMaxWidth(w).height(13.dp).background(pill, Tok.pill))
+                }
+            } else {
+                Text(error, color = Tok.textMuted, fontSize = 14.sp, modifier = Modifier.padding(top = 20.dp))
+                TextButton(onClick = onRetry, contentPadding = PaddingValues(0.dp)) { Text("Try again", color = Color.White) }
+            }
+        }
+    }
+}
+
 @Composable
 private fun Fact(k: String, v: String) {
     if (v.isBlank()) return
@@ -680,17 +733,23 @@ private fun PhonePerson(nav: Nav, id: Long, name: String) {
                         Column(Modifier.padding(start = 16.dp)) {
                             Text(p?.name ?: name, fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Tok.text)
                             p?.knownFor?.let { Text(it, color = Tok.textMuted, fontSize = 14.sp, modifier = Modifier.padding(top = 4.dp)) }
+                            // Loading: a blank line where the department lands, so the name does not move.
+                            if (d == null) Text(" ", fontSize = 14.sp, maxLines = 1, modifier = Modifier.padding(top = 4.dp).width(96.dp).background(Tok.surfaceSolid, Tok.pill))
                         }
                     }
                     when {
-                        d == null -> Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = Tok.accent, strokeWidth = 3.dp) }
+                        // Loading: the loaded page's "Known for" label; the grid below shows card skeletons.
+                        d == null -> Text("Known for", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = Tok.text, modifier = Modifier.padding(top = 20.dp, bottom = 4.dp))
                         d.person == null -> EmptyState("Person not found", "That profile is not in the catalog.")
                         d.titles.isEmpty() -> EmptyState("No titles to show", "Nothing in the catalog lists this person in a leading role.")
                         else -> Text("Known for", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = Tok.text, modifier = Modifier.padding(top = 20.dp, bottom = 4.dp))
                     }
                 }
             }
-        }, titles = d?.titles.orEmpty(), nav = nav, footer = { full("navpad") { Spacer(Modifier.windowInsetsBottomHeight(WindowInsets.navigationBars)) } })
+        }, titles = d?.titles.orEmpty(), nav = nav, footer = {
+            if (d == null) items(12, key = { "sk$it" }) { CardSkeleton(104.dp) }
+            full("navpad") { Spacer(Modifier.windowInsetsBottomHeight(WindowInsets.navigationBars)) }
+        })
         Box(Modifier.fillMaxWidth().background(Tok.bg).statusBarsPadding().height(56.dp))
         BackButton({ nav.pop() }, Modifier.statusBarsPadding().padding(start = 12.dp, top = 8.dp))
     }
@@ -833,7 +892,7 @@ private fun PhoneSearch(nav: Nav) {
                     }
                 }
             }
-            vm.error != null -> full("err") { Text(vm.error!!, color = Tok.danger) }
+            vm.error != null -> full("err") { EmptyState("Search failed", vm.error!!, "Try again") { vm.retry() } }
             vm.loading && vm.results.isEmpty() -> items(6, key = { "sk$it" }) { CardSkeleton(104.dp) }
             vm.query.trim().length >= 2 && vm.resultsFor == vm.query.trim() && vm.results.isEmpty() -> full("none") {
                 EmptyState("Nothing found for “${vm.query.trim()}”", "Check the spelling, or browse by language and genre instead.", "Browse") { nav.tab(Screen.Browse()) }
@@ -857,12 +916,12 @@ private fun PhoneMyList(nav: Nav) {
 }
 
 @Composable
-private fun PhoneLangs(firstRun: Boolean, onDone: () -> Unit) {
+private fun PhoneLangs(onDone: () -> Unit) {
     val prefs = App.instance.prefs
-    // First run opens with Telugu chosen and ready to save: it is the library's
-    // standing default, so a first-time viewer lands on it without hunting.
-    val chosen = remember { mutableStateListOf<String>().apply { if (firstRun) add("te") else addAll(prefs.langs()) } }
-    Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(24.dp), verticalArrangement = Arrangement.Center) {
+    // Only the Languages tab opens this; first run seeds every language.
+    val chosen = remember { mutableStateListOf<String>().apply { addAll(prefs.langs()) } }
+    // Always a tab now (the bottom bar owns the navigation inset): no second inset.
+    Column(Modifier.fillMaxSize().statusBarsPadding().padding(24.dp), verticalArrangement = Arrangement.Center) {
         Text("Your languages", fontSize = 26.sp, fontWeight = FontWeight.Bold, color = Tok.text)
         Text("Pick the languages you watch. Rows and search rank these first.", color = Tok.textMuted, modifier = Modifier.padding(top = 6.dp, bottom = 20.dp))
         Chips {
@@ -872,9 +931,9 @@ private fun PhoneLangs(firstRun: Boolean, onDone: () -> Unit) {
             }
         }
         Spacer(Modifier.height(28.dp))
-        Button(onClick = { prefs.save(chosen.toList()); onDone() }, modifier = Modifier.fillMaxWidth().height(48.dp), colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Tok.bg)) {
+        Button(onClick = { prefs.saveChosen(chosen); onDone() }, modifier = Modifier.fillMaxWidth().height(48.dp), colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Tok.bg)) {
             Text(if (chosen.isEmpty()) "Done" else "Done (${chosen.size})", fontWeight = FontWeight.SemiBold)
         }
-        TextButton(onClick = { if (firstRun) prefs.save(emptyList()); onDone() }, modifier = Modifier.fillMaxWidth()) { Text(if (firstRun) "Skip" else "Cancel", color = Tok.textSecondary) }
+        TextButton(onClick = onDone, modifier = Modifier.fillMaxWidth()) { Text("Cancel", color = Tok.textSecondary) }
     }
 }

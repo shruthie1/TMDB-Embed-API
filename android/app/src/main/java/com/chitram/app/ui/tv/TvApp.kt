@@ -83,6 +83,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.FocusDirection
@@ -235,7 +236,7 @@ fun TvApp(nav: Nav) {
             val s = nav.top
             // Web AppNav is on every page; only the full-screen player and the
             // first-run language picker are drawn without it.
-            val rail = s !is Screen.Player && !(s is Screen.Langs && s.firstRun)
+            val rail = s !is Screen.Player
             // Initial focus belongs to the page, never the rail. The rail is
             // composed from frame 0 while a page's controls arrive later (lazy
             // items, network), so any focus search in that gap (a key press, a
@@ -269,7 +270,7 @@ fun TvApp(nav: Nav) {
                         Screen.Home -> TvHome(nav, restore, homeList)
                         Screen.Search -> TvSearch(nav)
                         Screen.MyList -> TvGrid(nav, "My list", App.instance.myList.all(), empty = "Titles you add show up here.")
-                        is Screen.Langs -> TvLangs(s.firstRun) { if (s.firstRun) nav.replaceAll(Screen.Home) else nav.pop() }
+                        is Screen.Langs -> TvLangs { nav.pop() }
                         is Screen.Detail -> TvDetail(nav, s.type, s.id)
                         is Screen.Person -> TvPerson(nav, s.id, s.name)
                         is Screen.Browse -> TvBrowse(nav, s.initial)
@@ -349,7 +350,7 @@ private fun TvHome(nav: Nav, restore: MutableState<String?>, listState: LazyList
 
     // D-pad slots top to bottom: the hero's buttons, then each row.
     val slots = (if (hasHero) listOf(HERO) else emptyList()) + visible.map { it.kind }
-    val focusable = (if (hasHero) listOf(true) else emptyList()) + visible.map { !it.loading }
+    val focusable = (if (hasHero) listOf(true) else emptyList()) + visible.map { !it.loading && (it.error || it.titles.isNotEmpty()) }
     val density = LocalDensity.current
     val screenW = with(density) { LocalConfiguration.current.screenWidthDp.dp.toPx() }
     val railPx = with(density) { RAIL_W.toPx() }
@@ -647,13 +648,20 @@ private fun TvRow(
         ) {
             if (row.error) {
                 item(key = "error") {
-                    Row(Modifier.height(POSTER_H), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("Couldn’t load this section.", color = Tok.textMuted, fontSize = 16f.pxSp)
-                        TvChip("Retry", modifier = Modifier.navSlot(geo, row.kind, "retry"), onClick = onRetry)
+                    // An invisible card keeps the row as tall as a loaded one.
+                    Box {
+                        CardSkeleton(Modifier.alpha(0f))
+                        Row(Modifier.height(POSTER_H), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("Couldn’t load this section.", color = Tok.textMuted, fontSize = 16f.pxSp)
+                            TvChip("Retry", modifier = Modifier.navSlot(geo, row.kind, "retry"), onClick = onRetry)
+                        }
                     }
                 }
             } else if (row.loading) {
                 items(10) { CardSkeleton() }
+            } else if (row.titles.isEmpty()) {
+                // A kept row (HomeRows.keepShown) whose titles all moved up: hold its height.
+                item(key = "reserve") { CardSkeleton(Modifier.alpha(0f)) }
             } else {
                 itemsIndexed(row.titles, key = { _, t -> t.key }) { i, t ->
                     val rk = "${row.kind}|${t.key}"
@@ -675,11 +683,15 @@ private fun TvRow(
 }
 
 @Composable
-private fun CardSkeleton() {
-    Column(Modifier.width(CARD_W)) {
+private fun CardSkeleton(modifier: Modifier = Modifier) {
+    // Blank text lines with PosterCard's sizes and line heights, so a loaded row is
+    // exactly as tall as its skeleton and the rows below never shift.
+    Column(modifier.width(CARD_W)) {
         Box(Modifier.size(CARD_W, POSTER_H).background(Tok.surfaceSolid, RADIUS))
-        Box(Modifier.padding(top = TvWeb.CARD_TITLE_TOP.px).fillMaxWidth(0.84f).height(TvWeb.CARD_TITLE.px).background(Tok.surfaceSolid, RADIUS))
-        Box(Modifier.padding(top = 2f.px).fillMaxWidth(0.4f).height(TvWeb.CARD_META.px).background(Tok.surfaceSolid, RADIUS))
+        Text(" ", fontSize = TvWeb.CARD_TITLE.pxSp, lineHeight = (TvWeb.CARD_TITLE * 1.25f).pxSp, fontWeight = FontWeight.Medium, maxLines = 1,
+            modifier = Modifier.padding(top = TvWeb.CARD_TITLE_TOP.px).fillMaxWidth(0.84f).background(Tok.surfaceSolid, RADIUS))
+        Text(" ", fontSize = TvWeb.CARD_META.pxSp, lineHeight = (TvWeb.CARD_META * 1.35f).pxSp, minLines = 1, maxLines = 1,
+            modifier = Modifier.padding(top = 2f.px).fillMaxWidth(0.4f).background(Tok.surfaceSolid, RADIUS))
     }
 }
 
@@ -1134,7 +1146,16 @@ private fun TvBrowse(nav: Nav, initial: BrowseFilters) {
                 TvFilterRow("Decade", BrowseOptions.DECADES.map { it.id to it.name }, { it == f.decade }) { d -> vm.set(f.copy(decade = if (f.decade == d) null else d)) }
                 TvFilterRow("Rating", BrowseOptions.RATINGS.map { it to "★ $it+" }, { it == f.minRating }) { r -> vm.set(f.copy(minRating = if (f.minRating == r) null else r)) }
                 TvFilterRow("Sort", BrowseOptions.SORTS.map { it.id to it.name }, { it == f.sort }) { vm.set(f.copy(sort = it)) }
-                vm.error?.let { Text(it, color = Tok.danger, fontSize = TvWeb.SUMMARY.pxSp) }
+                vm.error?.let { err ->
+                    // A focusable Try again: D-pad reachable, and focused when the first page fails
+                    // (a later page failing leaves focus on the grid the viewer is in).
+                    val retry = remember { FocusRequester() }
+                    if (vm.titles.isEmpty()) LaunchedEffect(err) { retry.focusWhenAttached() }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(err, color = Tok.danger, fontSize = TvWeb.SUMMARY.pxSp)
+                        TvChip("Try again", modifier = Modifier.focusRequester(retry)) { vm.retry() }
+                    }
+                }
                 if (!vm.loading && vm.titles.isEmpty() && vm.total != null) Text("No titles match those filters. Try removing a filter.", color = Tok.textMuted, fontSize = 22f.pxSp)
             }
         }
@@ -1168,6 +1189,7 @@ private fun TvSearch(nav: Nav) {
     val vm: SearchVm = viewModel()
     val field = remember { FocusRequester() }
     val firstCard = remember { FocusRequester() }
+    val retry = remember { FocusRequester() }
     val grid = rememberLazyGridState()
     val kb = LocalSoftwareKeyboardController.current
     var fieldFocused by remember { mutableStateOf(false) }
@@ -1228,7 +1250,8 @@ private fun TvSearch(nav: Nav) {
                         }
                         // D-pad Down leaves the field for the first result.
                         e.type == KeyEventType.KeyDown && e.key == Key.DirectionDown -> {
-                            if (hasResults()) goToResults()
+                            if (vm.error != null) { kb?.hide(); runCatching { retry.requestFocus() } }
+                            else if (hasResults()) goToResults()
                             true
                         }
                         // Left/Right belong to the field (cursor / on-screen keyboard),
@@ -1259,7 +1282,16 @@ private fun TvSearch(nav: Nav) {
         )
         Spacer(Modifier.height(10.dp))
         when {
-            vm.error != null -> Text(vm.error!!, color = Tok.danger, fontSize = TvWeb.SUMMARY.pxSp)
+            vm.error != null -> {
+                val err = vm.error!!
+                // Focus moves to Try again when the error shows, unless the viewer is still
+                // typing in the field (D-pad Down then reaches it).
+                LaunchedEffect(err) { if (toResults || !fieldFocused) retry.focusWhenAttached() }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(err, color = Tok.danger, fontSize = TvWeb.SUMMARY.pxSp)
+                    TvChip("Try again", modifier = Modifier.focusRequester(retry)) { vm.retry() }
+                }
+            }
             vm.loading && vm.results.isEmpty() -> Text("Searching", color = Tok.textMuted, fontSize = TvWeb.SUMMARY.pxSp)
             vm.query.length >= 2 && vm.results.isEmpty() && !vm.loading -> Text("No results for \"${vm.query}\"", color = Tok.textMuted, fontSize = 22f.pxSp)
             vm.results.isNotEmpty() -> Text("${vm.results.size} results for “${vm.resultsFor}”", color = Tok.textMuted, fontSize = TvWeb.SUMMARY.pxSp)
@@ -1297,16 +1329,12 @@ private fun TvGrid(nav: Nav, title: String, titles: List<Title>, empty: String) 
 }
 
 @Composable
-private fun TvLangs(firstRun: Boolean, onDone: () -> Unit) {
+private fun TvLangs(onDone: () -> Unit) {
     val prefs = App.instance.prefs
-    // First run opens with Telugu chosen and ready to save: it is the library's
-    // standing default, so a first-time viewer lands on it without hunting.
-    val chosen = remember { mutableStateListOf<String>().apply { if (firstRun) add("te") else addAll(prefs.langs()) } }
+    // Only the Languages rail entry opens this; first run seeds every language.
+    val chosen = remember { mutableStateListOf<String>().apply { addAll(prefs.langs()) } }
     val first = remember { FocusRequester() }
-    val done = remember { FocusRequester() }
-    // First run lands on Done so one OK accepts the Telugu default. The Languages
-    // screen keeps focus on the first chip. D-pad up from Done reaches the chips.
-    LaunchedEffect(Unit) { (if (firstRun) done else first).focusWhenAttached() }
+    LaunchedEffect(Unit) { first.focusWhenAttached() }
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         // Web .lang-modal on TV: min(760px,90vw) wide, --space-8 padding, 34px title, 20px hint.
         Column(Modifier.widthIn(max = 380.dp).background(Tok.surface, Tok.radiusLg).padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -1322,10 +1350,10 @@ private fun TvLangs(firstRun: Boolean, onDone: () -> Unit) {
             }
             Spacer(Modifier.height(14.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(TvWeb.ACTION_GAP.px)) {
-                TvButton(if (chosen.isEmpty()) "Done" else "Done (${chosen.size})", primary = true, modifier = Modifier.focusRequester(done)) {
-                    prefs.save(chosen.toList()); onDone()
+                TvButton(if (chosen.isEmpty()) "Done" else "Done (${chosen.size})", primary = true) {
+                    prefs.saveChosen(chosen); onDone()
                 }
-                if (firstRun) TvButton("Skip", primary = false) { prefs.save(emptyList()); onDone() }
+                TvButton("Cancel", primary = false) { onDone() }
             }
         }
     }
@@ -1385,7 +1413,7 @@ private val RAIL = listOf(
     RailDest(Screen.Home, "Home", Icons.Filled.Home),
     RailDest(Screen.Browse(), "Browse", Icons.Filled.Tune),
     RailDest(Screen.MyList, "My list", Icons.Filled.Bookmark),
-    RailDest(Screen.Langs(false), "Languages", Icons.Filled.Translate),
+    RailDest(Screen.Langs, "Languages", Icons.Filled.Translate),
 )
 
 private fun RailDest.matches(s: Screen) = when (screen) {

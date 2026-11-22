@@ -45,6 +45,12 @@ class StartRace(
      */
     @OptIn(ExperimentalCoroutinesApi::class)
     suspend fun firstMany(backend: Deferred<List<Source>>?, device: List<Deferred<List<Source>>>, preferred: String,
+                          /**
+                           * prewarm.md: jobs (also in [device]) continuing a details-page prewarm.
+                           * A good row from one of them starts the film at once, without the VM lead;
+                           * the VM call keeps running and its rows join late.
+                           */
+                          warm: List<Deferred<List<Source>>> = emptyList(),
                           extras: ((why: String) -> List<Deferred<List<Source>>>)? = null): First {
         val jobs = device.toMutableList()
         var started = false
@@ -56,11 +62,13 @@ class StartRace(
         return firstReady(backend, preferred,
             ready = { jobs.filter { it.isCompleted && !it.isCancelled }.flatMap { runCatching { it.getCompleted() }.getOrDefault(emptyList()) } },
             allDone = { jobs.all { it.isCompleted } },
+            warmReady = { warm.filter { it.isCompleted && !it.isCancelled }.flatMap { runCatching { it.getCompleted() }.getOrDefault(emptyList()) } },
             onLeadNoGood = { startExtras("VM lead over, no ${preferred} row") },
             onVmFailed = { startExtras("VM failed") })
     }
 
     private suspend fun firstReady(backend: Deferred<List<Source>>?, preferred: String, ready: () -> List<Source>, allDone: () -> Boolean,
+                                   warmReady: () -> List<Source> = { emptyList() },
                                    onLeadNoGood: () -> Unit = {}, onVmFailed: () -> Unit = {}): First {
         val t0 = now()
         fun good(s: Source) = !s.unsupported && Ranking.tier(s, preferred) <= 2
@@ -68,6 +76,11 @@ class StartRace(
         // 1. The VM's lead: wait for it, but never past VM_LEAD_MS when a device row can play.
         while (backend != null && !backend.isCompleted) {
             val r = ready()
+            // A prewarmed row in the viewer's language is in hand: no reason to wait for the VM.
+            if (warmReady().any(::good)) {
+                android.util.Log.i("Chitram", "[race] prewarmed ${preferred} row ready after ${now() - t0}ms: starting before the VM with ${r.size} device row(s)")
+                return First(emptyList(), null, r, backendPending = true)
+            }
             val leadOver = now() - t0 >= leadMs
             if (leadOver && !r.any(::good)) onLeadNoGood()
             if (leadOver && (r.any(::good) || (allDone() && r.isNotEmpty()))) {

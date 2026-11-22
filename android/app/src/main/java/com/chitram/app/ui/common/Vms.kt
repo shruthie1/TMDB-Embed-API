@@ -11,10 +11,12 @@ import com.chitram.app.data.Episode
 import com.chitram.app.data.LanguagePrefs
 import com.chitram.app.data.PersonResponse
 import com.chitram.app.data.Progress
+import com.chitram.app.data.SeasonInfo
 import com.chitram.app.data.Title
 import com.chitram.app.data.TitleFull
 import com.chitram.app.player.PlayRequest
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -35,11 +37,14 @@ data class Row(
     val rec: Boolean = false,
     /** "See all" target; null for rows without one. */
     val seeAll: BrowseFilters? = null,
+    /** Shown once loaded this session: stays on Home so rows never collapse under the viewer. */
+    val keep: Boolean = false,
 ) {
     val personal: Boolean get() = kind == "continue" || kind == "list"
 
     /** Web Home: hide an empty personal row, a thin row, and an empty row. */
     val shown: Boolean get() = when {
+        keep -> true
         error -> !rec
         loading -> !personal
         else -> titles.size >= maxOf(thin, 1)
@@ -102,6 +107,16 @@ object HomeRows {
         }
     }
 
+    /**
+     * Home must not move under the viewer. A row that showed loaded stays shown
+     * for the session, even when Continue watching later claims some of its titles
+     * and it falls under its thin limit. [kept] records the rows (by kind).
+     */
+    fun keepShown(rows: List<Row>, kept: MutableSet<String>): List<Row> = rows.map { r ->
+        // An emptied personal row (the viewer cleared it) still hides.
+        if (r.kind in kept && !r.shown && !(r.personal && r.titles.isEmpty())) r.copy(keep = true) else r
+    }.onEach { r -> if (r.shown && !r.loading) kept += r.kind }
+
     /** Hero pool (web Home): Continue watching, Top 10, Trending; with a backdrop; 6. */
     fun heroPool(cont: List<Title>, top10: List<Title>, trending: List<Title>): List<Title> =
         (cont + top10 + trending).filter { !it.backdrop.isNullOrEmpty() }.distinctBy { it.key }.take(6)
@@ -126,6 +141,8 @@ class HomeVm : ViewModel() {
     private var loadedFor: List<String>? = null
     private var base: List<Row> = emptyList()
     private var recs: List<Row> = emptyList()
+    /** Rows shown loaded this session (HomeRows.keepShown); reset when languages change. */
+    private val kept = HashSet<String>()
 
     /** Raw catalogue rows as fetched; `rows` shows them deduplicated in order. */
     private val raw = HashMap<String, List<Title>>()
@@ -137,7 +154,7 @@ class HomeVm : ViewModel() {
         val chosen = g.prefs.langs()
         if (!force && loadedFor == chosen) { refreshLocal(); return }
         loadedFor = chosen
-        raw.clear(); failed.clear(); recs = emptyList()
+        raw.clear(); failed.clear(); recs = emptyList(); kept.clear()
         base = HomeRows.plan(chosen)
         heroTitles = null
         rebuild()
@@ -184,7 +201,7 @@ class HomeVm : ViewModel() {
         val planned = HomeRows.withRecs(base, recs).map { r ->
             local[r.kind] ?: r.copy(loading = r.kind !in raw && r.kind !in failed, error = r.kind in failed)
         }
-        rows = HomeRows.dedupe(planned, raw)
+        rows = HomeRows.keepShown(HomeRows.dedupe(planned, raw), kept)
         // Web waits for Continue watching and Top 10, then fills from Trending.
         if ("top10" in raw || "top10" in failed) {
             val pool = HomeRows.heroPool(local["continue"]?.titles.orEmpty(), raw["top10"].orEmpty(), raw["trending"].orEmpty())
@@ -243,11 +260,42 @@ class DetailVm : ViewModel() {
             val t = runCatching { g.api.titleFull(type, id) }.onFailure { android.util.Log.w("Chitram", "title $type/$id failed", it); error = "Could not load this title." }.getOrNull() ?: return@launch
             full = t
             refreshLocal()
+            // Prewarm (prewarm.md): same title and language Play passes (playRequest).
+            if (t.mediaType != "tv") prewarm(t, 0, 0)
             if (t.mediaType == "tv") {
                 val next = g.progress.nextUp(t.tmdbId, t.seasonList)
+                // A show's Play needs the season list: prewarm the episode Play opens.
+                val (ps, pe) = prefetchEpisode(next, t.seasonList)
+                prewarm(t, ps, pe)
                 selectSeason(next?.season?.takeIf { s -> t.seasonList.any { it.number == s } } ?: t.seasonList.firstOrNull { it.number > 0 }?.number ?: 1)
             }
         }
+    }
+
+    /**
+     * Fire-and-forget on-device resolve of the config's prewarm providers, off the
+     * main thread. No VM call: Play reuses the jobs, the VM is asked only on Play.
+     * Never blocks the page; any failure is dropped and Play resolves as usual.
+     */
+    private fun prewarm(t: TitleFull, season: Int, episode: Int) {
+        warmed = t.mediaType to t.tmdbId
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { g.onDevice.prewarm(t.mediaType, t.tmdbId, season, episode, g.codecs, g.prefs.preferredAudio(), t.title, t.originalLang) }
+                .onFailure { android.util.Log.i("Chitram", "prewarm: skipped: ${it.javaClass.simpleName}") }
+        }
+    }
+    private var warmed: Pair<String, Long>? = null
+
+    /** Page gone (back out): jobs Play did not take are cancelled; a job Play took is untouched. */
+    override fun onCleared() {
+        warmed?.let { (type, id) -> runCatching { g.onDevice.cancelPrewarm(type, id) } }
+    }
+
+    companion object {
+        /** The episode Play opens with no tap on an episode: next up, else S(first)E1 (playRequest). */
+        fun prefetchEpisode(next: Progress?, seasons: List<SeasonInfo>?): Pair<Int, Int> =
+            next?.let { it.season to it.episode }
+                ?: ((seasons.orEmpty().firstOrNull { it.number > 0 }?.number ?: 1) to 1)
     }
 
     fun retry() {
@@ -398,6 +446,8 @@ class SearchVm : ViewModel() {
         search(debounceMs = 0)
     }
     private var inFlight: String? = null
+    /** Try again after a failed search (submit skips a query that already has an answer). */
+    fun retry() = search(debounceMs = 0)
 
     /** Saved when the viewer submits or opens a result, not on every keystroke. */
     fun remember(q: String = query) { g.recent.add(q); recent = g.recent.all() }
