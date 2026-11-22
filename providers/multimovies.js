@@ -77,7 +77,6 @@ const SERVER_LIST_TTL_MS = 6 * 60 * 60 * 1000;
 // Mutable for tests only.
 const _config = {
     audioTimeoutMs: 8000,
-    tmdbWaitMs: Number(process.env.MULTIMOVIES_TMDB_WAIT_MS) || 2000,
     // Hard wall clock for the whole call, below the 20 s registry deadline.
     budgetMs: 15000,
     // Cap on each /api/resolve and embed-page call.
@@ -89,21 +88,14 @@ const _config = {
     throttleCooldownMs: 60000,
     // Per-server cooldown after COOLDOWN_STREAK unanswered asks in a row.
     cooldownMs: 60 * 60 * 1000,
+    // Cap on each source's index.mpd GET (all in parallel). Short: on a miss
+    // the title falls back to "last listed wins".
+    mpdTimeoutMs: 2500,
 };
-// TMDB original_language ("te") or null; replaceable for tests.
-const _deps = {
-    originalLanguage: async (type, tmdbId) => {
-        const d = await require('../utils/tmdb').getDetails(type, tmdbId);
-        return (d && d.original_language) || null;
-    },
-};
+// Replaceable for tests. (No TMDB lookup: "Original" never takes the
+// title's original_language, see sourceLanguage.)
+const _deps = {};
 
-// `promise`, or `fallback` after `ms`. The timer is always cleared.
-function withCap(promise, ms, fallback) {
-    let timer;
-    const cap = new Promise((resolve) => { timer = setTimeout(() => resolve(fallback), ms); });
-    return Promise.race([promise, cap]).finally(() => clearTimeout(timer));
-}
 const DISGUISE_CACHE_MS = 6 * 60 * 60 * 1000;
 
 // Headers the stream host gets through /m3u8-proxy. The scraper sent VidBolt's
@@ -248,27 +240,142 @@ const GENERIC_AUDIO_NAME = /^(audio|audio\s*\d+|track\s*\d*|default|main|aac|ste
 // VidBolt's /api/resolve `language` for one source, when it names a KNOWN
 // audio language (knownLanguage: no title-cased junk like "Hindi dubbed").
 // MovieBox "<lang> sub" sources carry the original audio with subtitles, so
-// they are never an audio language. "Original" takes the title's TMDB
-// original_language when known, else nothing.
-function sourceLanguage(src, originalLang = null) {
+// they are never an audio language. "Original" names no language: it is NOT
+// the title's TMDB original_language. Live 2026-11-22: Vidrift's RRR
+// "Original" (TMDB te) is byte-identical to this provider's "English" RRR
+// source and speech ID reads ta/hi; Jailer's "Original" (TMDB ta) is
+// byte-identical to a MovieBox Malayalam source (ml 1.00). Unknown, never a
+// guessed tag. The row keeps "Original" as its label.
+function sourceLanguage(src) {
     const raw = String((src && src.language) || '').trim();
     if (!raw || /\bsub(s|bed|titles?)?$/i.test(raw)) return null;
-    if (/^original$/i.test(raw)) return knownLanguage(originalLang);
+    if (/^original$/i.test(raw)) return null;
     return knownLanguage(raw);
 }
 
-// "Original" is not always the TMDB original language: Vidrift's "Original"
-// for 1261763 (TMDB te) is the Tamil track (vidrift.js originalLanguageFor).
-// When another source of the same title names that language itself, the
-// "Original" source stays unlabelled: unknown, never a wrong tag. `sources`:
-// every source VidBolt listed this call, across servers. Pure, exported.
-function originalLanguageFor(sources, originalLang) {
-    const language = knownLanguage(originalLang);
-    if (!language) return null;
-    const named = (sources || [])
-        .filter((s) => !/^original$/i.test(String((s && s.language) || '').trim()))
-        .map((s) => sourceLanguage(s));
-    return named.includes(language) ? null : originalLang;
+const TELUGU = 'Telugu';
+
+// Several sources of one title may each say "Telugu". Live 2026-11-22, RRR:
+// VidBolt lists 5820588283537016992 and 5355663801620775816 both as Telugu;
+// speech ID reads the first as Tamil (ta 0.60/0.37/0.52) and the second as
+// Telugu (te 1.00), and the owner hears the same every time. Only one Telugu
+// claim stands: the LAST listed in the first answer that lists two or more.
+// Claims never listed together have no order: none stands (unknown over
+// wrong). Telugu only, because a wrong Telugu row plays first (Telugu-first
+// ranking); Jailer's two "Malayalam" sources are both Malayalam (ml 1.00).
+// `lists`: each answer's sources, in answer order. Returns the winning
+// masterKey, or null when there is one claim or none (nothing to drop).
+// Pure, exported.
+function teluguClaimWinner(lists) {
+    const claims = (list) => [...new Set((list || [])
+        .filter((s) => s && s.url && sourceLanguage(s) === TELUGU)
+        .map((s) => masterKey(s.url)))];
+    const all = new Set((lists || []).flatMap(claims));
+    if (all.size < 2) return null;
+    for (const list of lists) {
+        const keys = claims(list);
+        if (keys.length >= 2) return keys[keys.length - 1];
+    }
+    return '';
+}
+
+// ---- MPD audio lang (2026-11-22, telugu-rule-check.md). Every MovieBox
+// source is a bridge over sacdn.hakunaymatata.com/dash/<id>/master.m3u8; the
+// bridge drops the DASH `lang`, but index.mpd beside it keeps it, and the
+// CloudFront query (Policy, Signature, Key-Pair-Id) signs the whole /dash/<id>/
+// folder. Against speech ID on 13 titles: `tel` 6 of 6, tam/kan/hin 4 of 4,
+// `eng` 0 of 1 (Vikram's Tamil), `und` no information.
+const MPD_HOST = 'sacdn.hakunaymatata.com';
+const MPD_EVIDENCE = { tel: TELUGU, te: TELUGU, tam: 'Tamil', ta: 'Tamil', kan: 'Kannada', kn: 'Kannada',
+    hin: 'Hindi', hi: 'Hindi', mal: 'Malayalam', ml: 'Malayalam' };
+
+// The signed index.mpd URL for one source, or null when it is not a signed
+// sacdn DASH folder. The signature params sit on the innermost URL or on a wrapper.
+function mpdUrlOf(url) {
+    const layers = [];
+    let u = String(url || '');
+    for (let i = 0; i < 4; i++) {
+        let p;
+        try { p = new URL(u); } catch { break; }
+        layers.push(p);
+        const inner = p.searchParams.get('url');
+        if (!inner || !/^https?:/i.test(inner)) break;
+        u = inner;
+    }
+    const target = layers[layers.length - 1];
+    if (!target || target.host !== MPD_HOST || !/^\/dash\/[^/]+\//.test(target.pathname)) return null;
+    const signed = ['Policy', 'Signature', 'Key-Pair-Id'];
+    // Unsigned, sacdn answers 403: no MPD to read.
+    const from = [...layers].reverse().find((l) => signed.every((k) => l.searchParams.has(k)));
+    if (!from) return null;
+    const q = signed.map((k) => `${k}=${encodeURIComponent(from.searchParams.get(k))}`).join('&');
+    return `https://${MPD_HOST}${target.pathname.replace(/[^/]*$/, 'index.mpd')}?${q}`;
+}
+
+// The audio `lang` of an MPD, lower case, when its audio AdaptationSets name
+// exactly one; else null (none, several, or empty).
+function mpdAudioLang(text) {
+    const langs = new Set();
+    for (const m of String(text || '').matchAll(/<AdaptationSet\b[^>]*>/g)) {
+        const tag = m[0];
+        if (!/contentType="audio"|mimeType="audio\//.test(tag)) continue;
+        const l = (/\slang="([^"]*)"/.exec(tag) || [])[1];
+        if (l && l.trim()) langs.add(l.trim().toLowerCase());
+    }
+    return langs.size === 1 ? [...langs][0] : null;
+}
+
+// Pure. `lists`: each answer's sources in arrival order. `mpd`: masterKey ->
+// { ok: true, lang } | { ok: false, error }; a key with no entry has no MPD.
+// Returns { fallback, why, claims, tel, fixed, sources: masterKey ->
+// { listed, language, drop, reason, mpd } }. `language` is what the source's
+// lone untagged rendition is stamped with.
+//  - MPD `tel`/`te`: Telugu, whatever the label ("Kurdish sub" Devara).
+//  - Listed Telugu with any other or no tag: Telugu dropped, unverified.
+//  - A listed language that a tam/kan/hin/mal tag contradicts: the tag.
+//  - `eng`, `und`, no tag: the label stands.
+// Fallback (any MPD failed, or a Telugu claim has no MPD): the old rule,
+// "last listed wins" (teluguClaimWinner), for the whole title.
+function mpdLanguagePlan(lists, mpd) {
+    const sources = new Map();
+    for (const src of (lists || []).flat()) {
+        if (!src || !src.url) continue;
+        const k = masterKey(src.url);
+        if (!sources.has(k)) sources.set(k, { listed: sourceLanguage(src), language: sourceLanguage(src), drop: false, reason: null, mpd: null });
+    }
+    const keys = [...sources.keys()];
+    const claims = keys.filter((k) => sources.get(k).listed === TELUGU).length;
+    const failed = keys.filter((k) => mpd.has(k) && !mpd.get(k).ok);
+    const unsigned = keys.filter((k) => sources.get(k).listed === TELUGU && !mpd.has(k));
+    if (failed.length || unsigned.length) {
+        const winner = teluguClaimWinner(lists);
+        for (const [k, s] of sources) {
+            if (s.listed === TELUGU && winner !== null && winner !== k) {
+                Object.assign(s, { language: null, drop: true, reason: 'duplicate' });
+            }
+        }
+        const why = [failed.length ? `mpd failed ${failed.map((k) => `${k}(${mpd.get(k).error})`).join(',')}` : '',
+            unsigned.length ? `no mpd for Telugu claim ${unsigned.join(',')}` : ''].filter(Boolean).join('; ');
+        return { fallback: true, why, claims, tel: 0, fixed: 0, sources };
+    }
+    let tel = 0;
+    let fixed = 0;
+    for (const [k, s] of sources) {
+        const code = mpd.has(k) ? mpd.get(k).lang : null;
+        s.mpd = code;
+        const evidence = code ? MPD_EVIDENCE[code] || null : null;
+        if (evidence === TELUGU) {
+            tel += 1;
+            if (s.listed !== TELUGU) { s.language = TELUGU; fixed += 1; }
+        } else if (s.listed === TELUGU) {
+            Object.assign(s, { language: null, drop: true, reason: 'mpd' });
+            fixed += 1;
+        } else if (evidence && s.listed && evidence !== s.listed) {
+            s.language = evidence;
+            fixed += 1;
+        }
+    }
+    return { fallback: false, why: null, claims, tel, fixed, sources };
 }
 
 // One audio[] entry per AUDIO rendition the master declares. LANGUAGE wins.
@@ -332,19 +439,38 @@ function isHlsPlaylistUrl(url) {
 }
 
 // Pure: the stream row for one fetched master. Exported for tests.
-function streamFromMaster(src, masterText, masterUrl, deadAudioUrls = null, originalLang = null) {
+// `opts.dropLabel`: this source's "Telugu" is not stamped on the rendition
+// (`opts.reason` 'mpd': its MPD tag is not tel; 'duplicate': it lost
+// teluguClaimWinner in the fallback). `opts.language`: the language to stamp
+// in place of the listed one (mpdLanguagePlan).
+function streamFromMaster(src, masterText, masterUrl, deadAudioUrls = null, opts = null) {
     const levels = hls.parseLevels(masterText, masterUrl);
     if (!levels.length) return null;
-    const audio = audioFromMaster(masterText, masterUrl, deadAudioUrls, sourceLanguage(src, originalLang));
+    const o = opts && typeof opts === 'object' ? opts : {};
+    const dropLabel = Boolean(o.dropLabel);
+    const listed = sourceLanguage(src);
+    // `o.language` (mpdLanguagePlan) replaces the listed language when given.
+    const stamp = dropLabel ? null : ('language' in o ? o.language : listed);
+    const audio = audioFromMaster(masterText, masterUrl, deadAudioUrls, stamp);
     const languages = teluguFirst([...new Set(audio.map((a) => a.language).filter(Boolean))]);
     const quality = tierOf(levels[0]) || (/\b(2160|1440|1080|720|480|360)p\b/i.exec(src.quality || '') || [])[0] || 'Auto';
     const subtitles = hls.parseMedia(masterText, masterUrl, 'SUBTITLES')
         .filter((s) => s.url && !isHlsPlaylistUrl(s.url))
         .map((s, i) => ({ url: s.url, lang: s.languageCode || s.name || `Subtitle ${i + 1}`, id: `mm-sub-${i}` }));
-    const label = audio.length > 1 ? 'Multi Audio' : (languages[0] || 'Unknown');
+    // A lone rendition that names no language ("Audio") under an "Original"
+    // source reads "Original", as listed.
+    const isOriginal = /^original$/i.test(String((src && src.language) || '').trim());
+    const named = languages.filter((l) => knownLanguage(l));
+    const label = audio.length > 1 ? 'Multi Audio'
+        : (isOriginal && !named.length) ? 'Original' : (languages[0] || 'Unknown');
+    // No language word in the note: normaliseStream reads language words from
+    // name/title when languages[] is empty. The listed label and the MPD tag
+    // are in the `telugu-claim dropped` log line.
+    const note = dropLabel && listed && !named.includes(listed)
+        ? (o.reason === 'mpd' ? ' [audio tag disagrees, unverified]' : ' [duplicate listing, unverified]') : '';
     return {
         name: `MultiMovies | ${quality} | ${label}`,
-        title: `MultiMovies · VidBolt · ${label}${languages.length ? ` (${languages.join(', ')})` : ''}`,
+        title: `MultiMovies · VidBolt · ${label}${languages.length ? ` (${languages.join(', ')})` : ''}${note}`,
         url: masterUrl,
         provider: 'multimovies',
         quality,
@@ -473,18 +599,8 @@ async function getMultimoviesStreams(tmdbId, mediaType = 'movie', seasonNum = nu
     const phase = new AbortController();
     const stepSignal = () => AbortSignal.any([phase.signal, AbortSignal.timeout(Math.max(1, Math.min(_config.resolveStepMs, left())))]);
 
-    // Only when a source says "Original": the title's TMDB original_language
-    // (cached 6 h in utils/tmdb.js), started on the first such source, capped
-    // at tmdbWaitMs; unknown or late -> null, that row stays unlabelled.
-    let originalP = null;
-    const original = () => originalP || (originalP = withCap(_deps.originalLanguage(type, tmdbId).catch((e) => {
-        console.log(`[multimovies] TMDB original_language unknown for ${tmdbId}: ${e.message}`);
-        return null;
-    }), _config.tmdbWaitMs, null));
-
     // One master -> one row (or null). Starts as soon as its server answers.
     const masterJob = async (src) => {
-        const origP = /^original$/i.test(String(src.language || '').trim()) ? original() : Promise.resolve(null);
         let text;
         try {
             const cap = Math.min(MASTER_TIMEOUT_MS, left());
@@ -502,20 +618,13 @@ async function getMultimoviesStreams(tmdbId, mediaType = 'movie', seasonNum = nu
         }
         const audioCap = Math.max(0, Math.min(_config.audioTimeoutMs, left()));
         const dead = await deadAudioUrls(text, src.url, tmdbId, audioCap);
-        let originalLang = await origP;
-        if (originalLang) {
-            // Every server's list is known once the ask phase ends (the
-            // caller awaits that before any row, so this adds no wait).
-            await phaseDone;
-            const listed = [...answers.values()].flatMap((a) => (a && a.ok ? a.sources : []));
-            const kept = originalLanguageFor(listed, originalLang);
-            if (!kept) {
-                console.log(`[multimovies] "Original" not labelled ${knownLanguage(originalLang)} for ${tmdbId}: `
-                    + `another source names ${knownLanguage(originalLang)} - stays unlabelled`);
-            }
-            originalLang = kept;
-        }
-        const row = streamFromMaster(src, text, src.url, dead, originalLang);
+        // The title's language plan (MPD tags, or the last-wins fallback)
+        // needs every answer and every MPD: ready after the ask phase plus
+        // at most mpdTimeoutMs.
+        const plan = await langPlan();
+        const d = plan.sources.get(masterKey(src.url));
+        const row = streamFromMaster(src, text, src.url, dead,
+            d ? { language: d.language, dropLabel: d.drop, reason: d.reason } : null);
         const top = hls.parseLevels(text, src.url)[0];
         if (top && top.url && disguisedHost(top.url) === true) {
             console.log(`[multimovies] segments disguised as images for ${tmdbId}, dropped`);
@@ -541,6 +650,45 @@ async function getMultimoviesStreams(tmdbId, mediaType = 'movie', seasonNum = nu
     if (throttled) console.log(`[multimovies] vidbolt throttled (429) until +${throttledUntil - Date.now()}ms: plain resolve only for ${tmdbId}`);
     const answers = new Map(); // ask label -> result
     const jobs = new Map(); // masterKey -> Promise<row|null>
+    const mpds = new Map(); // masterKey -> Promise<{ ok, lang } | { ok: false, error }>
+    // index.mpd for one source of this title, started as its answer lands.
+    const fetchMpd = async (mpdUrl) => {
+        try {
+            const signal = AbortSignal.timeout(Math.max(1, Math.min(_config.mpdTimeoutMs, left())));
+            const r = await fetch(mpdUrl, { headers: streamHeaders(), signal });
+            if (!r.ok) { if (r.body && r.body.cancel) r.body.cancel().catch(() => {}); return { ok: false, error: `HTTP ${r.status}` }; }
+            const text = await r.text();
+            if (!/<MPD\b/.test(text)) return { ok: false, error: 'not an MPD' };
+            return { ok: true, lang: mpdAudioLang(text) };
+        } catch (e) {
+            return { ok: false, error: e && e.name === 'TimeoutError' ? `no answer in ${_config.mpdTimeoutMs}ms` : (e && e.message) || String(e) };
+        }
+    };
+    let planP = null;
+    const langPlan = () => planP || (planP = phaseDone.then(async () => {
+        const lists = [...answers.values()].map((a) => (a && a.ok ? a.sources : []));
+        const got = new Map();
+        await Promise.all([...mpds].map(async ([k, p]) => got.set(k, await p)));
+        const plan = mpdLanguagePlan(lists, got);
+        if (plan.fallback) {
+            console.log(`[multimovies] mpd-lang fallback for ${tmdbId}: ${plan.why} - last listed Telugu wins`);
+            const winner = teluguClaimWinner(lists);
+            for (const [k, d] of plan.sources) {
+                if (d.drop) {
+                    console.log(`[multimovies] telugu-claim dropped for ${tmdbId}: ${k} listed Telugu, `
+                        + (winner ? `kept ${winner} (listed later)` : 'claims never listed together - none kept'));
+                }
+            }
+        } else {
+            for (const [k, d] of plan.sources) {
+                if (d.language === d.listed && !d.drop) continue;
+                console.log(`[multimovies] mpd-lang fix for ${tmdbId}: ${k} listed ${d.listed || '-'}, mpd ${d.mpd || '-'}`
+                    + ` -> ${d.drop ? 'unverified' : d.language}`);
+            }
+        }
+        console.log(`[multimovies] mpd-lang ${tmdbId} claims=${plan.claims} tel=${plan.tel} fixed=${plan.fixed} fallback=${plan.fallback ? 1 : 0}`);
+        return plan;
+    }));
     let pending = 0;
     let endPhase;
     const phaseDone = new Promise((r) => { endPhase = r; });
@@ -559,6 +707,10 @@ async function getMultimoviesStreams(tmdbId, mediaType = 'movie', seasonNum = nu
         }
         for (const src of a.ok ? a.sources : []) {
             const k = masterKey(src.url);
+            if (!mpds.has(k) && !jobs.has(k)) {
+                const mpdUrl = mpdUrlOf(src.url);
+                if (mpdUrl) mpds.set(k, fetchMpd(mpdUrl));
+            }
             if (!jobs.has(k)) jobs.set(k, masterJob(src));
         }
     }));
@@ -646,7 +798,8 @@ async function getMultimoviesStreams(tmdbId, mediaType = 'movie', seasonNum = nu
     // Rows in ask order (plain resolve first, then servers in list order),
     // each master once.
     const done = new Map();
-    await Promise.all([...jobs].map(async ([k, p]) => done.set(k, await p)));
+    // The plan logs its mpd-lang line even when every master fails.
+    await Promise.all([langPlan(), ...[...jobs].map(async ([k, p]) => done.set(k, await p))]);
     const out = [];
     const seen = new Set();
     for (const l of labels) {
@@ -671,7 +824,11 @@ module.exports = {
     STREAM_HEADERS,
     streamFromMaster,
     audioFromMaster,
-    originalLanguageFor,
+    teluguClaimWinner,
+    mpdLanguagePlan,
+    mpdUrlOf,
+    mpdAudioLang,
+    sourceLanguage,
     looksLikeImage,
     tierOf,
     masterKey,

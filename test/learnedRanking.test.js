@@ -92,7 +92,7 @@ test('a langOk=false report writes viewer evidence keyed on the media identity',
     assert.strictEqual(getStore().audioEvidenceFor('cdn.example/v/two.mp4').length, 0);
 });
 
-test('play_fails >= 2 sinks a row inside the Telugu group; Telugu stays first; memo hit re-ranks', async () => {
+test('play_fails >= 2 sinks a row inside the Telugu group; Telugu stays first; a fail report drops the memo (11.8)', async () => {
     const id = 7001;
     const before = await order(id);
     assert.strictEqual(before.count, 3);
@@ -103,13 +103,13 @@ test('play_fails >= 2 sinks a row inside the Telugu group; Telugu stays first; m
     // One failure is a bad moment on someone's wifi: no change.
     await report({ tmdbId: id, type: 'movie', provider: top, playedOk: false, reason: 'stall' });
     let after = await order(id);
-    assert.strictEqual(after.cached, true, 'served from the memo');
+    assert.notStrictEqual(after.cached, true, 'a failed report drops the memo (gap 11.8)');
     assert.deepStrictEqual(after.providers, before.providers);
 
     // Second failure sinks it - below the other Telugu row, never below Hindi.
     await report({ tmdbId: id, type: 'movie', provider: top, playedOk: false, reason: 'stall' });
     after = await order(id);
-    assert.strictEqual(after.cached, true, 'the memo did not pin the old order');
+    assert.notStrictEqual(after.cached, true, 'a failed report drops the memo (gap 11.8)');
     assert.deepStrictEqual(after.providers, [other, top, 'OneTouchTV']);
     assert.strictEqual(after.count, 3, 'nothing dropped');
 
@@ -117,6 +117,7 @@ test('play_fails >= 2 sinks a row inside the Telugu group; Telugu stays first; m
     // unconfirmed one of the same language.
     await report({ tmdbId: id, type: 'movie', provider: top, playedOk: true, startupMs: 900 });
     after = await order(id);
+    assert.strictEqual(after.cached, true, 'a success report keeps the memo, and the memo hit re-ranks');
     assert.deepStrictEqual(after.providers, [top, other, 'OneTouchTV']);
 });
 

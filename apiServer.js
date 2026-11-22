@@ -367,6 +367,7 @@ app.post('/api/playback-report', (req, res) => {
         provider: r.provider, mediaIdentity: r.mediaIdentity, lang: r.audioLang,
         source: 'viewer', refuted: r.langOk === false });
     }
+    if (!r.ok) evictReportedRow(r);
     console.log(`[learn] playback-report ${r.ok ? 'ok' : 'fail'} ${r.type}/${r.tmdbId} s${r.season}e${r.episode} `
       + `provider=${r.provider} identity=${r.mediaIdentity ? 'yes' : 'no'} startupMs=${r.startupMs}`
       + `${r.langOk === null ? '' : ` langOk=${r.langOk}`}`);
@@ -444,7 +445,7 @@ const CASTLE_GATE_MAX_MS = Number(process.env.CASTLE_GATE_MAX_MS) || 3000;
 //   PROVIDER_EMPTY_TTL_MS. Kept short because an empty can be a transient
 //   upstream failure (NetMirror reports resets as empty). ?refresh=1 skips both.
 const { createTtlCache } = require('./lib/runtime/ttlCache');
-const PROVIDER_HIT_TTL_MS = Number(process.env.PROVIDER_HIT_TTL_MS) || 10 * 60 * 1000;
+const PROVIDER_HIT_TTL_MS = Number(process.env.PROVIDER_HIT_TTL_MS) || 30 * 60 * 1000;
 const providerHitCache = createTtlCache({ ttlMs: PROVIDER_HIT_TTL_MS, maxEntries: 2000 });
 // Signed URLs carry their own expiry (e=, expire=, internal_token). A cache
 // entry lives at most until its first row's URL dies, and a read that finds an
@@ -558,7 +559,7 @@ const STREAMS_CACHE_SECONDS = Number(process.env.STREAMS_CACHE_SECONDS) || 300;
 // `expire=` sits 180 min out, so a 10 min entry cannot outlive the URLs it
 // holds. Keyed per title+episode; the payload carries signed per-session URLs,
 // so this Map must stay process-local and never be shared between users.
-const STREAMS_MEMO_MS = Number(process.env.STREAMS_MEMO_MS) || 10 * 60 * 1000;
+const STREAMS_MEMO_MS = Number(process.env.STREAMS_MEMO_MS) || 30 * 60 * 1000;
 // Capped: an unbounded Map grew with every distinct title+episode requested.
 const streamsMemo = createTtlCache({
   ttlMs: STREAMS_MEMO_MS, maxEntries: Number(process.env.STREAMS_MEMO_MAX) || 500 });
@@ -587,6 +588,18 @@ function memoSet(key, payload) {
   if (!payload || !Array.isArray(payload.streams) || payload.streams.length === 0) return;
   const ttl = urlExpiry.cappedTtlMs(STREAMS_MEMO_MS, payload.streams);
   if (ttl > 0) streamsMemo.set(key, payload, ttl);
+}
+// Gap 11.8: a client reports a row failed. Drop that provider's kept rows for
+// the title and every memo answer of the title, so the next request (any
+// client) asks that provider again instead of serving the dead row for up to
+// 30 min. Other providers' rows stay in providerHitCache: a rebuild is cheap.
+// Nothing is dropped from an answer: an evicted provider is re-resolved.
+function evictReportedRow(r) {
+  // The streams routes key a show as `series`; a report says `tv`.
+  const titleKey = `${r.type === 'tv' ? 'series' : r.type}:${r.tmdbId}:${r.season || ''}:${r.episode || ''}`;
+  const hit = providerHitCache.delete(`${r.provider}|${titleKey}`);
+  const memo = streamsMemo.deleteWhere((k) => k.startsWith(`${titleKey}:`));
+  console.log(`[cache] playback-report fail ${r.provider} ${titleKey}: provider rows ${hit ? 'dropped' : 'none'}, memo answers dropped=${memo}`);
 }
 setInterval(() => {
   streamsMemo.prune(); providerHitCache.prune(); providerEmptyCache.prune();

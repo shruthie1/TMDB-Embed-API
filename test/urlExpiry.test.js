@@ -153,3 +153,14 @@ test('per-provider route: expired cached entry re-resolves', async () => {
     assert.match(b.streams[0].url, /p2/);
   } finally { Date.now = realNow; }
 });
+
+// Gap 11.2: CastleTV signs with `Expires=` (capital E). The VM caches must cap
+// an entry at that expiry, not keep it the full 30 min.
+test('Expires= (Castle, capital E) caps the entry', () => {
+  const exp = NOW + 10 * 60_000;
+  const url = `https://img1.hscow.com/x.m3u8?Expires=${sec(exp)}&KeyName=k&Signature=s`;
+  assert.equal(urlExpiresAt(url, NOW), sec(exp) * 1000);
+  const ttl = cappedTtlMs(30 * 60_000, [{ url }], 30_000, NOW);
+  assert.ok(ttl < 30 * 60_000, `ttl ${ttl}`);
+  assert.equal(ttl, sec(exp) * 1000 - 30_000 - NOW);
+});

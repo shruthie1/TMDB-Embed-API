@@ -208,24 +208,21 @@ test('RRR bridge: an unrecognised source label ("Hindi Dubbed") does not replace
     assert.ok(!n.languages.some((l) => /dub/i.test(l)), n.languages.join(','));
 });
 
-test('RRR bridge: source "Original" takes TMDB original_language, else stays unlabelled', () => {
-    const withTmdb = normaliseStream(streamFromMaster({ language: 'Original' }, RRR_BRIDGE, RRR_URL, null, 'te'));
-    assert.deepEqual(withTmdb.languages, ['Telugu']);
-    const without = normaliseStream(streamFromMaster({ language: 'Original' }, RRR_BRIDGE, RRR_URL, null, null));
-    assert.ok(!without.languages.includes('Telugu'));
+test('RRR bridge: source "Original" never takes the TMDB language; the row reads Original', () => {
+    for (const tmdb of ['te', null]) {
+        const row = streamFromMaster({ language: 'Original' }, RRR_BRIDGE, RRR_URL, null, tmdb);
+        assert.ok(!normaliseStream(row).languages.includes('Telugu'));
+        assert.match(row.name, /\| Original$/);
+    }
 });
 
-// Round 2 N2: a hung TMDB call is capped (default 2 s) and never drops the row.
-test('getMultimoviesStreams: TMDB hangs on an "Original" source, row survives unlabelled', async () => {
+test('getMultimoviesStreams: an "Original" source asks TMDB nothing and stays unlabelled', async () => {
     const mm = require('../providers/multimovies');
     const realFetch = global.fetch;
-    const realDeps = { ...mm._deps };
-    const realCfg = { ...mm._config };
-    assert.equal(mm._config.tmdbWaitMs, 2000);
-    mm._config.tmdbWaitMs = 100;
-    mm._deps.originalLanguage = () => new Promise(() => {});
+    const calls = [];
     global.fetch = async (url) => {
         const u = String(url);
+        calls.push(u);
         if (u.includes('/api/resolve')) {
             return { ok: true, status: 200, json: async () => ({ stream: { server: 'x', sources: [{ url: RRR_URL, kind: 'hls', quality: '1080p', language: 'Original' }] } }) };
         }
@@ -233,18 +230,14 @@ test('getMultimoviesStreams: TMDB hangs on an "Original" source, row survives un
         return { ok: true, status: 200, text: async () => '#EXTM3U\n', body: null, arrayBuffer: async () => new ArrayBuffer(16) };
     };
     try {
-        const t0 = Date.now();
         const rows = await mm.getMultimoviesStreams('579974', 'movie');
-        assert.ok(Date.now() - t0 < 1500, `took ${Date.now() - t0}ms`);
         assert.equal(rows.length, 1);
         assert.ok(!normaliseStream(rows[0]).languages.includes('Telugu'));
-        mm._deps.originalLanguage = async () => 'te';
-        const again = await mm.getMultimoviesStreams('579974', 'movie');
-        assert.deepEqual(normaliseStream(again[0]).languages, ['Telugu']);
+        assert.match(rows[0].title, /Original/);
+        assert.ok(!calls.some((u) => /themoviedb|tmdb\.org/.test(u)), 'no TMDB call');
+        assert.equal(mm._config.tmdbWaitMs, undefined, 'no TMDB wait');
     } finally {
         global.fetch = realFetch;
-        Object.assign(mm._deps, realDeps);
-        Object.assign(mm._config, realCfg);
         await mm._disguiseSettled();
     }
 });
@@ -329,12 +322,13 @@ function freshMM(t, cfg = {}) {
     return mm;
 }
 
-test('all servers: plain resolve gives luna, callisto still adds both Telugu rows', async (t) => {
+test('all servers: plain resolve gives luna, callisto adds its two "Telugu" rows; only the later one stays Telugu', async (t) => {
     const mm = freshMM(t);
     const calls = stubVidbolt(t, rrrVidbolt());
     const rows = (await mm.getMultimoviesStreams('579974', 'movie')).map(normaliseStream);
-    assert.deepEqual(rows.map((r) => r.languages.join('/')), ['', 'Telugu', 'Telugu']);
-    assert.equal(rows.filter((r) => r.languages.includes('Telugu')).length, 2);
+    assert.deepEqual(rows.map((r) => r.languages.join('/')), ['', 'Audio', 'Telugu']);
+    assert.equal(rows.filter((r) => r.languages.includes('Telugu')).length, 1);
+    assert.match(rows.find((r) => r.languages.includes('Telugu')).url, /5355663801620775816/);
     assert.ok(rows.every((r) => r.container === 'hls'), 'mp4 sources stay out');
     const asked = calls.filter((u) => u.includes('/api/resolve')).map((u) => serverOf(u) || 'default');
     assert.deepEqual(asked.sort(), ['callisto', 'default', 'luna', 'orion', 'quantum', 'quasar', 'vega']);
@@ -536,25 +530,22 @@ test('cooldown: a 429 neither adds to nor clears a server streak', async (t) => 
     assert.equal(mm._serverHealth('vega').until, 0, 'not cooled');
 });
 
-// Vidrift's "Original" for 1261763 (TMDB te) is the Tamil track (live
-// 2026-11-21, vidrift.test.js). A source "Original" is not claimed as the
-// TMDB language when another source of the title names that language itself.
-test('originalLanguageFor: TMDB language kept only when no other source names it', () => {
-    const { originalLanguageFor } = require('../providers/multimovies');
-    const src = (...l) => l.map((language) => ({ language }));
-    assert.equal(originalLanguageFor(src('Original', 'Hindi'), 'te'), 'te');
-    assert.equal(originalLanguageFor(src('Original', 'Hindi', 'Telugu'), 'te'), null);
-    assert.equal(originalLanguageFor(src('Original', 'tel'), 'te'), null);
-    assert.equal(originalLanguageFor(src('Original', 'Telugu Sub'), 'te'), 'te');
-    assert.equal(originalLanguageFor(src('Original', 'Original'), 'te'), 'te');
-    assert.equal(originalLanguageFor(src('Original'), null), null);
+test('teluguClaimWinner: the last Telugu claim in the first list with two; none when never listed together', () => {
+    const { teluguClaimWinner, masterKey } = require('../providers/multimovies');
+    const src = (n, language) => ({ url: id(n), language });
+    const A = '5820588283537016992_0_0_1080_h265_795'; const B = '5355663801620775816_0_0_1080_h265_623';
+    assert.equal(teluguClaimWinner([[src(A, 'Telugu'), src(B, 'Telugu')]]), masterKey(id(B)));
+    assert.equal(teluguClaimWinner([[src(B, 'Telugu'), src(A, 'tel')]]), masterKey(id(A)));
+    assert.equal(teluguClaimWinner([[src(A, 'Telugu'), src(B, 'Hindi')]]), null, 'one claim: nothing to drop');
+    assert.equal(teluguClaimWinner([[src(A, 'Telugu'), src(B, 'Telugu Sub')]]), null, 'a sub source is no claim');
+    assert.equal(teluguClaimWinner([[src(A, 'Telugu'), src(B, 'Original')]]), null, 'Original is no claim');
+    assert.equal(teluguClaimWinner([[src(A, 'Telugu')], [src(B, 'Telugu')]]), '', 'never listed together: none kept');
+    // The same master twice (another signature) is one claim.
+    assert.equal(teluguClaimWinner([[src(A, 'Telugu'), { url: id(A) + '%26Signature%3Dx', language: 'Telugu' }]]), null);
 });
 
-test('getMultimoviesStreams: "Original" stays unlabelled when another server lists Telugu itself', async (t) => {
+test('getMultimoviesStreams: "Original" stays unlabelled beside the callisto Telugu pair; one Telugu row', async (t) => {
     const mm = freshMM(t);
-    const realDeps = { ...mm._deps };
-    mm._deps.originalLanguage = async () => 'te';
-    t.after(() => Object.assign(mm._deps, realDeps));
     const routes = rrrVidbolt();
     const inner = routes[0][1];
     // The plain resolve (luna) now lists an "Original" bridge master; callisto lists two Telugu.
@@ -567,14 +558,11 @@ test('getMultimoviesStreams: "Original" stays unlabelled when another server lis
     const orig = rows.find((r) => r.url === ORIG);
     assert.ok(orig, 'Original row kept');
     assert.ok(!normaliseStream(orig).languages.includes('Telugu'), JSON.stringify(orig.languages));
-    assert.equal(rows.map(normaliseStream).filter((r) => r.languages.includes('Telugu')).length, 2);
+    assert.equal(rows.map(normaliseStream).filter((r) => r.languages.includes('Telugu')).length, 1);
 });
 
-test('getMultimoviesStreams: "Original" keeps TMDB te when no source lists Telugu', async (t) => {
+test('getMultimoviesStreams: "Original" is not Telugu even when no source lists Telugu', async (t) => {
     const mm = freshMM(t);
-    const realDeps = { ...mm._deps };
-    mm._deps.originalLanguage = async () => 'te';
-    t.after(() => Object.assign(mm._deps, realDeps));
     const ORIG = RRR_URL.replace('5820588283537016992_0_0_1080_h265_795', '604320274028317248_0_0_1080_h265_174');
     stubVidbolt(t, [
         [/\/api\/resolve/, (u) => new Response(resolveBody('luna', serverOf(u) === null
@@ -584,7 +572,9 @@ test('getMultimoviesStreams: "Original" keeps TMDB te when no source lists Telug
         [/dash-hls-bridge/, () => new Response(RRR_BRIDGE, { status: 200 })],
     ]);
     const rows = await mm.getMultimoviesStreams('1261763', 'movie');
-    assert.deepEqual(normaliseStream(rows.find((r) => r.url === ORIG)).languages, ['Telugu']);
+    const row = rows.find((r) => r.url === ORIG);
+    assert.ok(!normaliseStream(row).languages.includes('Telugu'), JSON.stringify(row.languages));
+    assert.match(row.title, /Original/);
 });
 
 // Soak 1: VidBolt answered 2xx with no source for the title while a server
@@ -604,4 +594,219 @@ test('soak 1: VidBolt 5xx on every ask: thrown, not titleEmpty', async (t) => {
     const mm = freshMM(t, { settleMs: 50, resolveStepMs: 500 });
     stubVidbolt(t, [[/\/api\/resolve/, () => new Response('bad', { status: 502 })], [/vidbolt\.xyz\/movie\//, '']]);
     await assert.rejects(mm.getMultimoviesStreams('1496785', 'movie'), (e) => !e.titleEmpty);
+});
+
+// Live 2026-11-22 (telugu-label.md): VidBolt /api/resolve for RRR (579974),
+// default and only=callisto, both list two sources with language "Telugu".
+// Speech ID on 40 s of each: 5820588283537016992 reads ta 0.60 / 0.37 / 0.52
+// (Tamil), 5355663801620775816 reads te 1.00 at the same point of the film.
+// The owner hears the same: first "Telugu" plays Tamil, the second is Telugu.
+// Two Telugu claims from one provider cannot both stand: only the last listed
+// keeps Telugu, the other keeps its listed label in the title, unlabelled.
+const id = (n) => RRR_URL.replace('5820588283537016992_0_0_1080_h265_795', n);
+const RRR_LIVE_DEFAULT = [
+    ['7067694354684856232_0_0_1080_h265_745', 'Bengali'], ['5820588283537016992_0_0_1080_h265_795', 'Telugu'],
+    ['2848239607093808728_0_0_1080_h265_905', 'English'], ['7499853135079687472_0_0_1080_h265_956', 'Hindi'],
+    ['3648827707632354536_0_0_1080_h265_341', 'Arabic sub'], ['5355663801620775816_0_0_1080_h265_623', 'Telugu'],
+];
+const RRR_LIVE_CALLISTO = [1, 2, 4, 0, 3, 5].map((i) => RRR_LIVE_DEFAULT[i]);
+const liveBody = (list) => resolveBody('callisto', list.map(([n, language]) => ({ url: id(n), kind: 'hls', quality: '1080p', language })));
+
+test('live 11-22 RRR: two sources say Telugu; only the last listed keeps Telugu', async (t) => {
+    const mm = freshMM(t);
+    stubVidbolt(t, [
+        [/\/api\/resolve/, (u) => {
+            const s = serverOf(u);
+            if (s === null) return new Response(liveBody(RRR_LIVE_DEFAULT), { status: 200 });
+            if (s === 'callisto') return new Response(liveBody(RRR_LIVE_CALLISTO), { status: 200 });
+            return new Response(resolveBody(s, null), { status: 200 });
+        }],
+        [/vidbolt\.xyz\/movie\//, ''],
+        [/dash-hls-bridge/, () => new Response(RRR_BRIDGE, { status: 200 })],
+    ]);
+    const rows = await mm.getMultimoviesStreams('579974', 'movie');
+    const te = rows.map(normaliseStream).filter((r) => r.languages.includes('Telugu'));
+    assert.equal(te.length, 1, JSON.stringify(rows.map((r) => r.languages)));
+    assert.match(te[0].url, /5355663801620775816/);
+    const first = rows.find((r) => r.url.includes('5820588283537016992'));
+    assert.ok(first, 'the demoted row is kept');
+    assert.ok(!normaliseStream(first).languages.includes('Telugu'));
+    assert.ok(!normaliseStream(first).audio.some((a) => a.language === 'Telugu'));
+    assert.match(first.title, /duplicate listing/);
+    assert.doesNotMatch(`${first.name} ${first.title}`, /telugu/i);
+    // The other explicit languages stay as listed.
+    const langs = rows.map(normaliseStream).flatMap((r) => r.languages);
+    for (const l of ['Bengali', 'English', 'Hindi']) assert.ok(langs.includes(l), l);
+});
+
+test('dropLabel: a Telugu claim that lost to a later one is not stamped on the lone rendition', () => {
+    const row = normaliseStream(streamFromMaster({ language: 'Telugu' }, RRR_BRIDGE, RRR_URL, null, { dropLabel: true }));
+    assert.ok(!row.languages.includes('Telugu'));
+    assert.match(row.title, /duplicate listing/);
+    // A master LANGUAGE tag is its own evidence and still wins.
+    const tagged = RRR_BRIDGE.replace('NAME="Audio"', 'NAME="Audio",LANGUAGE="tel"');
+    assert.deepEqual(normaliseStream(streamFromMaster({ language: 'Telugu' }, tagged, RRR_URL, null, { dropLabel: true })).languages, ['Telugu']);
+});
+
+test('live 11-22: "Original" never takes the TMDB language (te or ta)', () => {
+    for (const lang of ['te', 'ta']) {
+        const row = streamFromMaster({ language: 'Original' }, RRR_BRIDGE, RRR_URL, null, lang);
+        const n = normaliseStream(row);
+        assert.ok(!n.languages.includes('Telugu') && !n.languages.includes('Tamil'), JSON.stringify(n.languages));
+        assert.ok(!n.audio.some((a) => a.language === 'Telugu' || a.language === 'Tamil'));
+        assert.match(row.title, /Original/);
+    }
+});
+
+// Live 2026-11-22: Jailer (937020) orion master, every rendition LANGUAGE-tagged
+// (speech ID on each: hi 0.98, kn 0.97, ml 1.00, ta 1.00, te 0.99).
+test('live 11-22 Jailer multi-audio master: every tagged language kept, Telugu first, nothing invented', () => {
+    const JAILER = [
+        '#EXTM3U', '#EXT-X-VERSION:3',
+        '#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",DEFAULT=NO,AUTOSELECT=YES,FORCED=NO,LANGUAGE="en-us",URI="subtitles_english.m3u8"',
+        '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",LANGUAGE="hin",NAME="[1] Hindi",DEFAULT=NO,URI="track_hindi.m3u8"',
+        '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",LANGUAGE="kan",NAME="[2] Kannada",DEFAULT=NO,URI="track_kannada.m3u8"',
+        '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",LANGUAGE="mal",NAME="[3] Malayalam",DEFAULT=NO,URI="track_malayalam.m3u8"',
+        '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",LANGUAGE="tam",NAME="[4] Tamil",DEFAULT=NO,URI="track_tamil.m3u8"',
+        '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",LANGUAGE="tel",NAME="[5] Telugu",DEFAULT=NO,URI="track_telugu.m3u8"',
+        '#EXT-X-STREAM-INF:BANDWIDTH=5000000,AUDIO="aac",RESOLUTION=1920x1040,SUBTITLES="subs",CLOSED-CAPTIONS=NONE', 'tiles.m3u8',
+        '#EXT-X-STREAM-INF:BANDWIDTH=2000000,AUDIO="aac",DEFAULT=YES,RESOLUTION=1280x688,SUBTITLES="subs",CLOSED-CAPTIONS=NONE', 'video_720p.m3u8', '',
+    ].join('\n');
+    const n = normaliseStream(streamFromMaster({ quality: '1080p' }, JAILER, 'https://img.rousav.tech/media/fce9ee51fc8ce1cc4e1b/index.m3u8'));
+    assert.deepEqual(n.languages, ['Telugu', 'Hindi', 'Kannada', 'Malayalam', 'Tamil']);
+    assert.deepEqual(n.audio.map((a) => a.language), ['Hindi', 'Kannada', 'Malayalam', 'Tamil', 'Telugu']);
+});
+
+// ---- MPD audio lang rule (2026-11-22). Real resolve answers for 6 titles,
+// signatures redacted (fixtures/multimovies/mpd-lang-titles.json), and the
+// real Salaar index.mpd shape with each source's measured `lang` put in.
+// Speech ID (telugu-rule-check.md): tel 6 of 6, tam/kan/hin 4 of 4.
+const MPD_FIX = require('./fixtures/multimovies/mpd-lang-titles.json');
+const MPD_TEMPLATE = require('fs').readFileSync(require('path').join(__dirname, 'fixtures', 'multimovies', 'salaar-7844085959171131184-index.mpd'), 'utf8');
+const mpdWith = (lang) => MPD_TEMPLATE.replace(' lang="tel"', lang ? ` lang="${lang}"` : '');
+const sacdnId = (u) => (/\/dash\/(\d+)_/.exec(decodeURIComponent(String(u))) || [])[1];
+
+// VidBolt answers as captured; every bridge master is the RRR single "Audio"
+// master; orion masters are Krack's tagged multi master. `mpd`: 'fixture'
+// serves the measured lang, or a function (url) -> Response|'hang'.
+function capturedVidbolt(id, { mpd = 'fixture' } = {}) {
+    const answers = MPD_FIX.titles[id].answers;
+    return [
+        [/\/api\/resolve/, (u) => {
+            const label = serverOf(u) || 'default';
+            const a = answers.find((x) => x.ask === label) || (label === 'default' ? answers[0] : null);
+            return new Response(resolveBody(a ? a.server : label, a && a.sources.length ? a.sources : null), { status: 200 });
+        }],
+        [/vidbolt\.xyz\/movie\//, ''],
+        [/sacdn\.hakunaymatata\.com\/.*index\.mpd/, (u) => (mpd === 'fixture'
+            ? new Response(mpdWith(MPD_FIX.mpdAudioLang[sacdnId(u)]), { status: 200 })
+            : mpd(u))],
+        // Bridge hosts vary (dash-hls-bridge, hakunamatata.rousav.tech, *.workers.dev).
+        [/\/\?url=https%3A%2F%2Fsacdn/, () => new Response(RRR_BRIDGE, { status: 200 })],
+        [/img\.rousav\.tech/, () => new Response(KRACK, { status: 200 })],
+    ];
+}
+
+function logLines(t) {
+    const lines = [];
+    t.mock.method(console, 'log', (...a) => { lines.push(a.join(' ')); });
+    return lines;
+}
+
+async function mpdResolve(t, id, opts) {
+    const mm = freshMM(t, { mpdTimeoutMs: 300 });
+    const lines = logLines(t);
+    const calls = stubVidbolt(t, capturedVidbolt(id, opts));
+    const rows = await mm.getMultimoviesStreams(id, 'movie');
+    const by = new Map(rows.map((r) => [sacdnId(r.url) || r.url, r]));
+    const langs = (key) => normaliseStream(by.get(key)).languages;
+    return { rows, by, langs, lines, calls, summary: lines.find((l) => l.startsWith(`[multimovies] mpd-lang ${id} `)) };
+}
+
+test('mpd-lang RRR: the first "Telugu" (MPD und, Tamil speech) is not Telugu; the second (tel) is', async (t) => {
+    const r = await mpdResolve(t, '579974');
+    assert.ok(!r.langs('5820588283537016992').includes('Telugu'), JSON.stringify(r.langs('5820588283537016992')));
+    assert.deepEqual(r.langs('5355663801620775816'), ['Telugu']);
+    assert.equal(r.rows.map(normaliseStream).filter((x) => x.languages.includes('Telugu')).length, 1);
+    assert.equal(r.summary, '[multimovies] mpd-lang 579974 claims=2 tel=1 fixed=1 fallback=0');
+});
+
+test('mpd-lang Pushpa: the single "Telugu" source tagged tam is not Telugu, and no language word is added', async (t) => {
+    const r = await mpdResolve(t, '690957');
+    const row = r.by.get('1120489025439157848');
+    assert.ok(!r.langs('1120489025439157848').includes('Telugu'));
+    assert.ok(!/Telugu|Tamil/.test(row.title + row.name), row.title);
+    assert.ok(!normaliseStream(row).languages.includes('Tamil'));
+    assert.match(row.title, /unverified/);
+    assert.equal(r.summary, '[multimovies] mpd-lang 690957 claims=1 tel=0 fixed=1 fallback=0');
+});
+
+test('mpd-lang Hanu-Man: the "Telugu" source (MPD und, Hindi speech) is not Telugu; Hindi stays Hindi', async (t) => {
+    const r = await mpdResolve(t, '869760');
+    assert.ok(!r.langs('5646656895621416016').includes('Telugu'));
+    assert.deepEqual(r.langs('5669817185716291008'), ['Hindi']);
+    assert.equal(r.summary, '[multimovies] mpd-lang 869760 claims=1 tel=0 fixed=1 fallback=0');
+});
+
+test('mpd-lang Devara: "Kurdish sub" tagged tel becomes Telugu; the listed Telugu stays', async (t) => {
+    const r = await mpdResolve(t, '811941');
+    assert.deepEqual(r.langs('6176354059575264600'), ['Telugu']);
+    assert.deepEqual(r.langs('5096152864070746064'), ['Telugu']);
+    assert.equal(r.summary, '[multimovies] mpd-lang 811941 claims=1 tel=2 fixed=1 fallback=0');
+});
+
+test('mpd-lang Salaar: the tel source keeps Telugu; the und claim loses it; one MPD GET per sacdn source, signed', async (t) => {
+    const r = await mpdResolve(t, '770906');
+    assert.deepEqual(r.langs('7844085959171131184'), ['Telugu']);
+    assert.ok(!r.langs('891921665641332688').includes('Telugu'));
+    assert.equal(r.summary, '[multimovies] mpd-lang 770906 claims=2 tel=1 fixed=1 fallback=0');
+    const mpds = r.calls.filter((u) => /index\.mpd/.test(u));
+    assert.equal(mpds.length, 8, 'the 8 callisto sources, once each; orion has no MPD');
+    assert.ok(mpds.every((u) => /^https:\/\/sacdn\.hakunaymatata\.com\/dash\/\d+_[^/]+\/index\.mpd\?Policy=REDACTED&Signature=REDACTED&Key-Pair-Id=REDACTED$/.test(u)), mpds[0]);
+});
+
+test('mpd-lang KGF2: the Kannada claims follow the tag (kan stays Kannada, und is no evidence); Telugu tel stays', async (t) => {
+    const r = await mpdResolve(t, '587412');
+    assert.deepEqual(r.langs('940721918355932584'), ['Kannada']);
+    assert.deepEqual(r.langs('2871208402850570248'), ['Kannada'], 'und carries no information');
+    assert.deepEqual(r.langs('68264836194533344'), ['Telugu']);
+    assert.equal(r.summary, '[multimovies] mpd-lang 587412 claims=1 tel=1 fixed=0 fallback=0');
+});
+
+test('mpd-lang rule: tam/kan/hin/mal that contradicts a listed language wins; eng and und never do', () => {
+    const { mpdLanguagePlan, masterKey } = require('../providers/multimovies');
+    const kgf = MPD_FIX.titles['587412'].answers.map((a) => a.sources);
+    // Synthetic: KGF2's measured tags, except position 0 ("Kannada", Hindi
+    // speech, measured und) is given `hin` to exercise the override.
+    const tags = { '2871208402850570248': 'hin', '940721918355932584': 'kan', '3461436953068011736': 'eng', '1207594074979664368': 'und', '68264836194533344': 'tel' };
+    const mpd = new Map(kgf.flat().map((s) => [masterKey(s.url), { ok: true, lang: tags[masterKey(s.url)] || null }]));
+    const plan = mpdLanguagePlan(kgf, mpd);
+    assert.equal(plan.fallback, false);
+    assert.equal(plan.sources.get('2871208402850570248').language, 'Hindi', 'Kannada label, hin tag');
+    assert.equal(plan.sources.get('940721918355932584').language, 'Kannada');
+    assert.equal(plan.sources.get('3461436953068011736').language, 'Bengali', 'eng is ignored');
+    assert.equal(plan.sources.get('1207594074979664368').language, 'Hindi', 'und is ignored');
+    assert.equal(plan.fixed, 1);
+});
+
+test('mpd-lang: an MPD failure falls back to last-listed-wins for the title, and says so', async (t) => {
+    let n = 0;
+    const r = await mpdResolve(t, '579974', { mpd: () => (++n === 1 ? 'hang' : new Response('no', { status: 503 })) });
+    assert.ok(!r.langs('5820588283537016992').includes('Telugu'));
+    assert.match(r.by.get('5820588283537016992').title, /duplicate listing, unverified/);
+    assert.deepEqual(r.langs('5355663801620775816'), ['Telugu']);
+    assert.equal(r.summary, '[multimovies] mpd-lang 579974 claims=2 tel=0 fixed=0 fallback=1');
+    assert.ok(r.lines.some((l) => /^\[multimovies\] mpd-lang fallback for 579974: /.test(l)), r.lines.join('\n'));
+});
+
+test('mpd-lang: index.mpd URL from any wrapper keeps the signed query; unsigned or non-sacdn has none; tag parse', () => {
+    const { mpdUrlOf, mpdAudioLang } = require('../providers/multimovies');
+    const inner = 'https%3A%2F%2Fsacdn.hakunaymatata.com%2Fdash%2F5355663801620775816_0_0_1080_h265_623%2Fmaster.m3u8';
+    assert.equal(mpdUrlOf(`https://old-mode-b611.fykko14.workers.dev/?url=${inner}&Policy=P_&Signature=S~x&Key-Pair-Id=K`),
+        'https://sacdn.hakunaymatata.com/dash/5355663801620775816_0_0_1080_h265_623/index.mpd?Policy=P_&Signature=S~x&Key-Pair-Id=K');
+    assert.equal(mpdUrlOf(`https://h/?url=${inner}`), null, 'unsigned');
+    assert.equal(mpdUrlOf('https://img.rousav.tech/media/031fe7b1d27fd6aa800d/index.m3u8?Policy=a&Signature=b&Key-Pair-Id=c'), null);
+    assert.equal(mpdAudioLang(mpdWith('tel')), 'tel');
+    assert.equal(mpdAudioLang(mpdWith(null)), null);
+    assert.equal(mpdAudioLang(mpdWith('TAM')), 'tam');
 });

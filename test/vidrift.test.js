@@ -256,11 +256,9 @@ test('"Original" streamFromMaster without TMDB language: title keeps Original, n
 });
 
 // Round 2 N1: a hung TMDB call must not eat the budget and drop every row.
-test('TMDB hangs: masters still fetched, rows survive, Original unlabelled, wait capped', async () => {
+test('RRR: masters fetched, rows survive, Original unlabelled', async () => {
     vidrift._config.budgetMs = 800;
-    vidrift._config.tmdbWaitMs = 100;
     stubFetch([[isPage('embed.vidrift.net'), () => text(RRR_PAGE)], [isMaster, () => text(MASTER_TE)]]);
-    vidrift._deps.originalLanguage = () => new Promise(() => {});
     const t0 = Date.now();
     const rows = await vidrift.getVidriftStreams('579974', 'movie');
     assert.ok(Date.now() - t0 < 600, `took ${Date.now() - t0}ms`);
@@ -271,35 +269,23 @@ test('TMDB hangs: masters still fetched, rows survive, Original unlabelled, wait
     assert.deepEqual(rows.find((r) => r.url.includes('4160f9215437e11c789d19d826048e8b')).languages, ['Telugu']);
 });
 
-test('TMDB wait also ends with the budget (budget 300 ms < 2 s wait)', async () => {
+test('a short budget (300 ms) still returns every row', async () => {
     vidrift._config.budgetMs = 300;
     stubFetch([[isPage('embed.vidrift.net'), () => text(RRR_PAGE)], [isMaster, () => text(MASTER_TE)]]);
-    vidrift._deps.originalLanguage = () => new Promise(() => {});
     const t0 = Date.now();
     const rows = await vidrift.getVidriftStreams('579974', 'movie');
     assert.ok(Date.now() - t0 < 600, `took ${Date.now() - t0}ms`);
     assert.equal(rows.length, 4);
 });
 
-test('default TMDB wait is 2 s', () => {
-    assert.equal(vidrift._config.tmdbWaitMs, 2000);
-});
-
-test('N3: the TMDB wait timer is cleared once TMDB answers', async () => {
-    vidrift._config.tmdbWaitMs = 60000;
-    vidrift._config.budgetMs = 10 * 60000; // so the wait is exactly tmdbWaitMs
+test('no TMDB lookup: "Original" never waits on or asks TMDB', async () => {
+    let asked = 0;
     stubFetch([[isPage('embed.vidrift.net'), () => text(RRR_PAGE)], [isMaster, () => text(MASTER_TE)]]);
-    const realSet = global.setTimeout; const realClear = global.clearTimeout;
-    const waits = new Set(); const cleared = new Set();
-    global.setTimeout = (fn, ms, ...a) => { const h = realSet(fn, ms, ...a); if (ms === 60000) waits.add(h); return h; };
-    global.clearTimeout = (h) => { cleared.add(h); return realClear(h); };
-    try {
-        await vidrift.getVidriftStreams('579974', 'movie');
-    } finally {
-        global.setTimeout = realSet; global.clearTimeout = realClear;
-    }
-    assert.equal(waits.size, 1, 'one capped TMDB wait');
-    for (const h of waits) assert.ok(cleared.has(h), 'wait timer cleared');
+    vidrift._deps.originalLanguage = async () => { asked += 1; return 'te'; };
+    const rows = await vidrift.getVidriftStreams('579974', 'movie');
+    assert.equal(asked, 0);
+    assert.equal(vidrift._config.tmdbWaitMs, undefined);
+    assert.deepEqual(rows.find((r) => r.url.includes('36c0c00732d43d2df373f8c4e10e971b')).languages, []);
 });
 
 test('N4: an unknown TMDB code keeps "Original" (no title-cased guess)', async () => {
@@ -319,13 +305,14 @@ test('subtitles: HLS playlist URLs are not emitted, real vtt is kept', () => {
     assert.deepEqual(row.subtitles.map((s) => s.url.replace(/^.*\//, '')), ['s_te.vtt']);
 });
 
-test('R1: "Original" with TMDB mr / pa is Marathi / Punjabi; bn stays unlabelled (RRR lists Bangla itself)', async () => {
-    for (const [code, name] of [['mr', 'Marathi'], ['pa', 'Punjabi'], ['bn', null]]) {
+test('"Original" is never labelled from TMDB, whatever the code (te, ta, mr, pa, bn, xx)', async () => {
+    for (const code of ['te', 'ta', 'mr', 'pa', 'bn', 'xx']) {
         stubFetch([[isPage('embed.vidrift.net'), () => text(RRR_PAGE)], [isMaster, () => text(MASTER_TE)]],
             { originalLanguage: code });
         const rows = await vidrift.getVidriftStreams('579974', 'movie');
         const orig = rows.find((r) => r.url.includes('36c0c00732d43d2df373f8c4e10e971b'));
-        assert.deepEqual(normaliseStream(orig).languages, name ? [name] : [], code);
+        assert.deepEqual(normaliseStream(orig).languages, [], code);
+        assert.match(orig.title, /Original/, code);
     }
 });
 
@@ -350,25 +337,21 @@ test('1261763: Original is NOT labelled Telugu when the page has its own Telugu 
     assert.ok(rows.find((r) => r.url.includes(DTTT_TE)).languages.includes('Telugu'));
 });
 
-test('originalLanguageFor: TMDB language kept only when no other entry names it', () => {
+test('teluguClaimWinner: index of the last Telugu entry when two or more say Telugu', () => {
     const names = (...l) => l.map((x) => ({ name: `Orion · ${x}` }));
-    assert.equal(vidrift.originalLanguageFor(names('Original', 'Hindi'), 'te'), 'te');
-    assert.equal(vidrift.originalLanguageFor(names('Original', 'Hindi', 'Telugu'), 'te'), null);
-    assert.equal(vidrift.originalLanguageFor(names('Original', 'Hindi', 'Telugu'), 'tel'), null);
-    assert.equal(vidrift.originalLanguageFor(names('Original', 'Bangla'), 'bn'), null);
-    // A "<lang> Sub" entry is not an audio language, so it does not block.
-    assert.equal(vidrift.originalLanguageFor(names('Original', 'Telugu Sub'), 'te'), 'te');
-    assert.equal(vidrift.originalLanguageFor(names('Original'), null), null);
-    assert.equal(vidrift.originalLanguageFor(names('Original'), 'xx'), null);
+    assert.equal(vidrift.teluguClaimWinner(names('Telugu', 'Hindi', 'Telugu')), 2);
+    assert.equal(vidrift.teluguClaimWinner(names('Original', 'Hindi', 'Telugu')), null);
+    assert.equal(vidrift.teluguClaimWinner(names('Telugu', 'Telugu Sub')), null);
+    assert.equal(vidrift.teluguClaimWinner(names('Tamil', 'Tamil')), null, 'Telugu only');
 });
 
-test('Original keeps TMDB te when the page has no Telugu entry of its own', async () => {
+test('1261763 without its Telugu entry: Original is still not Telugu', async () => {
     const page = DTTT_PAGE.replace(/\{"index":3,[^{}]*"name":"Orion · Telugu"[^{}]*"rungs":\[[^\]]*\][^{}]*\},/, '');
     assert.ok(!page.includes('Orion · Telugu'), 'fixture edit removed the Telugu entry');
     stubFetch([[isPage('embed.vidrift.net'), () => text(page)], [isMaster, () => text(MASTER_ORIG)]]);
     const rows = await vidrift.getVidriftStreams('1261763', 'movie');
     const orig = rows.find((r) => r.url.includes(DTTT_ORIG));
-    assert.deepEqual(normaliseStream(orig).languages, ['Telugu']);
+    assert.deepEqual(normaliseStream(orig).languages, []);
 });
 
 test('R1: knownLanguage covers 2- and 3-letter Indian codes', () => {
@@ -436,4 +419,49 @@ test('dead hosts or a page without embedMeta: not titleEmpty (host fault)', asyn
     await assert.rejects(vidrift.getVidriftStreams('579974', 'movie'), (e) => !e.titleEmpty);
     stubFetch([[(u) => u.includes('/embed/movie/'), () => text(KRACK_PAGE.replace('"orionStreams":null,', '').replace(',"orionStreams":null', ''))]]);
     await assert.rejects(vidrift.getVidriftStreams('579974', 'movie'), (e) => /orionStreams missing|no embedMeta/.test(e.message) && !e.titleEmpty);
+});
+
+// Live 2026-11-22 (telugu-label.md). Vidrift's page for RRR (579974, TMDB te)
+// listed ONE entry, "Orion · Original". It was labelled Telugu from TMDB.
+// Its audio segments are byte-identical to MultiMovies' "English" RRR source
+// (cmp: 0 differing bytes of 666,405) and speech ID says ta/hi, not te; the
+// phone played it as lang=und. Jailer (937020, TMDB ta): "Original" was
+// labelled Tamil, but its audio is byte-identical to MovieBox's Malayalam
+// source (speech ID ml 1.00). "Original" names no language: it stays Original.
+test('live 11-22 RRR: a page with only "Orion · Original" is NOT Telugu (TMDB te ignored)', async () => {
+    const page = RRR_PAGE.replace(/,\{"index":[123],[^{}]*"name":"Orion · (Hindi|Telugu|Bangla)","rungs":\[[^\]]*\][^{}]*\}/g, '');
+    assert.ok(!/Orion · (Hindi|Telugu|Bangla)/.test(page), 'fixture edit left only Original');
+    stubFetch([[isPage('embed.vidrift.net'), () => text(page)], [isMaster, () => text(MASTER_ORIG)]], { originalLanguage: 'te' });
+    const rows = await vidrift.getVidriftStreams('579974', 'movie');
+    assert.equal(rows.length, 1);
+    const n = normaliseStream(rows[0]);
+    assert.deepEqual(n.languages, []);
+    assert.ok(!n.audio.some((a) => a.language), JSON.stringify(n.audio));
+    assert.match(rows[0].title, /Original/);
+});
+
+test('live 11-22 Jailer: "Original" with TMDB ta is not labelled Tamil (it plays Malayalam)', () => {
+    assert.deepEqual(vidrift.pageLanguage({ name: 'Orion · Original' }, 'ta'), { language: null, label: 'Original' });
+    assert.deepEqual(vidrift.pageLanguage({ name: 'Orion · Original' }, 'te'), { language: null, label: 'Original' });
+});
+
+test('two page entries both say Telugu: only the last listed keeps Telugu; the other is unlabelled', async () => {
+    const page = RRR_PAGE.replace('"name":"Orion · Original"', '"name":"Orion · Telugu"');
+    stubFetch([[isPage('embed.vidrift.net'), () => text(page)], [isMaster, () => text(MASTER_ORIG)]]);
+    const rows = await vidrift.getVidriftStreams('579974', 'movie');
+    const n = rows.map(normaliseStream);
+    assert.equal(n.filter((r) => r.languages.includes('Telugu')).length, 1, JSON.stringify(n.map((r) => r.languages)));
+    const first = rows.find((r) => r.url.includes('36c0c00732d43d2df373f8c4e10e971b'));
+    const last = rows.find((r) => r.url.includes('4160f9215437e11c789d19d826048e8b'));
+    assert.deepEqual(normaliseStream(first).languages, []);
+    assert.match(first.title, /duplicate listing/);
+    assert.doesNotMatch(`${first.name} ${first.title}`, /telugu/i);
+    assert.deepEqual(normaliseStream(last).languages, ['Telugu']);
+});
+
+test('a master LANGUAGE tag still wins over a duplicate page label', () => {
+    const tagged = MASTER_ORIG.replace(/(#EXT-X-MEDIA:TYPE=AUDIO[^\n]*?)NAME=/, '$1LANGUAGE="tel",NAME=');
+    assert.ok(tagged.includes('LANGUAGE="tel"'), 'fixture edit tagged the rendition');
+    const row = vidrift.streamFromMaster({ name: 'Orion · Telugu' }, tagged, MURL, BASE, { dropLabel: true });
+    assert.deepEqual(normaliseStream(row).languages, ['Telugu']);
 });

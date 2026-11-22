@@ -20,9 +20,9 @@
 // LANGUAGE. Per AUDIO rendition, its own LANGUAGE tag wins. Only when the
 // master has exactly ONE untagged AUDIO rendition (or none, audio muxed) does
 // the page label apply: the part after "·" ("Bangla" -> Bengali). "Original"
-// takes the title's TMDB original_language, unless another entry
-// on the page names that language itself (originalLanguageFor); unknown ->
-// stays "Original" with no language. embedMeta.lang is NOT used: Krack, a Telugu
+// names no language and stays "Original" (never the TMDB original_language,
+// pageLanguage). When two entries say Telugu, only the last keeps it
+// (teluguClaimWinner). embedMeta.lang is NOT used: Krack, a Telugu
 // film, had lang "" (review I2). Never read from a TMDB title string.
 //
 // FAILURES. A master that fails on every host is dropped and named in
@@ -33,7 +33,6 @@
 
 const axios = require('axios');
 const hls = require('../lib/media/hlsManifest');
-const { knownLanguage } = require('../utils/streamSchema');
 
 const UA = 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) '
     + 'Chrome/124.0 Mobile Safari/537.36';
@@ -42,17 +41,7 @@ const _config = {
     budgetMs: Number(process.env.VIDRIFT_BUDGET_MS) || 15000,
     pageTimeoutMs: Number(process.env.VIDRIFT_PAGE_TIMEOUT_MS) || 5000,
     masterTimeoutMs: Number(process.env.VIDRIFT_MASTER_TIMEOUT_MS) || 5000,
-    // Longest wait for TMDB original_language, run beside the master fetches.
-    // On timeout "Original" stays unlabelled; it never costs the masters.
-    tmdbWaitMs: Number(process.env.VIDRIFT_TMDB_WAIT_MS) || 2000,
 };
-
-// `promise`, or `fallback` after `ms`. The timer is always cleared.
-function withCap(promise, ms, fallback) {
-    let timer;
-    const cap = new Promise((resolve) => { timer = setTimeout(() => resolve(fallback), ms); });
-    return Promise.race([promise, cap]).finally(() => clearTimeout(timer));
-}
 // The scraper sent MultiMovies' site as Referer on the embed page.
 const PAGE_REFERER = 'https://m1.multimovies.courses/';
 
@@ -86,12 +75,6 @@ const _deps = {
             validateStatus: () => true, maxRedirects: 3,
         });
         return { status: r.status, text: String(r.data || '') };
-    },
-    // TMDB original_language ("te") or null. Cached 6 h in utils/tmdb.js.
-    originalLanguage: async (type, tmdbId) => {
-        const { getDetails } = require('../utils/tmdb');
-        const d = await getDetails(type, tmdbId);
-        return (d && d.original_language) || null;
     },
 };
 
@@ -196,34 +179,30 @@ function langName(raw) {
 }
 
 // "Orion · Telugu" -> { language: 'Telugu', label: 'Telugu' }.
-// "Orion · Original" -> TMDB original language, or { language: null, label: 'Original' }.
-function pageLanguage(entry, originalLang) {
+// "Orion · Original" -> { language: null, label: 'Original' }, always.
+// "Original" is not the TMDB original language. 1261763 (TMDB te): its
+// Original audio is the Tamil track (byte-identical, 2026-11-21). Live
+// 2026-11-22: RRR (TMDB te) listed only Original, prod labelled it Telugu,
+// and its audio is byte-identical to MultiMovies' "English" RRR source
+// (0 of 666,405 bytes differ; speech ID ta/hi, the phone saw lang=und).
+// Jailer (TMDB ta): Original is byte-identical to a MovieBox Malayalam source
+// (speech ID ml 1.00). Unknown, never a guessed tag. Pure, exported.
+function pageLanguage(entry) {
     const label = String((entry && entry.name) || '').replace(/^.*·\s*/, '').replace(/\s*\(.*\)\s*$/, '').trim();
     if (!label) return { language: null, label: null };
-    if (/^original$/i.test(label)) {
-        // TMDB codes go through knownLanguage: an unknown code ("xx") keeps
-        // "Original" rather than becoming a title-cased guess.
-        const language = knownLanguage(originalLang);
-        return { language, label: language || 'Original' };
-    }
+    if (/^original$/i.test(label)) return { language: null, label: 'Original' };
     const language = langName(label);
     return { language, label: language };
 }
 
-// "Original" is not always the TMDB original language. Don't Trouble the
-// Trouble (1261763, TMDB te) lists Original, Hindi, Tamil, Telugu, Malayalam,
-// Kannada; its Original audio is byte-identical to the Tamil row's (audio
-// segment 200: 136 of 82,461 bytes differ vs Tamil, 80,074 vs Telugu, live
-// 2026-11-21), and the owner heard Tamil. When another entry on the same
-// page names that language itself, the page already places it elsewhere, so
-// "Original" stays unlabelled: unknown, never a wrong tag. Pure, exported.
-function originalLanguageFor(entries, originalLang) {
-    const language = knownLanguage(originalLang);
-    if (!language) return null;
-    const named = (entries || [])
-        .map((e) => pageLanguage(e, null).language)
-        .filter(Boolean);
-    return named.includes(language) ? null : originalLang;
+// Two page entries may each say Telugu; at most one is (multimovies.js
+// teluguClaimWinner: the RRR MovieBox pair, first Tamil, second Telugu).
+// Only the LAST Telugu entry in page order keeps it. Returns that entry's
+// index in `entries`, or null with fewer than two claims. Telugu only: a
+// wrong Telugu row plays first. Pure, exported.
+function teluguClaimWinner(entries) {
+    const idx = (entries || []).map((e, i) => (pageLanguage(e).language === 'Telugu' ? i : -1)).filter((i) => i >= 0);
+    return idx.length >= 2 ? idx[idx.length - 1] : null;
 }
 
 // Tier from height. Width only lifts a letterboxed encode (1920x800 is a
@@ -257,10 +236,17 @@ function isHlsPlaylistUrl(url) {
 }
 
 // Pure: the row for one fetched master. Exported for tests.
-function streamFromMaster(entry, masterText, masterUrl, base, originalLang) {
+// `opts.dropLabel`: this entry's Telugu lost to a later entry's
+// (teluguClaimWinner): the page label is not stamped.
+function streamFromMaster(entry, masterText, masterUrl, base, opts = null) {
     const levels = hls.parseLevels(masterText, masterUrl);
     if (!levels.length) return null;
-    const page = pageLanguage(entry, originalLang);
+    const listed = pageLanguage(entry);
+    const dropLabel = Boolean(opts && typeof opts === 'object' && opts.dropLabel && listed.language);
+    // The note names no language: normaliseStream reads language words from
+    // name/title when languages[] is empty, and would put Telugu back. The
+    // listed label stays in the `telugu-claim dropped` log line.
+    const page = dropLabel ? { language: null, label: 'Unknown' } : listed;
     const renditions = hls.parseMedia(masterText, masterUrl, 'AUDIO');
     const audio = renditions.map((m) => {
         const stated = langName(m.languageCode);
@@ -277,12 +263,13 @@ function streamFromMaster(entry, masterText, masterUrl, base, originalLang) {
         : (page.language ? [page.language] : []);
     const quality = tierOf(levels[0]) || 'Auto';
     const label = languages.length ? languages.join('/') : (page.label || 'Unknown');
+    const note = dropLabel && !languages.includes(listed.language) ? ' [duplicate listing, unverified]' : '';
     const subtitles = hls.parseMedia(masterText, masterUrl, 'SUBTITLES')
         .filter((s) => s.url && !isHlsPlaylistUrl(s.url))
         .map((s, i) => ({ url: s.url, lang: s.languageCode || s.name || `Subtitle ${i + 1}`, id: `vr-sub-${i}` }));
     return {
         name: `Vidrift | ${quality} | ${label}`,
-        title: `Vidrift · Orion · ${label}`,
+        title: `Vidrift · Orion · ${label}${note}`,
         url: masterUrl,
         provider: 'vidrift',
         quality,
@@ -377,12 +364,6 @@ async function getVidriftStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
     }
     console.log(`[vidrift] Fetching streams for TMDB ID: ${tmdbId}, Type: ${type}`);
     const deadline = Date.now() + _config.budgetMs;
-    // Started now, read only if a page entry says "Original".
-    const origP = _deps.originalLanguage(type, tmdbId).catch((e) => {
-        console.log(`[vidrift] TMDB original_language unknown for ${tmdbId}: ${e.message}`);
-        return null;
-    });
-
     const { meta, bases } = await fetchPage(tmdbId, type, seasonNum, episodeNum, deadline);
     const entries = meta.orionStreams
         .filter((s) => s && (s.url || s.proxyUrl) && (s.type || 'hls') === 'hls');
@@ -390,24 +371,17 @@ async function getVidriftStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
         console.log(`[vidrift] page lists no orion streams for ${tmdbId}`);
         return [];
     }
-    // Masters and the TMDB wait run side by side; the wait is capped at
-    // tmdbWaitMs and never holds the masters (review N1).
-    const needOriginal = entries.some((e) => /·\s*original\s*$/i.test(String(e.name || '')));
-    const [results, originalLang] = await Promise.all([
-        Promise.all(entries.map((e) => fetchMaster(e, bases, deadline))),
-        needOriginal ? withCap(origP, Math.max(0, Math.min(_config.tmdbWaitMs, deadline - Date.now())), null).then((l) => {
-            if (!l) console.log(`[vidrift] TMDB original_language not known within ${_config.tmdbWaitMs}ms for ${tmdbId} - "Original" stays unlabelled`);
-            return l;
-        }) : null,
-    ]);
-    const originalFor = originalLanguageFor(entries, originalLang);
-    if (originalLang && knownLanguage(originalLang) && !originalFor) {
-        console.log(`[vidrift] "Original" not labelled ${knownLanguage(originalLang)} for ${tmdbId}: another entry names `
-            + `${knownLanguage(originalLang)} - stays unlabelled`);
-    }
+    const results = await Promise.all(entries.map((e) => fetchMaster(e, bases, deadline)));
+    const winner = teluguClaimWinner(entries);
     const failed = results.filter((r) => r.error).map((r) => r.error);
     const built = results.filter((r) => !r.error).map((r) => {
-        const row = streamFromMaster(r.entry, r.text, r.masterUrl, r.base, originalFor);
+        const i = entries.indexOf(r.entry);
+        const dropLabel = winner !== null && i !== winner && pageLanguage(r.entry).language === 'Telugu';
+        if (dropLabel) {
+            console.log(`[vidrift] telugu-claim dropped for ${tmdbId}: entry ${i} "${r.entry.name}" listed Telugu, `
+                + `kept entry ${winner} (listed later)`);
+        }
+        const row = streamFromMaster(r.entry, r.text, r.masterUrl, r.base, { dropLabel });
         console.log(`[vidrift] "${r.entry.name}" -> ${row.languages.join('/') || 'unlabelled'} ${row.quality} `
             + `${row.videoCodec || '?'} audio=${row.audio.length} ${r.base} (${r.ms}ms)`);
         return row;
@@ -433,7 +407,7 @@ module.exports = {
     embedUrl,
     parseEmbedMeta,
     pageLanguage,
-    originalLanguageFor,
+    teluguClaimWinner,
     streamFromMaster,
     _config,
     _deps,
