@@ -47,4 +47,25 @@ describe('Cast button', () => {
     await findByText(/not pairable/);
     await waitFor(() => expect(getByLabelText('Cast to TV').disabled).toBe(false));
   });
+  it('says WVC is missing when Chrome comes back with #cast-no-wvc (no Play Store)', async () => {
+    window.history.replaceState(null, '', '/title/movie/1#cast-no-wvc');
+    const { findByText } = setup({ cast: { prepare: vi.fn() } });
+    await findByText(/Web Video Caster is not installed/);
+    expect(window.location.hash).toBe('');
+  });
+
+  it('shows the missing-WVC note on a hash change too', async () => {
+    window.history.replaceState(null, '', '/title/movie/1');
+    const { findByText } = setup({ cast: { prepare: vi.fn() } });
+    window.history.replaceState(null, '', '/title/movie/1#cast-no-wvc');
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    await findByText(/Web Video Caster is not installed/);
+  });
+
+  it('tells the viewer to pick Web Video Caster in the Chrome chooser', async () => {
+    const prepare = vi.fn(async () => ({ href: 'intent://h#Intent;end' }));
+    const { getByLabelText, findByText } = setup({ cast: { prepare } });
+    fireEvent.click(getByLabelText('Cast to TV'));
+    await findByText(/pick Web Video Caster/);
+  });
 });

@@ -10,7 +10,12 @@
  */
 
 export const WVC_PACKAGE = 'com.instantbits.cast.webvideo';
-export const PLAY_STORE = `https://play.google.com/store/apps/details?id=${WVC_PACKAGE}`;
+/**
+ * Chrome loads S.browser_fallback_url when WVC is not installed. It points back
+ * at the player page with this hash, and the player shows a note. Never the
+ * Play Store: the owner saw it open at 20:42 and 20:48 IST on 2026-11-22.
+ */
+export const NO_WVC_HASH = 'cast-no-wvc';
 /**
  * Lowercase, and one WVC 6.2.0 declares. Measured on the phone 2026-11-22
  * (cmd package query-activities): `application/x-mpegURL` matched NO WVC
@@ -46,20 +51,36 @@ export function wvcSchemeLink(mediaUrl, { title, poster, mime = HLS_MIME } = {})
 }
 
 /**
- * Chrome Android intent: opens WVC directly, or the Play Store only when WVC is
- * not installed (the type must match a WVC activity, see HLS_MIME). Only String extras fit an intent url, which is fine: the cast
+ * Chrome Android intent: opens WVC (the type must match a WVC activity, see
+ * HLS_MIME). WVC declares http(s) browser filters, so Chrome 158 asks first
+ * ("Choose activity": Chrome or Web Video Caster); measured on the phone
+ * 2026-11-22 for every link form, the wvc-x-callback scheme included. Without
+ * WVC, Chrome loads `pageUrl#cast-no-wvc`; with no page url there is no
+ * fallback. Only String extras fit an intent url, which is fine: the cast
  * master needs no request headers.
  */
-export function wvcIntentLink(mediaUrl, { title, poster, mime = HLS_MIME } = {}) {
+export function wvcIntentLink(mediaUrl, { title, poster, mime = HLS_MIME, pageUrl } = {}) {
   const type = castMime(mime);
   const u = new URL(mediaUrl);
   const extras = [];
   if (title) extras.push(`S.title=${encodeURIComponent(title)}`);
   if (poster) extras.push(`S.poster=${encodeURIComponent(poster)}`);
-  extras.push(`S.browser_fallback_url=${encodeURIComponent(PLAY_STORE)}`);
+  const back = noWvcUrl(pageUrl);
+  if (back) extras.push(`S.browser_fallback_url=${encodeURIComponent(back)}`);
   return `intent://${u.host}${u.pathname}${u.search}#Intent;`
     + `scheme=${u.protocol.replace(':', '')};action=android.intent.action.VIEW;`
-    + `type=${type};package=${WVC_PACKAGE};${extras.join(';')};end`;
+    + `type=${type};package=${WVC_PACKAGE};${extras.map((x) => `${x};`).join('')}end`;
+}
+
+/** The player page with #cast-no-wvc, or null when it is not an http(s) page. */
+function noWvcUrl(pageUrl) {
+  if (!pageUrl) return null;
+  try {
+    const p = new URL(pageUrl);
+    if (p.protocol !== 'https:' && p.protocol !== 'http:') return null;
+    p.hash = NO_WVC_HASH;
+    return p.toString();
+  } catch { return null; }
 }
 
 /** Chrome on Android (not Firefox, Edge, Opera, Samsung or a WebView). */
@@ -104,7 +125,10 @@ export function castBody({ stream, pair, tmdbId, mediaType, title, nudge }) {
 }
 
 /** POST /cast, then the WVC link for the served master. Throws with the server's reason. */
-export async function prepareCast({ body, meta, ua, fetchImpl = fetch }) {
+export async function prepareCast({
+  body, meta, ua, fetchImpl = fetch,
+  pageUrl = typeof window !== 'undefined' ? window.location.href : undefined,
+}) {
   const r = await fetchImpl(`${BASE}/cast`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -113,5 +137,5 @@ export async function prepareCast({ body, meta, ua, fetchImpl = fetch }) {
   let d = null;
   try { d = await r.json(); } catch { /* non-JSON error page */ }
   if (!r.ok || !d?.url) throw new Error(d?.reason || d?.error || `cast failed (HTTP ${r.status})`);
-  return { ...d, href: castLink(d.url, meta, ua) };
+  return { ...d, href: castLink(d.url, { ...meta, pageUrl }, ua) };
 }

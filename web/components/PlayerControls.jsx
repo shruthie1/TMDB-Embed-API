@@ -1,6 +1,7 @@
 'use client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Icon from './Icon';
+import { NO_WVC_HASH } from '../lib/cast';
 import { audioLanguageKey, languageSourceIndex } from '../lib/player/languageSources';
 import MenuRow from './player/MenuRow';
 import QualityMenu from './player/QualityMenu';
@@ -189,6 +190,19 @@ function SettingsSheet({ subs, currentSub, onPickSub, subLoading, subPrefs, onSu
  */
 function CastButton({ prepare }) {
   const [st, setSt] = useState({ phase: 'idle' });
+  // WVC not installed: Chrome's intent fallback brings the viewer back here
+  // with #cast-no-wvc (lib/cast.js NO_WVC_HASH), never to the Play Store.
+  useEffect(() => {
+    const check = () => {
+      if (window.location.hash !== `#${NO_WVC_HASH}`) return;
+      const { pathname, search } = window.location;
+      window.history.replaceState(window.history.state, '', `${pathname}${search}`);
+      setSt({ phase: 'missing' });
+    };
+    check();
+    window.addEventListener('hashchange', check);
+    return () => window.removeEventListener('hashchange', check);
+  }, []);
   const start = async (e) => {
     e.stopPropagation();
     setSt({ phase: 'preparing' });
@@ -207,6 +221,10 @@ function CastButton({ prepare }) {
         <a href={st.href} className="focusable" data-focus="" style={{ ...note, fontWeight: 600, textDecoration: 'underline' }}>
           Open Web Video Caster{st.audio?.name ? ` (${st.audio.name})` : ''}
         </a>
+      )}
+      {st.phase === 'ready' && st.href.startsWith('intent:') && <span style={note}>Chrome asks: pick Web Video Caster</span>}
+      {st.phase === 'missing' && (
+        <span style={note} role="status">Web Video Caster is not installed. Install it, then tap Cast again.</span>
       )}
       {st.phase === 'preparing' && <span style={note} role="status">Preparing cast…</span>}
       {st.phase === 'error' && <span style={note} role="status">Cast failed: {st.reason}</span>}

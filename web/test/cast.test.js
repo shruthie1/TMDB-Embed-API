@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
-  WVC_PACKAGE, HLS_MIME, castMime, wvcSchemeLink, wvcIntentLink, castLink, canCast, isAndroidChrome, castBody, prepareCast,
+  WVC_PACKAGE, HLS_MIME, NO_WVC_HASH, castMime, wvcSchemeLink, wvcIntentLink, castLink, canCast, isAndroidChrome, castBody, prepareCast,
 } from '../lib/cast';
 
 // C3 (docs/PENDING-WORK.md): cast to a TV through Web Video Caster (WVC).
@@ -32,8 +32,8 @@ describe('WVC links', () => {
     expect(link).toContain('Devara%3A%20Part%201');
   });
 
-  it('intent link targets the WVC package with a Play Store fallback', () => {
-    const link = wvcIntentLink(URL1, META);
+  it('intent link targets the WVC package and never falls back to the Play Store', () => {
+    const link = wvcIntentLink(URL1, { ...META, pageUrl: 'https://chtrm2.vercel.app/title/movie/1?s=2#x' });
     expect(link).toMatch(/^intent:\/\/tmdb-187-127-137-163\.sslip\.io\/cast\/0123456789abcdef01234567\.m3u8#Intent;/);
     expect(link).toContain('scheme=https;');
     expect(link).toContain('action=android.intent.action.VIEW;');
@@ -41,7 +41,18 @@ describe('WVC links', () => {
     expect(link).toContain(`package=${WVC_PACKAGE};`);
     expect(link).toContain(`S.title=${encodeURIComponent('Devara: Part 1')};`);
     expect(link).toContain(`S.poster=${encodeURIComponent(META.poster)};`);
-    expect(link).toContain(`S.browser_fallback_url=${encodeURIComponent(`https://play.google.com/store/apps/details?id=${WVC_PACKAGE}`)};`);
+    // WVC missing: Chrome loads this page again with #cast-no-wvc, the
+    // player shows a message. Measured 2026-11-22: the Play Store fallback
+    // is what the owner saw at 20:42 and 20:48 IST.
+    expect(link).toContain(`S.browser_fallback_url=${encodeURIComponent(`https://chtrm2.vercel.app/title/movie/1?s=2#${NO_WVC_HASH}`)};`);
+    expect(link).not.toContain('play.google.com');
+    expect(link.endsWith(';end')).toBe(true);
+  });
+
+  it('intent link without a page url has no fallback at all (never the Play Store)', () => {
+    const link = wvcIntentLink(URL1, META);
+    expect(link).not.toContain('browser_fallback_url');
+    expect(link).not.toContain('play.google.com');
     expect(link.endsWith(';end')).toBe(true);
   });
 
@@ -113,11 +124,13 @@ describe('castBody', () => {
 describe('prepareCast', () => {
   it('posts to /cast and returns the WVC link for the served master', async () => {
     const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ id: 'x', url: URL1, audio: { language: 'tel' } })));
-    const out = await prepareCast({ body: { url: 'u' }, meta: META, ua: UA.androidChrome, fetchImpl });
+    const pageUrl = 'https://chtrm2.vercel.app/title/movie/1';
+    const out = await prepareCast({ body: { url: 'u' }, meta: META, ua: UA.androidChrome, pageUrl, fetchImpl });
     expect(fetchImpl).toHaveBeenCalledWith('/cast', expect.objectContaining({ method: 'POST' }));
     expect(JSON.parse(fetchImpl.mock.calls[0][1].body)).toEqual({ url: 'u' });
     expect(out.url).toBe(URL1);
-    expect(out.href).toBe(castLink(URL1, META, UA.androidChrome));
+    expect(out.href).toBe(castLink(URL1, { ...META, pageUrl }, UA.androidChrome));
+    expect(out.href).toContain(`S.browser_fallback_url=${encodeURIComponent(`${pageUrl}#${NO_WVC_HASH}`)};`);
   });
 
   it('a refusal throws with the server reason', async () => {
