@@ -46,6 +46,15 @@ class App : Application(), ImageLoaderFactory {
     var isTv = false
         private set
 
+    /** Resolvers of every network with internet other than the default one (HedgedDns alternates). */
+    private fun otherNetworkDns(cm: android.net.ConnectivityManager?): List<okhttp3.Dns> = try {
+        val active = cm?.activeNetwork
+        @Suppress("DEPRECATION")
+        cm?.allNetworks.orEmpty().filter { n ->
+            n != active && cm?.getNetworkCapabilities(n)?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+        }.map { n -> object : okhttp3.Dns { override fun lookup(hostname: String) = n.getAllByName(hostname).toList() } }
+    } catch (_: Exception) { emptyList() }
+
     override fun onCreate() {
         super.onCreate()
         instance = this
@@ -57,7 +66,17 @@ class App : Application(), ImageLoaderFactory {
         // The copy builds up to 1.2.49 kept in the shared file.
         kv.put(StreamCache.KV_KEY, null)
         val cm = runCatching { getSystemService(android.net.ConnectivityManager::class.java) }.getOrNull()
-        api = Api(Api.buildClient(), httpCache = Api.httpCache(cacheDir), vm = com.chitram.app.data.VmHealth(kv), streamCache = streamCache)
+        // 1.2.52: a DNS lookup slower than 5 s is asked again on the phone's other network (Wi-Fi + LTE).
+        val dns = com.chitram.app.data.HedgedDns(okhttp3.Dns.SYSTEM, { otherNetworkDns(cm) })
+        api = Api(Api.buildClient(dns), httpCache = Api.httpCache(cacheDir), vm = com.chitram.app.data.VmHealth(kv), streamCache = streamCache)
+        // 1.2.52: a default-network change drops the pooled connections (a dead one hung /api/title 30 s).
+        val watch = com.chitram.app.data.NetworkWatch { why -> api.networkChanged(why) }
+        runCatching {
+            cm?.registerDefaultNetworkCallback(object : android.net.ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: android.net.Network) = watch.available(network.toString())
+                override fun onLost(network: android.net.Network) = watch.lost(network.toString())
+            })
+        }
         prefs = LanguagePrefs(kv)
         progress = ProgressStore(kv)
         myList = MyListStore(kv)

@@ -563,9 +563,12 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             vmJob = vm
             if (vm == null) android.util.Log.i("Chitram", "[vm] paused: starting from device rows only")
             // Fix A: VM-down-only providers start once the VM fails or its lead ends with no row in the viewer's language.
+            // The remembered provider's job: the start waits for it at most StartRace.PIN_WAIT_MS (LastPlayed).
+            val pinnedJobs = if (keep || keepProvider != null || saved == null) emptyList()
+                else device.zip(names + warmExtra).filter { (_, n) -> n.equals(saved.provider, ignoreCase = true) }.map { it.first }
             val first = StartRace().firstMany(vm, device, preferred, warm = warmJobs, extras = if (vm == null) null else { why ->
                 startVmDownJobs(r, preferred, t0, vmDownExtras(g.onDevice.names(vmDown = true), g.onDevice.names(vmDown = false), deviceNames), why)
-            })
+            }, pinned = pinnedJobs)
             val backend = first.backend
             val backendError = first.backendError
             if (!first.backendPending) {
@@ -599,9 +602,14 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             if (phase == Phase.Resolving) {
                 // The provider that last played this title starts first, inside the viewer's language (LastPlayed).
                 val last = if (keepProvider == null) LastPlayed.startRow(sources, saved, preferred) else null
-                if (keepProvider == null && saved != null) android.util.Log.i("Chitram", LastPlayed.line(r.type, r.id, saved.provider, if (last != null) "hit" else "miss"))
+                val startRow = last ?: sources.first()
+                if (keepProvider == null && saved != null) android.util.Log.i("Chitram", when {
+                    last != null -> LastPlayed.line(r.type, r.id, saved.provider, "hit")
+                    sources.none { it.provider.equals(saved.provider, ignoreCase = true) } -> LastPlayed.notReady(r.type, r.id, saved.provider, startRow.provider)
+                    else -> LastPlayed.line(r.type, r.id, saved.provider, "miss")
+                })
                 lastHitId = last?.id
-                play(last ?: sources.first(), startMs)
+                play(startRow, startMs)
             }
         }
     }

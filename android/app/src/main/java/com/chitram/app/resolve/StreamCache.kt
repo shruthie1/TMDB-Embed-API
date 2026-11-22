@@ -25,7 +25,9 @@ import kotlinx.serialization.json.Json
 class StreamCache(private val kv: KeyValue?, private val now: () -> Long = System::currentTimeMillis) {
 
     @Serializable
-    internal data class Slot(val at: Long, val until: Long, val rows: List<Source> = emptyList(), val vm: StreamsResponse? = null)
+    internal data class Slot(val at: Long, val until: Long, val rows: List<Source> = emptyList(), val vm: StreamsResponse? = null,
+                             /** Rows of a partial answer (a sub-lookup failed): kept [PARTIAL_TTL_MS], replaced by a complete one. */
+                             val partial: Boolean = false)
 
     @Serializable
     internal data class Title(val at: Long, val slots: Map<String, Slot> = emptyMap())
@@ -40,14 +42,37 @@ class StreamCache(private val kv: KeyValue?, private val now: () -> Long = Syste
     fun device(title: String, name: String, preferred: String): List<Source>? =
         live(title, deviceSlot(name, preferred))?.rows?.takeIf { it.isNotEmpty() }
 
+    /** The kept rows came from a partial answer: a fresh resolve may add rows (OnDevice refreshes in the background). */
+    fun devicePartial(title: String, name: String, preferred: String): Boolean = live(title, deviceSlot(name, preferred))?.partial == true
+
     fun hasDevice(title: String, name: String, preferred: String): Boolean = device(title, name, preferred) != null
 
-    /** Keeps a provider's rows. Empty or incomplete answers are not kept (a fresh resolve may find more). */
+    /**
+     * Keeps a provider's rows. An empty answer is not kept. 1.2.52: a partial answer
+     * (any row `incomplete`: one catalog or dub failed, or the budget ran out) is kept
+     * too, for [PARTIAL_TTL_MS], so Play reuses its real rows with no request (it was
+     * never kept before, so every Play resolved NetMirror again). A complete answer
+     * replaces kept rows; a partial one never drops a kept row: rows it lacks stay, and
+     * on top of a complete slot it only adds rows (the slot keeps its own end).
+     */
     fun putDevice(title: String, name: String, preferred: String, rows: List<Source>) {
-        if (rows.isEmpty() || rows.any { it.incomplete }) return
-        val expiry = rows.flatMap { listOfNotNull(it.url, it.directUrl) }.mapNotNull { UrlExpiry.at(it, now()) }.minOrNull()
-        put(title, deviceSlot(name, preferred), rows = rows, vm = null, expiry = expiry)
+        if (rows.isEmpty()) return
+        val slot = deviceSlot(name, preferred)
+        if (rows.none { it.incomplete }) { put(title, slot, rows = rows, vm = null, expiry = expiryOf(rows)); return }
+        val at = now()
+        val old = live(title, slot)
+        val ids = rows.map { it.id }.toSet()
+        if (old != null && !old.partial) {
+            val add = rows.filter { r -> old.rows.none { it.id == r.id } }
+            if (add.isEmpty()) return
+            put(title, slot, rows = old.rows + add, vm = null, expiry = expiryOf(add), ttlMs = old.until - at)
+            return
+        }
+        val merged = rows + old?.rows.orEmpty().filter { it.id !in ids }
+        put(title, slot, rows = merged, vm = null, expiry = expiryOf(merged), ttlMs = PARTIAL_TTL_MS, partial = true)
     }
+
+    private fun expiryOf(rows: List<Source>): Long? = rows.flatMap { listOfNotNull(it.url, it.directUrl) }.mapNotNull { UrlExpiry.at(it, now()) }.minOrNull()
 
     /** The VM answer for [title]: the ?full=1 one when kept ([full] false takes it over the first answer too). */
     fun vm(title: String, full: Boolean): StreamsResponse? =
@@ -85,14 +110,14 @@ class StreamCache(private val kv: KeyValue?, private val now: () -> Long = Syste
         if (s.until > now()) s else null
     }
 
-    private fun put(title: String, slot: String, rows: List<Source>, vm: StreamsResponse?, expiry: Long?) {
+    private fun put(title: String, slot: String, rows: List<Source>, vm: StreamsResponse?, expiry: Long?, ttlMs: Long = TTL_MS, partial: Boolean = false) {
         val at = now()
-        val until = minOf(at + TTL_MS, (expiry ?: Long.MAX_VALUE) - EXPIRY_SKEW_MS)
+        val until = minOf(at + ttlMs, (expiry ?: Long.MAX_VALUE) - EXPIRY_SKEW_MS)
         if (until <= at) return
         synchronized(lock) {
             load()
             val old = titles.remove(title)?.slots.orEmpty()
-            titles[title] = Title(at, old + (slot to Slot(at, until, rows, vm)))
+            titles[title] = Title(at, old + (slot to Slot(at, until, rows, vm, partial)))
             prune(at)
             save()
         }
@@ -138,6 +163,8 @@ class StreamCache(private val kv: KeyValue?, private val now: () -> Long = Syste
     companion object {
         /** How long resolved rows are reused on this device (owner: at least 20-30 min). */
         const val TTL_MS = 30 * 60 * 1000L
+        /** A partial answer's rows are reused this long (coordinator 2026-11-22: 5 min). */
+        const val PARTIAL_TTL_MS = 5 * 60 * 1000L
         const val MAX_TITLES = 50
         /** A row is treated as dead this long before its url's stated expiry (lib/urlExpiry.js DEFAULT_SKEW_MS). */
         const val EXPIRY_SKEW_MS = 30_000L

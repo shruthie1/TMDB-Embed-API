@@ -18,6 +18,8 @@ class StartRace(
     private val graceMs: Long = PlayerVm.DEVICE_GRACE_MS,
     private val waitMs: Long = PlayerVm.DEVICE_WAIT_MS,
     private val now: () -> Long = System::currentTimeMillis,
+    /** Longest the start waits, from Play, for the remembered provider's row (LastPlayed). */
+    private val pinWaitMs: Long = PIN_WAIT_MS,
 ) {
     data class First(
         /** VM rows, ranked by the caller; empty when the VM failed, was skipped or is still pending. */
@@ -51,6 +53,12 @@ class StartRace(
                            * the VM call keeps running and its rows join late.
                            */
                           warm: List<Deferred<List<Source>>> = emptyList(),
+                          /**
+                           * 1.2.52: the job(s) of the provider that last played this title. When the
+                           * race is ready before it, the start waits for it at most [pinWaitMs] from
+                           * the race start (a kept row lands in milliseconds), never longer.
+                           */
+                          pinned: List<Deferred<List<Source>>> = emptyList(),
                           extras: ((why: String) -> List<Deferred<List<Source>>>)? = null): First {
         val jobs = device.toMutableList()
         var started = false
@@ -59,12 +67,20 @@ class StartRace(
             started = true
             jobs += extras(why)
         }
-        return firstReady(backend, preferred,
-            ready = { jobs.filter { it.isCompleted && !it.isCancelled }.flatMap { runCatching { it.getCompleted() }.getOrDefault(emptyList()) } },
+        val t0 = now()
+        val ready = { jobs.filter { it.isCompleted && !it.isCancelled }.flatMap { runCatching { it.getCompleted() }.getOrDefault(emptyList()) } }
+        val first = firstReady(backend, preferred,
+            ready = ready,
             allDone = { jobs.all { it.isCompleted } },
             warmReady = { warm.filter { it.isCompleted && !it.isCancelled }.flatMap { runCatching { it.getCompleted() }.getOrDefault(emptyList()) } },
             onLeadNoGood = { startExtras("VM lead over, no ${preferred} row") },
             onVmFailed = { startExtras("VM failed") })
+        if (pinned.isEmpty() || pinned.all { it.isCompleted }) return first
+        val left = pinWaitMs - (now() - t0)
+        if (left <= 0) return first
+        val landed = kotlinx.coroutines.withTimeoutOrNull(left) { pinned.forEach { it.join() } } != null
+        android.util.Log.i("Chitram", "[race] remembered provider ${if (landed) "landed" else "not ready"} after ${now() - t0}ms")
+        return first.copy(device = ready())
     }
 
     private suspend fun firstReady(backend: Deferred<List<Source>>?, preferred: String, ready: () -> List<Source>, allDone: () -> Boolean,
@@ -112,6 +128,8 @@ class StartRace(
         /** How long a healthy VM leads before a ready device row starts the film. */
         const val VM_LEAD_MS = 5_000L
         private const val POLL_MS = 100L
+        /** Owner: the last provider starts first when its row is there; nothing waits for it (~300 ms at most). */
+        const val PIN_WAIT_MS = 300L
 
         /**
          * Same provider from both sides: the VM row shows (demux languages, hybrid,

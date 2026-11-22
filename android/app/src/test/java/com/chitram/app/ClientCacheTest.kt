@@ -225,12 +225,57 @@ class ClientCacheTest {
         assertEquals(StreamCache.MAX_TITLES, StreamCache(kv) { clock }.titleKeys().size)
     }
 
-    @Test fun tvEpisodesAreSeparateAndIncompleteRowsAreNotKept() {
+    /** 1.2.52: incomplete (partial) rows are kept too, for PARTIAL_TTL_MS (was: never kept). */
+    @Test fun tvEpisodesAreSeparateAndIncompleteRowsAreKeptShort() {
         val row = sample(url = "https://cdn.test/te.m3u8")
         cache.putDevice(StreamCache.key("tv", 1, 1, 1), OnDeviceResolver.NETMIRROR, "Telugu", listOf(row))
         assertNull(cache.device(StreamCache.key("tv", 1, 1, 2), OnDeviceResolver.NETMIRROR, "Telugu"))
-        cache.putDevice(StreamCache.key("tv", 1, 1, 3), OnDeviceResolver.NETMIRROR, "Telugu", listOf(row.copy(incomplete = true)))
-        assertNull(cache.device(StreamCache.key("tv", 1, 1, 3), OnDeviceResolver.NETMIRROR, "Telugu"))
+        val k3 = StreamCache.key("tv", 1, 1, 3)
+        cache.putDevice(k3, OnDeviceResolver.NETMIRROR, "Telugu", listOf(row.copy(incomplete = true)))
+        assertNotNull(cache.device(k3, OnDeviceResolver.NETMIRROR, "Telugu"))
+        assertTrue(cache.devicePartial(k3, OnDeviceResolver.NETMIRROR, "Telugu"))
+        assertFalse(cache.devicePartial(StreamCache.key("tv", 1, 1, 1), OnDeviceResolver.NETMIRROR, "Telugu"))
+        clock += StreamCache.PARTIAL_TTL_MS - 1
+        assertNotNull(cache.device(k3, OnDeviceResolver.NETMIRROR, "Telugu"))
+        clock += 1
+        assertNull("a partial answer lives 5 min", cache.device(k3, OnDeviceResolver.NETMIRROR, "Telugu"))
+    }
+
+    /** A complete answer replaces kept partial rows; a later partial one never drops real rows. */
+    @Test fun completeReplacesPartialAndPartialNeverDropsRows() {
+        val nm = OnDeviceResolver.NETMIRROR
+        fun r(id: String, partial: Boolean) = sample(url = "https://cdn.test/$id.m3u8").copy(id = id, provider = "netmirror", onDevice = "netmirror", incomplete = partial)
+        cache.putDevice(key, nm, "Telugu", listOf(r("a", true), r("b", true)))
+        // A second partial answer with fewer rows: b stays.
+        cache.putDevice(key, nm, "Telugu", listOf(r("a", true)))
+        assertEquals(listOf("a", "b"), cache.device(key, nm, "Telugu")!!.map { it.id })
+        // The complete answer replaces them and lives the full TTL.
+        cache.putDevice(key, nm, "Telugu", listOf(r("a", false), r("b", false), r("c", false)))
+        assertFalse(cache.devicePartial(key, nm, "Telugu"))
+        assertEquals(listOf("a", "b", "c"), cache.device(key, nm, "Telugu")!!.map { it.id })
+        // A partial answer after a complete one keeps every complete row.
+        cache.putDevice(key, nm, "Telugu", listOf(r("a", true)))
+        assertEquals(listOf("a", "b", "c"), cache.device(key, nm, "Telugu")!!.map { it.id })
+        assertFalse(cache.devicePartial(key, nm, "Telugu"))
+        clock += StreamCache.TTL_MS - 1
+        assertNotNull(cache.device(key, nm, "Telugu"))
+    }
+
+    /** A NetMirror url that states an expiry ends the kept slot before it, partial or complete. */
+    @Test fun netmirrorUrlExpiryIsHonoured() {
+        val nm = OnDeviceResolver.NETMIRROR
+        val exp = clock + 3 * 60_000
+        val row = sample(url = "https://tv.test/newtv/hls/nf/1.m3u8?e=${exp / 1000}").copy(provider = "netmirror", onDevice = "netmirror")
+        cache.putDevice(key, nm, "Telugu", listOf(row))
+        clock = exp - StreamCache.EXPIRY_SKEW_MS - 1
+        assertNotNull(cache.device(key, nm, "Telugu"))
+        clock += 1
+        assertNull(cache.device(key, nm, "Telugu"))
+        // Partial: the url expiry (3 min) beats the 5 min partial TTL.
+        val exp2 = clock + 3 * 60_000
+        cache.putDevice(key, nm, "Telugu", listOf(row.copy(url = "https://tv.test/newtv/hls/nf/1.m3u8?e=${exp2 / 1000}", incomplete = true)))
+        clock = exp2 - StreamCache.EXPIRY_SKEW_MS
+        assertNull(cache.device(key, nm, "Telugu"))
     }
 
     /** Gap X10: the kept rows live in their own prefs file, not in the shared `chitram` one. */

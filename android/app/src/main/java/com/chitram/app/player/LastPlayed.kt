@@ -27,6 +27,9 @@ object LastPlayed {
     fun played(framedAtMs: Long, positionMs: Long, sameRow: Boolean): Boolean =
         sameRow && positionMs - framedAtMs >= LastProviderStore.PLAYED_MS
 
+    /** `[last] <type>/<id> provider=<p> not ready, started <q>`: its row was not there at the start (1.2.52). */
+    fun notReady(type: String, id: Long, provider: String, started: String): String = "${line(type, id, provider, "not ready")}, started $started"
+
     /** `[last] <type>/<id> provider=<p> hit|miss|failed|saved`. */
     fun line(type: String, id: Long, provider: String, outcome: String): String = "[last] $type/$id provider=$provider $outcome"
 }

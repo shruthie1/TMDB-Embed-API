@@ -113,7 +113,9 @@ class OnDeviceResolver(
         if (!fresh) c.device(key, name, preferred)?.let { rows ->
             // mapple's late preferred-language row is kept in the same slot: nothing more comes.
             later?.deliver(null)
-            android.util.Log.i("Chitram", "[cache] $name $type/$id hit: ${rows.size} row(s), 0 requests")
+            val partial = c.devicePartial(key, name, preferred)
+            android.util.Log.i("Chitram", "[cache] $name $type/$id hit: ${rows.size} row(s), 0 requests${if (partial) ", partial" else ""}")
+            if (partial) refreshPartial(c, key, name, type, id, season, episode, codecs, preferred, title, originalLang)
             return rows
         }
         if (later == null) {
@@ -536,6 +538,40 @@ class OnDeviceResolver(
     }
 
     /** Unclaimed prewarm jobs (tests). */
+    internal fun partialRefreshJobs(): List<kotlinx.coroutines.Job> = partialJobs.values.filter { it.isActive }
+    private val partialJobs = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.Job>()
+
+    /**
+     * 1.2.52: Play got a partial answer's kept rows. Ask the provider again in the
+     * background, as a prewarm (NetMirror: its half of the request budget only), so a
+     * complete answer replaces them; a failed or partial one keeps every kept row.
+     * Skipped offline, with the breaker open, or once NetMirror's prewarm share is spent.
+     * One refresh per title and provider at a time. Never delays the caller.
+     */
+    private fun refreshPartial(c: StreamCache, key: String, name: String, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport,
+                               preferred: String, title: String?, originalLang: String?) {
+        val why = when {
+            offline() -> "offline"
+            isOpen(name) -> "breaker open"
+            name == NETMIRROR && netmirror?.prewarmShareSpent(config.current().netmirror) == true -> "prewarm share of the request budget spent"
+            name == NETMIRROR && netmirrorEmpty("$type:$id:$season:$episode") -> "no rows lately"
+            else -> null
+        }
+        if (why != null) { android.util.Log.i("Chitram", "[cache] $name $type/$id partial: no refresh, $why"); return }
+        val k = "$key|$name|${preferred.lowercase()}"
+        if (partialJobs[k]?.isActive == true) return
+        partialJobs[k] = warmScope.launch(Prewarming()) {
+            val out = Outcome()
+            val rows = try {
+                withContext(out) { resolveAllNow(name, type, id, season, episode, codecs, preferred, false, title, originalLang, null) }
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                emptyList()
+            }
+            keep(c, key, name, preferred, rows, fresh = false, out = out)
+            android.util.Log.i("Chitram", "[cache] $name $type/$id partial refresh: ${rows.size} row(s), complete=${rows.isNotEmpty() && rows.none { it.incomplete }}")
+        }.also { j -> j.invokeOnCompletion { partialJobs.remove(k, j) } }
+    }
     internal fun prewarmJobs(): List<Deferred<List<Source>>> = warm.values.map { it.rows }
 
     /** Details page left: cancel this title's prewarm jobs Play has not taken. */

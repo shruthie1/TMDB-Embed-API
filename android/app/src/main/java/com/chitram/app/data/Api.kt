@@ -88,6 +88,7 @@ class Api(
     private val streamsHedgeMs: Long = STREAMS_HEDGE_MS,
     /** VM answers kept 30 min on the device (StreamCache); null keeps none (tests). */
     private val streamCache: com.chitram.app.resolve.StreamCache? = null,
+    private val catalogHedgeMs: Long = CATALOG_HEDGE_MS,
 ) {
     /** False while the VM breaker is open (paused after failures): no VM call would go out. */
     val vmUp: Boolean get() = vm?.allow() != false
@@ -120,7 +121,33 @@ class Api(
         if (httpCache == null) client
         else client.newBuilder().cache(httpCache).addNetworkInterceptor(CatalogCachePolicy).build()
 
+    /**
+     * 1.2.52: the details page's JSON calls (/api/title, /api/similar, /api/rows ...)
+     * end in [CATALOG_CALL_TIMEOUT_MS], not the 30 s read timeout: Dhurandhar's
+     * /full hung 30003 ms on a dead pooled connection (dns -1, connect -1). Same pool
+     * and http cache as [catalogClient]; [get] hedges them after [catalogHedgeMs].
+     */
+    internal val catalogJsonClient: OkHttpClient by lazy {
+        catalogClient.newBuilder().callTimeout(CATALOG_CALL_TIMEOUT_MS, TimeUnit.MILLISECONDS).build()
+    }
+
+    /**
+     * The default network changed (Wi-Fi to LTE and back): pooled connections may
+     * be dead without knowing it, so drop the idle ones; the next call connects anew.
+     * Every client built from [client] shares its pool.
+     */
+    fun networkChanged(why: String) {
+        val n = client.connectionPool.connectionCount()
+        client.connectionPool.evictAll()
+        android.util.Log.i("Chitram", "[http] network changed ($why): $n pooled connection(s) evicted")
+    }
+
     companion object {
+        /** A catalog JSON call with no response headers in this long is sent again on a fresh connection. */
+        const val CATALOG_HEDGE_MS = 2_500L
+        const val CATALOG_CALL_TIMEOUT_MS = 10_000L
+        /** HTTP/2 PING on idle shared connections, so a dead one is found and dropped. */
+        const val PING_INTERVAL_MS = 10_000L
         const val BASE = "https://chtrm2.vercel.app"
         /** The VM origin (Vercel rewrites /api/streams here). */
         const val VM = "https://tmdb-187-127-137-163.sslip.io"
@@ -169,7 +196,9 @@ class Api(
             !path.startsWith("/api/streams") && CATALOG_PREFIXES.any { path.startsWith(it) }
 
         /** Uncached client for the player, Coil and streams. */
-        fun buildClient(): OkHttpClient = OkHttpClient.Builder()
+        fun buildClient(dns: okhttp3.Dns = okhttp3.Dns.SYSTEM): OkHttpClient = OkHttpClient.Builder()
+            .dns(dns)
+            .pingInterval(PING_INTERVAL_MS, TimeUnit.MILLISECONDS)
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .eventListenerFactory { SlowCallLog() }
@@ -246,7 +275,7 @@ class Api(
         .build()
 
     private suspend fun get(path: String): String =
-        call(if (isCatalogPath(path)) catalogClient else client, request(path))
+        if (isCatalogPath(path)) hedged(catalogJsonClient, request(path), catalogHedgeMs) else call(client, request(path))
 
     private suspend fun call(c: OkHttpClient, req: Request, onHeaders: (() -> Unit)? = null): String {
         val call = c.newCall(req)
@@ -458,7 +487,7 @@ class Api(
                 kotlinx.coroutines.selects.select<Unit> { heads.onAwait {}; first.onAwait {} }
             }
             if (answered != null) return@coroutineScope first.await().getOrThrow()
-            android.util.Log.i("Chitram", "[vm] no response headers in ${hedgeMs}ms: hedging ${req.url.encodedPath} on a fresh connection")
+            android.util.Log.i("Chitram", "[http] hedged ${req.url.encodedPath} after ${hedgeMs}ms")
             val fresh = c.newBuilder().connectionPool(okhttp3.ConnectionPool())
                 .callTimeout((c.callTimeoutMillis - hedgeMs).coerceAtLeast(1_000), TimeUnit.MILLISECONDS).build()
             val second = async { runCatching { call(fresh, req) } }
@@ -469,12 +498,12 @@ class Api(
             if (won.isSuccess) {
                 other.cancel()
                 fresh.connectionPool.evictAll()
-                android.util.Log.i("Chitram", "[vm] hedge: $label call answered first")
+                android.util.Log.i("Chitram", "[http] hedge: $label call answered first")
                 return@coroutineScope won.getOrThrow()
             }
             val last = other.await()
             fresh.connectionPool.evictAll()
-            android.util.Log.i("Chitram", "[vm] hedge: ${if (last.isSuccess) "${if (label == "first") "hedge" else "first"} call answered" else "both calls failed"}")
+            android.util.Log.i("Chitram", "[http] hedge: ${if (last.isSuccess) "${if (label == "first") "hedge" else "first"} call answered" else "both calls failed"}")
             last.getOrThrow()
         }
     }

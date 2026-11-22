@@ -42,6 +42,7 @@ class NetmirrorTest {
     private var repeatCursor = false
     private var extraCatalog = false
     private var held = false
+    private var slowPlayer = false
     private var slowHotstar = false
     private var apiPrefix = ""
     private val cfg get() = NetmirrorConfig(domains = listOf(base), maxCalls = 50)
@@ -85,7 +86,8 @@ class NetmirrorTest {
                 }
                 if (p.endsWith("/player.php")) {
                     val target = r.requestUrl!!.queryParameter("id")!!
-                    return json("""{"status":"ok","video_link":"$base/media/$target.m3u8${if (expiring) "?e=${clock / 1000 + 5}" else ""}","referer":"$base/"}""")
+                    val out = json("""{"status":"ok","video_link":"$base/media/$target.m3u8${if (expiring) "?e=${clock / 1000 + 5}" else ""}","referer":"$base/"}""")
+                    return if (slowPlayer) out.setBodyDelay(5, TimeUnit.SECONDS) else out
                 }
                 if (p.startsWith("/media/")) {
                     assertNull("API credential must not reach CDN", r.getHeader("Usertoken"))
@@ -201,10 +203,10 @@ class NetmirrorTest {
         ch.proceed(ch.request().newBuilder().url(local).build())
     }).build()
     private fun nmCalls() = seen.count { it.requestUrl!!.encodedPath.contains("/newtv/") }
-    private fun onDevice(nm: NetmirrorResolver): OnDeviceResolver {
+    private fun onDevice(nm: NetmirrorResolver, nmExtra: String = ""): OnDeviceResolver {
         val kv = MemoryKeyValue()
         // A saved config: only NetMirror prewarms here (mapple off), so only NetMirror requests are counted.
-        kv.put(ResolveConfigStore.KEY, """{"version":4,"mapple":{"prewarm":false},"netmirror":{"prewarm":true,"metadataTtlMs":60000}}""")
+        kv.put(ResolveConfigStore.KEY, """{"version":4,"mapple":{"prewarm":false},"netmirror":{"prewarm":true,"metadataTtlMs":60000$nmExtra}}""")
         kv.put(ResolveConfigStore.KEY_AT, System.currentTimeMillis().toString())
         kv.put(ResolveConfigStore.KEY_FROM, ResolveConfigStore.FROM_VM)
         val store = ResolveConfigStore(redirect, "https://vm.test" + ResolveConfigStore.PATH, kv)
@@ -471,5 +473,74 @@ class NetmirrorTest {
         assertEquals(NetmirrorConfig().domains, parsed.netmirror.domains)
         assertEquals(1, parsed.netmirror.maxCalls)
         assertEquals(86_400_000L, parsed.netmirror.sessionTtlMs)
+    }
+
+    // ---- 1.2.52: NetMirror rows kept in StreamCache (Major movie/605153, phone log 20:34) ----
+
+    /** A complete NetMirror answer is kept 30 min: a reopen inside it sends 0 NetMirror requests. */
+    @Test fun aKeptNetmirrorAnswerMakesZeroRequestsOnReopen() = runBlocking {
+        val od = onDevice(NetmirrorResolver(redirect, now = { clock }))
+        val first = od.resolveAll(OnDeviceResolver.NETMIRROR, "movie", 605153, 0, 0, codecs, "Telugu", title = "Test Movie")
+        assertEquals(3, first.size)
+        val n = nmCalls()
+        clock += StreamCache.TTL_MS - 60_000
+        assertEquals(first, od.resolveAll(OnDeviceResolver.NETMIRROR, "movie", 605153, 0, 0, codecs, "Telugu", title = "Test Movie"))
+        assertEquals("reopen inside 30 min: 0 NetMirror requests", n, nmCalls())
+    }
+
+    /**
+     * Phone 1.2.50: the prewarm spent its budget share on one catalog, so every row
+     * came back `incomplete` and was never kept; each Play resolved NetMirror again
+     * (2.7 s). A partial answer is now kept: Play gets its rows at once, 0 requests.
+     */
+    @Test fun aPartialNetmirrorAnswerIsKeptAndPlaysAtOnce() = runBlocking {
+        failFirstDub = true
+        val od = onDevice(NetmirrorResolver(redirect, now = { clock }))
+        val first = od.resolveAll(OnDeviceResolver.NETMIRROR, "movie", 605153, 0, 0, codecs, "Telugu", title = "Test Movie")
+        assertEquals(3, first.size)
+        assertTrue(first.all { it.incomplete })
+        val n = nmCalls()
+        slowPlayer = true // any NetMirror player.php now takes 5 s
+        val t0 = System.currentTimeMillis()
+        val again = od.resolveAll(OnDeviceResolver.NETMIRROR, "movie", 605153, 0, 0, codecs, "Telugu", title = "Test Movie")
+        val ms = System.currentTimeMillis() - t0
+        assertEquals("the kept partial rows, tags intact", first, again)
+        assertTrue("Play did not wait on NetMirror: ${ms}ms", ms < 500)
+        assertTrue(n > 0)
+        od.partialRefreshJobs().forEach { it.cancelAndJoin() }
+    }
+
+    /** A partial hit refreshes in the background (budget allowing); the complete answer replaces it. */
+    @Test fun aPartialHitRefreshesInTheBackgroundAndTheCompleteAnswerReplacesIt() = runBlocking {
+        failFirstDub = true
+        // A 60 s request window: the partial Play spent more than the prewarm half, so the next window is used.
+        val od = onDevice(NetmirrorResolver(redirect, now = { clock }), ""","budgetWindowMs":60000""")
+        od.resolveAll(OnDeviceResolver.NETMIRROR, "movie", 605153, 0, 0, codecs, "Telugu", title = "Test Movie")
+        failFirstDub = false
+        clock += 61_000
+        val again = od.resolveAll(OnDeviceResolver.NETMIRROR, "movie", 605153, 0, 0, codecs, "Telugu", title = "Test Movie")
+        assertEquals(3, again.size)
+        val jobs = od.partialRefreshJobs()
+        assertEquals("one background refresh", 1, jobs.size)
+        kotlinx.coroutines.withTimeout(30_000) { jobs.forEach { it.join() } }
+        val n = nmCalls()
+        val third = od.resolveAll(OnDeviceResolver.NETMIRROR, "movie", 605153, 0, 0, codecs, "Telugu", title = "Test Movie")
+        assertTrue("the complete answer replaced the partial one", third.none { it.incomplete })
+        assertTrue("the catalog that failed is there now", third.any { it.id == "device-netmirror-nf-111" })
+        assertEquals("the complete kept answer: 0 requests", n, nmCalls())
+    }
+
+    /** The background refresh never runs once the prewarm share of the request budget is spent. */
+    @Test fun aPartialHitDoesNotRefreshWhenTheBudgetShareIsSpent() = runBlocking {
+        val od = onDevice(NetmirrorResolver(redirect, now = { clock }))
+        failFirstDub = true
+        // One play of another title, then the partial one: more than half of the 24-call window.
+        od.resolveAll(OnDeviceResolver.NETMIRROR, "movie", 1, 0, 0, codecs, "Telugu", title = "Test Movie")
+        od.resolveAll(OnDeviceResolver.NETMIRROR, "movie", 605153, 0, 0, codecs, "Telugu", title = "Test Movie (Dub)")
+        val n = nmCalls()
+        val again = od.resolveAll(OnDeviceResolver.NETMIRROR, "movie", 605153, 0, 0, codecs, "Telugu", title = "Test Movie (Dub)")
+        assertTrue(again.isNotEmpty())
+        assertTrue("no refresh started", od.partialRefreshJobs().isEmpty())
+        assertEquals("0 NetMirror requests", n, nmCalls())
     }
 }
