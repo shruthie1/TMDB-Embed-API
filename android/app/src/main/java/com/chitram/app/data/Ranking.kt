@@ -7,7 +7,10 @@ package com.chitram.app.data
  * Telugu-first: the scarce resource is LANGUAGE, not pixels, so resolution
  * never re-sorts inside a tier (the server's order stands). A row the device
  * cannot decode ranks last.
+ *
+ * Serializable so resolve.StreamCache keeps rows whole on the device (every tag).
  */
+@kotlinx.serialization.Serializable
 data class Source(
     val id: String,
     val provider: String,

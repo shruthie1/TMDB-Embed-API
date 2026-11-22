@@ -6,6 +6,7 @@ import com.chitram.app.data.Source
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
@@ -45,6 +46,8 @@ class OnDeviceResolver(
             TitleMatch.find(same.ifEmpty { rows }, t) { it.title }?.tmdbId
         }
     },
+    /** Rows kept 30 min on the device (StreamCache); null keeps no rows (tests). */
+    private val cache: StreamCache? = null,
     // Last: callers pass the clock as a trailing lambda.
     private val now: () -> Long = System::currentTimeMillis,
 ) {
@@ -82,8 +85,43 @@ class OnDeviceResolver(
             scope.async { resolveAll(n, type, id, season, episode, codecs, preferred, title = title, originalLang = originalLang, later = later) }
         }.also { if (late != null && MAPPLE !in names(vmDown)) late.complete(emptyList()) }
 
+    /**
+     * One provider's rows. Kept rows (StreamCache, 30 min) answer first with no request;
+     * then a details-page prewarm job; else a resolve, whose rows are kept. `fresh`
+     * (a row failed in playback) drops the kept rows and resolves once more.
+     */
     suspend fun resolveAll(name: String, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, preferred: String = "Telugu", fresh: Boolean = false, title: String? = null, originalLang: String? = null,
                            later: MappleResolver.Later? = null): List<Source> {
+        val c = cache ?: return resolveAllNow(name, type, id, season, episode, codecs, preferred, fresh, title, originalLang, later)
+        val key = StreamCache.key(type, id, season, episode)
+        if (fresh) c.evictDevice(key, name)
+        else c.device(key, name, preferred)?.let { rows ->
+            // mapple's late preferred-language row is kept in the same slot: nothing more comes.
+            later?.deliver(null)
+            android.util.Log.i("Chitram", "[cache] $name $type/$id hit: ${rows.size} row(s), 0 requests")
+            return rows
+        }
+        if (later == null) return resolveAllNow(name, type, id, season, episode, codecs, preferred, fresh, title, originalLang, null).also { c.putDevice(key, name, preferred, it) }
+        // mapple: keep its first rows and the late row together, once the late outcome is known,
+        // so a kept slot never lacks the preferred-language row a live resolve would add.
+        val first = kotlinx.coroutines.CompletableDeferred<List<Source>>()
+        val lateRow = kotlinx.coroutines.CompletableDeferred<Source?>()
+        val tap = MappleResolver.Later(later.scope) { r -> lateRow.complete(r?.let { toSource(it, codecs) }); later.deliver(r) }
+        later.scope.launch {
+            val rows = first.await()
+            val extra = if (tap.handedOff) lateRow.await() else null
+            c.putDevice(key, name, preferred, rows + listOfNotNull(extra))
+        }
+        return try {
+            resolveAllNow(name, type, id, season, episode, codecs, preferred, fresh, title, originalLang, tap).also { first.complete(it) }
+        } finally {
+            later.handedOff = tap.handedOff
+            first.complete(emptyList())
+        }
+    }
+
+    private suspend fun resolveAllNow(name: String, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, preferred: String, fresh: Boolean, title: String?, originalLang: String?,
+                                      later: MappleResolver.Later?): List<Source> {
         // Play after a details-page prewarm: continue from that work, never a second fetch.
         if (!fresh && kotlin.coroutines.coroutineContext[Prewarming] == null) claimWarm(name, type, id, season, episode, preferred)?.let { w -> return awaitWarm(name, w, later) }
         if (name == MULTIMOVIES) return resolveMultiMovies(type, id, season, episode, codecs, fresh, originalLang)
@@ -264,8 +302,11 @@ class OnDeviceResolver(
         }
         netmirrorWarmed.entries.removeIf { at - it.value > PREWARM_TTL_MS }
         val started = mutableListOf<String>()
+        val kept = mutableListOf<String>()
         for (n in prewarmNames()) {
             val k = "$t|$n"
+            // Rows kept from an earlier resolve: nothing to warm, 0 requests.
+            if (cache?.hasDevice(StreamCache.key(type, id, season, episode), n, preferred) == true) { kept += n; continue }
             if (warm.containsKey(k)) continue
             // Breaker open: the provider is paused for Play too; nothing to warm.
             if (isOpen(n)) continue
@@ -290,6 +331,7 @@ class OnDeviceResolver(
             job.start()
             started += n
         }
+        if (kept.isNotEmpty()) android.util.Log.i("Chitram", "prewarm: $type/$id s$season e$episode kept rows, skipped ${kept.joinToString(",")}")
         if (started.isNotEmpty()) android.util.Log.i("Chitram", "prewarm: $type/$id s$season e$episode started ${started.joinToString(",")}")
         return started
     }
@@ -302,7 +344,23 @@ class OnDeviceResolver(
     fun prewarmedNames(type: String, id: Long, season: Int, episode: Int, preferred: String): List<String> {
         val t = warmTitle(type, id, season, episode, preferred)
         val at = now()
-        return names(vmDown = true).filter { n -> warm["$t|$n"]?.let { at - it.at <= PREWARM_TTL_MS && !it.rows.isCancelled } == true }
+        val key = StreamCache.key(type, id, season, episode)
+        return names(vmDown = true).filter { n ->
+            warm["$t|$n"]?.let { at - it.at <= PREWARM_TTL_MS && !it.rows.isCancelled } == true || cache?.hasDevice(key, n, preferred) == true
+        }
+    }
+
+    /**
+     * A row failed in playback: drop the kept rows it came from, so the next resolve
+     * (this play's one re-resolve, or the next Play) fetches fresh. A device row drops
+     * its provider's rows; a VM row drops the kept VM answers.
+     */
+    fun dropKept(type: String, id: Long, season: Int, episode: Int, row: Source) {
+        val c = cache ?: return
+        val key = StreamCache.key(type, id, season, episode)
+        val n = row.onDevice?.let(::nameFor)
+        if (n != null) c.evictDevice(key, n) else if (row.onDevice == null) c.evictVm(key) else return
+        android.util.Log.i("Chitram", "[cache] ${row.provider} $type/$id failed in playback: kept ${n ?: "vm"} rows dropped")
     }
 
     /** Unclaimed prewarm jobs (tests). */

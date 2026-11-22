@@ -86,6 +86,8 @@ class Api(
     private val streamsFullTimeoutMs: Long = STREAMS_FULL_TIMEOUT_MS,
     /** Fix C: no response headers from /api/streams in this long sends a second call on a fresh connection. */
     private val streamsHedgeMs: Long = STREAMS_HEDGE_MS,
+    /** VM answers kept 30 min on the device (StreamCache); null keeps none (tests). */
+    private val streamCache: com.chitram.app.resolve.StreamCache? = null,
 ) {
     /** False while the VM breaker is open (paused after failures): no VM call would go out. */
     val vmUp: Boolean get() = vm?.allow() != false
@@ -395,10 +397,12 @@ class Api(
      * already proved the VM up; a slow full answer is not a VM fault).
      */
     suspend fun streamsFull(type: String, id: Long, season: Int = 0, episode: Int = 0): StreamsResponse? {
+        val key = com.chitram.app.resolve.StreamCache.key(type, id, season, episode)
+        streamCache?.vm(key, full = true)?.let { android.util.Log.i("Chitram", "[cache] vm full $type/$id hit: ${it.streams.size} row(s), 0 requests"); return it }
         if (vm?.allow() == false) return null
         val path = streamsPath(type, id, season, episode, refresh = false, full = true)
         return try {
-            json.decodeFromString(StreamsResponse.serializer(), call(fullClient, noStore(vmBase + path)))
+            json.decodeFromString(StreamsResponse.serializer(), call(fullClient, noStore(vmBase + path))).also { streamCache?.putVm(key, full = true, it) }
         } catch (e: IOException) {
             android.util.Log.i("Chitram", "[vm] full follow-up failed: ${e.javaClass.simpleName} ${e.message}")
             null
@@ -410,6 +414,10 @@ class Api(
 
     suspend fun streams(type: String, id: Long, season: Int = 0, episode: Int = 0, refresh: Boolean = false): StreamsResponse {
         val path = streamsPath(type, id, season, episode, refresh, full = false)
+        // Kept VM answer (30 min): no call. A refresh (a VM row failed) drops it and asks again.
+        val key = com.chitram.app.resolve.StreamCache.key(type, id, season, episode)
+        if (refresh) streamCache?.evictVm(key)
+        else streamCache?.vm(key, full = false)?.let { android.util.Log.i("Chitram", "[cache] vm $type/$id hit: ${it.streams.size} row(s), 0 requests"); return it }
         val h = vm
         if (h != null && !h.allow()) throw VmDown("VM paused for ${(h.openUntil - System.currentTimeMillis()) / 1000}s")
         if (h != null && h.halfOpen && !vmAnswers()) {
@@ -421,7 +429,7 @@ class Api(
             try {
                 val body = hedged(vmClient, noStore(vmBase + path), streamsHedgeMs)
                 h?.onSuccess()
-                return json.decodeFromString(StreamsResponse.serializer(), body)
+                return json.decodeFromString(StreamsResponse.serializer(), body).also { streamCache?.putVm(key, full = false, it) }
             } catch (e: IOException) {
                 // A 4xx is an answer: the VM is up.
                 if (e is HttpException && e.code < 500) { h?.onSuccess(); throw e }

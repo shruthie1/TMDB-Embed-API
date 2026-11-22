@@ -794,6 +794,12 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         android.util.Log.i("Chitram", "[hybrid] picked video ${v.mediaTrackGroup.id} and audio ${au.mediaTrackGroup.id} from ${a.provider}")
     }
 
+    /** A row failed in playback: its kept rows (StreamCache) are dropped so nothing reuses them. */
+    private fun dropKept(row: Source?) {
+        val r = request ?: return
+        if (row != null) g.onDevice.dropKept(r.type, r.id, r.season, r.episode, row)
+    }
+
     /** Fatal error policy (web/lib/player/fatalPolicy.js): stale link refreshes once, else next source. */
     private fun handleError(e: PlaybackException) {
         val http = generateSequence<Throwable>(e) { it.cause }.filterIsInstance<HttpDataSource.InvalidResponseCodeException>().firstOrNull()
@@ -810,6 +816,8 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             goOffline()
             return
         }
+        // Client cache: rows that failed in playback are never reused; the re-resolve below (once) fetches fresh.
+        dropKept(cur)
         // On-device merge: a donor request failed. The donor's fault, not the
         // picture's route: next donor first, the picture stays direct (m-B).
         if (!pairFused && DirectRoute.donorAtFault(http?.dataSpec?.uri?.toString(), cur, pairedAudio) && pairFailed("${e.errorCodeName}", pos)) return
@@ -1078,6 +1086,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             directFallBack(s, player.currentPosition.coerceAtLeast(0), directWhy)
             return
         }
+        if (!isOffline()) dropKept(s)
         if (!isOffline() && pairFailed(reason, player.currentPosition.coerceAtLeast(0))) return
         when (FailPolicy.onError(s, null, refreshedOnce, s.onDevice in reresolved, offline = isOffline(), twinTried = s.provider.lowercase() in twinTried, languageSelection = languageTrial != null, rowDelivered = alive || deliveredThisPlay)) {
             FailPolicy.Action.WAIT_ONLINE -> { judged = false; goOffline() }

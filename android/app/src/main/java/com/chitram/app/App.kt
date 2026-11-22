@@ -45,7 +45,9 @@ class App : Application(), ImageLoaderFactory {
         super.onCreate()
         instance = this
         val kv = PrefsKeyValue(this)
-        api = Api(Api.buildClient(), httpCache = Api.httpCache(cacheDir), vm = com.chitram.app.data.VmHealth(kv))
+        // Resolved rows (VM and on-device) kept 30 min, so a reopen or a second Play fetches nothing.
+        val streamCache = com.chitram.app.resolve.StreamCache(kv)
+        api = Api(Api.buildClient(), httpCache = Api.httpCache(cacheDir), vm = com.chitram.app.data.VmHealth(kv), streamCache = streamCache)
         prefs = LanguagePrefs(kv)
         progress = ProgressStore(kv)
         myList = MyListStore(kv)
@@ -68,6 +70,7 @@ class App : Application(), ImageLoaderFactory {
             castle = com.chitram.app.resolve.CastleResolver(api.client, hosts = hosts, config = { resolveConfig.current().castletv }),
             multimovies = com.chitram.app.resolve.MultiMoviesResolver(api.client, hosts = hosts, config = { resolveConfig.current().multimovies }),
             netmirror = com.chitram.app.resolve.NetmirrorResolver(api.client, otp = { kv.get("netmirror.otp") ?: "111111" }, kv = kv),
+            cache = streamCache,
         )
         appScope.launch { resolveConfig.get() }
     }
