@@ -9,6 +9,7 @@
 // "no data", never as an error.
 
 import { abortReason, isAbort } from './abortReason';
+import { takeEarly } from './earlyRows';
 
 // Endpoints that only ever existed on the VM: /api/stats, /api/validate,
 // /api/sources and /api/embed. The local backend has none of them, so these
@@ -87,6 +88,12 @@ export function logoUrl(path) {
 }
 
 async function getJson(url, { timeoutMs = 15000, signal } = {}) {
+  // Home's first rows may already be on the way from the HTML (earlyRows.js).
+  const early = takeEarly(url);
+  if (early) {
+    const res = await early;
+    if (res && !signal?.aborted) return res;
+  }
   const ctrl = new AbortController();
   // Always abort WITH a reason: a bare abort() reports as "signal is aborted
   // without reason" in Next's dev overlay even though the catch below handles

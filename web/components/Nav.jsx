@@ -36,7 +36,7 @@ export function AppNav() {
           <span className="app-nav-label">{i.label}</span>
         </Link>
       ))}
-      <PrefsButton className="app-nav-item" iconSize={22} firstVisit={false} />
+      <PrefsButton className="app-nav-item" iconSize={22} />
     </nav>
   );
 }

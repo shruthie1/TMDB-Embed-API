@@ -5,7 +5,7 @@ import { render, cleanup, act } from '@testing-library/react';
 const full = vi.hoisted(() => ({ logo: null, calls: [] }));
 vi.mock('../../lib/api', async (orig) => ({
   ...(await orig()),
-  fetchTitleFull: vi.fn(async (type, id) => { full.calls.push(`${type}/${id}`); return { logo: full.logo }; }),
+  fetchTitleFull: vi.fn(async (type, id) => { full.calls.push(`${type}/${id}`); return { ok: true, status: 200, body: { logo: full.logo } }; }),
 }));
 const { default: Hero } = await import('../../components/Hero');
 

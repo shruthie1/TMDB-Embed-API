@@ -4,7 +4,7 @@ import { useParams, useRouter } from 'next/navigation';
 import { fetchTitle, fetchTitleFull, poster } from '../../../../lib/api';
 import { posterSources } from '../../../../lib/posterSources';
 import TitleLogo from '../../../../components/TitleLogo';
-import Player from '../../../../components/Player';
+import dynamic from 'next/dynamic';
 import ErrorBoundary from '../../../../components/ErrorBoundary';
 import CastRow, { CastRowSkeleton } from '../../../../components/CastRow';
 import EpisodeList, { EpisodeListSkeleton } from '../../../../components/EpisodeList';
@@ -15,11 +15,29 @@ import { inList, toggleList } from '../../../../lib/list';
 import { prewarmStreams } from '../../../../lib/backend';
 import { languageName } from '../../../../lib/subtitles';
 import Icon from '../../../../components/Icon';
-import { HeroInnerSkeleton, FactsSkeleton } from '../../../../components/TitleSkeleton';
+import { HeroInnerSkeleton, FactsSkeleton, useTitleSeed } from '../../../../components/TitleSkeleton';
 import HeroBackdrop from '../../../../components/HeroBackdrop';
 import ErrorScreen from '../../../../components/ErrorScreen';
+import { EARLY_TITLE_SCRIPT } from '../../../../lib/earlyRows';
+
+// The player is about 55kB of this route's JS and only mounts after Play. As a
+// static import it rode the first load, so on a phone the page hydrated (and
+// the title data request started) about a second later. It loads during the
+// reading dwell instead (see the warm-up effect below).
+const loadPlayer = () => import('../../../../components/Player');
+const Player = dynamic(loadPlayer, {
+  ssr: false,
+  // Play pressed before the chunk arrived: the player's own dark frame and
+  // spinner, not a page that seems to ignore the press.
+  loading: () => (
+    <div className="player" role="dialog" aria-modal="true" aria-label="Loading player">
+      <div className="pbuffering" role="status"><div className="pspinner" /><span className="sr-only">Loading</span></div>
+    </div>
+  ),
+});
 
 // Measures before paint in the browser; useLayoutEffect warns during SSR.
+
 const useBrowserLayoutEffect = typeof window !== 'undefined' ? useLayoutEffect : useEffect;
 
 function runtime(min) {
@@ -30,7 +48,7 @@ function runtime(min) {
 
 // fetchpriority puts the poster ahead of the rows below the fold; the shimmer
 // covers the wait so the box is never a flat dark tile.
-function HeroPoster({ title }) {
+function HeroPoster({ title, placeholder = null }) {
   // Chosen once per title: the cache check must not flip mid-load, and the
   // full record's poster url must not remount a poster that already shows.
   const [sources, setSources] = useState(() => posterSources(title));
@@ -61,7 +79,10 @@ function HeroPoster({ title }) {
   // No .enter fade: the poster replaces a skeleton box, and a fade from 0
   // read as a flash on arrival.
   return (
-    <div className={`hero-poster${loading ? ' loading' : ''}`}>
+    // The tapped card's poster (already cached) fills the box until the
+    // detail-size image has loaded, so the poster never blinks to a shimmer.
+    <div className={`hero-poster${loading && !placeholder ? ' loading' : ''}${loading && placeholder ? ' seeded' : ''}`}
+         style={loading && placeholder ? { backgroundImage: `url(${placeholder})` } : undefined}>
       {src && (
         <img key={src} ref={ref} src={src} alt="" width="342" height="513" decoding="async"
              fetchpriority="high" onLoad={() => setLoading(false)} onError={onError} />
@@ -74,6 +95,8 @@ export default function TitlePage() {
   const { type, id } = useParams();
   const router = useRouter();
   const tmdbId = Number(id);
+  // What the tapped card knew (name, poster, backdrop); null on a hard load.
+  const seed = useTitleSeed(type, id);
 
   const [t, setT] = useState(null);
   const [full, setFull] = useState(false);
@@ -138,14 +161,20 @@ export default function TitlePage() {
     const target = type === 'tv'
       ? { season: resume?.season ?? 1, episode: resume?.episode ?? 1 }
       : {};
-    // hls.js is a dynamic player dependency. Download it during the same
-    // reading dwell as the resolver warmup so the click only waits for media,
-    // not for a JavaScript chunk to arrive first.
-    import('hls.js').catch(() => {});
     // Same key the Player's resolve uses (title.mediaType/tmdbId), so Play
     // joins this request or reads its cached answer.
     const timer = setTimeout(() => prewarmStreams(t.mediaType, t.tmdbId, target), 700);
-    return () => clearTimeout(timer);
+    // The player and hls.js (about 180kB) download during the same reading
+    // dwell, so Play waits only for media. Not at once: fetched with the
+    // record they took a phone's bandwidth from the backdrop and poster
+    // (LCP 5.2s on Slow 4G). After the page load event plus a short wait.
+    let code;
+    const loadCode = () => {
+      code = setTimeout(() => { loadPlayer().catch(() => {}); import('hls.js').catch(() => {}); }, 1500);
+    };
+    if (document.readyState === 'complete') loadCode();
+    else window.addEventListener('load', loadCode, { once: true });
+    return () => { clearTimeout(timer); clearTimeout(code); window.removeEventListener('load', loadCode); };
   }, [t, full, type, tmdbId, resume?.season, resume?.episode]);
 
   // Stable so the Player's next-episode lookup does not refetch each render.
@@ -177,6 +206,10 @@ export default function TitlePage() {
   // What the Play button does, and what it should say. For a series this is
   // an episode; for a film, a position. Falls back to S1E1 for a new show.
   const isTv = type === 'tv';
+  // First child of both returns, so the slots below keep their positions.
+  // On a hard load it requests the record before hydration (earlyRows.js);
+  // inert after that.
+  const early = <script dangerouslySetInnerHTML={{ __html: EARLY_TITLE_SCRIPT }} suppressHydrationWarning />;
   const backButton = (
     <button
       type="button"
@@ -200,10 +233,11 @@ export default function TitlePage() {
   if (!t) {
     return (
       <article className="detail title-skeleton" aria-busy="true" aria-label="Loading title">
+        {early}
         {backButton}
         <div className="hero">
-          <HeroBackdrop path={null} />
-          <HeroInnerSkeleton />
+          <HeroBackdrop path={seed?.backdrop || null} />
+          <HeroInnerSkeleton seed={seed} />
         </div>
         {isTv && <EpisodeListSkeleton />}
         <CastRowSkeleton />
@@ -236,12 +270,13 @@ export default function TitlePage() {
 
   return (
     <article className="detail">
+      {early}
       {backButton}
       <div className="hero">
         <HeroBackdrop path={t.backdrop || null} />
         <div className="hero-inner">
           {pos && (
-            <HeroPoster key={`${type}/${id}`} title={t} />
+            <HeroPoster key={`${type}/${id}`} title={t} placeholder={seed?.posterSrc || null} />
           )}
           <div className="hero-text">
             <h1 className={`detail-title${t.logo ? ' has-logo' : ''}`}><TitleLogo title={t.title} logo={t.logo} /></h1>

@@ -101,6 +101,9 @@ export function FilterPanel({ f, set, open, onClose, count }) {
       <div className={`sheet-scrim ${open ? 'on' : ''}`} onClick={onClose} aria-hidden={!open} />
       <aside ref={panelRef} className={`fpanel ${open ? 'open' : ''}`}
              aria-label="Filters" aria-hidden={!open}
+             // Closed, the panel only slides off screen: without inert, Tab
+             // (and a desktop keyboard) still walked its hidden buttons.
+             inert={open ? undefined : ''}
              role="dialog" aria-modal={open ? 'true' : undefined}>
         <div className="fpanel-grab" />
         <div className="fpanel-head">

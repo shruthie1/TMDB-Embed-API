@@ -1,4 +1,5 @@
 'use client';
+import { warmTitle } from './titleSeed';
 
 /**
  * Pre-resolve on intent.
@@ -41,7 +42,11 @@ export function intentProps(type, tmdbId, opts) {
   let timer = null;
   const start = () => {
     clearTimeout(timer);
-    timer = setTimeout(() => preresolve(type, tmdbId, opts), DWELL_MS);
+    timer = setTimeout(() => {
+      preresolve(type, tmdbId, opts);
+      // The page's metadata (not the stream): cheap and edge-cached.
+      warmTitle(type, tmdbId);
+    }, DWELL_MS);
   };
   const stop = () => clearTimeout(timer);
   return {

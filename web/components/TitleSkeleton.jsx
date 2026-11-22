@@ -1,5 +1,8 @@
 'use client';
+import { useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
+import { posterSources } from '../lib/posterSources';
+import { peekSeed } from '../lib/titleSeed';
 import { Skeleton } from './ui';
 import { CastRowSkeleton } from './CastRow';
 import { EpisodeListSkeleton } from './EpisodeList';
@@ -14,15 +17,18 @@ import Icon from './Icon';
  * synopsis lines and the Read more line are reserved on desktop and TV
  * (globals.css), so the loaded hero does not grow or shrink on arrival.
  */
-export function HeroInnerSkeleton() {
+export function HeroInnerSkeleton({ seed = null }) {
   return (
     <div className="hero-inner">
-      <Skeleton className="hero-poster" />
+      {seed?.poster ? <SeedPoster seed={seed} /> : <Skeleton className="hero-poster" />}
       <div className="hero-text">
-        <h1 className="detail-title"><span className="skel skel-line" style={{ width: '56%' }} /></h1>
+        <h1 className="detail-title">
+          {seed?.title || <span className="skel skel-line" style={{ width: '56%' }} />}
+        </h1>
         <p className="tagline"><span className="skel skel-line" style={{ width: '32%' }} /></p>
         <div className="detail-meta">
-          <span><span className="skel skel-line" style={{ width: '12em' }} /></span>
+          {seed?.year && <span>{seed.year}</span>}
+          <span><span className="skel skel-line" style={{ width: seed?.year ? '8em' : '12em' }} /></span>
           <span><span className="badge skel skel-ghost">English</span></span>
         </div>
         <p className="detail-overview">
@@ -41,6 +47,27 @@ export function HeroInnerSkeleton() {
       </div>
     </div>
   );
+}
+
+/**
+ * The tapped card's poster: the exact url the card showed (already in the
+ * browser cache), else the detail poster url the page will load anyway.
+ */
+function SeedPoster({ seed }) {
+  const [src] = useState(() => seed.posterSrc || posterSources(seed)[0]);
+  const [loading, setLoading] = useState(!seed.posterSrc);
+  return (
+    <div className={`hero-poster${loading ? ' loading' : ''}`}>
+      <img src={src} alt="" width="342" height="513" decoding="async" fetchpriority="high"
+           ref={img => { if (img?.complete && img.naturalWidth) setLoading(false); }}
+           onLoad={() => setLoading(false)} onError={() => setLoading(false)} />
+    </div>
+  );
+}
+
+/** The seed for this route, read on the client only (see lib/titleSeed.js). */
+export function useTitleSeed(type, id) {
+  return peekSeed(type, id);
 }
 
 /** The facts grid at the foot of the page, until the full record lands. */
@@ -65,6 +92,7 @@ export function FactsSkeleton() {
 export default function TitleSkeleton({ onBack }) {
   const router = useRouter();
   const params = useParams();
+  const seed = useTitleSeed(params?.type, params?.id);
   return (
     <article className="detail title-skeleton" aria-busy="true" aria-label="Loading title">
       <button type="button" className="detail-back focusable" data-focus="" onClick={onBack || (() => router.back())} aria-label="Go back">
@@ -72,8 +100,8 @@ export default function TitleSkeleton({ onBack }) {
         <span>Back</span>
       </button>
       <div className="hero">
-        <HeroBackdrop path={null} />
-        <HeroInnerSkeleton />
+        <HeroBackdrop path={seed?.backdrop || null} />
+        <HeroInnerSkeleton seed={seed} />
       </div>
       {params?.type === 'tv' && <EpisodeListSkeleton />}
       <CastRowSkeleton />

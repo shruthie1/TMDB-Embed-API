@@ -9,6 +9,7 @@ import { warmContinueWatching } from '../lib/prefetch';
 import { getPrefs, prefsQuery, effectiveLangs, PREFS_EVENT } from '../lib/prefs';
 import { homeRows, dedupeRows } from '../lib/homeRows';
 import { readHome, patchHome, clearHome } from '../lib/homeCache';
+import { EARLY_ROWS_SCRIPT } from '../lib/earlyRows';
 
 // True once a Home has mounted in this tab. The first Home render is a
 // hydration of server HTML, and the server has no localStorage, so that render
@@ -18,6 +19,10 @@ import { readHome, patchHome, clearHome } from '../lib/homeCache';
 // client renders and read storage at once, so the in-tab cache still seeds the
 // first paint.
 let mountedOnce = false;
+
+// Remote rows requested before the rest (top 10, new, trending and the first
+// language pair): what a phone, desktop or TV shows above the fold.
+const FIRST_ROWS = 5;
 
 export default function Home() {
   // null on the server and during hydration; the stored prefs on a client
@@ -100,11 +105,14 @@ export default function Home() {
         .then(rows => { if (alive) { const r = rows.filter(Boolean); setRecs(r); patchHome(query, { recs: r }); } });
     }
 
-    for (const { kind } of rows) {
-      if (kind === 'continue' || kind === 'list') continue;
+    // The rows on the first screen are requested at once; the rest wait for
+    // those to answer. All 19 at once shared a phone's link with the hero art
+    // and first posters (about 150kB of JSON on Slow 4G), and nobody can
+    // scroll to row 7 in that time.
+    const remote = rows.map(r => r.kind).filter(kind => kind !== 'continue' && kind !== 'list'
       // Already fetched for this query and still fresh: keep it, don't re-fetch.
-      if (fresh?.data && Array.isArray(fresh.data[kind])) continue;
-      fetchRow(kind, { query }).then(res => {
+      && !(fresh?.data && Array.isArray(fresh.data[kind])));
+    const load = (kind) => fetchRow(kind, { query }).then(res => {
         if (!alive) return;
         const titles = res.ok ? (res.body?.titles || []) : [];
         setRowErrors(errors => {
@@ -126,7 +134,9 @@ export default function Home() {
           return next;
         });
       });
-    }
+    const first = remote.slice(0, FIRST_ROWS);
+    Promise.allSettled(first.map(load))
+      .then(() => { if (alive) remote.slice(FIRST_ROWS).forEach(load); });
     return () => { alive = false; };
   }, [prefs, rows, query]);
 
@@ -188,6 +198,9 @@ export default function Home() {
 
   return (
     <div className="home-page">
+      {/* Starts the first rows' requests while the HTML parses, not after
+          hydration (lib/earlyRows.js). Inert on a client re-mount. */}
+      <script dangerouslySetInnerHTML={{ __html: EARLY_ROWS_SCRIPT }} suppressHydrationWarning />
       <Hero titles={heroTitles || []} loading={heroTitles === undefined} />
 
       {/* Before mount (server render, and the seconds a TV spends loading

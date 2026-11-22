@@ -1,8 +1,8 @@
 'use client';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import Icon from './Icon';
-import { PREF_LANGS, getPrefs, hasPrefs, savePrefs } from '../lib/prefs';
+import { PREF_LANGS, getPrefs, effectiveLangs, savePrefs } from '../lib/prefs';
 import { isTv } from '../lib/dpad';
 
 const FOCUSABLE = 'button:not([disabled]), [href], [tabindex]:not([tabindex="-1"])';
@@ -11,33 +11,28 @@ const FOCUSABLE = 'button:not([disabled]), [href], [tabindex]:not([tabindex="-1"
  * Preferred languages, as a small centred dialog. Tap order is still saved
  * as rank order (rows follow it), but the UI no longer shows numbers.
  *
- * First visit: Telugu is pre-selected, it opens after the home page has painted,
- * and it is sticky (no outside-tap or Escape dismiss). Save needs at least one
- * language; Skip stores an empty choice, which means all languages.
+ * It never opens by itself (owner, 2026-11-22): a first visit uses every
+ * language, Telugu first, and the viewer changes that only from the
+ * Languages button. Nothing saved, or an old empty Skip choice, opens with
+ * every language selected, since that is what the rows already use.
+ * Save needs at least one language; Cancel keeps the current choice.
  */
-export function PrefsModal({ open, onClose, firstVisit = false }) {
+export function PrefsModal({ open, onClose }) {
   const [langs, setLangs] = useState([]);
   const cardRef = useRef(null);
-  // TV first visit: focus Save once it is enabled, so one OK accepts Telugu.
-  const saveFirst = useRef(false);
 
   useEffect(() => {
     if (!open) return undefined;
-    // First visit opens with Telugu already chosen and ready to save - Telugu
-    // is the library's standing default, so a first-time viewer lands on it
-    // without hunting. They can still add or clear languages before saving.
-    setLangs(firstVisit ? ['te'] : getPrefs().langs);
+    setLangs(effectiveLangs(getPrefs()));
     const card = cardRef.current;
     const returnTo = document.activeElement;
     // Focus the dialog itself, so no tile looks different on open. A TV has no
-    // pointer: there the first tile takes focus and shows the ring. On a TV
-    // first visit Save takes it instead (effect below), as Telugu is chosen.
-    if (isTv() && firstVisit) saveFirst.current = true;
-    else if (isTv()) card?.querySelector('.lang-opt')?.focus();
+    // pointer: there the first tile takes focus and shows the ring.
+    if (isTv()) card?.querySelector('.lang-opt')?.focus();
     else card?.focus();
     // Keep Tab inside the dialog; arrows are scoped by lib/dpad.js.
     const onKey = (e) => {
-      if (e.key === 'Escape' && !firstVisit) { e.stopPropagation(); onClose(); return; }
+      if (e.key === 'Escape') { e.stopPropagation(); onClose(); return; }
       if (e.key !== 'Tab' || !card) return;
       const items = [...card.querySelectorAll(FOCUSABLE)];
       if (!items.length) return;
@@ -59,17 +54,9 @@ export function PrefsModal({ open, onClose, firstVisit = false }) {
       window.removeEventListener('keydown', onKey, true);
       window.removeEventListener('keydown', onAnyKey, true);
       window.removeEventListener('pointerdown', onPointer, true);
-      saveFirst.current = false;
       if (returnTo instanceof HTMLElement) returnTo.focus({ focusVisible: viaKeys || isTv() });
     };
-  }, [open, firstVisit, onClose]);
-
-  // Save is disabled on the open render (langs not yet set), so wait for it.
-  useEffect(() => {
-    if (!open || !saveFirst.current) return;
-    const save = cardRef.current?.querySelector('.lang-modal-actions .btn.primary');
-    if (save && !save.disabled) { saveFirst.current = false; save.focus(); }
-  }, [open, langs]);
+  }, [open, onClose]);
 
   if (!open) return null;
 
@@ -90,12 +77,10 @@ export function PrefsModal({ open, onClose, firstVisit = false }) {
           <span className="lang-modal-count" aria-live="polite">
             {langs.length ? `${langs.length} selected` : ''}
           </span>
-          {!firstVisit && (
-            <button type="button" className="icon-btn lang-close focusable" data-focus=""
-                    aria-label="Close" onClick={onClose}>
-              <Icon name="close" size={16} />
-            </button>
-          )}
+          <button type="button" className="icon-btn lang-close focusable" data-focus=""
+                  aria-label="Close" onClick={onClose}>
+            <Icon name="close" size={16} />
+          </button>
         </div>
         <p id="lang-modal-hint" className="lang-modal-hint">
           Pick the languages you watch.
@@ -120,37 +105,25 @@ export function PrefsModal({ open, onClose, firstVisit = false }) {
           <button type="button" data-focus="" className="btn primary focusable lang-focus"
                   disabled={!langs.length} onClick={() => done({ langs })}>Save</button>
           <button type="button" data-focus="" className="btn focusable lang-focus"
-                  onClick={() => done({ langs: [] })}>Skip</button>
+                  onClick={onClose}>Cancel</button>
         </div>
       </div>
     </div>
   );
 }
 
-/** Header button plus the dialog; opens once on a first visit, after load. */
-export default function PrefsButton({ className = 'nav-link nav-search', iconSize = 15, firstVisit = true }) {
+/** Header button plus the dialog. The dialog opens only from this button. */
+export default function PrefsButton({ className = 'nav-link nav-search', iconSize = 15 }) {
   const [open, setOpen] = useState(false);
-  const [first, setFirst] = useState(false);
   const [mounted, setMounted] = useState(false);
+  const close = useCallback(() => setOpen(false), []);
 
-  useEffect(() => {
-    setMounted(true);
-    // Two buttons exist (desktop top bar, TV/phone AppNav); only one may
-    // open the first-visit picker, or it would open twice.
-    if (!firstVisit || hasPrefs()) return undefined;
-    // After the page has loaded and painted, so the home page is visible
-    // behind the dimmed backdrop rather than replaced by it.
-    let t;
-    const show = () => { t = setTimeout(() => { setFirst(true); setOpen(true); }, 700); };
-    if (document.readyState === 'complete') show();
-    else window.addEventListener('load', show, { once: true });
-    return () => { clearTimeout(t); window.removeEventListener('load', show); };
-  }, [firstVisit]);
+  useEffect(() => { setMounted(true); }, []);
 
   return (
     <>
       <button type="button" className={`${className} focusable`} data-focus=""
-              aria-label="Your languages" onClick={() => { setFirst(false); setOpen(true); }}>
+              aria-label="Your languages" onClick={() => setOpen(true)}>
         <Icon name="settings" size={iconSize} />
         <span className="app-nav-label">Languages</span>
       </button>
@@ -158,8 +131,7 @@ export default function PrefsButton({ className = 'nav-link nav-search', iconSiz
           header's stacking context (z-index 20), so on a phone the bottom
           tab bar (z-index 30) covered the buttons. */}
       {mounted && createPortal(
-        <PrefsModal open={open} firstVisit={first}
-                    onClose={() => { setOpen(false); setFirst(false); }} />,
+        <PrefsModal open={open} onClose={close} />,
         document.body)}
     </>
   );

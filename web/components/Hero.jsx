@@ -7,9 +7,15 @@ import { Badge, Skeleton } from './ui';
 import { inList, toggleList } from '../lib/list';
 import { languageName } from '../lib/subtitles';
 import { isTv } from '../lib/dpad';
+import { seedTitle } from '../lib/titleSeed';
 
 /** Auto-advance interval. Must match --hero-rotate in app/tokens.css. */
 const ROTATE_MS = 8000;
+
+/** Same breakpoint as `.page-backdrop` --bg-sm in globals.css. */
+function narrowScreen() {
+  try { return window.matchMedia('(max-width:719px)').matches; } catch { return false; }
+}
 
 function focusVisible(el) {
   try { return el.matches(':focus-visible'); } catch { return false; }
@@ -56,6 +62,17 @@ export default function Hero({ titles = [], loading }) {
     const id = setTimeout(() => setI(v => (v + 1) % pool.length), ROTATE_MS);
     return () => clearTimeout(id);
   }, [paused, pool.length, i]);
+
+  // The backdrop is a CSS background, which Chrome fetches at low priority,
+  // so on a phone the row posters beat it to the bandwidth (LCP 5.4s on Slow
+  // 4G). Ask for the slide on screen at high priority; the CSS then reuses it.
+  const artUrl = current?.backdrop ? heroBackdrop(current.backdrop, narrowScreen()) : null;
+  useEffect(() => {
+    if (!artUrl) return;
+    const img = new Image();
+    img.fetchPriority = 'high';
+    img.src = artUrl;
+  }, [artUrl]);
 
   if (loading) {
     return (
@@ -139,7 +156,7 @@ export default function Hero({ titles = [], loading }) {
               it "Play" promised something the click does not do. */}
           <Link href={`/title/${t.mediaType}/${t.tmdbId}`}
                 className="btn primary focusable" data-focus=""
-                aria-label={`Open ${t.title}`}>
+                aria-label={`Open ${t.title}`} onClick={() => seedTitle(t)}>
             <svg className="ico" viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true">
               <path d="M6 4v16l14-8z" />
             </svg>

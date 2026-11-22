@@ -59,7 +59,7 @@
 .lang-modal-actions .btn.primary{box-shadow:none}
 /* Disabled Save stays the white primary, dimmed: never a grey fill. */
 .lang-modal-actions .btn.primary:disabled{background:var(--btn-primary-bg);color:var(--btn-primary-fg);border-color:transparent;opacity:.4}
-/* Skip: the secondary button (translucent white). */
+/* Cancel: the secondary button (translucent white). */
 .lang-modal-actions .btn:not(.primary){background:var(--btn-secondary-bg);color:var(--btn-secondary-fg);border-color:transparent}
 .lang-modal-actions .btn:not(.primary):hover{background:var(--btn-secondary-bg-hover)}
 

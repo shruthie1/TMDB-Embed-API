@@ -301,6 +301,9 @@ main{padding:0 var(--space-5) var(--space-24)}
 @media (prefers-reduced-motion:reduce){.hero-poster.loading::after{animation:none}}
 .hero-poster img{transition:opacity var(--duration-fast) ease}
 .hero-poster.loading img{opacity:0}
+/* The tapped card's poster stands in until the detail-size one decodes. */
+.hero-poster.seeded{background-size:cover;background-position:center}
+.hero-poster.seeded img{opacity:0}
 /* The text column settles to the bottom of the row, so the last line of the
    synopsis sits level with the poster's lower edge rather than leaving a gap
    beneath it. `.hero-inner` already aligns the two columns; this aligns the
@@ -3368,9 +3371,12 @@ html[data-tv="true"] .pmenu-item:focus .pmenu-marker{color:var(--ink)}
    and anchor it where the text title starts. */
 .has-logo{line-height:0}
 .title-logo{
-  display:block;width:auto;height:auto;
-  max-width:min(100%,26rem);max-height:clamp(64px,14vh,140px);
+  display:block;width:min(100%,26rem);
+  /* A fixed height, not max-height: the box is the same size before and
+     after the PNG decodes, so the meta and synopsis below do not jump
+     (measured: h1 0px -> 84px on a phone, CLS 0.06). */
+  height:clamp(64px,14vh,140px);
   object-fit:contain;object-position:left bottom;
   filter:drop-shadow(0 2px 12px rgba(0,0,0,.45));
 }
-@media (max-width:559px){ .title-logo{max-width:min(100%,17rem);max-height:84px} }
+@media (max-width:559px){ .title-logo{width:min(100%,17rem);height:84px} }

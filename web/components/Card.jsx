@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { useState } from 'react';
 import { poster, posterSrcSet, CARD_SIZES } from '../lib/api';
 import { intentProps } from '../lib/prefetch';
+import { seedOnClick } from '../lib/titleSeed';
 
 /**
  * Skeleton is the SAME shape as the card, so nothing shifts when data lands.
@@ -56,6 +57,8 @@ export function Card({ title, i = 0, progressPct, showType = false, rank = null 
       // usually lands on a warm cache instead of a 6-37s cold resolve.
       {...intentProps(title.mediaType, title.tmdbId,
                       { season: title.season, episode: title.episode })}
+      // The title page paints this card's name and poster at once.
+      onClick={seedOnClick(title)}
     >
       <div className="poster">
         {src && !imageFailed

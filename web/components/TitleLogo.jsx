@@ -30,7 +30,9 @@ export function useHeroLogo(t) {
     if (!t || t.logo !== undefined || key in logos) return undefined;
     const ctrl = new AbortController();
     fetchTitleFull(t.mediaType, t.tmdbId, { signal: ctrl.signal })
-      .then(full => setLogos(m => ({ ...m, [key]: full?.logo || null })))
+      // getJson shape: { ok, body }. Reading `.logo` off the wrapper was
+      // always undefined, so the home hero never showed a logo.
+      .then(r => setLogos(m => ({ ...m, [key]: (r?.ok && r.body?.logo) || null })))
       .catch(() => { if (!ctrl.signal.aborted) setLogos(m => ({ ...m, [key]: null })); });
     return () => ctrl.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps

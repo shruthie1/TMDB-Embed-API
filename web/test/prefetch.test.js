@@ -124,7 +124,21 @@ describe('intentProps — dwell, not a passing mouse', () => {
       expect(typeof p[k]).toBe('function');
     }
     expect(src).toMatch(/const DWELL_MS = 600;/);
-    expect(src).toMatch(/setTimeout\(\(\) => preresolve\(type, tmdbId, opts\), DWELL_MS\)/);
+    expect(src).toMatch(/preresolve\(type, tmdbId, opts\);\s*\/\/[^\n]*\n\s*warmTitle\(type, tmdbId\);\s*\}, DWELL_MS\)/);
+  });
+
+  it('after the dwell warms the title page record (metadata only, never streams)', async () => {
+    vi.useFakeTimers();
+    const { intentProps } = await load();
+    vi.stubGlobal('window', {});
+    const p = intentProps('movie', 5);
+    p.onMouseEnter();
+    vi.advanceTimersByTime(599);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(globalThis.fetch.mock.calls.map(c => c[0])).toEqual(['/api/title/movie/5/full']);
+    expect(globalThis.fetch.mock.calls.some(c => String(c[0]).includes('/api/streams'))).toBe(false);
+    vi.unstubAllGlobals();
   });
 });
 

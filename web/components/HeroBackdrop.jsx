@@ -29,6 +29,9 @@ export default function HeroBackdrop({ path }) {
     const url = backdropUrl(path, narrow);
     let alive = true;
     const img = new Image();
+    // The backdrop is the page's LCP. A script-made Image starts at low
+    // priority and lost the phone's bandwidth to the posters and cast photos.
+    img.fetchPriority = 'high';
     const show = () => { if (alive) setShown(url); };
     img.onload = () => {
       // decode() so the swap paints a ready bitmap, not a blank frame.
