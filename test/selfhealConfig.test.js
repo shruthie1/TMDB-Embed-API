@@ -222,3 +222,26 @@ test('M5 remote host lists: https only, at most 10, netmirror.domains capped at 
     assert.strictEqual(c.cfg('mapple', 'fronts', ['x']).length, 13);
     assert.ok(logs.lines.some((l) => l.startsWith('[selfheal-config] remote trim multimovies.bases 15->10')), logs.lines.join('\n'));
 });
+
+test('prewarm: /api/resolve-config passes boolean prewarm through (built-in v3 defaults), drops bad values', async () => {
+    const shipped = path.join(__dirname, '..', 'routes', 'resolve-config.json');
+    const snap = createConfig({ builtin: shipped }).snapshot();
+    assert.equal(snap.version, 3);
+    const on = Object.keys(snap).filter((k) => snap[k] && snap[k].prewarm === true).sort();
+    assert.deepStrictEqual(on, ['castletv', 'mapple', 'multimovies', 'netmirror', 'vidrift']);
+    for (const k of ['vaplayer', 'showsst', 'onetouchtv']) assert.strictEqual(snap[k].prewarm, false, k);
+    // The static web copy the APK falls back to carries the same flags.
+    const web = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'web', 'public', 'resolve-config.json'), 'utf8'));
+    assert.equal(web.version, 3);
+    for (const k of Object.keys(snap)) if (snap[k] && typeof snap[k] === 'object' && 'prewarm' in snap[k]) assert.strictEqual(web[k].prewarm, snap[k].prewarm, k);
+
+    // A remote edit wins per field; a non-boolean is dropped (APK reads it as false); heals never touch it.
+    const f = fakeFetch([{ status: 200, body: JSON.stringify({ version: 4, mapple: { prewarm: false }, vidrift: { prewarm: 'yes' } }) }]);
+    const c = createConfig({ builtin: { version: 3, mapple: { prewarm: true }, vidrift: { prewarm: true }, castletv: { prewarm: true, bases: ['https://a.test'] } }, url: 'https://cfg.test/rc.json', fetch: f, file: tmpFile() });
+    await c.refresh();
+    c.setHeals({ castletv: { bases: { value: ['https://b.test'], over: ['https://a.test'] } } });
+    const s = c.snapshot();
+    assert.strictEqual(s.mapple.prewarm, false);
+    assert.ok(!('prewarm' in s.vidrift));
+    assert.strictEqual(s.castletv.prewarm, true);
+});

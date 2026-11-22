@@ -52,7 +52,7 @@ async function probeTracks(segmentBuffer) {
         await fs.writeFile(tmp, segmentBuffer);
         const { stdout } = await execFileAsync(FFPROBE, [
             '-v', 'error',
-            '-show_entries', 'stream=index,codec_name,codec_type,sample_rate,channels,width,height:stream_tags=language',
+            '-show_entries', 'stream=index,codec_name,profile,codec_type,sample_rate,channels,width,height:stream_tags=language',
             '-of', 'json', tmp,
         ], { maxBuffer: 4 * 1024 * 1024 });
         const streams = (JSON.parse(stdout).streams || []);
@@ -62,6 +62,10 @@ async function probeTracks(segmentBuffer) {
             .map(s => ({
                 index: s.index,
                 codec: s.codec_name,
+                // AAC object type (LC / HE-AAC / HE-AACv2). The demux is -c copy,
+                // so this is also the codec of every served audio segment, and
+                // the master's CODECS is filled from it (audioCodecString).
+                profile: s.profile || null,
                 sampleRate: Number(s.sample_rate) || 0,
                 channels: Number(s.channels) || 2,
                 language: (s.tags && s.tags.language) || null,
@@ -78,6 +82,16 @@ async function probeTracks(segmentBuffer) {
     } finally {
         fs.unlink(tmp).catch(() => {});
     }
+}
+
+// RFC 6381 codec string for one probed audio track, for the master's CODECS.
+// Only pairs ffprobe actually reported: a probe stored before `profile` was
+// read has none, and gets null, so the master stays video-only rather than
+// naming a codec nobody measured.
+const AAC_PROFILE_CODECS = { lc: 'mp4a.40.2', 'he-aac': 'mp4a.40.5', 'he-aacv2': 'mp4a.40.29' };
+function audioCodecString(track) {
+    if (!track || String(track.codec || '').toLowerCase() !== 'aac' || !track.profile) return null;
+    return AAC_PROFILE_CODECS[String(track.profile).toLowerCase()] || null;
 }
 
 // Pulls one elementary stream out of a segment. `-c copy` so this is a remux,
@@ -199,5 +213,5 @@ setInterval(() => {
 
 module.exports = {
     FFMPEG, FFPROBE, LANG_NAMES, langName,
-    probeTracks, probeStartPts, extractTrack, getProbe, setProbe,
+    probeTracks, probeStartPts, extractTrack, getProbe, setProbe, audioCodecString,
 };

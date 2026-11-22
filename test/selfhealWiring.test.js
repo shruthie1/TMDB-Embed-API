@@ -33,7 +33,7 @@ globalThis.fetch = (url, opts) => {
     if (/^http:\/\/127\.0\.0\.1:/.test(u)) return realFetch(url, opts);
     return Promise.reject(new Error(`outbound fetch blocked in test: ${u}`));
 };
-stub('lib/media/segmentVerify.js', { ...require('../lib/media/segmentVerify'), verifyTopStreams: async (s) => s });
+stub('lib/media/segmentVerify.js', { ...require('../lib/media/segmentVerify'), verifyTopStreams: async (s) => s, prewarmTopStreams: () => [] });
 const realTmdb = require('../utils/tmdb');
 stub('utils/tmdb.js', { ...realTmdb, resolveImdbId: async () => 'tt0000001' });
 const { getStore } = require('../utils/store');
@@ -72,7 +72,9 @@ test('(d) blocked vaplayer (apk on-device) is not run for a default caller; the 
     assert.equal(calls['vaplayer:5002'], 1);
 });
 
-test('(e) a canary pass on that provider lets it run again', async () => {
+// Owner 2026-11-22: the aggregate never runs an APK-on-device provider, so a
+// canary pass changes the canary state only; the device keeps resolving it.
+test('(e) a canary pass sets the state back to ok; the aggregate still leaves vaplayer to the device', async () => {
     let t = Date.now();
     const canary = createCanary({
         providers: () => [{ name: 'vaplayer', enabled: true, resolve: (id) => fake.vaplayer.fetch({ tmdbId: id }) }],
@@ -87,6 +89,6 @@ test('(e) a canary pass on that provider lets it run again', async () => {
     assert.equal(await canary.tick(), 'vaplayer');
     assert.equal(getStore().canaryGet('vaplayer').state, 'ok');
     const a = await get('/api/streams/movie/5003');
-    assert.deepEqual(providers(a.d), ['castletv', 'vaplayer']);
-    assert.equal(calls['vaplayer:5003'], 1);
+    assert.deepEqual(providers(a.d), ['castletv']);
+    assert.equal(calls['vaplayer:5003'], undefined);
 });

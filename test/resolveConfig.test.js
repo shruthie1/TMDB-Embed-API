@@ -35,6 +35,7 @@ function literal(src) {
   if (s === 'true' || s === 'false') return s === 'true';
   if (consts[s] !== undefined) return consts[s];
   if (/^\w+\(\)$/.test(s)) return null; // nested config, checked on its own
+  if (s === 'DEFAULT_PREWARM') return null; // per-section `prewarm`, checked on its own
   if (/^listOf\(/.test(s)) return [...s.matchAll(/"([^"]*)"/g)].map((m) => m[1]);
   if (/^mapOf\(/.test(s)) {
     return Object.fromEntries([...s.matchAll(/"([^"]+)" to ([\d_]+)L?/g)].map((m) => [m[1], Number(m[2].replace(/_/g, ''))]));
@@ -97,9 +98,18 @@ test('A1: values equal the app defaults exactly', async () => {
   const top = defaultsOf('ResolveConfig');
   assert.equal(cfg.version, top.version);
   assert.equal(cfg.ttlSec, top.ttlSec);
-  assert.deepStrictEqual(cfg.mapple, defaultsOf('MappleConfig'));
-  assert.deepStrictEqual(cfg.vaplayer, defaultsOf('VaplayerConfig'));
-  assert.deepStrictEqual(cfg.netmirror, defaultsOf('NetmirrorConfig'));
+  assert.deepStrictEqual(noPrewarm(cfg.mapple), defaultsOf('MappleConfig'));
+  assert.deepStrictEqual(noPrewarm(cfg.vaplayer), defaultsOf('VaplayerConfig'));
+  assert.deepStrictEqual(noPrewarm(cfg.netmirror), defaultsOf('NetmirrorConfig'));
+});
+
+// prewarm.md: the served `<provider>.prewarm` flags equal ResolveConfig.DEFAULT_PREWARM.
+function noPrewarm(sec) { const { prewarm, ...rest } = sec; return rest; }
+test('prewarm: served flags equal the APK built-in DEFAULT_PREWARM', async () => {
+  const cfg = JSON.parse((await serve()).body);
+  const def = [...kt.match(/val DEFAULT_PREWARM = setOf\(([^)]*)\)/)[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]).sort();
+  const on = Object.keys(cfg).filter((k) => cfg[k] && cfg[k].prewarm === true).sort();
+  assert.deepStrictEqual(on, def);
 });
 
 const selfhealConfig = require('../lib/selfheal/config');
@@ -119,7 +129,7 @@ test('Task 3: new provider sections equal the provider constants', async () => {
   for (const name of ['castletv', 'multimovies', 'vidrock', 'vidrift', 'onetouchtv', 'showsst']) {
     const mod = require(`../providers/${name}`);
     assert.ok(mod.CONFIG_DEFAULTS, `${name} exports CONFIG_DEFAULTS`);
-    assert.deepStrictEqual(cfg[name], mod.CONFIG_DEFAULTS, name);
+    assert.deepStrictEqual(noPrewarm(cfg[name]), mod.CONFIG_DEFAULTS, name);
   }
 });
 

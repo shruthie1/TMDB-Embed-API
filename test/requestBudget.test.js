@@ -45,7 +45,7 @@ globalThis.fetch = (url, opts) => {
     outbound.push(u);
     return Promise.reject(new Error(`outbound fetch blocked in test: ${u}`));
 };
-stub('lib/media/segmentVerify.js', { ...require('../lib/media/segmentVerify'), verifyTopStreams: async (s) => s });
+stub('lib/media/segmentVerify.js', { ...require('../lib/media/segmentVerify'), verifyTopStreams: async (s) => s, prewarmTopStreams: () => [] });
 const realTmdb = require('../utils/tmdb');
 stub('utils/tmdb.js', { ...realTmdb, resolveImdbId: async () => 'tt0000001' });
 const { recordProviderOutcome, BREAKER_THRESHOLD, metrics } = require('../lib/runtime/metrics');

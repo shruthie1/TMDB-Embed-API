@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 3,
   "ttlSec": 21600,
   "mapple": {
     "enabled": true,
@@ -43,7 +43,8 @@
     "unavailableMarker": "playback-unavailable",
     "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
     "powMaxIterations": 20000000,
-    "betterWaitMaxMs": 12000
+    "betterWaitMaxMs": 12000,
+    "prewarm": true
   },
   "vaplayer": {
     "enabled": true,
@@ -62,7 +63,8 @@
     "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "stepTimeoutMs": 8000,
     "budgetMs": 20000,
-    "probeSegment": true
+    "probeSegment": true,
+    "prewarm": false
   },
   "netmirror": {
     "enabled": true,
@@ -99,7 +101,8 @@
     "apiTtlMs": 600000,
     "sessionTtlMs": 1800000,
     "metadataTtlMs": 604800000,
-    "playerTtlMs": 30000
+    "playerTtlMs": 30000,
+    "prewarm": true
   },
   "castletv": {
     "bases": [
@@ -110,7 +113,8 @@
       "search": "v1.1.0",
       "details": "v1.9.9",
       "video": "v2.0.1"
-    }
+    },
+    "prewarm": true
   },
   "multimovies": {
     "bases": [
@@ -124,7 +128,8 @@
     ],
     "scrapers": [
       "https://raw.githubusercontent.com/mayurgj/nama/main/providers/multimovies.js"
-    ]
+    ],
+    "prewarm": true
   },
   "vidrock": {
     "bases": [
@@ -138,7 +143,8 @@
       "https://embed.vidrift.in"
     ],
     "moviePath": "/embed/movie/{id}",
-    "tvPath": "/embed/tv/{id}/{s}/{e}"
+    "tvPath": "/embed/tv/{id}/{s}/{e}",
+    "prewarm": true
   },
   "onetouchtv": {
     "bases": [
@@ -146,7 +152,8 @@
     ],
     "front": "https://onetouchtv.xyz",
     "key": "im72charPasswordofdInitVectorStm",
-    "iv": "im72charPassword"
+    "iv": "im72charPassword",
+    "prewarm": false
   },
   "showsst": {
     "mirrors": [
@@ -158,6 +165,7 @@
         "api": "https://api.vidmario.net",
         "player": "https://player.vidmario.net"
       }
-    ]
+    ],
+    "prewarm": false
   }
 }

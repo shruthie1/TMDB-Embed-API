@@ -5,8 +5,9 @@ const path = require('path');
 
 // Owner rule 2026-11-21: mapple and VaPlayer are APK-only (the APK resolves
 // them on device). A web caller (?client=web) must not run them in the fan-out,
-// so the browser never waits on their timeouts and never sees their rows. Any
-// other caller (the APK, old clients) gets them exactly as before.
+// so the browser never waits on their timeouts and never sees their rows.
+// Since 2026-11-22 the aggregate skips them for the APK too; the
+// single-provider route still serves them to non-web callers.
 function stub(rel, exports) {
     const id = require.resolve(path.join(__dirname, '..', rel));
     require.cache[id] = { id, filename: id, loaded: true, exports };
@@ -38,7 +39,7 @@ globalThis.fetch = (url, opts) => {
     if (/^http:\/\/127\.0\.0\.1:/.test(u)) return realFetch(url, opts);
     return Promise.reject(new Error(`outbound fetch blocked in test: ${u}`));
 };
-stub('lib/media/segmentVerify.js', { ...require('../lib/media/segmentVerify'), verifyTopStreams: async (s) => s });
+stub('lib/media/segmentVerify.js', { ...require('../lib/media/segmentVerify'), verifyTopStreams: async (s) => s, prewarmTopStreams: () => [] });
 const realTmdb = require('../utils/tmdb');
 stub('utils/tmdb.js', { ...realTmdb, resolveImdbId: async () => 'tt0000001' });
 const { surfaceAllows, PROVIDER_SURFACES } = require('../lib/routing/providerRoutes');
@@ -77,13 +78,14 @@ test('a web caller never runs mapple/vaplayer and does not wait on them', async 
     assert.ok(w.ms < 1000, `web answer took ${w.ms}ms`);
 });
 
-test('the APK (no client param) still gets mapple and vaplayer, even after a web call for the same title', async () => {
+// Owner 2026-11-22: the APK resolves mapple/vaplayer on device, so the
+// aggregate no longer runs them for the APK either (test/onDeviceSkip.test.js).
+test('the APK (no client param) no longer gets mapple and vaplayer from the aggregate', async () => {
     const a = await get('/api/streams/movie/4001');
-    assert.deepEqual(providers(a.d), ['castletv', 'mapple', 'vaplayer']);
-    assert.equal(calls['mapple:4001'], 1);
-    assert.equal(calls['vaplayer:4001'], 1);
-    const w = await get('/api/streams/movie/4001?client=web');
-    assert.deepEqual(providers(w.d), ['castletv'], 'the APK answer in the memo is not served to the web');
+    assert.deepEqual(providers(a.d), ['castletv']);
+    assert.equal(calls['mapple:4001'], undefined);
+    assert.equal(calls['vaplayer:4001'], undefined);
+    assert.ok(a.ms < 1000, `APK answer took ${a.ms}ms`);
 });
 
 test('the single-provider route refuses mapple/vaplayer for web, serves them for the APK', async () => {

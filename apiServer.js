@@ -16,7 +16,7 @@ const { listProviders, getProvider, getCookieStats, PROVIDER_DEADLINE_MS } = req
 const { QUALITIES: STREAM_QUALITIES, normaliseStream, normaliseStreams } = require('./utils/streamSchema');
 const { resolveMany } = require('./lib/media/capabilities');
 const streamHeaders = require('./lib/media/streamHeaders');
-const { verifyTopStreams } = require('./lib/media/segmentVerify');
+const { verifyTopStreams, prewarmTopStreams } = require('./lib/media/segmentVerify');
 const { registerCapabilityRoutes } = require('./routes/capabilities');
 const { createProxyRoutes, processStreamsForProxy } = require('./proxy/proxyServer');
 const { routeStreams, surfaceAllows, surfaceOf, surfaceOnDevice } = require('./lib/routing/providerRoutes');
@@ -806,6 +806,13 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
     const imdbId = await resolveImdbId(tmdbType, tmdbId); if (imdbId) metrics.tmdbToImdbLookups++;
     const selectedProviders = (config.defaultProviders.length ? config.defaultProviders : listProviders().map(p=>p.name))
       .filter((name) => surfaceAllows(name, surface))
+      // Owner 2026-11-22: a provider the APK resolves ON DEVICE (mapple,
+      // vaplayer: providerRoutes apk:on-device) is not run here for ANY
+      // caller. The web never uses it (surfaceAllows) and the APK runs it
+      // itself. On the VM mapple is Cloudflare-blocked: its error or late
+      // answer only kept APK answers out of the memo. The single-provider
+      // route below still runs it, for debugging.
+      .filter((name) => !surfaceOnDevice(name))
       // Task 8: an APK-on-device provider the canary found blocked on this
       // server is left to the device until a canary pass.
       .filter((name) => !canaryMod.serveSkip(name, surface, getStore(), surfaceOnDevice));
@@ -883,19 +890,96 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
     const early = new Map(selectedProviders
       .filter((name) => name !== GATE_PROVIDER && !GATED_BY_DEMUX.includes(name))
       .map((name) => [name, runProvider(name)]));
+    // Byte-check prewarm. The answer is often ready long before
+    // EARLY_ANSWER_FLOOR_MS (a Telugu row at 325-585 ms), and verifyTopStreams
+    // after the floor used to add 0.3-1.0 s of master + segment reads. Start
+    // the same checks on the best rows as they land, and again only when the
+    // top rows change, so the call after the floor joins checks already
+    // running or done (segmentVerify cachedVerify). It only warms that cache:
+    // the rows, their order and their tags still come from the code below.
+    const landed = new Map();
+    let prewarmedTop = '';
+    let prewarmOpen = typeof prewarmTopStreams === 'function';
+    const prewarm = () => {
+      if (!prewarmOpen) return;
+      try {
+        let rows = [...(landed.get(GATE_PROVIDER) || []),
+          ...[...landed].filter(([n]) => n !== GATE_PROVIDER).flatMap(([, r]) => r)];
+        rows = applyFilters(urlExpiry.dropExpiredStreams(rows), 'aggregate', config.minQualities, config.excludeCodecs);
+        rows = sortStreamsCanonically(rows, { tmdbId, type, season, episode });
+        const top = rows.filter((x) => x && typeof x.url === 'string' && !x.url.startsWith(serverUrlEarly))
+          .slice(0, 3).map((x) => x.url).join('\n');
+        if (!top || top === prewarmedTop) return;
+        prewarmedTop = top;
+        const started = prewarmTopStreams(rows, { skipPrefix: serverUrlEarly });
+        console.log(`[api] verify-prewarm tmdbId=${tmdbId} at=+${Date.now() - reqT0}ms rows=${rows.length} checks=${started.length}`);
+      } catch (e) {
+        console.warn(`[api] verify-prewarm failed for ${tmdbId}: ${e.message}`);
+      }
+    };
+    const onLanded = (name, p) => p.then((rows) => {
+      if (Array.isArray(rows) && rows.length) { landed.set(name, rows); prewarm(); }
+    }, () => {});
+    for (const [name, p] of early) onLanded(name, p);
+    // ?full=1 is the web's follow-up to a partial answer: it waits for every
+    // provider (each still capped by the registry deadline). The providers the
+    // first answer left running are joined in flight, not started again.
+    const wantFull = req.query.full === '1';
+    const earlyAnswerOn = PRIMARY_LIST.length > 0 && !wantFull;
     // The gate is capped at CASTLE_GATE_MAX_MS. A slower Castle joins the
     // fan-out as an ordinary primary task and NetMirror starts at once.
+    //
+    // The gate exists to decide whether NetMirror runs (it is skipped when
+    // Castle's demux already has the preferred language). It also held the
+    // answer: Krack 784572 (2026-11-22) had a multimovies Telugu row at
+    // 2440 ms, waited for the 3000 ms cap plus 400 ms grace, and went out at
+    // 4.25 s with Castle still late. So once a non-gated provider has a
+    // preferred-language row, the answer stops waiting on the gate
+    // (castle-gate-release). Castle joins the fan-out as a primary task and
+    // is in the first answer if it lands before EARLY_ANSWER_FLOOR_MS, else
+    // it is late (partial) and the ?full=1 follow-up carries it. NetMirror's
+    // start still waits for the gate decision (Castle's result or the cap),
+    // so NetMirror is not called more often than before.
     let castleGate = null;
+    let gateDecision = null; // the gate's NetMirror decision, after a release
+    let gateReleased = false;
     if (selectedProviders.includes(GATE_PROVIDER)) {
       castleGate = (async () => {
         const rows = await runProvider(GATE_PROVIDER);
+        onLanded(GATE_PROVIDER, Promise.resolve(rows));
         return { rows, demux: await buildCastleDemuxEntry(rows, serverUrlEarly) };
       })();
       let gateTimer;
-      const gate = await Promise.race([castleGate,
+      const capped = Promise.race([castleGate,
         new Promise((r) => { gateTimer = setTimeout(() => r(null), CASTLE_GATE_MAX_MS); })]);
-      clearTimeout(gateTimer);
-      if (gate) {
+      const RELEASE = Symbol('release');
+      const release = earlyAnswerOn
+        ? new Promise((r) => { for (const [, p] of early) p.then((rows) => { if (hasPreferred(rows)) r(RELEASE); }, () => {}); })
+        : new Promise(() => {});
+      const gate = await Promise.race([capped, release]);
+      if (gate === RELEASE) {
+        gateReleased = true;
+        console.log(`[api] castle-gate-release tmdbId=${tmdbId} at=+${Date.now() - reqT0}ms reason=preferred-row-elsewhere`
+          + ` - answer no longer waits on ${GATE_PROVIDER}; ${GATED_BY_DEMUX.join(', ')} still waits for the gate`);
+        gateDecision = capped.then((g) => {
+          clearTimeout(gateTimer);
+          if (!g) {
+            console.log(`[api] castle-gate-cap ${GATE_PROVIDER} not done after ${CASTLE_GATE_MAX_MS}ms for ${tmdbId} - starting ${GATED_BY_DEMUX.join(', ')} anyway`);
+            return false;
+          }
+          const holds = Boolean(g.demux) && new RegExp(preferredLanguage, 'i')
+            .test(`${g.demux.name || ''} ${g.demux.language || ''}`);
+          console.log(holds
+            ? `[api] castle demux available for ${tmdbId} (has ${preferredLanguage}) - skipping ${GATED_BY_DEMUX.join(', ')}`
+            : `[api] castle for ${tmdbId} has no ${preferredLanguage} demux - still querying ${GATED_BY_DEMUX.join(', ')}`);
+          return holds;
+        }, () => false);
+      } else {
+        clearTimeout(gateTimer);
+      }
+      if (gateReleased) {
+        // castleGate stays set: Castle is a fan-out task below.
+      } else if (gate) {
         castleStreams = gate.rows;
         demuxed = gate.demux;
         castleGate = null;
@@ -918,8 +1002,12 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
     const remaining = selectedProviders.filter((name) =>
       name !== GATE_PROVIDER && !(gateHolds && GATED_BY_DEMUX.includes(name)));
 
-    const tasks = remaining.map((name) => ({ name, p: early.get(name) || runProvider(name) }));
+    const tasks = remaining.map((name) => ({ name, p: early.get(name)
+      || (gateDecision && GATED_BY_DEMUX.includes(name)
+        ? gateDecision.then((holds) => (holds ? [] : runProvider(name)))
+        : runProvider(name)) }));
     if (castleGate) tasks.push({ name: GATE_PROVIDER, p: castleGate.then((g) => g.rows) });
+    for (const x of tasks) if (!early.has(x.name) && x.name !== GATE_PROVIDER) onLanded(x.name, x.p);
     // Answer early once a stream in the preferred language is in hand: the
     // viewer can start, and everything still running fills providerHitCache
     // for the next request (the web app also asks NetMirror on its own after
@@ -929,12 +1017,8 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
     // the rest of the early answer.
     let foundPreferred;
     const preferredFound = new Promise((r) => { foundPreferred = r; });
-    // ?full=1 is the web's follow-up to a partial answer: it waits for every
-    // provider (each still capped by the registry deadline). The providers the
-    // first answer left running are joined in flight, not started again.
-    const wantFull = req.query.full === '1';
     const primary = (name) => wantFull || isPrimary(name);
-    if (PRIMARY_LIST.length && !wantFull) {
+    if (earlyAnswerOn) {
       if (gateHolds || hasPreferred(castleStreams)) foundPreferred(true);
       for (const x of tasks) x.p.then((r) => { if (hasPreferred(r)) foundPreferred(true); });
     }
@@ -965,6 +1049,7 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
     let results = await Promise.all(tasks.map((x) =>
       Promise.race([x.p, (primary(x.name) && !answeredEarly) ? budgetOver : graceOver])));
     clearTimeout(grace);
+    prewarmOpen = false;
     const late = tasks.filter((x, i) => results[i] === LATE);
     results = results.map((r) => (r === LATE ? [] : r));
     if (late.length && castleStreams.length === 0 && results.every((r) => r.length === 0)) {
@@ -986,6 +1071,12 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
     if (castleTask && castleGate && !late.includes(castleTask)) {
       const g = await castleGate;
       if (!demuxed) demuxed = g.demux;
+      // After a gate release Castle's rows keep their usual place, first,
+      // as when the gate itself returned them.
+      if (gateReleased) {
+        castleStreams = g.rows;
+        results[tasks.indexOf(castleTask)] = [];
+      }
     }
     for (const x of late) {
       providerTimings[x.name] = null;
@@ -1071,7 +1162,9 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
     // Read the first bytes of the top candidates before serving them. Runs
     // before routeStreamsForBrowser, which strips the upstream headers the
     // origin needs. Failures are demoted by the re-sort, never removed.
+    const verifyT0 = Date.now();
     streams = sortStreamsCanonically(await verifyTopStreams(streams, { skipPrefix: serverUrl }), learn);
+    console.log(`[api] verify-top tmdbId=${tmdbId} at=+${verifyT0 - reqT0}ms took=${Date.now() - verifyT0}ms`);
     streams = routeStreamsForBrowser(streams, serverUrl);
     // Every call here fans out to a dozen providers, and NetMirror rate limits
     // per IP ("Too Many Requests in Short Period of Time"). A plain page reload
@@ -1118,16 +1211,30 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
     // browser must not keep this answer either (HTTP cache or the web app's
     // sessionStorage), or a short upstream blip hides that server for minutes.
     if (erroredProviders.length) payload.providerErrors = [...erroredProviders];
+    // An error from a provider the APK resolves ON DEVICE (mapple, vaplayer:
+    // providerRoutes surfaceOnDevice) hides nothing from a non-web caller: the
+    // APK runs that provider itself. mapple errors on almost every VM call (the
+    // VM is Cloudflare-blocked), so counting it kept every APK answer out of
+    // the memo and every repeat play paid the floor again. It is still named
+    // in providerErrors. The web never runs these providers (surfaceAllows).
+    // Since 2026-11-22 the aggregate runs them for no caller (selectedProviders),
+    // so this filter only guards a future caller that runs one anyway.
+    const cacheBlockingErrors = erroredProviders.filter((name) =>
+      surface === 'web' || !surfaceOnDevice(name));
     // A partial answer is missing a provider that is still running; any HTTP
     // cache that kept it (max-age=300) would hide that provider for 5 min.
-    if (erroredProviders.length || late.length) {
+    if (cacheBlockingErrors.length || late.length) {
       res.set('Cache-Control', 'no-store');
     } else {
       res.set('Cache-Control', `private, max-age=${STREAMS_CACHE_SECONDS}`);
     }
     // A response missing a late provider is not memoized, so the next request
     // rebuilds it and picks that provider up from providerHitCache.
-    if (!late.length && !erroredProviders.length) memoSet(mk, payload);
+    if (!late.length && !cacheBlockingErrors.length) memoSet(mk, payload);
+    if (erroredProviders.length > cacheBlockingErrors.length) {
+      console.log(`[api] memo-ondevice-error tmdbId=${tmdbId} ignored=${erroredProviders.filter((n) => !cacheBlockingErrors.includes(n)).join(',')}`
+        + ` cached=${!late.length && !cacheBlockingErrors.length}`);
+    }
     res.json(payload);
   } catch (e) {
     metrics.lastError = e.message;

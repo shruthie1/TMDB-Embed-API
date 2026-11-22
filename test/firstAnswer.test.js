@@ -52,7 +52,7 @@ globalThis.fetch = (url, opts) => {
 };
 // The byte-check is covered by test/segmentVerify.test.js. Here it is a
 // pass-through so the fake cdn.example urls are never fetched.
-stub('lib/media/segmentVerify.js', { ...require('../lib/media/segmentVerify'), verifyTopStreams: async (s) => s });
+stub('lib/media/segmentVerify.js', { ...require('../lib/media/segmentVerify'), verifyTopStreams: async (s) => s, prewarmTopStreams: () => [] });
 const realTmdb = require('../utils/tmdb');
 stub('utils/tmdb.js', { ...realTmdb, resolveImdbId: async () => 'tt0000001' });
 const app = require('../apiServer');

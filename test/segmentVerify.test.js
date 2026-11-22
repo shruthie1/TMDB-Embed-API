@@ -173,6 +173,42 @@ test('only the top 3 are fetched, own-server urls are skipped, count never chang
     assert.equal(out[0].byteCheck, undefined);
 });
 
+test('prewarmTopStreams starts the top 3 checks at once and does not wait for them', async () => {
+    const log = [];
+    const routes = {};
+    for (let i = 0; i < 5; i++) routes[`https://p${i}/x.mp4`] = { body: mp4Bytes(), delayMs: 300 };
+    const f = fakeFetch(routes, log);
+    const list = [s('Own', 'http://me:8787/castle-demux/1/master.m3u8'),
+        ...[0, 1, 2, 3, 4].map((i) => s(`P${i}`, `https://p${i}/x.mp4`))];
+    const t0 = Date.now();
+    const started = sv.prewarmTopStreams(list, { fetchImpl: f, skipPrefix: 'http://me:8787' });
+    assert.ok(Date.now() - t0 < 50, 'prewarm returns at once');
+    assert.deepEqual(started, ['https://p0/x.mp4', 'https://p1/x.mp4', 'https://p2/x.mp4']);
+    assert.deepEqual([...new Set(log.map((l) => l.url))], started);
+});
+
+test('verifyTopStreams after a prewarm joins the running checks: same verdicts, no refetch, no full wait', async () => {
+    const log = [];
+    const f = fakeFetch({
+        'https://w0/x.mp4': { body: mp4Bytes(), delayMs: 600 },
+        'https://w1/x.mp4': { body: HTML, delayMs: 600 },
+    }, log);
+    const list = [s('W0', 'https://w0/x.mp4'), s('W1', 'https://w1/x.mp4')];
+    sv.prewarmTopStreams(list, { fetchImpl: f, attemptMs: 2000 });
+    await new Promise((r) => setTimeout(r, 450));
+    const t0 = Date.now();
+    const out = await sv.verifyTopStreams(list, { fetchImpl: f, attemptMs: 2000, budgetMs: 3000 });
+    const took = Date.now() - t0;
+    assert.ok(took < 400, `final verify took ${took}ms after a 450 ms head start`);
+    assert.equal(log.length, 2, 'each url fetched once');
+    assert.equal(out[0].byteCheck.ok, true);
+});
+
+test('prewarmTopStreams with an empty or unverifiable list starts nothing', () => {
+    assert.deepEqual(sv.prewarmTopStreams([], {}), []);
+    assert.deepEqual(sv.prewarmTopStreams([s('Own', 'http://me:8787/a.m3u8')], { skipPrefix: 'http://me:8787', fetchImpl: async () => { throw new Error('no'); } }), []);
+});
+
 // Route level: the real sortStreamsCanonically in apiServer.js, real wiring.
 test('/api/streams demotes an HTML-serving Telugu stream below a live one and drops nothing', async () => {
     const path = require('path');
