@@ -933,6 +933,8 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
     const providerErrorWhy = {};
     const refresh = req.query.refresh === '1';
     const titleKey = `${type}:${tmdbId}:${season ?? ''}:${episode ?? ''}`;
+    // This request's provider runs, keyed like the provider caches.
+    const requestRuns = new Map();
     const runProvider = async (name, { bypassBreaker = false } = {}) => {
       const prov = getProvider(name);
       if (!prov || !prov.enabled) return [];
@@ -942,21 +944,35 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
         if (hit) { providerTimings[name] = 0; return languagesLater.apply(hit); }
         if (providerEmptyCache.has(ck)) { providerTimings[name] = 0; return []; }
       }
-      if (!bypassBreaker && !providerInflight.has(ck) && breakerOpen(name)) {
+      if (!bypassBreaker && !requestRuns.has(ck) && !providerInflight.has(ck) && breakerOpen(name)) {
         providerTimings[name] = null;
         skippedByBreaker.push(name);
         return [];
       }
-      const o = await fetchProviderShared(prov, ck,
-        { tmdbId, type, season, episode, imdbId, filters:{ }, resolveService: async child => {
-          const rows=await runProvider(child);
-          if(providerErrorWhy[child])throw new Error(`MultiMovies child ${child} failed`);
-          return rows;
-        } }, { titleIsResolvable, titleKey });
+      // One run per provider per request. A linked provider (gdmirror,
+      // cineverse) asks for its VidBolt/Vidrift child through resolveService;
+      // when the fan-out's own run of that child already ended with a partial
+      // answer (never cached) the in-flight entry is gone, and the child ran
+      // again with fresh upstream calls. Prod 2026-11-24 [47d21642] 811941:
+      // multimovies ran twice in one request, re-asking every VidBolt server.
+      let shared = requestRuns.get(ck);
+      const firstRun = !shared;
+      if (firstRun) {
+        shared = fetchProviderShared(prov, ck,
+          { tmdbId, type, season, episode, imdbId, filters:{ }, resolveService: async child => {
+            const rows=await runProvider(child);
+            if(providerErrorWhy[child])throw new Error(`MultiMovies child ${child} failed`);
+            return rows;
+          } }, { titleIsResolvable, titleKey });
+        requestRuns.set(ck, shared);
+      } else {
+        console.log(`[api] provider-reuse ${name} tmdbId=${tmdbId}: this request's run shared`);
+      }
+      const o = await shared;
       providerTimings[name] = o.ms;
       // error, timeout and partial all leave this title's answer UNKNOWN for
       // the provider, so the response must not be cached (see below).
-      if (o.outcome !== 'hit' && o.outcome !== 'empty') {
+      if (firstRun && o.outcome !== 'hit' && o.outcome !== 'empty') {
         erroredProviders.push(name);
         providerErrorWhy[name] = String(o.error || o.outcome).slice(0, 120);
       }
