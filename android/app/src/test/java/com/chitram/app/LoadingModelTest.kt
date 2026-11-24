@@ -72,10 +72,10 @@ class LoadingModelTest {
     @Test fun everyRowFailedIsTheEndCard() {
         val v = LoadingModel.view(input(90_000, listReady = true, failed = true, attempts = list.map { Attempt(it.id, 0, 1, RowState.FAILED, Reason.NO_ANSWER) }))
         assertEquals(Phase.FAILED, v.phase)
-        // Refresh sources (owner 2026-11-22) replaces Try again on the failure card.
-        assertFalse(v.showTryAgain)
-        assertTrue(v.showRefresh)
-        assertEquals("Couldn't play this title", v.headline)
+        // End card (owner 2026-11-24): Try again + Pick a source when rows were tried.
+        assertTrue(v.showTryAgain)
+        assertTrue(v.showPickSource)
+        assertEquals("Couldn't play any source", v.headline)
         assertEquals("We tried 5 sources. None of them played.", v.detail)
     }
 

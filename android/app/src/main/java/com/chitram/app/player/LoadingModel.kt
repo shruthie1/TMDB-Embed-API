@@ -16,6 +16,14 @@ object LoadingModel {
     const val LOADING_SLOW_HINT_MS = 15_000L
     const val LOADING_CHOOSER_MS = 30_000L
     const val LOADING_RETRY_MS = 30_000L
+    /** 0 rows this long after Play ends the search with the no-sources card (owner 2026-11-24). */
+    const val NO_SOURCE_CAP_MS = 45_000L
+
+    /**
+     * The search for rows is over: 0 rows and every path (VM, on-device, background
+     * mapple) has finished, or [NO_SOURCE_CAP_MS] passed. Any row keeps it going.
+     */
+    fun noSourceEnd(elapsedMs: Long, rows: Int, pathsActive: Boolean): Boolean = rows == 0 && (!pathsActive || elapsedMs >= NO_SOURCE_CAP_MS)
 
     /**
      * Caps for "Add <L> audio from another server" (Step 2, 2026-11-21): at most
@@ -51,9 +59,12 @@ object LoadingModel {
      */
     object Copy {
         /** Failure card: every source was tried and none played. */
-        const val COULDNT_PLAY = "Couldn't play this title"
-        /** Failure card: the title has no source at all. */
-        const val NO_SOURCES = "No sources found yet"
+        const val COULDNT_PLAY = "Couldn't play any source"
+        /** Failure card: the search ended with no source at all. */
+        fun noSources(title: String) = if (title.isBlank()) "No sources found" else "No sources found for $title"
+        /** Failure card actions: re-resolve now (a tap skips the refresh cooldown) and open the server list. */
+        const val TRY_AGAIN = "Try again"
+        const val PICK_SOURCE = "Pick a source"
         /** A server switch the viewer asked for is in flight. */
         const val SWITCHING_SERVER = "Switching server…"
         /** The source list is still on its way. */
@@ -144,14 +155,16 @@ object LoadingModel {
         val showTryAgain: Boolean,
         val rows: List<Row>,
         val footer: String,
-        /** Failure card: "Refresh sources" (primary; TV focus starts there) and Back. */
+        /** Kept for the old failure card; the end card now shows Try again (showTryAgain) instead. */
         val showRefresh: Boolean = false,
+        /** End card with rows that all failed: "Pick a source" opens the server list. */
+        val showPickSource: Boolean = false,
     )
 
     enum class Focus { DETAILS, REFRESH }
 
-    /** Where TV focus starts: Refresh sources on the failure card, Details while loading. */
-    fun tvFocus(v: View): Focus = if (v.showRefresh) Focus.REFRESH else Focus.DETAILS
+    /** Where TV focus starts: Try again on the end card, Details while loading. */
+    fun tvFocus(v: View): Focus = if (v.phase == Phase.FAILED) Focus.REFRESH else Focus.DETAILS
 
     data class RetryPlan(val refresh: Boolean, val keepDevice: Boolean)
 
@@ -238,9 +251,11 @@ object LoadingModel {
         if (i.failed) {
             val distinct = triedAttempts.map { it.id }.distinct().size
             val detail = if (distinct > 0) "We tried $distinct sources. None of them played." else i.failMessage.ifEmpty { "No playable source found." }
-            // Every source failed: "Couldn't play this title". None at all: "No sources found yet".
-            val headline = if (distinct == 0 && list.isNullOrEmpty()) Copy.NO_SOURCES else Copy.COULDNT_PLAY
-            return View(Phase.FAILED, headline, detail, showChooser = false, showTryAgain = false, rows = rows, footer = footer, showRefresh = true)
+            // Rows tried and none played: "Couldn't play any source" + Pick a source. Nothing tried
+            // (no rows, or late rows after the card): "No sources found for <title>". Both: Try again, Back.
+            val none = distinct == 0
+            val headline = if (none) Copy.noSources(i.title) else Copy.COULDNT_PLAY
+            return View(Phase.FAILED, headline, detail, showChooser = false, showTryAgain = true, rows = rows, footer = footer, showPickSource = !none)
         }
         val chooser = list != null && !i.framed && t >= LOADING_CHOOSER_MS
         val cur = i.attempts.lastOrNull()

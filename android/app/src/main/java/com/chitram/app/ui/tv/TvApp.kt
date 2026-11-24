@@ -817,6 +817,7 @@ private fun TvChip(text: String, selected: Boolean = false, modifier: Modifier =
 
 @Composable
 private fun TvButton(text: String, primary: Boolean, modifier: Modifier = Modifier, icon: ImageVector? = null, busy: Boolean = false, onClick: () -> Unit) {
+    val iconOnly = text.isEmpty()
     val src = remember { MutableInteractionSource() }
     val focused by src.collectIsFocusedAsState()
     Button(
@@ -833,12 +834,15 @@ private fun TvButton(text: String, primary: Boolean, modifier: Modifier = Modifi
         // Web .btn.primary:focus keeps its white fill and adds the ring, 3px out.
         border = if (primary) ButtonDefaults.border(focusedBorder = Border(BorderStroke(TvWeb.RING.px, Focus.ring), inset = TvWeb.RING_OFFSET.px, shape = Tok.pill)) else ButtonDefaults.border(),
         glow = ButtonDefaults.glow(focusedGlow = controlGlow),
-        contentPadding = PaddingValues(horizontal = TvWeb.BTN_PAD_X.px),
+        contentPadding = if (iconOnly) PaddingValues(0.dp) else PaddingValues(horizontal = TvWeb.BTN_PAD_X.px),
         interactionSource = src,
     ) {
-        if (busy) com.chitram.app.ui.common.RefreshGlyph(true, LocalContentColor.current, TvWeb.BTN_FONT.px, Modifier.padding(end = 6.dp))
-        else if (icon != null) Icon(icon, null, Modifier.padding(end = 4.dp).size(TvWeb.BTN_FONT.px), tint = LocalContentColor.current)
-        Text(text, fontSize = TvWeb.BTN_FONT.pxSp, fontWeight = FontWeight.SemiBold)
+        // Icon-only (text ""): a round button, the glyph centred and a little larger.
+        val glyph = if (iconOnly) (TvWeb.BTN_FONT * 1.3f).px else TvWeb.BTN_FONT.px
+        val gap = if (iconOnly) Modifier else Modifier.padding(end = if (busy) 6.dp else 4.dp)
+        if (busy) com.chitram.app.ui.common.RefreshGlyph(true, LocalContentColor.current, glyph, gap)
+        else if (icon != null) Icon(icon, null, gap.size(glyph), tint = LocalContentColor.current)
+        if (!iconOnly) Text(text, fontSize = TvWeb.BTN_FONT.pxSp, fontWeight = FontWeight.SemiBold)
     }
 }
 
@@ -865,13 +869,20 @@ private fun TvDetail(nav: Nav, type: String, id: Long) {
         // the art's top edge into the page so there is no hard cut. scrimBottom fades
         // the bottom, scrimLeft keeps the poster/text column legible. The art fills
         // most of the height so its bottom edge lands deep in scrimBottom's opaque zone.
-        Art(t?.backdrop, Api.BACKDROP_TV, Modifier.align(Alignment.TopEnd).fillMaxWidth().fillMaxHeight(0.92f), alignment = Alignment.TopCenter)
-        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(
-            0f to Tok.bg.copy(alpha = 0.85f), 0.26f to Color.Transparent,
-        )))
-        Box(Modifier.fillMaxSize().background(Tok.scrimLeft))
-        Box(Modifier.fillMaxSize().background(Tok.scrimBottom))
+        // 2026-11-24 (owner): the art fills the whole screen, and the scrims sit only
+        // where text sits (left column, bottom edge), so the right and top stay clear.
+        // Scrolling down to the rows dims the art (graphicsLayer alpha, no recomposition)
+        // so rows never sit on a bright image.
         val detailList = rememberLazyListState()
+        val dimPx = with(androidx.compose.ui.platform.LocalDensity.current) { 240.dp.toPx() }
+        Box(Modifier.fillMaxSize().graphicsLayer {
+            val off = if (detailList.firstVisibleItemIndex == 0) detailList.firstVisibleItemScrollOffset.toFloat() else if (detailList.firstVisibleItemIndex == 1) dimPx * 0.5f + detailList.firstVisibleItemScrollOffset else dimPx
+            alpha = 1f - 0.7f * (off / dimPx).coerceIn(0f, 1f)
+        }) {
+            Art(t?.backdrop, Api.BACKDROP_TV, Modifier.fillMaxSize(), alignment = BiasAlignment(0f, -0.4f))
+            Box(Modifier.fillMaxSize().background(Brush.verticalGradient(0f to Tok.bg.copy(alpha = 0.6f), 0.18f to Color.Transparent, 0.55f to Color.Transparent, 1f to Tok.bg)))
+            Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(0f to Tok.bg.copy(alpha = 0.92f), 0.38f to Tok.bg.copy(alpha = 0.6f), 0.62f to Color.Transparent)))
+        }
         val scope = rememberCoroutineScope()
         // Focus Play, then pin the list to the top: focusing scrolls Play into
         // view and would otherwise clip the title.
@@ -961,8 +972,9 @@ private fun TvDetail(nav: Nav, type: String, id: Long) {
                         val rNow = com.chitram.app.ui.common.rememberRefreshTick(rm)
                         val rLabel = rm.label(rNow)
                         val rNote = rm.noteAt(rNow) ?: if (rm.running) rm.chips() else ""
-                        TvButton(rLabel, primary = false, icon = Icons.Filled.Refresh, busy = rm.running,
-                            modifier = Modifier.semantics { contentDescription = listOf(rLabel, rNote).filter { it.isNotEmpty() }.joinToString(". ") }) { vm.refreshSources() }
+                        // Round icon after My List (owner 2026-11-24); its label is the focus/TalkBack text.
+                        TvButton("", primary = false, icon = Icons.Filled.Refresh, busy = rm.running,
+                            modifier = Modifier.width(TvWeb.BTN_H.px).semantics { contentDescription = listOf(rLabel, rNote).filter { it.isNotEmpty() }.joinToString(". ") }) { vm.refreshSources() }
                         if (rNote.isNotEmpty()) Text(rNote, color = Tok.textMuted, fontSize = TvWeb.BTN_FONT.pxSp, maxLines = 1,
                             modifier = Modifier.align(Alignment.CenterVertically).semantics { liveRegion = androidx.compose.ui.semantics.LiveRegionMode.Polite })
                     }

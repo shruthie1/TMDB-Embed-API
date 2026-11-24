@@ -321,14 +321,16 @@ class RefreshSourcesTest {
             firstListSize = sources?.size ?: 0, attempts = attempts, checks = emptyList(), framed = false, failed = failed,
         )
         val failed = LoadingModel.view(input(true, list, listOf(LoadingModel.Attempt("a", 0, 1, LoadingModel.RowState.FAILED, LoadingModel.Reason.NO_ANSWER))))
-        assertEquals("Couldn't play this title", failed.headline)
-        assertTrue(failed.showRefresh)
+        assertEquals("Couldn't play any source", failed.headline)
+        assertTrue(failed.showTryAgain && failed.showPickSource)
         assertEquals(LoadingModel.Focus.REFRESH, LoadingModel.tvFocus(failed))
         val empty = LoadingModel.view(input(true, emptyList(), emptyList()))
-        assertEquals("No sources found yet", empty.headline)
-        assertTrue(empty.showRefresh)
+        assertEquals("No sources found for RRR", empty.headline)
+        assertTrue(empty.showTryAgain)
+        assertFalse(empty.showPickSource)
+        assertEquals(LoadingModel.Focus.REFRESH, LoadingModel.tvFocus(empty))
         val loading = LoadingModel.view(input(false, null, emptyList()))
-        assertFalse(loading.showRefresh)
+        assertFalse(loading.phase == LoadingModel.Phase.FAILED)
         assertEquals(LoadingModel.Focus.DETAILS, LoadingModel.tvFocus(loading))
     }
 }

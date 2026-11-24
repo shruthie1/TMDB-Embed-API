@@ -144,6 +144,17 @@ import com.chitram.app.ui.common.Tok
 import com.chitram.app.ui.common.Focus
 import com.chitram.app.ui.common.langName
 import com.chitram.app.ui.common.runtimeText
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.calculateStartPadding
+import androidx.compose.foundation.layout.calculateEndPadding
+import androidx.compose.material3.OutlinedIconButton
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.platform.LocalDensity
+import com.chitram.app.ui.common.DetailLayout
 import kotlinx.coroutines.delay
 
 private val GUTTER = 16.dp
@@ -199,7 +210,14 @@ fun PhoneApp(nav: Nav) {
                 }
             },
         ) { pad ->
-            Box(Modifier.fillMaxSize().padding(bottom = pad.calculateBottomPadding()).background(Tok.bg)) {
+            // Landscape: keep content clear of the camera cutout and a side nav bar.
+            // Detail pads its own content so its backdrop can run under them.
+            // Plain padding, not windowInsetsPadding: nothing is consumed, so each screen's
+            // own statusBarsPadding still sees the status bar.
+            val sideInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal).asPaddingValues()
+            val ld = LocalLayoutDirection.current
+            val sides = if (top is Screen.Detail) Modifier else Modifier.padding(start = sideInsets.calculateStartPadding(ld), end = sideInsets.calculateEndPadding(ld))
+            Box(Modifier.fillMaxSize().padding(bottom = pad.calculateBottomPadding()).background(Tok.bg).then(sides)) {
                 when (top) {
                     Screen.Home -> PhoneHome(nav, homeList)
                     Screen.Search -> PhoneSearch(nav)
@@ -233,9 +251,11 @@ private fun PhoneHome(nav: Nav, listState: LazyListState) {
     val vm: HomeVm = viewModel()
     LaunchedEffect(Unit) { vm.load() }
     val shown = vm.rows.filter { it.shown }
-    Box(Modifier.fillMaxSize()) {
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        // Landscape: the hero is the visible height above the tab bar, so Watch now stays in view.
+        val wideHeroH = if (DetailLayout.mode(maxWidth.value, maxHeight.value) == DetailLayout.Mode.WIDE) maxHeight else null
         LazyColumn(state = listState, contentPadding = PaddingValues(bottom = 48.dp), verticalArrangement = Arrangement.spacedBy(22.dp)) {
-            item(key = "hero") { Box { HeroCarousel(vm.heroTitles, nav); HomeHeader(nav) } }
+            item(key = "hero") { Box { HeroCarousel(vm.heroTitles, nav, wideHeroH); HomeHeader(nav) } }
             items(shown, key = { it.kind }) { row -> PhoneRow(row, nav, onRetry = { vm.retry(row.kind) }) }
         }
         // Once the hero scrolls away, a solid strip keeps the status bar readable.
@@ -259,8 +279,11 @@ private fun HomeHeader(nav: Nav) {
 /** Web Hero: up to 6 titles, swipe, auto-advance every 8 s, dots. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun HeroCarousel(titles: List<Title>?, nav: Nav) {
-    val mod = Modifier.fillMaxWidth().aspectRatio(0.8f)
+private fun HeroCarousel(titles: List<Title>?, nav: Nav, wideHeight: Dp? = null) {
+    // Portrait: 4:5. Landscape: 4:5 of the width is taller than the screen, so the
+    // hero takes [wideHeight] (the height above the tab bar) instead.
+    val wide = wideHeight != null
+    val mod = if (wideHeight != null) Modifier.fillMaxWidth().height(wideHeight) else Modifier.fillMaxWidth().aspectRatio(0.8f)
     if (titles == null) {
         Box(mod.background(Tok.surfaceSolid))
         return
@@ -279,12 +302,13 @@ private fun HeroCarousel(titles: List<Title>?, nav: Nav) {
             Box(Modifier.fillMaxSize().clickable { nav.open(t) }) {
                 Art(t.backdrop, Api.BACKDROP_PHONE, Modifier.fillMaxSize(), alignment = BiasAlignment(0f, -0.6f))
                 Box(Modifier.fillMaxSize().background(Brush.verticalGradient(0.35f to Color.Transparent, 0.75f to Tok.bg.copy(alpha = 0.75f), 1f to Tok.bg)))
-                Column(Modifier.align(Alignment.BottomStart).padding(start = GUTTER, end = GUTTER, bottom = 34.dp)) {
-                    HeroTitle(rememberHeroLogo(t), t.title, maxW = 260.dp, maxH = 88.dp) {
+                if (wide) Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(0f to Tok.bg.copy(alpha = 0.8f), 0.45f to Color.Transparent)))
+                Column(Modifier.align(Alignment.BottomStart).padding(start = GUTTER, end = GUTTER, bottom = 34.dp).then(if (wide) Modifier.widthIn(max = 460.dp) else Modifier)) {
+                    HeroTitle(rememberHeroLogo(t), t.title, maxW = 260.dp, maxH = if (wide) 64.dp else 88.dp) {
                         Text(t.title, fontSize = 30.sp, lineHeight = 34.sp, fontWeight = FontWeight.Bold, color = Tok.text, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     }
                     MetaRow(t.year, null, t.rating, t.originalLang, Modifier.padding(top = 8.dp))
-                    t.overview?.let { Text(it, color = Tok.textSecondary, fontSize = 14.sp, lineHeight = 20.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 8.dp)) }
+                    if (!wide) t.overview?.let { Text(it, color = Tok.textSecondary, fontSize = 14.sp, lineHeight = 20.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 8.dp)) }
                     Row(Modifier.padding(top = 14.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         Button(onClick = { nav.open(t) }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Tok.bg)) {
                             Icon(Icons.Filled.PlayArrow, null, Modifier.size(20.dp)); Spacer(Modifier.width(6.dp)); Text("Watch now", fontWeight = FontWeight.SemiBold)
@@ -410,7 +434,7 @@ private fun PosterCard(t: Title, modifier: Modifier = Modifier, progress: Progre
 @Composable
 private fun BackButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
     Row(
-        modifier.clip(Tok.pill).background(Tok.bg.copy(alpha = 0.55f)).clickable(onClick = onClick).padding(start = 10.dp, end = 14.dp, top = 8.dp, bottom = 8.dp),
+        modifier.clip(Tok.pill).background(Tok.bg.copy(alpha = 0.8f)).border(1.dp, Tok.border, Tok.pill).clickable(onClick = onClick).padding(start = 10.dp, end = 14.dp, top = 8.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Tok.text, modifier = Modifier.size(20.dp))
@@ -430,95 +454,85 @@ private fun PhoneDetail(nav: Nav, type: String, id: Long, rowPoster: String? = n
     // Detail -> Detail (a related card) stays in the same composable slot; key the
     // list state to the title so the new title opens at the top.
     val detailList = key(type, id) { rememberLazyListState() }
-    val pastArt by remember(detailList) { derivedStateOf { detailList.firstVisibleItemIndex > 0 || detailList.firstVisibleItemScrollOffset > 420 } }
-    Box(Modifier.fillMaxSize()) {
+    // Hoisted: rotation swaps the hero layout, which would reset a flag kept inside it.
+    var overviewOpen by rememberSaveable(type, id) { mutableStateOf(false) }
+    // Refresh sources: a round icon in the action row; its progress and result show as the toast pill.
+    val rm = vm.refreshModel
+    val rNow = com.chitram.app.ui.common.rememberRefreshTick(rm)
+    val rLabel = rm.label(rNow)
+    val rNote = rm.noteAt(rNow) ?: if (rm.running) rm.chips() else ""
+    val refresh = RefreshAction(rm.running, listOf(rLabel, rNote).filter { it.isNotEmpty() }.joinToString(". ")) { vm.refreshSources() }
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        // Wide (landscape): the backdrop fills the first screen and the actions sit
+        // beside the poster, above the fold. Tall (portrait): 16:9 art on top.
+        val wide = DetailLayout.mode(maxWidth.value, maxHeight.value) == DetailLayout.Mode.WIDE
+        // Nothing scrolls under the system navigation bar (owner: Cast ran under it).
+        val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+        val heroH = DetailLayout.wideHeroHeight(maxHeight.value, navBottom.value).dp
+        // Side insets (camera cutout, a landscape nav bar on the right) pad the content;
+        // the backdrop still runs under them.
+        val ld = LocalLayoutDirection.current
+        val side = WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal).asPaddingValues()
+        val sideS = side.calculateStartPadding(ld)
+        val sideE = side.calculateEndPadding(ld)
+        val padS = sideS + GUTTER
+        val padE = sideE + GUTTER
+        val pastPx = with(LocalDensity.current) { (if (wide) heroH * 0.7f else 150.dp).roundToPx() }
+        val pastArt by remember(detailList, pastPx) { derivedStateOf { detailList.firstVisibleItemIndex > 0 || detailList.firstVisibleItemScrollOffset > pastPx } }
         if (t == null) {
             // Never blank: the loaded layout's shape, with the tapped card's art and title.
-            DetailSkeleton(cardTitle, cardBackdrop, rowPoster, vm.error) { vm.retry() }
-        } else LazyColumn(state = detailList, contentPadding = PaddingValues(bottom = 48.dp)) {
+            DetailSkeleton(cardTitle, cardBackdrop, rowPoster, vm.error, wide, heroH, padS, padE) { vm.retry() }
+        } else LazyColumn(state = detailList, modifier = Modifier.fillMaxSize().padding(bottom = navBottom), contentPadding = PaddingValues(bottom = 40.dp)) {
             item(key = "art") {
-                // Backdrop runs under the status bar; poster and title sit on its fade.
-                BoxWithConstraints(Modifier.fillMaxWidth()) {
-                    // Landscape: a 16:9 backdrop of the full width is taller than the screen,
-                    // so cap it to 45% of screen height; title and Play then show without scrolling.
-                    val cfg = LocalConfiguration.current
-                    val wideArtH = maxWidth * 9f / 16f + 40.dp
-                    val artH = if (cfg.orientation == Configuration.ORIENTATION_LANDSCAPE) wideArtH.coerceAtMost(cfg.screenHeightDp.dp * 0.45f) else wideArtH
-                    // The art starts below the status bar, so faces at the top of the
-                    // backdrop are not hidden under the clock or the Back button.
-                    val topInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
-                    // The art sits 15% of its height lower (owner, 2026-11-20, same as
-                    // the web detail hero). The strip above is the page colour; a top
-                    // fade runs from it through 70% to clear 30% down the art, so the
-                    // edge never shows. The block height is unchanged.
-                    val drop = artH * 0.15f
-                    Box(Modifier.fillMaxWidth().height(topInset + artH + 96.dp)) {
-                        Art(t.backdrop, Api.BACKDROP_PHONE, Modifier.padding(top = topInset + drop).fillMaxWidth().height(artH), alignment = BiasAlignment(0f, -0.85f))
-                        Box(Modifier.padding(top = topInset + drop).fillMaxWidth().height(artH).background(Brush.verticalGradient(0f to Tok.bg, 0.06f to Tok.bg.copy(alpha = 0.7f), 0.3f to Color.Transparent, 0.7f to Tok.bg.copy(alpha = 0.6f), 1f to Tok.bg)))
-                        Row(Modifier.align(Alignment.BottomStart).padding(horizontal = GUTTER), verticalAlignment = Alignment.Bottom) {
-                            Box(Modifier.width(104.dp).aspectRatio(2f / 3f).clip(Tok.radiusMd).border(1.dp, Tok.border, Tok.radiusMd)) {
-                                // The title API sends the metahub small poster here; it is a cache
-                                // miss at open time (measured 0.6-0.8 s). The row's TMDB w500 path
-                                // is already in Coil's cache, so it shows at once; metahub is the
-                                // fallback, and the only source when the opener had no poster.
-                                Art(rowPoster ?: t.poster, Api.POSTER_PHONE, Modifier.fillMaxSize(), fallback = t.poster.takeIf { rowPoster != null })
-                            }
-                            Column(Modifier.padding(start = 14.dp).weight(1f)) {
-                                HeroTitle(t.logo, t.title, maxW = 220.dp, maxH = 80.dp) {
-                                    Text(t.title, fontSize = 24.sp, lineHeight = 28.sp, fontWeight = FontWeight.Bold, color = Tok.text, maxLines = 3, overflow = TextOverflow.Ellipsis)
-                                }
-                                t.tagline?.takeIf { it.isNotBlank() }?.let { Text(it, color = Tok.textMuted, fontSize = 13.sp, maxLines = 2, modifier = Modifier.padding(top = 4.dp)) }
-                            }
-                        }
+                val posterArt: @Composable () -> Unit = {
+                    // The title API sends the metahub small poster here; it is a cache
+                    // miss at open time (measured 0.6-0.8 s). The row's TMDB w500 path
+                    // is already in Coil's cache, so it shows at once; metahub is the
+                    // fallback, and the only source when the opener had no poster.
+                    Art(rowPoster ?: t.poster, Api.POSTER_PHONE, Modifier.fillMaxSize(), fallback = t.poster.takeIf { rowPoster != null })
+                }
+                if (wide) WideHero(t.backdrop, heroH, padS, padE, posterArt) {
+                    HeroTitle(t.logo, t.title, maxW = 240.dp, maxH = 56.dp) {
+                        Text(t.title, fontSize = 24.sp, lineHeight = 28.sp, fontWeight = FontWeight.Bold, color = Tok.text, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     }
+                    t.tagline?.takeIf { it.isNotBlank() }?.let { Text(it, color = Tok.textMuted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 4.dp)) }
+                    Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        MetaRow(t.year, t.runtimeMin, t.rating, t.originalLang)
+                        if (t.mediaType == "tv" && (t.seasons ?: 0) > 0) Text("  ·  ${t.seasons} season${if (t.seasons == 1) "" else "s"}", color = Tok.textMuted, fontSize = 13.sp, maxLines = 1)
+                    }
+                    DetailActions(vm, nav, wide = true, refresh, Modifier.padding(top = 12.dp)) { toast = it }
+                } else TallHero(t.backdrop, padS, padE, posterArt) {
+                    HeroTitle(t.logo, t.title, maxW = 220.dp, maxH = 80.dp) {
+                        Text(t.title, fontSize = 24.sp, lineHeight = 28.sp, fontWeight = FontWeight.Bold, color = Tok.text, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                    }
+                    t.tagline?.takeIf { it.isNotBlank() }?.let { Text(it, color = Tok.textMuted, fontSize = 13.sp, maxLines = 2, modifier = Modifier.padding(top = 4.dp)) }
                 }
             }
             item(key = "head") {
-                Column(Modifier.padding(horizontal = GUTTER)) {
-                    MetaRow(t.year, t.runtimeMin, t.rating, t.originalLang, Modifier.padding(top = 14.dp))
-                    if (t.mediaType == "tv" && (t.seasons ?: 0) > 0) Text("${t.seasons} season${if (t.seasons == 1) "" else "s"}", color = Tok.textMuted, fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp))
-                    Button(
-                        onClick = { vm.playRequest()?.let { nav.push(Screen.Player(it)) } },
-                        modifier = Modifier.fillMaxWidth().padding(top = 16.dp).height(48.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Tok.bg),
-                    ) { Icon(Icons.Filled.PlayArrow, null); Spacer(Modifier.width(6.dp)); Text(vm.playLabel(), fontWeight = FontWeight.SemiBold, fontSize = 16.sp) }
-                    Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (vm.canStartOver) OutlinedButton(onClick = { vm.playRequest(fromStart = true)?.let { nav.push(Screen.Player(it)) } }, modifier = Modifier.weight(1f), border = androidx.compose.foundation.BorderStroke(1.dp, Tok.border)) {
-                            Icon(Icons.Filled.Replay, null, Modifier.size(18.dp), tint = Tok.text); Spacer(Modifier.width(6.dp)); Text("Start over", color = Tok.text)
-                        }
-                        OutlinedButton(onClick = { toast = if (vm.toggleList()) "Added to My List" else "Removed from My List" }, modifier = Modifier.weight(1f), border = androidx.compose.foundation.BorderStroke(1.dp, Tok.border)) {
-                            Icon(if (vm.inList) Icons.Filled.Check else Icons.Filled.Add, null, Modifier.size(18.dp), tint = Tok.text); Spacer(Modifier.width(6.dp))
-                            Text(if (vm.inList) "In My List" else "My List", color = Tok.text)
-                        }
-                    }
-                    // Secondary: Play's links asked anew (RefreshModel). Result line hides after 3 s.
-                    val rm = vm.refreshModel
-                    val rNow = com.chitram.app.ui.common.rememberRefreshTick(rm)
-                    val rLabel = rm.label(rNow)
-                    val rNote = rm.noteAt(rNow) ?: if (rm.running) rm.chips() else ""
-                    Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                        androidx.compose.material3.TextButton(onClick = { vm.refreshSources() },
-                            modifier = Modifier.heightIn(min = 48.dp).semantics { contentDescription = listOf(rLabel, rNote).filter { it.isNotEmpty() }.joinToString(". ") }) {
-                            com.chitram.app.ui.common.RefreshGlyph(rm.running, Tok.textSecondary, 16.dp)
-                            Spacer(Modifier.width(6.dp)); Text(rLabel, color = Tok.textSecondary, fontSize = 14.sp)
-                        }
-                        if (rNote.isNotEmpty()) Text(rNote, color = Tok.textMuted, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f).semantics { liveRegion = androidx.compose.ui.semantics.LiveRegionMode.Polite })
+                Column(Modifier.padding(start = padS, end = padE)) {
+                    if (!wide) {
+                        MetaRow(t.year, t.runtimeMin, t.rating, t.originalLang, Modifier.padding(top = 14.dp))
+                        if (t.mediaType == "tv" && (t.seasons ?: 0) > 0) Text("${t.seasons} season${if (t.seasons == 1) "" else "s"}", color = Tok.textMuted, fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp))
+                        DetailActions(vm, nav, wide = false, refresh, Modifier.padding(top = 16.dp)) { toast = it }
                     }
                     t.overview?.takeIf { it.isNotBlank() }?.let { ov ->
-                        var open by rememberSaveable { mutableStateOf(false) }
-                        Text(ov, color = Tok.textSecondary, fontSize = 14.sp, lineHeight = 21.sp, maxLines = if (open) Int.MAX_VALUE else 4, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 16.dp))
-                        if (ov.length > 180) Text(if (open) "Show less" else "Read more", color = Tok.text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.clickable { open = !open }.padding(vertical = 6.dp))
+                        Column(Modifier.widthIn(max = 640.dp)) {
+                            Text(ov, color = Tok.textSecondary, fontSize = 14.sp, lineHeight = 21.sp, maxLines = if (overviewOpen) Int.MAX_VALUE else if (wide) 3 else 4, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = if (wide) 4.dp else 16.dp))
+                            if (ov.length > 180) Text(if (overviewOpen) "Show less" else "Read more", color = Tok.text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.clickable { overviewOpen = !overviewOpen }.padding(vertical = 6.dp))
+                        }
                     }
                 }
             }
+            // Rows scroll inside the side insets, so cards never pass under a side nav bar.
+            val rowPad = PaddingValues(horizontal = GUTTER)
+            val rowClip = Modifier.padding(start = sideS, end = sideE)
             if (t.mediaType == "tv") {
                 item(key = "eps-head") {
                     Column(Modifier.padding(top = 22.dp)) {
-                        RowHeader("Episodes")
+                        Box(Modifier.padding(start = sideS, end = sideE)) { RowHeader("Episodes") }
                         val seasons = t.seasonList.filter { it.number > 0 }
-                        if (seasons.size > 1) LazyRow(contentPadding = PaddingValues(horizontal = GUTTER), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (seasons.size > 1) LazyRow(rowClip, contentPadding = rowPad, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             items(seasons, key = { it.number }) { s ->
                                 FilterChip(
                                     selected = s.number == vm.season, onClick = { vm.selectSeason(s.number) },
@@ -530,7 +544,7 @@ private fun PhoneDetail(nav: Nav, type: String, id: Long, rowPoster: String? = n
                     }
                 }
                 if (vm.episodesLoading) items(3, key = { "eps-sk-$it" }) {
-                    Row(Modifier.padding(horizontal = GUTTER, vertical = 8.dp)) {
+                    Row(Modifier.padding(start = padS, end = padE, top = 8.dp, bottom = 8.dp)) {
                         Box(Modifier.size(132.dp, 74.dp).background(Tok.surfaceSolid, Tok.radiusMd))
                         Column(Modifier.padding(start = 12.dp)) {
                             Box(Modifier.width(140.dp).height(12.dp).background(Tok.fill1, Tok.pill))
@@ -539,15 +553,17 @@ private fun PhoneDetail(nav: Nav, type: String, id: Long, rowPoster: String? = n
                     }
                 } else items(vm.episodes, key = { "ep-${it.season}-${it.episode}" }) { ep ->
                     val r = vm.resume
-                    EpisodeItem(ep, vm.episodeProgress(ep), isNext = r != null && r.season == ep.season && r.episode == ep.episode) {
-                        vm.playRequest(ep)?.let { nav.push(Screen.Player(it)) }
+                    Box(Modifier.padding(start = sideS, end = sideE)) {
+                        EpisodeItem(ep, vm.episodeProgress(ep), isNext = r != null && r.season == ep.season && r.episode == ep.episode) {
+                            vm.playRequest(ep)?.let { nav.push(Screen.Player(it)) }
+                        }
                     }
                 }
             }
             if (t.credits.isNotEmpty()) item(key = "cast") {
                 Column(Modifier.padding(top = 24.dp)) {
-                    RowHeader("Cast")
-                    LazyRow(contentPadding = PaddingValues(horizontal = GUTTER), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                    Box(Modifier.padding(start = sideS, end = sideE)) { RowHeader("Cast") }
+                    LazyRow(rowClip, contentPadding = rowPad, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                         items(t.credits, key = { it.id }) { p -> CastCard(p) { nav.push(Screen.Person(p.id, p.name)) } }
                     }
                 }
@@ -555,8 +571,8 @@ private fun PhoneDetail(nav: Nav, type: String, id: Long, rowPoster: String? = n
             val sim = vm.similar
             if (sim == null || sim.isNotEmpty()) item(key = "similar") {
                 Column(Modifier.padding(top = 24.dp)) {
-                    RowHeader("More like this")
-                    LazyRow(contentPadding = PaddingValues(horizontal = GUTTER), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Box(Modifier.padding(start = sideS, end = sideE)) { RowHeader("More like this") }
+                    LazyRow(rowClip, contentPadding = rowPad, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         if (sim == null) items(6) { CardSkeleton(CARD_W) }
                         else items(sim, key = { it.key }) { s -> PosterCard(s, Modifier.width(CARD_W)) { nav.open(s) } }
                     }
@@ -570,7 +586,7 @@ private fun PhoneDetail(nav: Nav, type: String, id: Long, rowPoster: String? = n
                     "Writers" to t.writers.joinToString(", "),
                     "Country" to t.country.joinToString(", "),
                 ).filter { it.second.isNotBlank() }
-                Column(Modifier.padding(start = GUTTER, end = GUTTER, top = 24.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                Column(Modifier.padding(start = padS, end = padE, top = 24.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                     facts.chunked(2).forEach { pair ->
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                             pair.forEach { (k, v) -> Box(Modifier.weight(1f)) { Fact(k, v) } }
@@ -579,20 +595,112 @@ private fun PhoneDetail(nav: Nav, type: String, id: Long, rowPoster: String? = n
                     }
                 }
             }
-            item(key = "navpad") { Spacer(Modifier.windowInsetsBottomHeight(WindowInsets.navigationBars)) }
         }
         // Solid bar once the backdrop scrolls away, so text never runs under Back or the clock.
         if (pastArt && t != null) Row(
             Modifier.fillMaxWidth().background(Tok.bg).statusBarsPadding().height(56.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Spacer(Modifier.width(112.dp))
-            Text(t.title, color = Tok.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(end = GUTTER))
+            Spacer(Modifier.width(sideS + 112.dp))
+            Text(t.title, color = Tok.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(end = padE))
         }
-        BackButton({ nav.pop() }, Modifier.statusBarsPadding().padding(start = 12.dp, top = 8.dp))
-        toast?.let {
-            Text(it, color = Tok.bg, fontSize = 14.sp, fontWeight = FontWeight.Medium,
-                modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 24.dp).background(Color.White, Tok.pill).padding(horizontal = 18.dp, vertical = 10.dp))
+        BackButton({ nav.pop() }, Modifier.statusBarsPadding().padding(start = sideS + 12.dp, top = 8.dp))
+        (toast ?: rNote.ifEmpty { null })?.let {
+            Text(it, color = Tok.bg, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(start = padS, end = padE, bottom = 24.dp)
+                    .background(Color.White, Tok.pill).padding(horizontal = 18.dp, vertical = 10.dp)
+                    .semantics { liveRegion = androidx.compose.ui.semantics.LiveRegionMode.Polite })
+        }
+    }
+}
+
+/** Refresh sources, drawn as a round icon: [desc] is its label plus the result line. */
+private class RefreshAction(val running: Boolean, val desc: String, val onClick: () -> Unit)
+
+/**
+ * Detail actions. Tall: Play full width, then one row of Start over, My List and the
+ * round Refresh icon. Wide: all four in one row beside the poster (owner 2026-11-24).
+ * No Start over without a resume point: the row is My List + Refresh.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun DetailActions(vm: DetailVm, nav: Nav, wide: Boolean, refresh: RefreshAction, modifier: Modifier = Modifier, onToast: (String) -> Unit) {
+    val outline = androidx.compose.foundation.BorderStroke(1.dp, Tok.border)
+    val h = 44.dp
+    val play = @Composable { m: Modifier ->
+        Button(
+            onClick = { vm.playRequest()?.let { nav.push(Screen.Player(it)) } },
+            modifier = m,
+            colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Tok.bg),
+        ) { Icon(Icons.Filled.PlayArrow, null); Spacer(Modifier.width(6.dp)); Text(vm.playLabel(), fontWeight = FontWeight.SemiBold, fontSize = 16.sp, maxLines = 1) }
+    }
+    val startOver = @Composable { m: Modifier ->
+        OutlinedButton(onClick = { vm.playRequest(fromStart = true)?.let { nav.push(Screen.Player(it)) } }, modifier = m.height(h), border = outline, contentPadding = PaddingValues(horizontal = 14.dp)) {
+            Icon(Icons.Filled.Replay, null, Modifier.size(18.dp), tint = Tok.text); Spacer(Modifier.width(6.dp)); Text("Start over", color = Tok.text, maxLines = 1)
+        }
+    }
+    val myList = @Composable { m: Modifier ->
+        OutlinedButton(onClick = { onToast(if (vm.toggleList()) "Added to My List" else "Removed from My List") }, modifier = m.height(h), border = outline, contentPadding = PaddingValues(horizontal = 14.dp)) {
+            Icon(if (vm.inList) Icons.Filled.Check else Icons.Filled.Add, null, Modifier.size(18.dp), tint = Tok.text); Spacer(Modifier.width(6.dp))
+            Text(if (vm.inList) "In My List" else "My List", color = Tok.text, maxLines = 1)
+        }
+    }
+    val refreshIcon = @Composable {
+        OutlinedIconButton(onClick = refresh.onClick, modifier = Modifier.size(h).semantics { contentDescription = refresh.desc }, border = outline) {
+            com.chitram.app.ui.common.RefreshGlyph(refresh.running, Tok.text, 18.dp)
+        }
+    }
+    if (wide) FlowRow(modifier, horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        play(Modifier.height(h).widthIn(min = 140.dp))
+        if (vm.canStartOver) startOver(Modifier)
+        myList(Modifier)
+        refreshIcon()
+    } else Column(modifier) {
+        play(Modifier.fillMaxWidth().height(48.dp))
+        Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (vm.canStartOver) startOver(Modifier.weight(1f))
+            myList(Modifier.weight(1f))
+            refreshIcon()
+        }
+    }
+}
+
+/** Portrait hero: the art starts below the status bar, 15% lower (owner 2026-11-20), poster overlaps its fade. */
+@Composable
+private fun TallHero(backdrop: String?, padS: Dp, padE: Dp, poster: @Composable () -> Unit, text: @Composable ColumnScope.() -> Unit) {
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val artH = DetailLayout.tallArtHeight(maxWidth.value).dp
+        val topInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+        val drop = artH * 0.15f
+        Box(Modifier.fillMaxWidth().height(topInset + artH + 96.dp)) {
+            val art = Modifier.padding(top = topInset + drop).fillMaxWidth().height(artH)
+            if (backdrop != null) Art(backdrop, Api.BACKDROP_PHONE, art, alignment = BiasAlignment(0f, -0.85f)) else Box(art.background(Tok.surfaceSolid))
+            // Light fades only at the two edges: the art stays clear in the middle
+            // (owner 2026-11-24: the old 70%/60% stops washed it out).
+            Box(art.background(Brush.verticalGradient(0f to Tok.bg, 0.12f to Color.Transparent, 0.62f to Color.Transparent, 0.86f to Tok.bg.copy(alpha = 0.75f), 1f to Tok.bg)))
+            Row(Modifier.align(Alignment.BottomStart).padding(start = padS, end = padE), verticalAlignment = Alignment.Bottom) {
+                Box(Modifier.width(104.dp).aspectRatio(2f / 3f).clip(Tok.radiusMd).background(Tok.surfaceSolid).border(1.dp, Tok.border, Tok.radiusMd)) { poster() }
+                Column(Modifier.padding(start = 14.dp).weight(1f), content = text)
+            }
+        }
+    }
+}
+
+/**
+ * Landscape hero: the backdrop fills the whole first screen, under the status
+ * and navigation bars. Scrims only where text sits: a left fade behind the
+ * poster/text column and a bottom fade into the page; the right and top of the
+ * art stay clear. Content sits bottom-left inside the side insets.
+ */
+@Composable
+private fun WideHero(backdrop: String?, height: Dp, padS: Dp, padE: Dp, poster: @Composable () -> Unit, text: @Composable ColumnScope.() -> Unit) {
+    Box(Modifier.fillMaxWidth().height(height)) {
+        if (backdrop != null) Art(backdrop, Api.BACKDROP_PHONE, Modifier.fillMaxSize(), alignment = BiasAlignment(0f, -0.4f)) else Box(Modifier.fillMaxSize().background(Tok.surfaceSolid))
+        Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(0f to Tok.bg.copy(alpha = 0.9f), 0.4f to Tok.bg.copy(alpha = 0.55f), 0.65f to Color.Transparent)))
+        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(0f to Tok.bg.copy(alpha = 0.45f), 0.2f to Color.Transparent, 0.6f to Color.Transparent, 1f to Tok.bg)))
+        Row(Modifier.align(Alignment.BottomStart).padding(start = padS, end = padE, bottom = DetailLayout.WIDE_BOTTOM.dp).widthIn(max = 720.dp), verticalAlignment = Alignment.Bottom) {
+            Box(Modifier.width(DetailLayout.WIDE_POSTER_W.dp).aspectRatio(2f / 3f).clip(Tok.radiusMd).background(Tok.surfaceSolid).border(1.dp, Tok.border, Tok.radiusMd)) { poster() }
+            Column(Modifier.padding(start = 16.dp).weight(1f), content = text)
         }
     }
 }
@@ -605,43 +713,39 @@ private fun PhoneDetail(nav: Nav, type: String, id: Long, rowPoster: String? = n
  * the overview lines.
  */
 @Composable
-private fun DetailSkeleton(title: String?, backdrop: String?, poster: String?, error: String?, onRetry: () -> Unit) {
+private fun DetailSkeleton(title: String?, backdrop: String?, poster: String?, error: String?, wide: Boolean, heroH: Dp, padS: Dp, padE: Dp, onRetry: () -> Unit) {
     val pill = Tok.surfaceSolid
-    Column(Modifier.fillMaxSize()) {
-        BoxWithConstraints(Modifier.fillMaxWidth()) {
-            val cfg = LocalConfiguration.current
-            val wideArtH = maxWidth * 9f / 16f + 40.dp
-            val artH = if (cfg.orientation == Configuration.ORIENTATION_LANDSCAPE) wideArtH.coerceAtMost(cfg.screenHeightDp.dp * 0.45f) else wideArtH
-            val topInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
-            val drop = artH * 0.15f
-            Box(Modifier.fillMaxWidth().height(topInset + artH + 96.dp)) {
-                val art = Modifier.padding(top = topInset + drop).fillMaxWidth().height(artH)
-                if (backdrop != null) Art(backdrop, Api.BACKDROP_PHONE, art, alignment = BiasAlignment(0f, -0.85f))
-                else Box(art.background(Tok.surfaceSolid))
-                Box(art.background(Brush.verticalGradient(0f to Tok.bg, 0.06f to Tok.bg.copy(alpha = 0.7f), 0.3f to Color.Transparent, 0.7f to Tok.bg.copy(alpha = 0.6f), 1f to Tok.bg)))
-                Row(Modifier.align(Alignment.BottomStart).padding(horizontal = GUTTER), verticalAlignment = Alignment.Bottom) {
-                    Box(Modifier.width(104.dp).aspectRatio(2f / 3f).clip(Tok.radiusMd).background(pill).border(1.dp, Tok.border, Tok.radiusMd)) {
-                        if (poster != null) Art(poster, Api.POSTER_PHONE, Modifier.fillMaxSize(), title)
-                    }
-                    Column(Modifier.padding(start = 14.dp).weight(1f)) {
-                        if (!title.isNullOrBlank()) Text(title, fontSize = 24.sp, lineHeight = 28.sp, fontWeight = FontWeight.Bold, color = Tok.text, maxLines = 3, overflow = TextOverflow.Ellipsis)
-                        else Box(Modifier.fillMaxWidth(0.7f).height(24.dp).background(pill, Tok.radiusMd))
-                    }
-                }
+    val posterArt: @Composable () -> Unit = { if (poster != null) Art(poster, Api.POSTER_PHONE, Modifier.fillMaxSize(), title) }
+    val titleText: @Composable ColumnScope.() -> Unit = {
+        if (!title.isNullOrBlank()) Text(title, fontSize = 24.sp, lineHeight = 28.sp, fontWeight = FontWeight.Bold, color = Tok.text, maxLines = if (wide) 2 else 3, overflow = TextOverflow.Ellipsis)
+        else Box(Modifier.fillMaxWidth(0.7f).height(24.dp).background(pill, Tok.radiusMd))
+    }
+    val errorOrLines: @Composable ColumnScope.() -> Unit = {
+        if (error == null) {
+            if (!wide) listOf(1f, 0.95f, 0.9f, 0.6f).forEachIndexed { i, w ->
+                Box(Modifier.padding(top = if (i == 0) 20.dp else 8.dp).fillMaxWidth(w).height(13.dp).background(pill, Tok.pill))
             }
+        } else {
+            Text(error, color = Tok.textMuted, fontSize = 14.sp, modifier = Modifier.padding(top = if (wide) 8.dp else 20.dp))
+            TextButton(onClick = onRetry, contentPadding = PaddingValues(0.dp)) { Text("Try again", color = Color.White) }
         }
-        Column(Modifier.padding(horizontal = GUTTER)) {
+    }
+    if (wide) WideHero(backdrop, heroH, padS, padE, posterArt) {
+        titleText()
+        Box(Modifier.padding(top = 10.dp).width(160.dp).height(14.dp).background(pill, Tok.pill))
+        Row(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Box(Modifier.width(140.dp).height(44.dp).background(pill, Tok.pill))
+            Box(Modifier.width(110.dp).height(44.dp).background(pill, Tok.pill))
+            Box(Modifier.size(44.dp).background(pill, CircleShape))
+        }
+        errorOrLines()
+    } else Column(Modifier.fillMaxSize()) {
+        TallHero(backdrop, padS, padE, posterArt, titleText)
+        Column(Modifier.padding(start = padS, end = padE)) {
             Box(Modifier.padding(top = 14.dp).width(160.dp).height(14.dp).background(pill, Tok.pill))
             Box(Modifier.fillMaxWidth().padding(top = 16.dp).height(48.dp).background(pill, Tok.pill))
-            Box(Modifier.fillMaxWidth().padding(top = 8.dp).height(40.dp).background(pill, Tok.pill))
-            if (error == null) {
-                listOf(1f, 0.95f, 0.9f, 0.6f).forEachIndexed { i, w ->
-                    Box(Modifier.padding(top = if (i == 0) 20.dp else 8.dp).fillMaxWidth(w).height(13.dp).background(pill, Tok.pill))
-                }
-            } else {
-                Text(error, color = Tok.textMuted, fontSize = 14.sp, modifier = Modifier.padding(top = 20.dp))
-                TextButton(onClick = onRetry, contentPadding = PaddingValues(0.dp)) { Text("Try again", color = Color.White) }
-            }
+            Box(Modifier.fillMaxWidth().padding(top = 8.dp).height(44.dp).background(pill, Tok.pill))
+            errorOrLines()
         }
     }
 }

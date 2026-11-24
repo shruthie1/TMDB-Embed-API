@@ -200,6 +200,8 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     private var vmJob: Deferred<List<Source>>? = null
     /** A9: the one ?full=1 follow-up after a partial VM answer. */
     private var fullJob: Job? = null
+    /** No-source cap (LoadingModel.NO_SOURCE_CAP_MS from Play): ends a search that found nothing. */
+    private var capJob: Job? = null
     /** Device rows hidden behind a VM row of the same provider, by lowercase provider. */
     private var twins: Map<String, Source> = emptyMap()
     /** Providers whose VM row already fell back to the device once in this title. */
@@ -539,6 +541,12 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         val t0 = System.currentTimeMillis()
         checks = (if (keep) checks.filter { it.id != LoadingModel.CHECK_SERVER } else emptyList()) +
             LoadingModel.Check(LoadingModel.CHECK_SERVER, "Chitram server", t0)
+        // Hard cap: 0 rows NO_SOURCE_CAP_MS after Play ends the search, even if a path still hangs.
+        capJob?.cancel()
+        capJob = viewModelScope.launch {
+            delay((playAt + LoadingModel.NO_SOURCE_CAP_MS - System.currentTimeMillis()).coerceAtLeast(0))
+            if (request == r && phase == Phase.Resolving && sources.isEmpty() && !offline) endNoSources(r, null)
+        }
         resolveJob = viewModelScope.launch {
             // A remembered provider leads only inside the viewer's language unless it was picked by hand (A8).
             val saved = g.lastProvider.get(r.type, r.id, r.season, r.episode)
@@ -600,7 +608,8 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             val list = Ranking.merge(backend, shown, preferred, pin, manualPin)
             putSources(list)
             if (firstListSize == 0) firstListSize = list.size
-            listReady = true
+            // An empty first list keeps "Finding sources…": later paths may still bring rows.
+            listReady = list.isNotEmpty()
             // Include jobs completing between the initial snapshot and listener setup.
             lateJobs = (deviceJobs + listOfNotNull(deviceLate)).map { d -> viewModelScope.launch { joinLate(r, d, preferred, pin, manualPin) } } +
                 listOfNotNull(vm?.takeIf { first.backendPending }?.let { j -> viewModelScope.launch { joinVm(r, j, preferred, pin, manualPin, t0, wantsFull) } })
@@ -614,10 +623,15 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             // Captions ride on the media item, so give the subtitle fetch a moment
             // to land; it runs alongside the streams call and is usually done.
             subsJob?.let { j -> withTimeoutOrNull(SUBS_WAIT_MS) { j.await() }?.let { subs = it } }
+            // 0 rows so far: wait while any path (VM, on-device, background mapple, full follow-up)
+            // still runs, up to the cap. A row landing here starts the film as usual.
+            while (sources.isEmpty() && phase == Phase.Resolving &&
+                !LoadingModel.noSourceEnd(System.currentTimeMillis() - playAt, 0, pathsActive = lateJobs.any { it.isActive } || fullJob?.isActive == true)) delay(200)
             if (sources.isEmpty()) {
-                phase = Phase.Failed(backendError?.let { "Could not reach the server (${it.message ?: it.javaClass.simpleName})." } ?: "No playable source found.")
+                endNoSources(r, backendError)
                 return@launch
             }
+            if (!listReady) { listReady = true; if (firstListSize == 0) firstListSize = sources.size }
             if (phase == Phase.Resolving) {
                 // The provider that last played this title starts first, inside the viewer's language (LastPlayed).
                 val last = if (keepProvider == null) LastPlayed.startRow(sources, saved, preferred) else null
@@ -703,7 +717,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         if (rows == null) { launchVmDownOnly(r, preferred, pin, manualPin, t0); return }
         putSources(Ranking.merge(sources, rows, preferred, pin, manualPin))
         android.util.Log.i("Chitram", "[vm] ${rows.size} row(s) joined late")
-        if (phase is Phase.Failed && rows.isNotEmpty()) { play(sources.first(), g.progress.resumeMs(r.type, r.id, r.season, r.episode)); notice = "" }
+        lateAfterEnd(r, rows.size)
         if (wantsFull.get()) followFull(r, preferred, pin, manualPin)
     }
 
@@ -723,7 +737,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             val before = sources.size
             putSources(Ranking.mergeMore(sources, more, preferred, g.codecs, pin, manualPin))
             android.util.Log.i("Chitram", "[vm] full follow-up: ${sources.size - before} new row(s) of ${more.streams.size} in ${System.currentTimeMillis() - t0}ms")
-            if (phase is Phase.Failed && sources.isNotEmpty()) { play(sources.first(), g.progress.resumeMs(r.type, r.id, r.season, r.episode)); notice = "" }
+            lateAfterEnd(r, sources.size - before)
         }
     }
 
@@ -734,7 +748,25 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         twins = twins + lateTwins
         putSources(Ranking.merge(sources, shown, preferred, pin, manualPin))
         android.util.Log.i("Chitram", "on-device ${rows.size} row(s) joined late")
-        if (phase is Phase.Failed && sources.isNotEmpty()) { play(sources.first(), g.progress.resumeMs(r.type, r.id, r.season, r.episode)); notice = "" }
+        lateAfterEnd(r, rows.size)
+    }
+
+    /**
+     * End card for a search that found nothing (owner 2026-11-24): every path ended
+     * with 0 rows, or NO_SOURCE_CAP_MS passed. Once only; the spinner stops here.
+     */
+    private fun endNoSources(r: PlayRequest, backendError: Exception?) {
+        if (request != r || phase is Phase.Failed) return
+        android.util.Log.i("Chitram", "[resolve] no sources ${r.type}/${r.id} after ${System.currentTimeMillis() - playAt}ms")
+        phase = Phase.Failed(backendError?.let { "Could not reach the server (${it.message ?: it.javaClass.simpleName})." } ?: "No playable source found.")
+    }
+
+    /**
+     * Rows that land after the end card join the list but never start by themselves
+     * (no auto-switch): the viewer taps Try again or picks a source.
+     */
+    private fun lateAfterEnd(r: PlayRequest, rows: Int) {
+        if (request == r && phase is Phase.Failed && rows > 0) android.util.Log.i("Chitram", "[resolve] $rows late row(s) after end card ${r.type}/${r.id}: waiting for Try again")
     }
 
     /**
@@ -1450,6 +1482,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         deviceBg?.cancel()
         vmJob?.cancel()
         fullJob?.cancel()
+        capJob?.cancel()
         guardJob?.cancel()
         subsJob?.cancel()
         refreshJob?.cancel()

@@ -278,11 +278,12 @@ class PrewarmTest {
         val lateRows = withTimeout(10_000) { late.await() }
         assertEquals(listOf("Telugu"), lateRows.single().languages)
         assertEquals("Play continued the prewarm: one mapple resolve", 1, calls.get())
-        // PlayerVm joins late rows as list entries: play() only when the start had failed.
+        // PlayerVm joins late rows as list entries; never play() from here.
         val vm = listOf(File("src/main/java/com/chitram/app/player/PlayerVm.kt"), File("app/src/main/java/com/chitram/app/player/PlayerVm.kt")).first { it.exists() }.readText()
         val join = vm.substringAfter("private suspend fun joinLate(").substringBefore("\n    }\n")
-        assertEquals(1, Regex("""\bplay\(""").findAll(join).count())
-        assertTrue(join.contains("if (phase is Phase.Failed && sources.isNotEmpty()) { play("))
+        assertEquals(0, Regex("""\bplay\(""").findAll(join).count())
+        // 2026-11-24: a late row after the end card waits for Try again (no auto-start).
+        assertTrue(join.contains("lateAfterEnd(r, rows.size)"))
         scope.coroutineContext[kotlinx.coroutines.Job]!!.cancel()
     }
 
@@ -348,8 +349,8 @@ class PrewarmTest {
         // joinVm only merges; it plays only when the start had failed (no switch while playing).
         val vm = listOf(File("src/main/java/com/chitram/app/player/PlayerVm.kt"), File("app/src/main/java/com/chitram/app/player/PlayerVm.kt")).first { it.exists() }.readText()
         val join = vm.substringAfter("private suspend fun joinVm(").substringBefore("\n    }\n")
-        assertEquals(1, Regex("""\bplay\(""").findAll(join).count())
-        assertTrue(join.contains("if (phase is Phase.Failed && rows.isNotEmpty()) { play("))
+        assertEquals(0, Regex("""\bplay\(""").findAll(join).count())
+        assertTrue(join.contains("lateAfterEnd(r, rows.size)"))
         // Play passes the prewarm jobs to the race, and starts prewarmed VM-down-only providers now.
         assertTrue(vm.contains("firstMany(vm, device, preferred, warm = warmJobs,"))
         assertTrue(vm.contains("val warmExtra = warmNames.filter { it !in names }"))

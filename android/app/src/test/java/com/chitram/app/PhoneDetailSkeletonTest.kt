@@ -18,12 +18,13 @@ class PhoneDetailSkeletonTest {
         val s = src("ui/phone/PhoneApp.kt")
         val detail = s.substringAfter("private fun PhoneDetail(").substringBefore("\n}\n")
         assertFalse("no spinner on the detail page", detail.contains("CircularProgressIndicator"))
-        assertTrue(detail.contains("DetailSkeleton(cardTitle, cardBackdrop, rowPoster, vm.error)"))
+        assertTrue(detail.contains("DetailSkeleton(cardTitle, cardBackdrop, rowPoster, vm.error, wide, heroH, padS, padE)"))
         assertTrue("open() passes the card's title and backdrop",
             s.contains("push(Screen.Detail(t.mediaType, t.tmdbId, t.poster, t.title.takeIf { it.isNotBlank() }, t.backdrop))"))
         assertTrue(s.contains("is Screen.Detail -> PhoneDetail(nav, top.type, top.id, top.poster, top.title, top.backdrop)"))
         val sk = s.substringAfter("private fun DetailSkeleton(").substringBefore("\n}\n")
-        for (part in listOf("Art(backdrop", "Art(poster", "Text(title", "height(48.dp)", "Try again")) assertTrue("skeleton has $part", sk.contains(part))
+        for (part in listOf("TallHero(backdrop", "WideHero(backdrop", "Art(poster", "Text(title", "height(48.dp)", "Try again")) assertTrue("skeleton has $part", sk.contains(part))
+        for (hero in listOf("private fun TallHero(", "private fun WideHero(")) assertTrue("$hero draws the backdrop", s.substringAfter(hero).substringBefore("\n}\n").contains("Art(backdrop"))
         assertTrue(src("ui/common/Common.kt").contains("val title: String? = null, val backdrop: String? = null) : Screen"))
     }
 }

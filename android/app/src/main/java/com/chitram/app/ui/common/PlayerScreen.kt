@@ -462,29 +462,21 @@ private fun LoadingScreen(r: PlayRequest, vm: PlayerVm, isTv: Boolean, details: 
                         )
                     }
                     Row(Modifier.padding(top = 20.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        if (v.showRefresh) {
-                            val m = vm.refreshModel
-                            val label = m.label(tick)
-                            PillButton(label, primary = true, icon = Glyphs.restart, busy = m.running,
-                                modifier = Modifier.focusRequester(retryFocus).semantics { contentDescription = listOfNotNull(label, m.noteAt(tick)).joinToString(". ") },
-                                onClick = { vm.refreshSources() })
+                        // End card (owner 2026-11-24): Try again (TV focus; a full re-resolve, no
+                        // cooldown), Pick a source when rows were tried, then Back.
+                        if (failed) {
+                            PillButton(LoadingModel.Copy.TRY_AGAIN, primary = true, icon = Glyphs.restart, modifier = Modifier.focusRequester(retryFocus), onClick = { vm.retry() })
+                            if (v.showPickSource) PillButton(LoadingModel.Copy.PICK_SOURCE, icon = Glyphs.server) { onChooseServer() }
                             PillButton("Back", icon = Glyphs.back, onClick = onBack)
                         } else if (isTv) PillButton("Back", icon = Glyphs.back, onClick = onBack)
                         if (v.showChooser) PillButton("Choose a server", icon = Glyphs.server) {
                             onChooseServer()
                         }
-                        if (v.showTryAgain) PillButton("Try again", primary = failed, icon = Glyphs.restart, modifier = Modifier.focusRequester(retryFocus), onClick = { vm.retry() })
+                        if (v.showTryAgain && !failed) PillButton("Try again", icon = Glyphs.restart, modifier = Modifier.focusRequester(retryFocus), onClick = { vm.retry() })
                         PillButton(
                             if (details) "Details ⌃" else "Details ⌄",
                             modifier = Modifier.focusRequester(detailsFocus).semantics { stateDescription = if (details) "Expanded" else "Collapsed" },
                         ) { focusRow = null; onDetails(!details) }
-                    }
-                    if (v.showRefresh) {
-                        val m = vm.refreshModel
-                        // Result line (auto-hides after 3 s) or the providers answering so far.
-                        val line = m.noteAt(tick) ?: if (m.running) m.chips() else ""
-                        BasicText(line, style = TextStyle(color = Tok.textMuted, fontSize = 14.sp, textAlign = TextAlign.Center),
-                            modifier = Modifier.padding(top = 10.dp).semantics { liveRegion = LiveRegionMode.Polite })
                     }
                 }
             }
