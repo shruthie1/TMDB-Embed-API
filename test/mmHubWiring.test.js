@@ -29,6 +29,7 @@ let verifyOk = true;
 stub('lib/media/segmentVerify.js', {
     verifyTopStreams: async (s) => s,
     verifyOne: async () => (verifyOk ? { ok: true, container: 'ts' } : { ok: false, reason: 'http 403' }),
+    cachedVerify: async () => (verifyOk ? { ok: true, container: 'ts' } : { ok: false, reason: 'http 403' }),
 });
 const realTmdb = require('../utils/tmdb');
 stub('utils/tmdb.js', { ...realTmdb, resolveImdbId: async () => 'tt8178634' });

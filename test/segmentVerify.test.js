@@ -273,3 +273,27 @@ test('a 70 B PNG placeholder segment fails as short', async () => {
     assert.equal(v.ok, false);
     assert.match(v.reason, /^segment short 70b/);
 });
+
+// Cold RRR 2026-11-24: the last-known-good check and verify-top read the same
+// master + segment back to back (+1751 ms on the first answer). The LKG check
+// now goes through cachedVerify, so verify-top reuses its verdict.
+test('a cachedVerify verdict (LKG check) is reused by verifyTopStreams: no refetch', async () => {
+    const log = [];
+    const f = fakeFetch({
+        'https://a/m.m3u8': { body: master('v.m3u8') },
+        'https://a/v.m3u8': { body: media('seg0.ts') },
+        'https://a/seg0.ts': { body: tsBytes() },
+    }, log);
+    const row = s('insertunit', 'https://a/m.m3u8');
+    const v = await sv.cachedVerify(row, { fetchImpl: f });
+    assert.equal(v.ok, true);
+    const n = log.length;
+    const out = await sv.verifyTopStreams([row], { fetchImpl: f });
+    assert.equal(log.length, n, 'no second read');
+    assert.equal(out[0].byteCheck.ok, true);
+});
+
+test('lastKnownGood checks through the shared verdict cache', () => {
+    const src = require('fs').readFileSync(require.resolve('../lib/mmhub/lastKnownGood'), 'utf8');
+    assert.match(src, /cachedVerify\(row/);
+});
