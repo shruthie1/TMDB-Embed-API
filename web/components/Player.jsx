@@ -1437,6 +1437,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   // while one runs. `streamRef` is the stream on screen, read by the checker.
   const srcSwitch = useRef(null);
   const srcTick = useRef(null);
+  const switchProgressAt = useRef(0);
   const [sourceLocked, setSourceLocked] = useState(false);
   const streamRef = useRef(stream);
   streamRef.current = stream;
@@ -1579,6 +1580,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     clearInterval(srcTick.current);
     warm.stop();
     srcSwitch.current = beginSourceSwitch({ target: src, label, at, ctx, streamKey: streamRef.current });
+    switchProgressAt.current = 0;
     beginAttempt(src?.id, asked);
     setSourceLocked(true);
     setSwitching(`Switching to ${label}…`);
@@ -1597,6 +1599,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
         frames: playedStreamRef.current != null && playedStreamRef.current === streamRef.current,
         alive: hasLife(videoRef.current),
         direct: hlsRouteRef.current === 'direct',
+        lastProgressAt: switchProgressAt.current,
       });
       if (r.verdict === 'wait') { srcSwitch.current = r.state; return; }
       if (r.verdict === 'landed') { endSourceSwitch(); switchGuard.landed(); return; }
@@ -1607,6 +1610,15 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     }, SWITCH_TICK_MS);
   }, [warm, endSourceSwitch, switchGuard, videoRef, beginAttempt, hlsRouteRef]);
   useEffect(() => () => clearInterval(srcTick.current), []);
+  // Bytes arriving for the stream being judged (a `progress` event): the switch
+  // watchdog waits while they flow (switchFlow SWITCH_FLOWING_MAX_MS).
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return undefined;
+    const onProgress = () => { if (srcSwitch.current) switchProgressAt.current = Date.now(); };
+    v.addEventListener('progress', onProgress);
+    return () => v.removeEventListener('progress', onProgress);
+  }, [videoRef, stream]);
   // A web-direct row retried via its proxied url: that attempt gets its own
   // 8 s / 20 s switch window (re-review I-A), like the 15 s startup switch.
   useEffect(() => {

@@ -32,6 +32,14 @@ import { markDead, nextAlive } from './deadSources';
 export const SWITCH_NO_LIFE_MS = 8000;
 export const SWITCH_HARD_MS = 20000;
 export const SWITCH_TICK_MS = 500;
+/**
+ * Bytes still arriving (a `progress` event within SWITCH_FLOW_GAP_MS) are life:
+ * a progressive mp4 with a large moov (NetMirror bcdnxw: 7.3 MB) shows no
+ * buffer, duration or readyState until all of it is in. Such a row waits up to
+ * SWITCH_FLOWING_MAX_MS while bytes flow; once they stop, the normal cuts apply.
+ */
+export const SWITCH_FLOW_GAP_MS = 3000;
+export const SWITCH_FLOWING_MAX_MS = 45000;
 
 /**
  * Any sign the new stream is alive. `videoWidth` is left out on purpose: the
@@ -67,7 +75,7 @@ export function beginSourceSwitch({ target, label, at = 0, ctx = {}, streamKey =
  * differs from the one at begin once the new stream is attached. `frames` is
  * true once the new stream fired `playing` or reached readyState >= 3.
  */
-export function tickSourceSwitch(state, { streamKey, frames = false, alive = false, direct = false, now = Date.now() }) {
+export function tickSourceSwitch(state, { streamKey, frames = false, alive = false, direct = false, lastProgressAt = 0, now = Date.now() }) {
   if (!state) return { state: null, verdict: 'wait' };
   const attached = streamKey !== state.streamKey;
   const next = attached && state.phase === 'requested' ? { ...state, phase: 'loading' } : state;
@@ -78,7 +86,8 @@ export function tickSourceSwitch(state, { streamKey, frames = false, alive = fal
   // `direct`: the row is still on its web-direct attempt. Its own 10 s timer
   // (useHls, DIRECT_FIRST_FRAME_MS) moves it to the proxied url and the clock is
   // re-armed then, so the no-life rule must not kill it first (re-review I-A).
-  if (elapsed >= SWITCH_HARD_MS || (attached && !direct && elapsed >= SWITCH_NO_LIFE_MS && !alive)) {
+  const flowing = attached && lastProgressAt >= state.startedAt && now - lastProgressAt < SWITCH_FLOW_GAP_MS;
+  if (elapsed >= (flowing ? SWITCH_FLOWING_MAX_MS : SWITCH_HARD_MS) || (attached && !direct && elapsed >= SWITCH_NO_LIFE_MS && !alive && !flowing)) {
     return { state: null, verdict: 'dead' };
   }
   return { state: next, verdict: 'wait' };
