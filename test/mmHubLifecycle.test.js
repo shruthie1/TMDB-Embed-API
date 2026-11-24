@@ -54,7 +54,7 @@ test('host and parser configuration changes cannot reuse the old catalog cache',
  const b=fixture({site:'https://new-catalog.example'});await page.read(TITLE,b.deps);
  assert.equal(b.calls.length,2);assert.ok(b.calls.every(u=>u.startsWith('https://new-catalog.example/')));
  const c=fixture({cfg:{...page.DEFAULTS,serverListPaths:['servers']},fetch:async()=>({status:200,text:async()=>'{"results":[]}'})});
- assert.equal(await page.read(TITLE,c.deps),null);
+ const r=await page.read(TITLE,c.deps);assert.equal(r.notListed,true);assert.deepEqual(r.servers,[]);
 });
 test('unknown hosts stay visible even if their display name resembles a known service',()=>{
  const s=page.classifyServer({name:'Vidbolt',url:'https://new-host.example/movie/579974'});

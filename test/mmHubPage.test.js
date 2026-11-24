@@ -85,11 +85,39 @@ test('read: search -> title page proven by the TMDB id in its server URLs; unkno
     assert.ok(calls.every((c) => c.opts.redirect === 'manual'));
 });
 
-test('read: no page proves the id -> null (unknown, never a wrong title)', async () => {
+test('read: no page proves the id -> notListed with no servers (never a wrong title); cached negative stays notListed', async () => {
     const other = TITLE.replace(/579974/g, '111').replace(/tt8178634/g, 'tt1');
+    const calls = [];
     const f = fakeFetch({ [`${SITE}/search?q=RRR`]: SEARCH, [`${SITE}/movie/rrr-10105`]: other,
-        [`${SITE}/movie/rrr-behind-beyond-72801`]: other, [`${SITE}/movie/grrr-61738`]: other, [`${SITE}/movie/hunterrr-51950`]: other });
-    assert.strictEqual(await page.read({ tmdbId: 579974, type: 'movie' }, deps(f)), null);
+        [`${SITE}/movie/rrr-behind-beyond-72801`]: other, [`${SITE}/movie/grrr-61738`]: other, [`${SITE}/movie/hunterrr-51950`]: other }, calls);
+    const d = deps(f, { cfg: { ...page.DEFAULTS, serversTtlSec: 0 } });
+    const r = await page.read({ tmdbId: 579974, type: 'movie' }, d);
+    assert.strictEqual(r.notListed, true);
+    assert.deepStrictEqual(r.servers, []);
+    const n = calls.length;
+    const again = await page.read({ tmdbId: 579974, type: 'movie' }, d);
+    assert.strictEqual(again.notListed, true, 'negative title cache answers notListed');
+    assert.strictEqual(calls.length, n, 'negative cache: no GET');
+});
+
+test('read: subtitle title with 0 search hits retries with the part before the separator (Pushpa 2 - The Rule)', async () => {
+    const pushpa = TITLE.replace(/579974/g, '857598').replace(/tt8178634/g, 'tt16539454');
+    const calls = [];
+    const f = fakeFetch({
+        [`${SITE}/api/search?q=Pushpa%202%20The%20Rule&limit=20`]: '{"movies":[],"tv_shows":[],"people":[],"results":[],"total":0}',
+        [`${SITE}/api/search?q=Pushpa%202&limit=20`]: '{"results":[{"url":"/movie/pushpa-2-the-rule-70068","title":"Pushpa 2 - The Rule"}],"total":1}',
+        [`${SITE}/movie/pushpa-2-the-rule-70068`]: pushpa,
+    }, calls);
+    const r = await page.read({ tmdbId: 857598, type: 'movie' }, deps(f, { details: async () => ({ title: 'Pushpa 2 - The Rule' }) }));
+    assert.strictEqual(r.path, '/movie/pushpa-2-the-rule-70068');
+    assert.ok(r.servers.length > 0);
+    assert.deepStrictEqual(page.searchQueries('Pushpa 2 - The Rule'), ['Pushpa 2 The Rule', 'Pushpa 2']);
+    assert.deepStrictEqual(page.searchQueries('RRR'), ['RRR']);
+});
+
+test('read: site down stays null (unknown), not notListed', async () => {
+    const f = fakeFetch({ [`${SITE}/api/search?q=RRR&limit=20`]: { status: 503, body: '' } });
+    assert.strictEqual(await page.read({ tmdbId: 579974, type: 'movie' }, deps(f, { log: () => {} })), null);
 });
 
 test('read: title mapping cached 7 d, server list cached 6 h', async () => {

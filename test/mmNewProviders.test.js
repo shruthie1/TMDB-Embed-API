@@ -74,3 +74,20 @@ test('viewer cancellation after a mirror result propagates and starts no followi
    read:async()=>{reads++;return {status:200,text:''};}}),/viewer left/);
  assert.equal(reads,0);
 });
+test('catalog says title not listed -> GD mirror, Cineverse and Nexus answer notListed, never an error; unknown catalog stays an error',async()=>{
+ const gd=require('../providers/gdmirror'),cv=require('../providers/cineverse');
+ const keep=[{...gd._deps},{...cv._deps}];
+ const notListed={site:'https://mm.example',path:null,pattern:null,servers:[],notListed:true};
+ try{
+  gd._deps.read=async()=>notListed;cv._deps.read=async()=>notListed;nexus._deps.catalog=async()=>notListed;
+  let fetched=0;nexus._deps.read=async()=>{fetched++;return {status:500,text:''};};
+  for(const r of [await gd.getGdMirrorStreams('857598'),await cv.getCineverseStreams('857598'),await nexus.getNexusStreams('857598')]){
+   assert.equal(r.notListed,true);assert.equal(r.length,0);
+  }
+  assert.equal(fetched,0);
+  gd._deps.read=async()=>null;cv._deps.read=async()=>null;nexus._deps.catalog=async()=>null;
+  await assert.rejects(()=>gd.getGdMirrorStreams('857598'),/catalog lookup unavailable/);
+  await assert.rejects(()=>cv.getCineverseStreams('857598'),/catalog lookup unavailable/);
+  await assert.rejects(()=>nexus.getNexusStreams('857598'),/catalog unavailable/);
+ }finally{Object.assign(gd._deps,keep[0]);Object.assign(cv._deps,keep[1]);}
+});
