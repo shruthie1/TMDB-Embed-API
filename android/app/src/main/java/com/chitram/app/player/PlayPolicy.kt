@@ -38,12 +38,24 @@ object PlayPolicy {
      * One look at a stream that has not shown a frame yet. `alive`: any buffer,
      * a known duration or a ready player. `frames`: it is playing.
      */
-    fun switchVerdict(elapsedMs: Long, alive: Boolean, frames: Boolean): Switch = when {
+    fun switchVerdict(elapsedMs: Long, alive: Boolean, frames: Boolean, flowing: Boolean = false): Switch = when {
         frames -> Switch.LANDED
-        elapsedMs >= SWITCH_HARD_MS -> Switch.DEAD
-        elapsedMs >= SWITCH_NO_LIFE_MS && !alive -> Switch.DEAD
+        elapsedMs >= (if (flowing) SWITCH_FLOWING_MAX_MS else SWITCH_HARD_MS) -> Switch.DEAD
+        elapsedMs >= SWITCH_NO_LIFE_MS && !alive && !flowing -> Switch.DEAD
         else -> Switch.WAIT
     }
+
+    /**
+     * 1.2.54: bytes still arriving are life. A progressive mp4 with a large moov
+     * (NetMirror bcdnxw, measured 7.3 MB at the front) has no duration and no
+     * buffer until all of it is in. While a byte came within [SWITCH_FLOW_GAP_MS]
+     * the row waits up to [SWITCH_FLOWING_MAX_MS]; once bytes stop, the old cuts apply.
+     */
+    const val SWITCH_FLOW_GAP_MS = 3_000L
+    const val SWITCH_FLOWING_MAX_MS = 45_000L
+
+    fun bytesFlowing(lastBytesAt: Long, playStartedAt: Long, now: Long): Boolean =
+        lastBytesAt > 0 && lastBytesAt >= playStartedAt && now - lastBytesAt < SWITCH_FLOW_GAP_MS
 
     /**
      * multimovies-slow-rca.md fix 3: a mapple row whose own (proxy) host refused

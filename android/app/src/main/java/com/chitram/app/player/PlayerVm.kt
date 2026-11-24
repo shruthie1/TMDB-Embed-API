@@ -806,7 +806,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             while (true) {
                 val t = System.currentTimeMillis()
                 val at = t - playStartedAt
-                val why = DirectRoute.stallReason(at, framedThisPlay, loadMarks.segmentLoaded, idleMs = t - maxOf(loadMarks.lastBytesAt, playStartedAt))
+                val why = DirectRoute.stallReason(at, framedThisPlay, loadMarks.segmentLoaded, idleMs = t - maxOf(loadMarks.lastBytesAt, playStartedAt), progressive = s.progressive)
                 if (why != null) {
                     val playing = current
                     val up = g.api.vmUp
@@ -814,8 +814,9 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                     if (playing != null && DirectRoute.timerShouldFallBack(playing, s, framedThisPlay, vmUp = up)) directFallBack(playing, player.currentPosition.coerceAtLeast(0), why)
                     return@launch
                 }
-                if (framedThisPlay || at >= DirectRoute.FIRST_FRAME_MS) return@launch
-                delay(minOf(500L, DirectRoute.FIRST_FRAME_MS - at).coerceAtLeast(1))
+                val cap = if (s.progressive) PlayPolicy.SWITCH_FLOWING_MAX_MS else DirectRoute.FIRST_FRAME_MS
+                if (framedThisPlay || at >= cap) return@launch
+                delay(minOf(500L, cap - at).coerceAtLeast(1))
             }
         }
     }
@@ -1021,7 +1022,9 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         notice = "Reconnecting to ${s.provider}…"
         player.stop()
         resolveJob?.cancel()
-        resolveJob = viewModelScope.launch {
+        // 1.2.54: the viewer picked this row: its re-resolve tries now, past NetMirror's own cooldown.
+        val tap = s.id == manualPickId
+        resolveJob = viewModelScope.launch(if (tap) com.chitram.app.resolve.UserTap() else kotlin.coroutines.EmptyCoroutineContext) {
             val key = OnDeviceResolver.nameFor(name) ?: OnDeviceResolver.VAPLAYER
             val rows = g.onDevice.resolveAll(key, r.type, r.id, r.season, r.episode, g.codecs, desiredAudio(), fresh = true, title = r.title, originalLang = r.originalLang)
             val eligible = languageTrial?.let { AudioChoice.candidates(rows, it, tried) } ?: rows
@@ -1154,10 +1157,11 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         if (offline || !player.playWhenReady) { playStartedAt = now; return }
         val alive = player.totalBufferedDuration > 0 || player.duration > 0 || player.playbackState == Player.STATE_READY
         if (alive) deliveredThisPlay = true
-        when (PlayPolicy.switchVerdict(now - playStartedAt, alive, frames = player.isPlaying)) {
+        val flowing = PlayPolicy.bytesFlowing(loadMarks.lastBytesAt, playStartedAt, now)
+        when (PlayPolicy.switchVerdict(now - playStartedAt, alive, frames = player.isPlaying, flowing = flowing)) {
             PlayPolicy.Switch.LANDED -> onLanded(s, now)
             PlayPolicy.Switch.DEAD -> {
-                val reason = if (alive) "switch: no frame in 20s" else "switch: no response in 8s"
+                val reason = if (flowing) "switch: no frame in 45s, bytes flowing" else if (alive) "switch: no frame in 20s" else "switch: no response in 8s"
                 judgeDead(s, alive, reason, if (alive) LoadingModel.Reason.NO_PICTURE else LoadingModel.Reason.NO_ANSWER, if (alive) "no-frame-20s" else "no-response-8s")
             }
             PlayPolicy.Switch.WAIT -> {}
@@ -1683,7 +1687,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val t0 = System.currentTimeMillis()
             try {
-                val (rows, note) = netmirrorCheck { g.onDevice.resolveAll("netmirror", r.type, r.id, r.season, r.episode, g.codecs, desiredAudio(), fresh = true, title = r.title) }
+                val (rows, note) = netmirrorCheck { withContext(com.chitram.app.resolve.UserTap()) { g.onDevice.resolveAll("netmirror", r.type, r.id, r.season, r.episode, g.codecs, desiredAudio(), fresh = true, title = r.title) } }
                 android.util.Log.i("Chitram", "[netmirror] check: ${rows.size} rows")
                 if (request == r) putSources(Ranking.merge(sources, rows, desiredAudio(), null))
                 // A cached answer comes back in ~100ms; keep "Checking sources…" up long enough to read.

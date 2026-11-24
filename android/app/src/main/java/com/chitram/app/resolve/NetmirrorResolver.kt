@@ -18,7 +18,7 @@ import java.util.concurrent.TimeUnit
 
 /** TV API protocol, on the viewer's IP. Credentials never travel to the VM or media CDN. */
 /** Gap 13.9: a prewarm spent its half of the window budget; Play keeps the rest. Not a provider failure. */
-class PrewarmShareSpent : java.io.IOException("netmirror: prewarm share of the window budget spent")
+class PrewarmShareSpent : java.io.IOException("netmirror: prewarm share of the window budget spent"), SelfImposedSkip
 
 class NetmirrorResolver(
     client: OkHttpClient,
@@ -109,9 +109,17 @@ class NetmirrorResolver(
     private val metadata = linkedMapOf<String, Cached>()
     private val players = linkedMapOf<String, Pair<List<Resolved>, Long>>()
 
-    suspend fun resolve(cfg: NetmirrorConfig, type: String, title: String, year: Int?, season: Int, episode: Int, fresh: Boolean = false, prewarm: Boolean = false, onRow: (Resolved) -> Unit = {}): List<Resolved> = lock.withLock {
+    /**
+     * `tap`: the viewer asked for NetMirror now (a row pick, Check, Refresh). It
+     * tries past this resolver's own cooldown; a new 403/429 starts a new one.
+     */
+    suspend fun resolve(cfg: NetmirrorConfig, type: String, title: String, year: Int?, season: Int, episode: Int, fresh: Boolean = false, prewarm: Boolean = false, tap: Boolean = false, onRow: (Resolved) -> Unit = {}): List<Resolved> = lock.withLock {
         if (!cfg.enabled || title.isBlank()) return@withLock emptyList()
-        if (blockedUntil > now()) throw StepException("netmirror", 0, "cooldown active")
+        if (blockedUntil > now()) {
+            if (!tap || prewarm) throw NetmirrorSkip("cooldown active")
+            log("[netmirror] cooldown skipped for tap (${(blockedUntil - now()) / 1000}s left)")
+            blockedUntil = 0
+        }
         prewarmCall = prewarm
         if (discoveryDomains != cfg.domains) {
             // A new discovery list may point at a new API base. The token stays: it is
@@ -306,9 +314,9 @@ class NetmirrorResolver(
     }
 
     private suspend fun request(cfg: NetmirrorConfig, url: String, headers: Map<String, String>): Reply {
-        if (blockedUntil > now()) throw StepException("netmirror", 0, "cooldown active")
+        if (blockedUntil > now()) throw NetmirrorSkip("cooldown active")
         if (now() - bucketAt >= cfg.budgetWindowMs) { bucketAt = now(); calls = 0 }
-        if (calls >= limit(cfg)) throw if (calls < cfg.maxCalls) PrewarmShareSpent() else StepException("netmirror", 0, "request budget spent")
+        if (calls >= limit(cfg)) throw if (calls < cfg.maxCalls) PrewarmShareSpent() else NetmirrorSkip("request budget spent")
         calls++
         val r = http.fetch(Request.Builder().url(url).header("User-Agent", UA)
             .header("X-Requested-With", "NetmirrorNewTV v1.0").header("Cache-Control", "no-cache, no-store, must-revalidate")

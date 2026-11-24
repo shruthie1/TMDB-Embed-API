@@ -32,8 +32,12 @@ object DirectRoute {
      * for [idleMs] >= [FIRST_SEGMENT_MS] (gap 6.3): fall back; no frame by
      * [FIRST_FRAME_MS]: fall back, as before.
      */
-    fun stallReason(elapsedMs: Long, framed: Boolean, segmentLoaded: Boolean, idleMs: Long = elapsedMs): String? = when {
+    fun stallReason(elapsedMs: Long, framed: Boolean, segmentLoaded: Boolean, idleMs: Long = elapsedMs, progressive: Boolean = false): String? = when {
         framed -> null
+        // 1.2.54: a progressive file still downloading its moov is not stalled; the proxy
+        // would restart the same download. Bytes stopped, or 45 s: fall back as before.
+        progressive && elapsedMs >= PlayPolicy.SWITCH_FLOWING_MAX_MS -> "no-first-frame-45s"
+        progressive && elapsedMs >= FIRST_FRAME_MS && idleMs < PlayPolicy.SWITCH_FLOW_GAP_MS -> null
         elapsedMs >= FIRST_FRAME_MS -> "no-first-frame-10s"
         // Gap 6.3: slow 2G still sending the first segment is not a stall; only a 6 s byte silence is.
         elapsedMs >= FIRST_SEGMENT_MS && !segmentLoaded && idleMs >= FIRST_SEGMENT_MS -> "no-first-segment-6s"

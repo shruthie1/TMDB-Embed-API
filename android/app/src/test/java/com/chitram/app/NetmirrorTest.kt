@@ -230,6 +230,39 @@ class NetmirrorTest {
         assertTrue(nmCalls() > n)
     }
 
+    /** 1.2.54: NetMirror's own cooldown is a self-imposed skip, never a breaker failure. */
+    @Test fun ownCooldownNeverOpensTheBreaker() = runBlocking {
+        clip = true
+        val od = onDevice(NetmirrorResolver(redirect, now = { clock }))
+        // One real failure (substituted clip) starts the cooldown; then auto resolves hit it.
+        for (i in 1..5) od.resolveAll(OnDeviceResolver.NETMIRROR, "movie", 2100L + i, 0, 0, codecs, "Telugu", title = "Test Movie")
+        assertFalse("cooldown skips are not counted", od.isOpen(OnDeviceResolver.NETMIRROR))
+    }
+
+    /** 1.2.54: a user tap tries now, past NetMirror's own cooldown; auto resolves keep the cooldown. */
+    @Test fun aTapBypassesTheResolverCooldownButAutoDoesNot() = runBlocking {
+        clip = true
+        val lines = CopyOnWriteArrayList<String>()
+        val nm = NetmirrorResolver(redirect, now = { clock }, log = { lines += it })
+        val od = onDevice(nm)
+        assertTrue(od.resolveAll(OnDeviceResolver.NETMIRROR, "movie", 2200, 0, 0, codecs, "Telugu", fresh = true, title = "Test Movie").isEmpty())
+        assertTrue(nm.throttled)
+        clip = false
+        assertTrue("auto keeps the cooldown", od.resolveAll(OnDeviceResolver.NETMIRROR, "movie", 2200, 0, 0, codecs, "Telugu", fresh = true, title = "Test Movie").isEmpty())
+        val rows = kotlinx.coroutines.withContext(UserTap()) {
+            od.resolveAll(OnDeviceResolver.NETMIRROR, "movie", 2200, 0, 0, codecs, "Telugu", fresh = true, title = "Test Movie")
+        }
+        assertEquals(3, rows.size)
+        assertTrue(lines.any { it.startsWith("[netmirror] cooldown skipped for tap") })
+    }
+
+    /** 1.2.54: the request budget is NetMirror's own limit too: not a breaker failure. */
+    @Test fun aSpentRequestBudgetIsNotABreakerFailure() = runBlocking {
+        val od = onDevice(NetmirrorResolver(redirect, now = { clock }), ",\"maxCalls\":2")
+        for (i in 1..5) od.resolveAll(OnDeviceResolver.NETMIRROR, "movie", 2300L + i, 0, 0, codecs, "Telugu", title = "Budget Film $i")
+        assertFalse(od.isOpen(OnDeviceResolver.NETMIRROR))
+    }
+
     /** Gap 13.9: 10 titles browsed past the dwell, then Play: NetMirror still has budget for Play. */
     @Test fun aBrowseStormLeavesNetmirrorBudgetForPlay() = runBlocking {
         val nm = NetmirrorResolver(redirect, now = { clock })

@@ -15,7 +15,16 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 /** One failed step of a provider chain. `code` is the HTTP status, 0 for a network error. */
-class StepException(val step: String, val code: Int, detail: String) : IOException("$step: $detail")
+open class StepException(val step: String, val code: Int, detail: String) : IOException("$step: $detail")
+
+/**
+ * A provider held itself back (its own cooldown or request budget): nothing was
+ * asked, so the provider did not fail. Never counted by the circuit breaker.
+ */
+interface SelfImposedSkip
+
+/** NetMirror's own pause or budget, thrown before any request. */
+class NetmirrorSkip(detail: String) : StepException("netmirror", 0, detail), SelfImposedSkip
 
 /** The device's IP may differ from the one that got the token (CGNAT, Wi-Fi to mobile). */
 class SegmentForbidden(detail: String) : IOException(detail)

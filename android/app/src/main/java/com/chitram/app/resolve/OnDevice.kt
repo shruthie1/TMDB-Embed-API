@@ -169,6 +169,7 @@ class OnDeviceResolver(
         }
         var searched = false
         val prewarming = kotlin.coroutines.coroutineContext[Prewarming] != null
+        val tapping = !prewarming && kotlin.coroutines.coroutineContext[UserTap] != null
         val got = guarded(name) {
             val cfg = cfgNow().netmirror
             if (!cfg.enabled) return@guarded emptyList()
@@ -182,7 +183,7 @@ class OnDeviceResolver(
                     }
                 }?.takeIf { it.first.isNotBlank() }
                     ?: title?.let { Triple(it, null, null) }
-                val result = if (t == null) emptyList() else netmirror?.resolve(cfg, type, t.first, t.second, season, episode, fresh, prewarm = prewarming) { completed += it }.orEmpty()
+                val result = if (t == null) emptyList() else netmirror?.resolve(cfg, type, t.first, t.second, season, episode, fresh, prewarm = prewarming, tap = tapping) { completed += it }.orEmpty()
                 searched = t != null && netmirror != null
                 timedOut = false
                 result
@@ -493,7 +494,7 @@ class OnDeviceResolver(
         val lateScope = CoroutineScope(coroutineContext + bg)
         val jobs = names.map { n ->
             val later = if (n == MAPPLE) MappleResolver.Later(lateScope) { r -> late.complete(listOfNotNull(r?.let { toSource(it, codecs) })) } else null
-            async {
+            async(UserTap()) {
                 val rows = resolveAll(n, type, id, season, episode, codecs, preferred, fresh = true, title = title, originalLang = originalLang, later = later)
                 if (later != null && !later.handedOff) late.complete(emptyList())
                 onProvider(n, rows.size)
@@ -641,8 +642,13 @@ class OnDeviceResolver(
             val net = isNetwork(e)
             out?.apply { failed = true; network = network || net || offline() }
             // Gap 13.10: the device went offline mid-resolve, or a prewarm hit its share: not the provider's fault.
-            if (offline() || e is PrewarmShareSpent) {
-                android.util.Log.i("Chitram", "on-device $name failed in ${now() - t0}ms, not counted (${if (offline()) "offline" else "prewarm share spent"}): ${e.message}")
+            if (offline()) {
+                android.util.Log.i("Chitram", "on-device $name failed in ${now() - t0}ms, not counted (offline): ${e.message}")
+                return null
+            }
+            // 1.2.54: the provider's own pause or budget (cooldown active, budget spent): nothing failed.
+            if (e is SelfImposedSkip) {
+                android.util.Log.i("Chitram", "[breaker] skip not counted: $name ${e.message}")
                 return null
             }
             val b = breakers.getOrPut(name) { Breaker() }
@@ -739,4 +745,12 @@ class OnDeviceResolver(
             )
         }
     }
+}
+
+/**
+ * 1.2.54: marks a resolve the viewer asked for now (a NetMirror row pick that
+ * failed, Check streams, Refresh sources). NetMirror then tries past its own cooldown.
+ */
+class UserTap : kotlin.coroutines.AbstractCoroutineContextElement(UserTap) {
+    companion object Key : kotlin.coroutines.CoroutineContext.Key<UserTap>
 }
