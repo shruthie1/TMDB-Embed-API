@@ -27,6 +27,7 @@ const ORIGIN = 'https://vidout.pages.dev';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const HEADERS = Object.freeze({ 'User-Agent': UA, Referer: `${ORIGIN}/`, Origin: ORIGIN });
 
+const CONFIG_DEFAULTS = { enabled: true, base: ORIGIN, catalogue: CATALOGUE, userAgent: UA, budgetMs: 12000, stepTimeoutMs: 6000 };
 const _config = {
     budgetMs: Number(process.env.VIDOUT_BUDGET_MS) || 12000,
     stepTimeoutMs: 6000,
@@ -40,8 +41,8 @@ const _deps = {
 // Canary validation title: Pushpa 2, the tagged Telugu master.
 const CANARY_TITLE = { tmdbId: '857598', mediaType: 'movie' };
 
-function catalogueUrl(tmdbId, type, season = null) {
-    return type === 'tv' ? `${CATALOGUE}/tv/${tmdbId}/S${season}.json` : `${CATALOGUE}/movie/${tmdbId}`;
+function catalogueUrl(tmdbId, type, season = null, catalogue = CATALOGUE) {
+    return type === 'tv' ? `${catalogue}/tv/${tmdbId}/S${season}.json` : `${catalogue}/movie/${tmdbId}`;
 }
 
 /** Pure: the catalogue value if it is a direct master url, else null. */
@@ -59,8 +60,8 @@ function usableLink(value) {
 // Telugu master) was then skipped for 10 minutes.
 function notListed() { return Object.assign([], { notListed: true }); }
 
-function rowFromMaster(masterText, masterUrl) {
-    return tagged.rowFromMaster(masterText, masterUrl, { provider: 'vidout', display: 'VIDOUT', headers: HEADERS });
+function rowFromMaster(masterText, masterUrl, headers = HEADERS) {
+    return tagged.rowFromMaster(masterText, masterUrl, { provider: 'vidout', display: 'VIDOUT', headers });
 }
 
 async function getVidoutStreams(tmdbId, mediaType = 'movie', seasonNum = null, episodeNum = null) {
@@ -69,10 +70,13 @@ async function getVidoutStreams(tmdbId, mediaType = 'movie', seasonNum = null, e
         console.log(`[vidout] tv ${tmdbId} without season/episode - no rows (never guess S1E1)`);
         return [];
     }
+    const config = require('../lib/mmhub/extractorConfig').current('vidout', CONFIG_DEFAULTS, _config);
+    if (!config.enabled) return notListed();
+    const headers = Object.freeze({ 'User-Agent': config.userAgent, Referer: `${config.base}/`, Origin: new URL(config.base).origin });
     const t0 = Date.now();
-    const deadline = t0 + _config.budgetMs;
-    const left = () => Math.max(500, Math.min(_config.stepTimeoutMs, deadline - Date.now()));
-    const cat = await _deps.fetchText(catalogueUrl(tmdbId, type, seasonNum), { 'User-Agent': UA }, left());
+    const deadline = t0 + config.budgetMs;
+    const left = () => require('../lib/mmhub/extractorConfig').remaining(deadline, config.stepTimeoutMs);
+    const cat = await _deps.fetchText(catalogueUrl(tmdbId, type, seasonNum, config.catalogue), { 'User-Agent': config.userAgent }, left());
     if (cat.status === 404) {
         console.log(`[vidout] not-in-catalogue ${type} ${tmdbId}`);
         return notListed();
@@ -89,13 +93,13 @@ async function getVidoutStreams(tmdbId, mediaType = 'movie', seasonNum = null, e
         console.log(`[vidout] no direct master for ${type} ${tmdbId}${type === 'tv' ? ` S${seasonNum}E${episodeNum}` : ''}`);
         return [];
     }
-    const master = await _deps.fetchText(masterUrl, HEADERS, left());
+    const master = await _deps.fetchText(masterUrl, headers, left());
     if (!(master.status >= 200 && master.status < 300)) throw new Error(`vidout: master HTTP ${master.status} for ${tmdbId}`);
-    const row = rowFromMaster(master.text, masterUrl);
+    const row = rowFromMaster(master.text, masterUrl, headers);
     if (!row) throw new Error(`vidout: master without variants for ${tmdbId}`);
     if (type === 'movie') {
         const runtime = await _deps.runtimeMinutes(tmdbId).catch(() => null);
-        const rc = await tagged.runtimeCheck(master.text, masterUrl, runtime, (u) => _deps.fetchText(u, HEADERS, left()));
+        const rc = await tagged.runtimeCheck(master.text, masterUrl, runtime, (u) => _deps.fetchText(u, headers, left()));
         const mins = rc.seconds ? Math.round(rc.seconds / 60) : '-';
         if (rc.verdict === 'mismatch') {
             console.log(`[vidout] runtime mismatch ${tmdbId}: ${mins}m vs ${runtime}m - row dropped`);
@@ -111,6 +115,7 @@ module.exports = {
     getVidoutStreams,
     CANARY_TITLE,
     HEADERS,
+    CONFIG_DEFAULTS,
     catalogueUrl,
     usableLink,
     rowFromMaster,

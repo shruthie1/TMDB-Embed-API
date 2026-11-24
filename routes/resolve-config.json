@@ -179,11 +179,16 @@
     "seasonsPatterns": [
       "\\bseasons:\\s*\\[",
       "\"seasons\"\\s*:\\s*\\["
-    ]
+    ],
+    "base": "https://api.insertunit.ws",
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
   },
   "vidout": {
     "enabled": true,
-    "prewarm": false
+    "prewarm": false,
+    "base": "https://vidout.pages.dev",
+    "catalogue": "https://raw.githubusercontent.com/Watchout2025/api/refs/heads/main/hls",
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
   },
   "mmhub": {
     "site": "https://m1.multimovies.courses",
@@ -232,14 +237,14 @@
         "hosts": [
           "streams.iqsmartgames.com"
         ],
-        "extractor": "insertunit"
+        "extractor": "gdmirror"
       },
       {
         "name": "^cineverse$",
         "hosts": [
           "rozgarlelo.modiplay.xyz"
         ],
-        "extractor": null
+        "extractor": "cineverse"
       },
       {
         "name": "^nexus$",
@@ -247,11 +252,21 @@
           "www.moviesnexus.fun",
           "moviesnexus.fun"
         ],
-        "extractor": null
+        "extractor": "nexus"
       }
     ],
     "titleTtlSec": 604800,
     "serversTtlSec": 21600,
-    "maxCandidates": 3
+    "maxCandidates": 3,
+    "jsonSearchPath": "/api/search?q={q}&limit=20"
+  },
+  "cineverse": {
+    "enabled": true
+  },
+  "gdmirror": {
+    "enabled": true
+  },
+  "nexus": {
+    "enabled": true
   }
 }

@@ -529,14 +529,14 @@ function fetchProviderShared(prov, ck, ctx, { titleIsResolvable, titleKey }) {
       let r;
       if (budget < PROVIDER_DEADLINE_MS) {
         let timer;
-        const run = prov.fetch(ctx);
+        const run = require('./lib/mmhub/resolveContext').run(name,ctx,()=>prov.fetch(ctx));
         run.catch(() => {});
         r = await Promise.race([run, new Promise((resolve) => {
           timer = setTimeout(() => { const out = []; out.timedOut = true; resolve(out); }, budget);
         })]).finally(() => clearTimeout(timer));
         if (r && r.timedOut) console.log(`[api] provider-probation ${name} cut at ${budget}ms (never succeeded)`);
       } else {
-        r = await prov.fetch(ctx);
+        r = await require('./lib/mmhub/resolveContext').run(name,ctx,()=>prov.fetch(ctx));
       }
       if (r && r.timedOut) {
         // Unknown, not empty: never cached, and the caller keeps the whole
@@ -934,7 +934,11 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
         return [];
       }
       const o = await fetchProviderShared(prov, ck,
-        { tmdbId, type, season, episode, imdbId, filters:{ } }, { titleIsResolvable, titleKey });
+        { tmdbId, type, season, episode, imdbId, filters:{ }, resolveService: async child => {
+          const rows=await runProvider(child);
+          if(providerErrorWhy[child])throw new Error(`MultiMovies child ${child} failed`);
+          return rows;
+        } }, { titleIsResolvable, titleKey });
       providerTimings[name] = o.ms;
       // error, timeout and partial all leave this title's answer UNKNOWN for
       // the provider, so the response must not be cached (see below).
@@ -1452,6 +1456,7 @@ if (require.main === module) {
   canaryMod.startCanary({ registry: require('./providers/registry'), store: getStore(), recordOutcome: recordProviderOutcome });
   // MultiMovies hub per-server canary: 6 h, RRR / Pushpa 2 / one series.
   require('./lib/mmhub/canary').startMmCanary({ getProvider, store: getStore() });
+  require('./lib/selfheal/titlePage').useCatalogReader(require('./lib/mmhub/page').read);
   installGracefulShutdown(server, { exit: (code) => { allowControlledExit = true; realProcessExit(code); } });
 }
 

@@ -57,9 +57,9 @@ test('classify: known extractors, known-without-extractor, unknown host', () => 
     assert.strictEqual(c.Vidbolt.extractor, 'multimovies');
     assert.strictEqual(c.Vidrift.extractor, 'vidrift');
     assert.strictEqual(c.VIDOUT.extractor, 'vidout');
-    assert.strictEqual(c['GD mirror'].extractor, 'insertunit');
+    assert.strictEqual(c['GD mirror'].extractor, 'gdmirror');
     assert.strictEqual(c.Cineverse.known, true);
-    assert.strictEqual(c.Cineverse.extractor, null);
+    assert.strictEqual(c.Cineverse.extractor, 'cineverse');
     const u = page.classifyServer({ name: 'Zeta', url: 'https://new.example.org/e/1' }, page.DEFAULTS);
     assert.strictEqual(u.known, false);
     assert.strictEqual(u.host, 'new.example.org');

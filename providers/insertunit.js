@@ -44,6 +44,7 @@ const _deps = {
 // others are the shapes the same player config takes when serialised as JSON
 // or as a jwplayer-style `file:`.
 const CONFIG_DEFAULTS = {
+    enabled: true, base: ORIGIN, userAgent: UA, budgetMs: 12000, stepTimeoutMs: 6000,
     hlsPatterns: [
         '\\bhls:\\s*"(https?:\\/\\/[^"]+)"',
         '"hls"\\s*:\\s*"(https?:\\/\\/[^"]+)"',
@@ -70,8 +71,8 @@ function safeRe(src) { try { return new RegExp(src); } catch { return null; } }
 // where the Telugu rendition was found. No heal: this provider has one host.
 const CANARY_TITLE = { tmdbId: '579974', mediaType: 'movie' };
 
-function embedUrl(imdbId) {
-    return `${ORIGIN}/embed/imdb/${imdbId}`;
+function embedUrl(imdbId, base = ORIGIN) {
+    return `${base}/embed/imdb/${imdbId}`;
 }
 
 // The JSON array that starts at `from` ('[' ... matching ']'), or null.
@@ -125,8 +126,8 @@ function masterFromPage(html, type, season = null, episode = null, override = nu
 }
 
 /** Pure: the row for a fetched master. */
-function rowFromMaster(masterText, masterUrl) {
-    return tagged.rowFromMaster(masterText, masterUrl, { provider: 'insertunit', display: 'Insertunit', headers: { 'User-Agent': UA } });
+function rowFromMaster(masterText, masterUrl, agent = UA) {
+    return tagged.rowFromMaster(masterText, masterUrl, { provider: 'insertunit', display: 'Insertunit', headers: { 'User-Agent': agent } });
 }
 
 async function getInsertunitStreams(tmdbId, mediaType = 'movie', seasonNum = null, episodeNum = null) {
@@ -135,15 +136,17 @@ async function getInsertunitStreams(tmdbId, mediaType = 'movie', seasonNum = nul
         console.log(`[insertunit] tv ${tmdbId} without season/episode - no rows (never guess S1E1)`);
         return [];
     }
+    const config = require('../lib/mmhub/extractorConfig').current('insertunit', CONFIG_DEFAULTS, _config);
+    if (!config.enabled) return Object.assign([], { notListed: true });
     const t0 = Date.now();
-    const deadline = t0 + _config.budgetMs;
-    const left = () => Math.max(500, Math.min(_config.stepTimeoutMs, deadline - Date.now()));
+    const deadline = t0 + config.budgetMs;
+    const left = () => require('../lib/mmhub/extractorConfig').remaining(deadline, config.stepTimeoutMs);
     const imdb = await _deps.imdbOf(type, tmdbId);
     if (!imdb || !/^tt\d+$/.test(imdb)) {
         console.log(`[insertunit] no IMDb id for ${type} ${tmdbId} - no rows`);
         return [];
     }
-    const page = await _deps.fetchText(embedUrl(imdb), { 'User-Agent': UA }, left());
+    const page = await _deps.fetchText(embedUrl(imdb, config.base), { 'User-Agent': config.userAgent }, left());
     if (page.status === 404) {
         console.log(`[insertunit] not-found ${imdb} (HTTP 404)`);
         // Upstream says "no such title": not a failure, keep it out of the
@@ -151,7 +154,7 @@ async function getInsertunitStreams(tmdbId, mediaType = 'movie', seasonNum = nul
         return Object.assign([], { notListed: true });
     }
     if (!(page.status >= 200 && page.status < 300)) throw new Error(`insertunit: page HTTP ${page.status} for ${imdb}`);
-    const masterUrl = masterFromPage(page.text, type, seasonNum, episodeNum);
+    const masterUrl = masterFromPage(page.text, type, seasonNum, episodeNum, config);
     if (!masterUrl) {
         console.log(`[insertunit] no hls master on the page for ${imdb}${type === 'tv' ? ` S${seasonNum}E${episodeNum}` : ''}`);
         // No pattern matched anything (a series page with no seasons array,
@@ -161,14 +164,14 @@ async function getInsertunitStreams(tmdbId, mediaType = 'movie', seasonNum = nul
         }
         return [];
     }
-    const master = await _deps.fetchText(masterUrl, { 'User-Agent': UA }, left());
+    const master = await _deps.fetchText(masterUrl, { 'User-Agent': config.userAgent }, left());
     if (!(master.status >= 200 && master.status < 300)) throw new Error(`insertunit: master HTTP ${master.status} for ${imdb}`);
-    const row = rowFromMaster(master.text, masterUrl);
+    const row = rowFromMaster(master.text, masterUrl, config.userAgent);
     if (!row) throw new Error(`insertunit: master without variants for ${imdb}`);
     if (type === 'movie') {
         const runtime = await _deps.runtimeMinutes(tmdbId).catch(() => null);
         const rc = await tagged.runtimeCheck(master.text, masterUrl, runtime,
-            (u) => _deps.fetchText(u, { 'User-Agent': UA }, left()));
+            (u) => _deps.fetchText(u, { 'User-Agent': config.userAgent }, left()));
         const mins = rc.seconds ? Math.round(rc.seconds / 60) : '-';
         if (rc.verdict === 'mismatch') {
             console.log(`[insertunit] runtime mismatch ${tmdbId}: ${mins}m vs ${runtime}m - row dropped`);

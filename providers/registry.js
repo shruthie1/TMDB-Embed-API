@@ -29,6 +29,9 @@ const providerFunctionMap = {
   'vidrift.js': 'getVidriftStreams',
   'insertunit.js': 'getInsertunitStreams',
   'vidout.js': 'getVidoutStreams',
+  'cineverse.js': 'getCineverseStreams',
+  'gdmirror.js': 'getGdMirrorStreams',
+  'nexus.js': 'getNexusStreams',
 };
 
 // Per-request cookie context.
