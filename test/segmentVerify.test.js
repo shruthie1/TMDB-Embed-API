@@ -258,3 +258,18 @@ test('/api/streams demotes an HTML-serving Telugu stream below a live one and dr
         globalThis.fetch = realFetch;
     }
 });
+
+// 2026-11-24 ShowsSt movie/1359490: every HLS segment on p16-sg.tiktokcdn.com
+// is a 70 B 1x1 PNG served 200 image/png. That first segment fails the check.
+test('a 70 B PNG placeholder segment fails as short', async () => {
+    const png = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415408d76360606060000000050001'
+        + '5ef32a3a0000000049454e44ae426082', 'hex');
+    const f = fakeFetch({
+        'https://cdn.ngcloud.app/movie/x': { body: '#EXTM3U\n#EXTINF:6.44,\nhttps://p16-sg.tiktokcdn.com/obj/s0\n', ct: 'application/vnd.apple.mpegurl' },
+        'https://p16-sg.tiktokcdn.com/obj/s0': { body: png, ct: 'image/png' },
+    });
+    const v = await sv.verifyOne({ url: 'https://cdn.ngcloud.app/movie/x', container: 'hls' }, { fetchImpl: f });
+    assert.equal(png.length, 70);
+    assert.equal(v.ok, false);
+    assert.match(v.reason, /^segment short 70b/);
+});

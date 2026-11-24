@@ -58,6 +58,7 @@ const CONFIG_DEFAULTS = {
 // read per call. Its player is the same name with `api.` -> `player.`, the
 // pairing every mirror so far has used.
 const upstream = require('../utils/upstreamBase');
+const { verifyOne } = require('../lib/media/segmentVerify');
 const playerFor = (api) => api.replace('//api.', '//player.');
 const selfheal = require('../lib/selfheal/config');
 // Env mirror first (as today), then the config list (remote, else built-in =
@@ -129,6 +130,18 @@ async function probeContainer(url, headers, fallback) {
 
 // A fragment never leaves the client, so `#.mp4` changes nothing upstream but
 // makes processStreamsForProxy pick /ts-proxy (it matches /\.(mp4|mkv)$/).
+// 2026-11-24 (movie/1359490): the HLS source listed 1034 segments on
+// p16-sg.tiktokcdn.com and each one is a 70 B 1x1 PNG (HTTP 200, image/png),
+// with or without Referer/Origin. Players fetched them forever. One read of
+// the first segment says so; only that proof drops the source. A timeout or a
+// network error is no verdict, and the source stays.
+const DEAD_SEGMENT = /^segment (short|html|text)\b/;
+
+async function deadSegments(url, headers) {
+    const v = await verifyOne({ url, headers, container: 'hls' });
+    return !v.ok && DEAD_SEGMENT.test(v.reason || '') ? v.reason : null;
+}
+
 function forProxy(url, container) {
     return container === 'mp4' || container === 'mkv' ? `${url}#.${container}` : url;
 }
@@ -191,6 +204,13 @@ async function getShowsstStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
     const hasQualities = Array.isArray(source.qualities) && source.qualities.length > 0;
     const container = await probeContainer(variants[0].url, headers, hasQualities ? 'mp4' : 'hls');
     const label = source.label || 'source';
+    if (container === 'hls') {
+        const dead = await deadSegments(variants[0].url, headers);
+        if (dead) {
+            console.log(`[showsst] dead segments for ${tmdbId} (${label}): ${dead}; source dropped`);
+            return [];
+        }
+    }
     console.log(`[showsst] Got ${variants.length} stream(s) for ${tmdbId} (${label}, ${container}, ${mirror.api})`);
     return variants.map((v) => ({
         url: forProxy(v.url, container),

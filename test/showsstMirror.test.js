@@ -97,6 +97,13 @@ test('showsst keeps an HLS source as hls with no fragment', async () => {
         if (host === 'api.vidqueen.st') {
             return json({ source: { label: 'VidAPI', url: 'https://cdn.example/api?d=M' }, subtitles: [] });
         }
+        // The provider reads the first segment (dead-segment check, 2026-11-24): serve real TS there.
+        if (host === 'cdn.example' && new URL(url).pathname === '/seg0.ts') {
+            const ts = Buffer.alloc(4096, 0xff);
+            for (let i = 0; i < ts.length; i += 188) ts[i] = 0x47;
+            return new Response(ts, { status: 200 });
+        }
+        if (host === 'cdn.example' && new URL(url).pathname === '/a') return new Response('#EXTM3U\n#EXTINF:6,\nseg0.ts\n', { status: 200 });
         if (host === 'cdn.example') return new Response('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\na\n', { status: 200 });
         throw new Error(`getaddrinfo ENOTFOUND ${host}`);
     };
