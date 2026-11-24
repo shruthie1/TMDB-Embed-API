@@ -39,6 +39,8 @@ data class Source(
     val providerGroup: String? = null,
     val serverLabel: String? = null,
     val audioTagsOnly: Boolean = false,
+    /** "ts-pmt" when the server read [languages] from the segment's PMT tags. */
+    val languageSource: String? = null,
     /** Read-only catalog availability, separate from playable language choices. */
     val catalogLanguages: List<String> = emptyList(),
     val netmirrorCatalog: String? = null,
@@ -307,6 +309,7 @@ object Ranking {
             unsupported = codecs.supports(s.videoCodec, s.codecs) == false,
             audioLanguages = audioLanguages,
             audioTagsOnly = s.audioTagsOnly,
+            languageSource = s.languageSource,
             providerGroup = s.providerGroup,
             serverLabel = s.serverLabel,
             catalogLanguages = languageLabels(s.catalogLanguages),
@@ -442,7 +445,8 @@ object Ranking {
 
     /**
      * Audio choices from OTHER sources (trackChoices.audioChoices "whole-source").
-     * Each language appears once; a non-switchable source offers its first language.
+     * Each language appears once; a non-switchable source offers its first language,
+     * a muxed one (TsAudioSwap.wanted) each of its PMT-tagged languages.
      * In-file tracks are added by the player, ahead of these.
      */
     fun otherSourceLanguages(sources: List<Source>, currentId: String?, exclude: Set<String>): List<Pair<String, Source>> {
@@ -450,7 +454,8 @@ object Ranking {
         val out = ArrayList<Pair<String, Source>>()
         for (s in sources) {
             if (s.id == currentId || s.unsupported) continue
-            val offered = if (s.selectableAudio) s.audioLanguages ?: s.languages else s.languages.take(1)
+            val offered = if (s.selectableAudio) s.audioLanguages ?: s.languages
+                else if (com.chitram.app.resolve.TsAudioSwap.wanted(s)) s.languages else s.languages.take(1)
             for (raw in offered) {
                 val lang = languageLabel(raw) ?: continue
                 if (!seen.add(lang.lowercase())) continue

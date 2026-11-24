@@ -473,6 +473,10 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     private var selectedAudioLanguage: String? = null
     private var languageTrial: String? = null
     private val discoveredAudio = HashMap<String, List<String>>()
+    /** Rows whose [discoveredAudio] is the file's PMT tags (muxed): they stay non-selectable. */
+    private val muxedIds = HashSet<String>()
+    /** The swap feeding the playing muxed row (TsAudioSwap.wanted); null for any other row. */
+    @Volatile private var muxSwap: TsAudioSwap? = null
     private var languageFallback: Triple<Source, String?, Long>? = null
     /** 1.2.55: the row (and position) on screen before a manual `src` pick, restored when the pick sends bad segments. */
     private var manualFallback: Pair<Source, Long>? = null
@@ -490,6 +494,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         languageFallback = null
         runEffects(journey.drop())
         discoveredAudio.clear()
+        muxedIds.clear()
         tried.clear()
         reresolved.clear()
         twinTried.clear()
@@ -773,6 +778,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         endAttempt(LoadingModel.RowState.WAITING, null)
         attempts = attempts + LoadingModel.Attempt(s.id, System.currentTimeMillis())
         current = s
+        muxSwap = null
         cues = ""
         videoSize = VideoSize.UNKNOWN
         playStartedAt = System.currentTimeMillis()
@@ -864,10 +870,13 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     /**
      * Provider Referer/Origin on every request; vaplayer's token on every segment.
      * Caption files go out plain: the provider headers and vaplayer token are for the stream only.
-     * A muxed CastleTV row (VM or device) gets the TS audio swap: the player keeps only the first AAC PID.
+     * A muxed row (TsAudioSwap.wanted: CastleTV, vidrock, VM or device) gets the TS audio swap: the player keeps only the first AAC PID.
      */
     private fun sourceFor(s: Source, item: MediaItem): androidx.media3.exoplayer.source.MediaSource {
-        val swap = if (TsAudioSwap.wanted(s)) TsAudioSwap(desiredAudio()) else null
+        val swap = if (TsAudioSwap.wanted(s)) TsAudioSwap(desiredAudio()) { lang ->
+            android.util.Log.i("Chitram", "[audio] in-stream pick $lang on ${s.provider}")
+        } else null
+        if (swap != null && s.id == current?.id) muxSwap = swap
         // A backend row playing direct (DirectRoute) carries the provider's headers.
         if (PlayPolicy.usesBaseClient(s, swap != null)) return DefaultMediaSourceFactory(OkHttpDataSource.Factory(playerHttp).setTransferListener(loadMarks.bytes)).createMediaSource(item)
         // A DASH row (MultiMovies sacdn MPD): its signature on every sacdn segment, its language in the MPD.
@@ -876,7 +885,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             .let { c -> if (swap == null) c else c.newBuilder().addInterceptor(swap).build() }
             // Innermost: kept playlists from memory, a master's first playlists in parallel (PlaylistCache).
             .let { c -> com.chitram.app.resolve.PlaylistInterceptor.attach(c, g.playlists) { isoFor(desiredAudio()).toList() } }
-        if (swap != null) android.util.Log.i("Chitram", "[tsaudio] ${s.provider}: swapping in ${g.prefs.preferredAudio()} from ${s.languages.joinToString("/")}")
+        if (swap != null) android.util.Log.i("Chitram", "[tsaudio] ${s.provider}: swapping in ${desiredAudio()} from ${s.languages.joinToString("/")}")
         val http = OkHttpDataSource.Factory(okhttp3.Call.Factory { req ->
             if (subs.any { it.url == req.url.toString() }) g.api.client.newCall(req) else streamClient.newCall(req)
         }).setTransferListener(loadMarks.bytes)
@@ -1511,7 +1520,10 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     private val sharedLogged = HashSet<String>()
 
     private fun putSources(list: List<Source>) {
-        sources = list.map { source -> discoveredAudio[source.id]?.let { source.copy(languages = it, audioLanguages = it, selectableAudio = it.size > 1) } ?: source }
+        sources = list.map { source -> discoveredAudio[source.id]?.let {
+            if (source.id in muxedIds) source.copy(languages = it)
+            else source.copy(languages = it, audioLanguages = it, selectableAudio = it.size > 1)
+        } ?: source }
         // Gap 9.10: two providers calling one master "Telugu" is logged for review; no tag changes.
         Ranking.sharedTeluguMasters(sources).filter { sharedLogged.add(it) }.forEach { android.util.Log.i("Chitram", it) }
         labels = LoadingModel.labelRows(labels, sources)
@@ -1520,6 +1532,20 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     private fun recordAudio(t: Tracks) {
         if (pairedAudio != null) return
         val source = current ?: return
+        // A muxed row: the player sees one AAC slot (the swapped-in track), so the file's
+        // PMT tags name its languages. Not read yet: leave the row as the server gave it.
+        if (TsAudioSwap.wanted(source)) {
+            val file = muxSwap?.languages ?: return
+            discoveredAudio[source.id] = file
+            muxedIds += source.id
+            current = source.copy(languages = file)
+            putSources(sources)
+            val wanted = languageTrial
+            if (wanted != null && file.none { Ranking.sameLanguage(it, wanted) }) viewModelScope.launch {
+                if (current?.id == source.id && languageTrial == wanted) failover("$wanted audio missing", player.currentPosition.coerceAtLeast(0), missingLang = wanted)
+            }
+            return
+        }
         val known = t.groups.filter { it.type == C.TRACK_TYPE_AUDIO }.flatMap { group ->
             (0 until group.length).filter { group.isTrackSupported(it) }.mapNotNull { i ->
                 val f = group.getTrackFormat(i)
@@ -1875,14 +1901,18 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                 if (AudioChoice.candidates(sources, language, tried).isEmpty()) all.forEach { tried.remove(it.id) }
                 // A1: the playing source with no track in this language cannot
                 // switch anything; go to another server or say there is none.
-                val next = nextForLanguage(AudioChoice.candidates(sources, language, tried), all, current?.id, carries(groups(C.TRACK_TYPE_AUDIO), language, current?.audioTagsOnly == true))
+                val inFile = muxedCarries(current, language)
+                val next = nextForLanguage(AudioChoice.candidates(sources, language, tried), all, current?.id, inFile || carries(groups(C.TRACK_TYPE_AUDIO), language, current?.audioTagsOnly == true))
                 if (next == null) { notice = "No other $language stream found"; return }
                 // Before the first frame there is nothing to restore: a failed pick moves on (web snapshot()).
                 languageFallback = if (framed) current?.let { Triple(it, selectedAudioLanguage ?: ctxLang, player.currentPosition.coerceAtLeast(0)) } else null
                 languageTrial = language
                 selectedAudioLanguage = language
                 audioPickedFor = null
-                if (next.id == current?.id) {
+                if (next.id == current?.id && inFile && !carries(groups(C.TRACK_TYPE_AUDIO), language, current?.audioTagsOnly == true)) {
+                    // The viewer's pick inside a muxed file: same row, same position, that track swapped in.
+                    play(next, audioLanguage = language)
+                } else if (next.id == current?.id) {
                     player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().clearOverridesOfType(C.TRACK_TYPE_AUDIO).setPreferredAudioLanguages(*isoFor(language)).build()
                     pickPreferredAudio(tracks)
                 } else { beginAskedSwitch(); play(next, audioLanguage = language) }
@@ -1894,7 +1924,11 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                 runEffects(journey.pick())
                 languageTrial = null; languageFallback = null
                 if (source.id == current?.id && language == null) return
-                if (source.id == current?.id) {
+                if (source.id == current?.id && language != null && muxedCarries(current, language) &&
+                    !carries(groups(C.TRACK_TYPE_AUDIO), language, current?.audioTagsOnly == true)) {
+                    // A muxed file's other language: re-open this row with that track swapped in.
+                    play(source, audioLanguage = language)
+                } else if (source.id == current?.id) {
                     selectedAudioLanguage = language
                     audioPickedFor = null
                     player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
@@ -2014,6 +2048,10 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             return audio.any { gr -> (0 until gr.length).any { i -> gr.isTrackSupported(i) && gr.getTrackFormat(i).let { f -> Ranking.trackMatches(f.language, if (tagsOnly) null else f.label, language) } } }
         }
 
+        /** True when [current] is a muxed row whose file tags [language] (TsAudioSwap swaps it in). */
+        internal fun muxedCarries(current: Source?, language: String): Boolean =
+            current != null && TsAudioSwap.wanted(current) && AudioChoice.languages(current).any { Ranking.sameLanguage(it, language) }
+
         /** Next source for a language pick. The playing source only when it [currentCarries] the language (A1). */
         internal fun nextForLanguage(pool: List<Source>, all: List<Source>, currentId: String?, currentCarries: Boolean): Source? {
             val first = pool.firstOrNull()
@@ -2045,6 +2083,11 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             }
             // Tracks not known yet: name the language that will play, not the row's first (A8).
             if (out.isEmpty()) curLang?.let { names += it.lowercase(); out += MenuItem("cur", it, "this server", true, group = IN_STREAM) }
+            // A muxed file (TsAudioSwap): its other PMT-tagged languages, picked inside this stream.
+            if (current != null && TsAudioSwap.wanted(current)) for (lang in AudioChoice.languages(current)) {
+                if (names.any { Ranking.sameLanguage(it, lang) } || !names.add(lang.lowercase())) continue
+                out += MenuItem("src:${current.id}:$lang", lang, "", false, group = IN_STREAM)
+            }
             // Key per language, not per source: one selectable-audio source (a Castle
             // demux row) offers several languages, so a bare src:<id> key repeats and
             // the audio LazyColumn throws "Key already used". (Kubera, 2026-11-21.)

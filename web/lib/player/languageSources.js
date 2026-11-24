@@ -175,6 +175,24 @@ export function singleAudioLanguage(renditionLanguages = [], languages = []) {
   return pick == null ? [] : [pick];
 }
 
+/**
+ * Providers whose muxed rows take `languages` from the segment's PMT tags
+ * (server vidrock withSegmentLanguages, CastleTV). Same list as APK TsAudioSwap.
+ */
+const PMT_TAGGED = new Set(['castletv', 'vidrock']);
+
+/**
+ * A muxed source: one HLS file whose TS carries several PMT-tagged audio tracks
+ * (selectableAudio false, no renditions). useHls's muxedAudioLoader probes the
+ * PMT and swaps the wanted PID in, so each language plays from this one row.
+ * Any other non-selectable row keeps its first language: unknown beats wrong.
+ */
+export function isMuxedSource(source) {
+  if (!source || source.selectableAudio || source.hybrid || source.progressive) return false;
+  if (!Array.isArray(source.languages) || source.languages.length < 2) return false;
+  return source.languageSource === 'ts-pmt' || PMT_TAGGED.has(String(source.provider || '').toLowerCase());
+}
+
 /** Playable audio evidence, never catalog availability alone. */
 export function sourceAudioLanguages(source) {
   const languages = source?.audioTagsOnly ? [] : source?.languages || [];
@@ -185,6 +203,7 @@ export function sourceAudioLanguages(source) {
   // to nothing fall back to the languages[] floor.
   const raw = source?.selectableAudio
     ? (real == null ? languages : hasAudio ? withLanguageFloor(real, languages) : real)
+    : isMuxedSource(source) ? languages
     : singleAudioLanguage(real || [], languages);
   const found = new Map();
   for (const value of raw) {

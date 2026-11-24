@@ -132,6 +132,8 @@ data class RawStream(
     val providerGroup: String? = null,
     val serverLabel: String? = null,
     val audioTagsOnly: Boolean = false,
+    /** "ts-pmt": [languages] were read from the segment's PMT tags (server vidrock). */
+    val languageSource: String? = null,
     /** Availability labels from a catalog, never proof of selectable audio. */
     val catalogLanguages: List<String> = emptyList(),
     val netmirrorCatalog: String? = null,

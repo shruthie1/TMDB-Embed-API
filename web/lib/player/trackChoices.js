@@ -1,4 +1,4 @@
-import { audioLanguageKey, displayLanguage, isResolvedLanguage, singleAudioLanguage, withLanguageFloor, languageFromTrackName, sourceAudioRenditions } from './languageSources';
+import { audioLanguageKey, displayLanguage, isMuxedSource, isResolvedLanguage, singleAudioLanguage, withLanguageFloor, languageFromTrackName, sourceAudioRenditions } from './languageSources';
 
 /**
  * Video and audio as two INDEPENDENT choices.
@@ -102,6 +102,7 @@ export function audioChoices(sources = [], videoSourceId = null, inFileTracks = 
     const real = sourceAudioRenditions(s).map((r) => r.language);
     const offered = s.selectableAudio
       ? (real.length ? withLanguageFloor(real, langs) : langs)
+      : isMuxedSource(s) ? langs
       : singleAudioLanguage(real, langs);
     for (const raw of offered) {
       const lang = displayLanguage(raw);

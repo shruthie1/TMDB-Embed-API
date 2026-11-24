@@ -190,30 +190,70 @@ object TsAudio {
 }
 
 /**
- * Applies [TsAudio] to every TS segment of one muxed CastleTV row on its way to
- * the player. Playlists and anything that is not clean TS pass through. A
- * segment without its own PMT uses the PIDs of the last one seen.
+ * Applies [TsAudio] to every TS segment of one muxed row (several languages in
+ * one TS: CastleTV plain rows, vidrock single-variant rows) on its way to the
+ * player. Playlists and anything that is not clean TS pass through. A segment
+ * without its own PMT uses the PIDs of the last one seen.
+ *
+ * media3 plays HLS with TsExtractor in MODE_HLS, which wires one track per
+ * stream type (InStreamAudioTest: hin only), so TrackSelectionParameters can
+ * never reach Telugu in such a file. The swap is the in-stream pick.
+ *
+ * [languages] is what the file's PMT tags say (untagged/und left out), read from
+ * the first segment that has a PMT. [onPick] runs once, when a segment's PMT
+ * carries the wanted language: never for a language the file lacks.
  */
-class TsAudioSwap(preferred: String) : Interceptor {
+class TsAudioSwap(preferred: String, private val onPick: (String) -> Unit = {}) : Interceptor {
     private val want = TsAudio.iso3(preferred)
+    private val wantLabel = preferred
     @Volatile private var last: Pair<Int, Int>? = null
+    @Volatile private var picked = false
+    /** File-tag languages of this row, PMT order; null until a segment with a PMT passed. */
+    @Volatile var languages: List<String>? = null
+        private set
 
     override fun intercept(chain: Interceptor.Chain): Response {
         val res = chain.proceed(chain.request())
-        val w = want ?: return res
+        if (want == null) return res
         val body = res.body ?: return res
         if (!res.isSuccessful) return res
         val head = res.peekBody(1).bytes()
         if (head.isEmpty() || head[0] != 0x47.toByte()) return res
         val bytes = body.bytes()
-        val plan = TsAudio.plan(bytes, w)?.also { last = it } ?: if (TsAudio.probe(bytes) == null) last else null
-        if (plan != null && TsAudio.swapPids(bytes, plan.first, plan.second)) TsAudio.swapLanguages(bytes, plan.first, plan.second)
+        onSegment(bytes)
         return res.newBuilder().body(bytes.toResponseBody(body.contentType())).build()
     }
 
+    /** Swap the wanted track into the first AAC slot of this segment, in place. */
+    fun onSegment(bytes: ByteArray) {
+        val w = want ?: return
+        val tracks = TsAudio.probe(bytes)
+        if (tracks != null && languages == null) languages = fileLanguages(tracks)
+        if (tracks != null && !picked && tracks.any { it.lang == w }) { picked = true; onPick(wantLabel) }
+        val plan = TsAudio.plan(bytes, w)?.also { last = it } ?: if (tracks == null) last else null
+        if (plan != null && TsAudio.swapPids(bytes, plan.first, plan.second)) TsAudio.swapLanguages(bytes, plan.first, plan.second)
+    }
+
     companion object {
-        /** A muxed CastleTV row (several languages in one TS, not castle-demux). */
+        /**
+         * A muxed row: one HLS file whose single TS carries several languages
+         * (selectableAudio false, no renditions), its [Source.languages] read from the
+         * segment's PMT tags. The swap only acts on a language the PMT really tags.
+         */
         fun wanted(s: Source): Boolean =
-            s.provider.equals("CastleTV", true) && !s.selectableAudio && !s.hybrid && s.languages.size > 1
+            !s.selectableAudio && !s.hybrid && !s.progressive && !s.dash && s.languages.size > 1 &&
+                (s.languageSource == "ts-pmt" || PMT_TAGGED.any { it.equals(s.provider, true) })
+
+        /**
+         * Providers whose muxed rows take [Source.languages] from the PMT (server
+         * vidrock withSegmentLanguages, CastleTV). Any other non-selectable row keeps
+         * its first language: its list may be catalog metadata, and unknown beats wrong.
+         */
+        private val PMT_TAGGED = listOf("CastleTV", "vidrock")
+
+        /** PMT tags as labels ("tel" -> Telugu); untagged and und tracks are unknown, so left out. */
+        fun fileLanguages(tracks: List<TsAudio.Track>): List<String> =
+            tracks.mapNotNull { t -> t.lang?.let(com.chitram.app.data.Ranking::languageLabel)?.takeIf { com.chitram.app.data.Ranking.languageCode(it) != null } }
+                .distinctBy { it.lowercase() }
     }
 }

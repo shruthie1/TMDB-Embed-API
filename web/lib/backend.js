@@ -251,6 +251,8 @@ export function toSource(s, i = 0) {
     catalogLanguages: Array.isArray(s.catalogLanguages) ? s.catalogLanguages : [],
     audio: Array.isArray(s.audio) ? s.audio : [],
     audioTagsOnly: Boolean(s.audioTagsOnly),
+    // 'ts-pmt': languages read from the segment's PMT tags (muxed TS, isMuxedSource).
+    languageSource: s.languageSource || null,
     // True only when the manifest really carries selectable renditions, so the
     // Audio menu is not offered on a stream that cannot switch.
     selectableAudio: Boolean(s.selectableAudio),

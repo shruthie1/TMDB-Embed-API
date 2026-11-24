@@ -5,7 +5,10 @@ import com.chitram.app.data.Source
 object AudioChoice {
     fun knownLanguage(value: String?): Boolean = com.chitram.app.data.Ranking.isKnownAudioLanguage(value)
     fun languages(source: Source): List<String> {
-        val offered = if (source.selectableAudio) source.audioLanguages ?: source.languages else (source.audioLanguages?.takeIf { it.isNotEmpty() } ?: source.languages).take(1)
+        // A muxed row (several PMT-tagged tracks in one TS) offers each: the TsAudioSwap plays the one picked.
+        val offered = if (source.selectableAudio) source.audioLanguages ?: source.languages
+            else if (com.chitram.app.resolve.TsAudioSwap.wanted(source)) source.languages
+            else (source.audioLanguages?.takeIf { it.isNotEmpty() } ?: source.languages).take(1)
         return offered.mapNotNull(com.chitram.app.data.Ranking::languageLabel).filter(::knownLanguage).distinctBy { it.lowercase() }
     }
     fun index(sources: List<Source>): Map<String, List<Source>> = buildMap {
