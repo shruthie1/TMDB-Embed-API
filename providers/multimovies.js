@@ -163,7 +163,15 @@ let serverList = null;
 // VidBolt rate-limits per IP: about 16 /api/resolve calls inside ~15 s gave
 // HTTP 429 on every call (2026-11-21 14:26-14:27 UTC, this Mac). After a 429
 // the per-server fan-out (7 calls) pauses and only the plain resolve runs.
+// 2026-11-25: a 429 on the plain resolve is VidBolt limiting the whole IP,
+// so the per-server asks pause for throttleCooldownMs (no burst). A 429 on one
+// `only=<server>` ask pauses only that server (serverPausedUntil), logged, so
+// one limited server no longer silences every other server for every title.
 let throttledUntil = 0;
+const serverPausedUntil = new Map(); // server id -> ms epoch
+// Bumped by _clearServerList so a late answer from an earlier call (tests)
+// cannot write into a later call's server health.
+let healthGen = 0;
 
 // PER-SERVER COOLDOWN (owner ruling 2026-11-21). A server with no 2xx answer
 // (cut, timeout, HTTP error; a 429 leaves the streak as is) on COOLDOWN_STREAK asks in a row, across
@@ -602,6 +610,11 @@ async function getMultimoviesStreams(tmdbId, mediaType = 'movie', seasonNum = nu
     const referer = type === 'movie' ? `${origin()}${playerPath(tmdbId)}` : `${origin()}/${path}`;
     const phase = new AbortController();
     const stepSignal = () => AbortSignal.any([phase.signal, AbortSignal.timeout(Math.max(1, Math.min(_config.resolveStepMs, left())))]);
+    // VidBolt asks are NOT aborted when the settle ends the phase: an ask cut
+    // by the settle keeps running to its own step cap in the background, so
+    // its real outcome (late 2xx, timeout, error) feeds the server cooldown.
+    // No extra request is sent; only the open one is allowed to finish.
+    const askSignal = () => AbortSignal.timeout(Math.max(1, Math.min(_config.resolveStepMs, left())));
 
     // A /dash/ source -> one dash-direct row, or null when its index.mpd GET
     // failed (then masterJob tries the bridge as before). Liveness is that
@@ -651,10 +664,13 @@ async function getMultimoviesStreams(tmdbId, mediaType = 'movie', seasonNum = nu
             const cap = Math.min(MASTER_TIMEOUT_MS, left());
             if (cap <= 0) throw new Error('budget exhausted');
             const r = await fetch(src.url, { headers: streamHeaders(), signal: AbortSignal.timeout(cap) });
-            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            if (!r.ok) throw Object.assign(new Error(`HTTP ${r.status}`), { status: r.status });
             text = await r.text();
         } catch (e) {
             console.log(`[multimovies] master unreadable for ${tmdbId}, dropped: ${e.message}`);
+            // A 5xx, timeout or network error is a blip: the answer is
+            // partial and must not be cached as complete for 30 min.
+            if (!(e.status >= 400 && e.status < 500)) masterDrops.push(e.message);
             return null;
         }
         if (!hls.parseLevels(text, src.url).length) {
@@ -692,6 +708,11 @@ async function getMultimoviesStreams(tmdbId, mediaType = 'movie', seasonNum = nu
     // Servers actually asked this call (cooled ones are skipped).
     const asked = [];
     const cooled = [];
+    const paused = []; // servers skipped: their own 429 back-off is running
+    const masterDrops = []; // masters dropped on a 5xx, timeout or network error
+    const askPromises = new Map(); // server id -> Promise<answer>
+    let phaseOver = false;
+    const gen = healthGen;
     if (throttled) console.log(`[multimovies] vidbolt throttled (429) until +${throttledUntil - Date.now()}ms: plain resolve only for ${tmdbId}`);
     const answers = new Map(); // ask label -> result
     const jobs = new Map(); // masterKey -> Promise<row|null>
@@ -745,9 +766,21 @@ async function getMultimoviesStreams(tmdbId, mediaType = 'movie', seasonNum = nu
         else if (answers.has('default') && Date.now() - t0 >= _config.settleMs) endPhase('settled');
     };
     const track = (p) => { pending += 1; p.finally(() => { pending -= 1; check(); }); };
-    const ask = (server) => track(askVidbolt(resolveUrl(tmdbId, type, seasonNum, episodeNum, server), referer, stepSignal()).then((a) => {
+    const ask = (server) => { const p = askVidbolt(resolveUrl(tmdbId, type, seasonNum, episodeNum, server), referer, askSignal());
+        if (server) askPromises.set(server, p);
+        track(p.then((a) => {
+        if (a.status === 429) {
+            if (server) {
+                serverPausedUntil.set(server, Date.now() + _config.throttleCooldownMs);
+                console.log(`[multimovies] vidbolt 429 on server=${server} for ${tmdbId}: ${server} paused ${_config.throttleCooldownMs}ms, other servers still asked`);
+            } else {
+                throttledUntil = Date.now() + _config.throttleCooldownMs;
+                console.log(`[multimovies] vidbolt 429 on plain resolve for ${tmdbId}: IP limited, per-server asks paused ${_config.throttleCooldownMs}ms`);
+            }
+        }
+        // Cut by the settle: the answer came too late for this call.
+        if (phaseOver) return;
         answers.set(server || 'default', a);
-        if (a.status === 429) throttledUntil = Date.now() + _config.throttleCooldownMs;
         if (!throttled && a.ok && a.server && !servers.includes(a.server)) {
             // VidBolt named a server we do not list yet: ask it too.
             servers.push(a.server);
@@ -761,8 +794,14 @@ async function getMultimoviesStreams(tmdbId, mediaType = 'movie', seasonNum = nu
             }
             if (!jobs.has(k)) jobs.set(k, masterJob(src));
         }
-    }));
+    })); };
     function askServer(id) {
+        const until = serverPausedUntil.get(id) || 0;
+        if (Date.now() < until) {
+            paused.push(id);
+            console.log(`[multimovies] server ${id} skipped for ${tmdbId}: own 429 back-off, +${until - Date.now()}ms left`);
+            return;
+        }
         if (cooling(id)) { cooled.push(id); return; }
         asked.push(id);
         ask(id);
@@ -790,13 +829,26 @@ async function getMultimoviesStreams(tmdbId, mediaType = 'movie', seasonNum = nu
     const why = await phaseDone;
     clearTimeout(settleTimer);
     clearTimeout(capTimer);
+    phaseOver = true;
     phase.abort();
 
-    // A 429 is VidBolt limiting our whole IP, not this server: the streak is left as is.
+    // A 429 is rate limiting, not this server's health: the streak is left as is.
+    // A server cut by the settle is recorded only when its own ask finishes
+    // (late 2xx clears, timeout or error counts): a cut is not a failure.
+    const record = (id, a) => {
+        if (a && a.status === 429) { health(id).probing = false; return; }
+        recordServer(id, Boolean(a && a.ok));
+    };
     for (const id of asked) {
         const a = answers.get(id);
-        if (a && a.status === 429) { health(id).probing = false; continue; }
-        recordServer(id, Boolean(a && a.ok));
+        if (a) { record(id, a); continue; }
+        const p = askPromises.get(id);
+        if (!p) { record(id, null); continue; }
+        p.then((late) => {
+            if (gen !== healthGen) return;
+            console.log(`[multimovies] server-late ${id} for ${tmdbId}: ${late.ok ? 'answered' : late.timedOut ? 'timeout' : late.error} after the settle`);
+            record(id, late);
+        });
     }
     const labels = ['default', ...asked];
     const summary = labels.map((l) => {
@@ -812,11 +864,12 @@ async function getMultimoviesStreams(tmdbId, mediaType = 'movie', seasonNum = nu
     // the 429 back-off that asked none) may hold the only Telugu master. Such
     // an answer is partial: apiServer serves it but caches none of it.
     const unheard = labels.filter((l) => { const a = answers.get(l); return !a || !a.ok; });
+    const notHeard = [...unheard.map((l) => {
+        const a = answers.get(l);
+        return `${l}(${!a ? 'cut' : a.timedOut ? 'timeout' : a.error})`;
+    }), ...paused.map((l) => `${l}(paused 429)`)];
     const partialWhy = throttled ? 'vidbolt 429 back-off, per-server asks skipped'
-        : unheard.length ? `vidbolt server(s) not heard: ${unheard.map((l) => {
-            const a = answers.get(l);
-            return `${l}(${!a ? 'cut' : a.timedOut ? 'timeout' : a.error})`;
-        }).join(',')}` : null;
+        : notHeard.length ? `vidbolt server(s) not heard: ${notHeard.join(',')}` : null;
     const partial = (rows) => {
         if (partialWhy) {
             rows.upstreamError = `multimovies ${partialWhy}`.slice(0, 300);
@@ -860,6 +913,10 @@ async function getMultimoviesStreams(tmdbId, mediaType = 'movie', seasonNum = nu
         }
     }
     partial(out);
+    if (masterDrops.length && !out.upstreamError) {
+        out.upstreamError = `multimovies master(s) dropped: ${masterDrops.join('; ')}`.slice(0, 300);
+        console.log(`[multimovies] partial for ${tmdbId}: ${masterDrops.length} master(s) dropped on upstream error`);
+    }
     const direct = out.filter((r) => r.dashDirect).length;
     console.log(`[multimovies] dash-direct ${tmdbId} sources=${direct} bridge=${out.length - direct}`);
     console.log(`[multimovies] Got ${out.length} stream(s) for ${tmdbId} in ${Date.now() - t0}ms`);
@@ -888,7 +945,7 @@ module.exports = {
     _deps,
     _clearDisguiseCache: () => { disguiseCache.clear(); disguiseInflight.clear(); },
     _disguiseSettled: () => Promise.all([...disguiseInflight.values()]),
-    _clearServerList: () => { serverList = null; throttledUntil = 0; serverHealth.clear(); },
+    _clearServerList: () => { serverList = null; throttledUntil = 0; serverHealth.clear(); serverPausedUntil.clear(); healthGen += 1; },
     _serverHealth: (id) => ({ ...health(id) }),
     _serverHealthSet: (id, patch) => { Object.assign(health(id), patch); },
     _setServerList: (ids) => { serverList = { ids: [...ids], at: Date.now() }; },

@@ -297,6 +297,11 @@ async function resolveAbsoluteEpisode(imdbId, season, episode) {
     return offset + episode;
 }
 
+// "Not in this catalogue" (no search match, wrong film by IMDb id, no such
+// season/episode). The fan-out keeps it out of the breaker count; 11-24 7 of
+// 10 onetouchtv trips came from plain "not found" empties.
+function notListed() { return Object.assign([], { notListed: true }); }
+
 // Search swallows its own 404 (a spelling miss), so a 404 that reaches here
 // came from detail or episode, after a search hit.
 async function getOnetouchtvStreams(tmdbId, mediaType = 'movie', seasonNum = null, episodeNum = null) {
@@ -367,7 +372,7 @@ async function resolveStreams(tmdbId, mediaType, seasonNum, episodeNum) {
 
         if (!matchResult) {
             console.log(`[OneTouchTV] "${title}" not found`);
-            return [];
+            return notListed();
         }
 
         if (imdbId && imdbId.startsWith('tt')) {
@@ -380,14 +385,14 @@ async function resolveStreams(tmdbId, mediaType, seasonNum, episodeNum) {
             ).catch(() => null);
             if (resolvedId && resolvedId !== imdbId) {
                 console.log(`[OneTouchTV] IMDB ID mismatch — rejecting match: expected ${imdbId}, resolved ${resolvedId}`);
-                return [];
+                return notListed();
             }
         }
 
         const detail = await getDetail(matchResult.id);
         if (!detail || !detail.episodes || detail.episodes.length === 0) {
             console.log(`[OneTouchTV] no episodes in detail for "${matchResult.title}"`);
-            return [];
+            return notListed();
         }
 
         let targetEpisode = null;
@@ -407,7 +412,7 @@ async function resolveStreams(tmdbId, mediaType, seasonNum, episodeNum) {
                 parseInt(matchedSeasonNum[1], 10) !== season
             ) {
                 console.warn(`[OneTouchTV] matched title names a different season — aborting`);
-                return [];
+                return notListed();
             }
 
             if (entryIsForTargetSeason) {
@@ -430,7 +435,7 @@ async function resolveStreams(tmdbId, mediaType, seasonNum, episodeNum) {
 
         if (!targetEpisode) {
             console.log(`[OneTouchTV] episode not found (S${season}E${episode})`);
-            return [];
+            return notListed();
         }
 
         const streamData = await getEpisodeStreams(matchResult.id, targetEpisode.playId);

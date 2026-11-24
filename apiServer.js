@@ -569,7 +569,12 @@ function fetchProviderShared(prov, ck, ctx, { titleIsResolvable, titleKey }) {
       // Never cached in providerEmptyCache: an error says the provider is
       // down right now, not that the title is missing. titleKey keeps one
       // title's repeated failures from tripping the breaker for all titles.
-      recordProviderOutcome(name, 'error', Date.now()-t0, 0, titleIsResolvable, titleKey);
+      // An error marked titleEmpty (vidrift "orionStreams null", a multimovies
+      // 429 back-off with no rows) is about this title, not the provider's
+      // health: 11-24 it made 99 vidrift misses and both vidrift trips.
+      const titleEmpty = !!(e && e.titleEmpty === true);
+      recordProviderOutcome(name, 'error', Date.now()-t0, 0, titleIsResolvable && !titleEmpty, titleKey);
+      if (titleEmpty) console.log(`[api] provider ${name} error is title-empty tmdbId=${ctx.tmdbId}: not counted toward breaker`);
       const h = metrics.providerHealth[name];
       if (h) h.lastErr = String(e.message || e).slice(0, 200);
       return { outcome: 'error', ms: null, streams: [], error: String(e && e.message || e).slice(0, 200) };

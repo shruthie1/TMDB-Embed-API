@@ -91,7 +91,7 @@ async function getVidoutStreams(tmdbId, mediaType = 'movie', seasonNum = null, e
     const masterUrl = usableLink(value);
     if (!masterUrl) {
         console.log(`[vidout] no direct master for ${type} ${tmdbId}${type === 'tv' ? ` S${seasonNum}E${episodeNum}` : ''}`);
-        return [];
+        return notListed();
     }
     const master = await _deps.fetchText(masterUrl, headers, left());
     if (!(master.status >= 200 && master.status < 300)) throw new Error(`vidout: master HTTP ${master.status} for ${tmdbId}`);
@@ -103,7 +103,7 @@ async function getVidoutStreams(tmdbId, mediaType = 'movie', seasonNum = null, e
         const mins = rc.seconds ? Math.round(rc.seconds / 60) : '-';
         if (rc.verdict === 'mismatch') {
             console.log(`[vidout] runtime mismatch ${tmdbId}: ${mins}m vs ${runtime}m - row dropped`);
-            return [];
+            return notListed();
         }
         console.log(`[vidout] runtime ${rc.verdict} ${tmdbId}: ${mins}m vs ${runtime || '-'}m`);
     }

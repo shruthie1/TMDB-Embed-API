@@ -69,12 +69,17 @@ test('detail 404 after a search hit rejects', async () => {
 
 test('search with no match is a real empty, not an error', async () => {
     route({ search: ok([{ id: 9, title: 'Something Else Entirely', year: '1990', type: 'movie' }]) });
-    assert.deepEqual(await getOnetouchtvStreams(1, 'movie'), []);
+    const out = await getOnetouchtvStreams(1, 'movie');
+    assert.deepEqual([...out], []);
+    // Audit 11-24: 7 of 10 onetouchtv trips came from "not found" empties.
+    assert.equal(out.notListed, true);
 });
 
 test('search 404 is a real empty (the endpoint 404s some spellings)', async () => {
     route({ search: fail(404) });
-    assert.deepEqual(await getOnetouchtvStreams(1, 'movie'), []);
+    const out = await getOnetouchtvStreams(1, 'movie');
+    assert.deepEqual([...out], []);
+    assert.equal(out.notListed, true);
     assert.equal(calls.search, 1, 'one plain-ASCII spelling, no retry');
 });
 

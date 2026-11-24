@@ -100,6 +100,24 @@ test('read: no page proves the id -> notListed with no servers (never a wrong ti
     assert.strictEqual(calls.length, n, 'negative cache: no GET');
 });
 
+// Audit 2026-11-25 #11: a miss was hidden for 6 h. Now 30 min, then re-searched.
+test('read: a notListed answer is cached 30 min, then the title is searched again', async () => {
+    const other = TITLE.replace(/579974/g, '111').replace(/tt8178634/g, 'tt1');
+    const calls = [];
+    const f = fakeFetch({ [`${SITE}/search?q=RRR`]: SEARCH, [`${SITE}/movie/rrr-10105`]: other,
+        [`${SITE}/movie/rrr-behind-beyond-72801`]: other, [`${SITE}/movie/grrr-61738`]: other, [`${SITE}/movie/hunterrr-51950`]: other }, calls);
+    let now = 5_000_000;
+    const d = deps(f, { now: () => now });
+    assert.strictEqual((await page.read({ tmdbId: 579974, type: 'movie' }, d)).notListed, true);
+    const n = calls.length;
+    now += 29 * 60e3;
+    await page.read({ tmdbId: 579974, type: 'movie' }, d);
+    assert.strictEqual(calls.length, n, 'inside 30 min: no GET');
+    now += 2 * 60e3;
+    await page.read({ tmdbId: 579974, type: 'movie' }, d);
+    assert.ok(calls.slice(n).some((c) => c.url.includes('/search?q=RRR')), 'after 30 min: searched again');
+});
+
 test('read: subtitle title with 0 search hits retries with the part before the separator (Pushpa 2 - The Rule)', async () => {
     const pushpa = TITLE.replace(/579974/g, '857598').replace(/tt8178634/g, 'tt16539454');
     const calls = [];

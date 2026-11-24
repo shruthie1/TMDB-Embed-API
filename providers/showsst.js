@@ -207,8 +207,10 @@ async function getShowsstStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
     if (!body) throw new Error(`showsst: all ${order.length} mirrors failed for ${tmdbId}`);
     const source = body && body.source;
     if (!source || !source.url) {
+        // The mirror answered without a source: not in this catalogue, which
+        // must not count toward the breaker.
         console.log(`[showsst] No source url for ${tmdbId}`);
-        return [];
+        return Object.assign([], { notListed: true });
     }
 
     const subtitles = Array.isArray(body.subtitles)

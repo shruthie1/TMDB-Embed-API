@@ -127,3 +127,30 @@ test('P7a: one master 403 is retried once and the row survives', async (t) => {
     assert.equal(rows.length, 1);
     assert.equal(rows[0].url, NOVA_URL);
 });
+
+// Audit 11-24: 80 vidrock answers over 28 titles were cached 30 min after a
+// master was dropped on a 502 (Atlas 68x, Orion 27x). A 5xx drop is partial.
+async function twoServers(t, secondStatus) {
+    const { getVidrockStreams } = require('../providers/vidrock');
+    const realFetch = global.fetch;
+    let masterCalls = 0;
+    global.fetch = async (url) => {
+        if (String(url).startsWith('https://vidrock.net/api/')) {
+            return new Response(JSON.stringify({ Nova: NOVA, Atlas: NOVA }), { status: 200 });
+        }
+        masterCalls += 1;
+        return masterCalls === 1 ? new Response(NOVA_MASTER, { status: 200 }) : new Response('x', { status: secondStatus });
+    };
+    t.after(() => { global.fetch = realFetch; });
+    return getVidrockStreams('27205', 'movie');
+}
+test('a master dropped on HTTP 502 marks the answer partial (not cached as complete)', async (t) => {
+    const rows = await twoServers(t, 502);
+    assert.equal(rows.length, 1);
+    assert.match(rows.upstreamError, /dropped: \w+: HTTP 502/);
+});
+test('a master dropped on HTTP 404 keeps the answer complete', async (t) => {
+    const rows = await twoServers(t, 404);
+    assert.equal(rows.length, 1);
+    assert.equal(rows.upstreamError, undefined);
+});

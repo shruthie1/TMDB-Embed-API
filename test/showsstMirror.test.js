@@ -120,7 +120,9 @@ test('showsst returns [] on a null source without trying other mirrors', async (
         return json({ meta: null, source: null, subtitles: [] });
     };
     const { getShowsstStreams } = load();
-    assert.deepEqual(await getShowsstStreams('1', 'movie'), []);
+    const out = await getShowsstStreams('1', 'movie');
+    assert.deepEqual([...out], []);
+    assert.equal(out.notListed, true, 'no source url: not in catalogue, out of the breaker');
     assert.equal(calls.length, 1);
 });
 

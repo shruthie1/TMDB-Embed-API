@@ -214,6 +214,7 @@ async function getVidrockStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
     // streams": thrown, so the registry's key heal can see it (Task 6).
     let decryptFails = 0; let lastDecryptErr = '';
     const cold = []; // single-variant rows whose PMT tags are not cached yet
+    const transient = []; // masters dropped on a 5xx, timeout or network error
     const rows = await Promise.all(entries.map(async ({ name, entry }) => {
         let url;
         try {
@@ -235,7 +236,7 @@ async function getVidrockStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
                 await new Promise((res) => setTimeout(res, MASTER_RETRY_DELAY_MS));
                 r = await get();
             }
-            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            if (!r.ok) throw Object.assign(new Error(`HTTP ${r.status}`), { status: r.status });
             const text = await r.text();
             const now = segmentLanguagesNow(streamFromMaster(name, entry, url, text), text, url);
             const row = now.row;
@@ -247,6 +248,10 @@ async function getVidrockStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
             return row;
         } catch (e) {
             console.log(`[vidrock] ${name}: master unreadable, dropped: ${e.message}`);
+            // A 5xx, timeout or network error is a blip, not the title's
+            // truth: the answer is partial and must not be cached as complete
+            // (11-24: 80 answers cached 30 min after Atlas/Orion 502s).
+            if (!(e.status >= 400 && e.status < 500)) transient.push(`${name}: ${e.message}`);
             return null;
         }
     }));
@@ -260,6 +265,10 @@ async function getVidrockStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
         + (cold.length ? `; ${cold.length} PMT probe(s) in background` : ''));
     const sent = cold.filter((c) => out.includes(c.row));
     if (sent.length) languagesLater.later('vidrock', id, probeColdRows(sent));
+    if (transient.length) {
+        console.log(`[vidrock] partial ${id}: ${transient.length} master(s) dropped on upstream error`);
+        out.upstreamError = `master(s) dropped: ${transient.join('; ')}`.slice(0, 300);
+    }
     return out;
 }
 

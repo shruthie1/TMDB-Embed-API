@@ -268,6 +268,12 @@ function dropReason(raw) {
     return null;
 }
 
+// "Not in this catalogue" (search miss, no confident match, no such
+// season/episode, preview-only or VIP-gated). The fan-out keeps such an empty
+// out of the breaker count (apiServer.js fetchProviderShared).
+const GATED_DROPS = new Set(['isPreview', 'permissionDenied', 'preview-url']);
+function notListed() { return Object.assign([], { notListed: true }); }
+
 function buildCastleStreams(raw, langLabel, titleLine, resolution) {
     const data = unwrap(raw);
     // Castle gates real playback behind a signed-in VIP session. Anonymously we
@@ -537,7 +543,7 @@ async function getCastletvStreams(tmdbId, mediaType = 'movie', seasonNum = null,
             console.log(`[CastleTV] No search results for "${candidate}"`);
         }
 
-        if (rows.length === 0) return [];
+        if (rows.length === 0) return notListed();
 
         // Title matching lives in utils/titleMatch.js, shared by every
         // title-based provider. It deaccents FIRST (a macron used to fall
@@ -557,10 +563,10 @@ async function getCastletvStreams(tmdbId, mediaType = 'movie', seasonNum = null,
             // by hand is what cost a day on Bahubali.
             const offered = rows.slice(0, 6).map((r) => r.title || r.name).join(' | ');
             console.log(`[CastleTV] No confident match for "${title}" among ${rows.length} rows - skipping (saw: ${offered})`);
-            return [];
+            return notListed();
         }
         const castleId = (match.id || match.redirectId || match.redirectIdStr || '').toString();
-        if (!castleId) return [];
+        if (!castleId) return notListed();
 
         let castleDetails = await getCastleDetails(secKey, castleId);
         let activeId = castleId;
@@ -573,7 +579,7 @@ async function getCastletvStreams(tmdbId, mediaType = 'movie', seasonNum = null,
             // whichever season the search row was, and serve it as a hit.
             if (seasons.length && !seasonEntry) {
                 console.log(`[CastleTV] season-missing ${tmdbId} S${season} (has ${seasons.map((s) => s.number).join(',')})`);
-                return [];
+                return notListed();
             }
             if (seasonEntry && seasonEntry.movieId && seasonEntry.movieId.toString() !== castleId) {
                 castleDetails = await getCastleDetails(secKey, seasonEntry.movieId.toString());
@@ -593,7 +599,7 @@ async function getCastletvStreams(tmdbId, mediaType = 'movie', seasonNum = null,
 
         if (!episodeId) {
             console.log(`[CastleTV] No episode found (${season}/${episode})`);
-            return [];
+            return notListed();
         }
 
         const epEntry = episodes.find((e) => e.id && e.id.toString() === episodeId);
@@ -707,6 +713,12 @@ async function getCastletvStreams(tmdbId, mediaType = 'movie', seasonNum = null,
         const why = lastRejection && (lastRejection.message || String(lastRejection));
         if (!streams.length && rejected) {
             throw new Error(`${rejected} video call(s) failed, none returned a stream: ${why}`);
+        }
+        // Castle answered, but only with a preview reel or a VIP gate: the
+        // title is not playable from this catalogue. That is not a provider
+        // outage (11-24: all 4 castletv trips came from these empties).
+        if (!streams.length && drops.size && [...drops.keys()].every((k) => GATED_DROPS.has(k))) {
+            return notListed();
         }
         if (failedTracks.length) {
             console.log(`[CastleTV] partial ${tmdbId} failed-tracks=${failedTracks.join('/')}: ${why}`);

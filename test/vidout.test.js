@@ -89,11 +89,13 @@ test('getVidoutStreams: not in the catalogue (404) is no rows, not an error', as
     assert.equal(out.notListed, true);
 });
 
-test('getVidoutStreams: a catalogue entry without a direct master is not marked notListed', async () => {
+// Audit 11-24: 82 not-in-catalogue vidout empties; plain [] counted toward the
+// breaker. A catalogue entry with no direct master is still "no title here".
+test('getVidoutStreams: a catalogue entry without a direct master is notListed (out of the breaker)', async () => {
     stub({ link: 'https://vidout.pages.dev/e/abc123' });
     const out = await vo.getVidoutStreams('27205', 'movie');
-    assert.deepStrictEqual(out, []);
-    assert.equal(out.notListed, undefined);
+    assert.deepStrictEqual([...out], []);
+    assert.equal(out.notListed, true);
 });
 
 test('getVidoutStreams: GitHub 5xx throws so the fan-out does not cache it', async () => {
@@ -103,7 +105,9 @@ test('getVidoutStreams: GitHub 5xx throws so the fan-out does not cache it', asy
 
 test('getVidoutStreams: wrong-cut runtime drops the row', async () => {
     stub({ minutes: 20 });
-    assert.deepStrictEqual(await vo.getVidoutStreams('857598', 'movie'), []);
+    const out = await vo.getVidoutStreams('857598', 'movie');
+    assert.deepStrictEqual([...out], []);
+    assert.equal(out.notListed, true, 'a wrong cut is not a provider failure');
 });
 
 test('getVidoutStreams: tv reads the season file entry for the episode', async () => {
@@ -112,7 +116,9 @@ test('getVidoutStreams: tv reads the season file entry for the episode', async (
     assert.equal(rows.length, 1);
     assert.match(calls[0].url, /hls\/tv\/1399\/S2\.json$/);
     stub({ link: { 1: P2_URL } });
-    assert.deepStrictEqual(await vo.getVidoutStreams('1399', 'tv', 2, 5), []);
+    const missing = await vo.getVidoutStreams('1399', 'tv', 2, 5);
+    assert.deepStrictEqual([...missing], []);
+    assert.equal(missing.notListed, true, 'episode not in the season file');
 });
 
 test('route: web through the proxy (Referer-gated), APK direct', () => {

@@ -71,7 +71,9 @@ test('showsst: every mirror failing throws; a null source stays []', async (t) =
 
     global.fetch = async () => json({ source: null });
     ({ getShowsstStreams } = fresh('showsst'));
-    assert.deepEqual(await getShowsstStreams('1', 'movie'), []);
+    const out = await getShowsstStreams('1', 'movie');
+    assert.deepEqual([...out], []);
+    assert.equal(out.notListed, true, 'a null source is "not listed", kept out of the breaker');
 });
 
 // ---------- mapple ----------
@@ -188,7 +190,9 @@ test('castletv: a season Castle does not list is not served from another season'
     t.after(() => { global.fetch = realFetch; });
     global.fetch = castleFetch({ failLang: null, seasons: [{ number: 1, movieId: 77 }] });
     const { getCastletvStreams } = fresh('castletv');
-    assert.deepEqual(await getCastletvStreams('6001', 'tv', 2, 1), []);
+    const missing = await getCastletvStreams('6001', 'tv', 2, 1);
+    assert.deepEqual([...missing], []);
+    assert.equal(missing.notListed, true);
     const s1 = await getCastletvStreams('6001', 'tv', 1, 1);
     assert.equal(s1.length, 2, 'the listed season still resolves');
 });

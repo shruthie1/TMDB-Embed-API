@@ -211,9 +211,9 @@ test('registry: an empty answer on a non-mainstream title does not count as a fa
     try {
         const { getProvider } = require('../providers/registry');
         const p = getProvider('showsst');
-        assert.deepEqual(await p.fetch({ type: 'movie', tmdbId: '999999' }), []);
+        assert.deepEqual([...await p.fetch({ type: 'movie', tmdbId: '999999' })], []);
         assert.equal(up.failStreak('showsst'), 0);
-        assert.deepEqual(await p.fetch({ type: 'movie', tmdbId: '27205' }), []);
+        assert.deepEqual([...await p.fetch({ type: 'movie', tmdbId: '27205' })], []);
         assert.equal(up.failStreak('showsst'), 1);
     } finally {
         global.fetch = realFetch;

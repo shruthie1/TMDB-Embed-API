@@ -306,7 +306,7 @@ function stubVidbolt(t, routes) {
                 if (s) s.addEventListener('abort', () => reject(s.reason || new Error('aborted')));
             });
         }
-        return Promise.resolve(body instanceof Response ? body : new Response(body, { status: 200 }));
+        return Promise.resolve(body).then((b) => (b instanceof Response ? b : new Response(b, { status: 200 })));
     };
     t.after(() => { global.fetch = realFetch; });
     return calls;
@@ -413,16 +413,39 @@ test('all servers: one server erroring keeps the rows and marks the result parti
     assert.match(rows.upstreamError, /orion/);
 });
 
-test('all servers: HTTP 429 pauses the fan-out, next call asks only the plain resolve', async (t) => {
+// 2026-11-25 (audit 11-24: 21x 429, 66 back-offs, 29 titles partial): a 429
+// on one server pauses only that server, logged; the plain resolve and the
+// other servers are still asked for the next title.
+test('all servers: HTTP 429 on one server pauses only that server, logged; next call asks the rest', async (t) => {
     const mm = freshMM(t);
+    const logs = [];
+    const realLog = console.log;
+    console.log = (...a) => { logs.push(a.join(' ')); };
+    t.after(() => { console.log = realLog; });
     const fail = ['quasar']; fail.status = 429;
     const calls = stubVidbolt(t, rrrVidbolt({ fail }));
     const first = await mm.getMultimoviesStreams('579974', 'movie');
     assert.equal(first.length, 3);
+    assert.ok(logs.some((l) => /vidbolt 429 on server=quasar for 579974: quasar paused 60000ms/.test(l)), logs.join('\n'));
     calls.length = 0;
     const second = await mm.getMultimoviesStreams('579974', 'movie');
-    assert.deepEqual(calls.filter((u) => u.includes('/api/resolve')).map(serverOf), [null]);
-    assert.equal(second.length, 1, 'cooldown: luna only, as before this change');
+    const asked = calls.filter((u) => u.includes('/api/resolve')).map((u) => serverOf(u) || 'default').sort();
+    assert.deepEqual(asked, ['callisto', 'default', 'luna', 'orion', 'quantum', 'vega'], 'only quasar paused');
+    assert.equal(second.length, 3, 'callisto Telugu rows still come back');
+    assert.match(second.upstreamError, /quasar\(paused 429\)/, 'a paused server still makes the answer partial');
+    assert.ok(logs.some((l) => /server quasar skipped for 579974: own 429 back-off/.test(l)));
+});
+
+test('all servers: HTTP 429 on the plain resolve (IP limited) pauses every per-server ask', async (t) => {
+    const mm = freshMM(t);
+    const fail = ['default']; fail.status = 429;
+    const calls = stubVidbolt(t, rrrVidbolt({ fail }));
+    await mm.getMultimoviesStreams('579974', 'movie');
+    assert.ok(calls.some((u) => u.includes('/api/resolve') && !serverOf(u)), 'plain resolve was asked and got 429');
+    const calls2 = stubVidbolt(t, rrrVidbolt());
+    const second = await mm.getMultimoviesStreams('579974', 'movie');
+    assert.deepEqual(calls2.filter((u) => u.includes('/api/resolve')).map(serverOf), [null], 'no burst while the IP is limited');
+    assert.match(second.upstreamError, /429 back-off/);
 });
 
 test('all servers: tv asks only=<server> with season and episode, Referer is the embed path', async (t) => {
@@ -452,14 +475,14 @@ test('all servers: a complete answer is not partial; a 429 or its back-off is pa
     const hit = await mm.getMultimoviesStreams('579974', 'movie');
     assert.match(hit.upstreamError, /quasar\(HTTP 429\)/);
     const backoff = await mm.getMultimoviesStreams('579974', 'movie');
-    assert.equal(backoff.length, 1);
-    assert.match(backoff.upstreamError, /429 back-off/);
+    assert.equal(backoff.length, 3, 'only quasar is paused');
+    assert.match(backoff.upstreamError, /quasar\(paused 429\)/);
 });
 
 // Owner ruling 2026-11-21: per-server cooldown. quantum was unheard on every
 // counted run, which made every answer partial and uncached.
-test('cooldown: 3 unheard asks in a row cool a server for an hour; then one probe; 2xx clears', async (t) => {
-    const mm = freshMM(t, { settleMs: 50, resolveStepMs: 1000, cooldownMs: 60 * 60 * 1000 });
+test('cooldown: 3 asks in a row that time out (after the settle cut) cool a server for an hour; then one probe; 2xx clears', async (t) => {
+    const mm = freshMM(t, { settleMs: 50, resolveStepMs: 150, cooldownMs: 60 * 60 * 1000 });
     const logs = [];
     const realLog = console.log;
     console.log = (...a) => { logs.push(a.join(' ')); };
@@ -472,7 +495,10 @@ test('cooldown: 3 unheard asks in a row cool a server for an hour; then one prob
     for (let i = 0; i < 3; i++) {
         const rows = await mm.getMultimoviesStreams('579974', 'movie');
         assert.match(rows.upstreamError, /quantum\(cut\)/, `ask ${i + 1}: quantum outside cooldown and unheard -> partial`);
+        // The cut ask runs on to its own step cap; its timeout is what counts.
+        await new Promise((r) => setTimeout(r, 250));
     }
+    assert.ok(logs.some((l) => /server-late quantum for 579974: timeout after the settle/.test(l)), logs.join('\n'));
     assert.ok(logs.includes('multimovies: server-cooldown quantum on streak=3'), logs.join('\n'));
     calls.length = 0;
     const cooledRows = await mm.getMultimoviesStreams('579974', 'movie');
@@ -489,6 +515,24 @@ test('cooldown: 3 unheard asks in a row cool a server for an hour; then one prob
     assert.equal(probed.upstreamError, undefined);
     assert.ok(logs.includes('multimovies: server-cooldown quantum off streak=0'), logs.join('\n'));
     assert.equal(mm._serverHealth('quantum').streak, 0);
+});
+
+// Audit 11-24: quantum 14 and vega 13 were cooled for an hour by 2 s settle
+// cuts while they were answering. A cut that answers 2xx late is no failure.
+test('cooldown: a server cut by the settle that answers late (2xx) never counts', async (t) => {
+    const mm = freshMM(t, { settleMs: 50, resolveStepMs: 1000 });
+    const routes = rrrVidbolt();
+    const inner = routes[0][1];
+    routes[0][1] = (u) => (serverOf(u) === 'vega'
+        ? new Promise((r) => setTimeout(() => r(inner(u)), 150)) : inner(u));
+    stubVidbolt(t, routes);
+    for (let i = 0; i < 4; i++) {
+        const rows = await mm.getMultimoviesStreams('579974', 'movie');
+        assert.match(rows.upstreamError, /vega\(cut\)/, 'still partial: the answer missed this call');
+        await new Promise((r) => setTimeout(r, 250));
+    }
+    assert.equal(mm._serverHealth('vega').streak, 0, 'late 2xx answers keep the streak at 0');
+    assert.equal(mm._serverHealth('vega').until, 0, 'not cooled');
 });
 
 test('cooldown: a failed probe cools the server for another hour', async (t) => {
@@ -912,4 +956,23 @@ test('dash-direct row passes segment verify: master -> lowest variant -> sacdn i
         : new Response(init, { status: 206 }));
     const v = await verifyOne(dash);
     assert.equal(v.ok, true, JSON.stringify(v));
+});
+
+// Audit 11-24: 7 of 15 answers with a 502 master drop were cached as complete
+// for 30 min. A master dropped on a 5xx is a partial answer; a 404 is not.
+test('master dropped on HTTP 502 marks the answer partial; a 404 drop does not', async (t) => {
+    const mm = freshMM(t);
+    const routes = rrrVidbolt();
+    routes.splice(2, 1, [/luna-rrr\.m3u8/, () => new Response('bad gateway', { status: 502 })]);
+    stubVidbolt(t, routes);
+    const rows = await mm.getMultimoviesStreams('579974', 'movie');
+    assert.equal(rows.length, 2, 'callisto rows kept, luna dropped');
+    assert.match(rows.upstreamError, /master\(s\) dropped: HTTP 502/);
+    mm._clearServerList();
+    const routes404 = rrrVidbolt();
+    routes404.splice(2, 1, [/luna-rrr\.m3u8/, () => new Response('gone', { status: 404 })]);
+    stubVidbolt(t, routes404);
+    const rows404 = await mm.getMultimoviesStreams('579974', 'movie');
+    assert.equal(rows404.length, 2);
+    assert.equal(rows404.upstreamError, undefined, '404 is the master gone, not a blip: cacheable');
 });
