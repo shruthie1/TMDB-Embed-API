@@ -117,11 +117,11 @@ class PrewarmTest {
         // castletv false and showsst true are booleans: they win.
         assertEquals(setOf("mapple", "vidrift", "showsst", "netmirror", "multimovies"), c.prewarm)
         assertEquals(3, c.version)
-        // The shipped JSON: version 4 and the five defaults on, vaplayer off.
+        // The shipped JSON: version 5 (the built-in) and the five defaults on; vaplayer, insertunit, vidout off.
         for (f in listOf("../routes/resolve-config.json", "../web/public/resolve-config.json", "../../routes/resolve-config.json", "../../web/public/resolve-config.json")) {
             val file = File(f).takeIf { it.exists() } ?: continue
             val shipped = ResolveConfig.parse(file.readText())
-            assertEquals(f, 4, shipped.version)
+            assertEquals(f, ResolveConfig().version, shipped.version)
             assertEquals(f, ResolveConfig.DEFAULT_PREWARM, shipped.prewarm)
         }
     }

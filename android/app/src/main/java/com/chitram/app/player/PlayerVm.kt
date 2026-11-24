@@ -2011,7 +2011,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         internal fun vmDownExtras(down: List<String>, up: List<String>, running: List<String>): List<String> =
             down.filter { it !in up && it !in running }
 
-        private val CHECK_LABELS = mapOf("mapple" to "Mapple", "vaplayer" to "VaPlayer", "castletv" to "CastleTV", "multimovies" to "MultiMovies", "netmirror" to "NetMirror", "showsst" to "showsst", "onetouchtv" to "OneTouchTV", "vidrift" to "Vidrift")
+        private val CHECK_LABELS = mapOf("mapple" to "Mapple", "vaplayer" to "VaPlayer", "castletv" to "CastleTV", "multimovies" to "MultiMovies", "netmirror" to "NetMirror", "showsst" to "showsst", "onetouchtv" to "OneTouchTV", "vidrift" to "Vidrift", "insertunit" to "Insertunit", "vidout" to "VIDOUT")
         const val DEVICE_GRACE_MS = 3_000L
         /** When the backend gave nothing: wait for on-device rows up to their own budgets. */
         const val DEVICE_WAIT_MS = 30_000L

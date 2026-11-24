@@ -36,6 +36,9 @@ class OnDeviceResolver(
     private val onetouch: OneTouchTvResolver? = api?.let { OneTouchTvResolver(it.client) },
     /** Vidrift Orion (RRR Telugu): VM down/failed only, like MultiMovies. */
     private val vidrift: VidriftResolver? = api?.let { VidriftResolver(it.client) },
+    /** Insertunit and VIDOUT (MultiMovies servers, tagged Telugu masters): VM down/failed only, like Vidrift. */
+    private val insertunit: InsertunitResolver? = api?.let { InsertunitResolver(it.client) },
+    private val vidout: VidoutResolver? = api?.let { VidoutResolver(it.client) },
     /**
      * TMDB id for OneTouchTV's matched title (the server's IMDB cross-check,
      * utils/tmdbTitleToImdb.js, on TMDB ids). Default asks /api/search; null
@@ -81,7 +84,8 @@ class OnDeviceResolver(
     /** The providers [launch] starts, in its order. MultiMovies only when the VM is not expected to answer. */
     fun names(vmDown: Boolean): List<String> =
         listOf(MAPPLE, VAPLAYER) + listOfNotNull(NETMIRROR.takeIf { netmirror != null }, CASTLE.takeIf { castle != null }, MULTIMOVIES.takeIf { vmDown && multimovies != null },
-            SHOWSST.takeIf { vmDown && showsst != null }, ONETOUCH.takeIf { vmDown && onetouch != null }, VIDRIFT.takeIf { vmDown && vidrift != null })
+            SHOWSST.takeIf { vmDown && showsst != null }, ONETOUCH.takeIf { vmDown && onetouch != null }, VIDRIFT.takeIf { vmDown && vidrift != null },
+            INSERTUNIT.takeIf { vmDown && insertunit != null }, VIDOUT.takeIf { vmDown && vidout != null })
 
     fun launch(scope: CoroutineScope, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, preferred: String = "Telugu", title: String? = null, vmDown: Boolean = false): List<Deferred<Source?>> =
         names(vmDown).map { n -> scope.async { resolveOne(n, type, id, season, episode, codecs, preferred, fresh = false, title = title) } }
@@ -159,6 +163,7 @@ class OnDeviceResolver(
         if (!fresh && kotlin.coroutines.coroutineContext[Prewarming] == null) claimWarm(name, type, id, season, episode, preferred)?.let { w -> return awaitWarm(name, w, later) }
         if (name == MULTIMOVIES) return resolveMultiMovies(type, id, season, episode, codecs, fresh, originalLang)
         if (name == VIDRIFT) return resolveVidrift(type, id, season, episode, codecs, fresh, originalLang)
+        if (name == INSERTUNIT || name == VIDOUT) return resolveTagged(name, type, id, season, episode, codecs, fresh)
         if (name == SHOWSST || name == ONETOUCH) return resolveRows(name, type, id, season, episode, codecs, fresh, title)
         if (name != NETMIRROR) return listOfNotNull(resolveOne(name, type, id, season, episode, codecs, preferred, fresh, title, later))
         if (!fresh && isOpen(name)) return emptyList()
@@ -228,6 +233,25 @@ class OnDeviceResolver(
         }.orEmpty()
     }
 
+    /** Insertunit / VIDOUT: one tagged master each, bounded by its budget (server budgetMs). */
+    private suspend fun resolveTagged(name: String, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, fresh: Boolean): List<Source> {
+        if (!fresh && isOpen(name)) return emptyList()
+        if (name == INSERTUNIT && insertunit == null || name == VIDOUT && vidout == null) return emptyList()
+        return guarded(name) {
+            var timedOut = true
+            val r = withTimeoutOrNull(TAGGED_BUDGET_MS + 2_000) {
+                val out = if (name == INSERTUNIT) {
+                    val imdb = withTimeoutOrNull(TITLE_WAIT_MS) { runCatching { imdbFor(type, id) }.getOrNull() }
+                    insertunit!!.resolveAll(type, id, imdb, season, episode, budgetMs = TAGGED_BUDGET_MS)
+                } else vidout!!.resolveAll(type, id, season, episode, budgetMs = TAGGED_BUDGET_MS)
+                timedOut = false
+                out
+            }
+            if (timedOut) throw StepException(name, 0, "budget ${TAGGED_BUDGET_MS}ms spent")
+            r.orEmpty().map { toSource(it, codecs) }
+        }.orEmpty()
+    }
+
     /**
      * showsst / OneTouchTV: every row, bounded by its budget, never throws. A
      * progressive (MP4) row stays progressive, or media3 would parse it as HLS.
@@ -263,7 +287,7 @@ class OnDeviceResolver(
         finally { if (later != null && !later.handedOff) later.deliver(null) }
 
     private suspend fun resolveOneNow(name: String, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, preferred: String, fresh: Boolean, title: String?, later: MappleResolver.Later?): Source? {
-        if (name == NETMIRROR || name == MULTIMOVIES || name == SHOWSST || name == ONETOUCH || name == VIDRIFT) return com.chitram.app.data.Ranking.rank(resolveAll(name, type, id, season, episode, codecs, preferred, fresh, title), preferred).firstOrNull()
+        if (name == NETMIRROR || name == MULTIMOVIES || name == SHOWSST || name == ONETOUCH || name == VIDRIFT || name == INSERTUNIT || name == VIDOUT) return com.chitram.app.data.Ranking.rank(resolveAll(name, type, id, season, episode, codecs, preferred, fresh, title), preferred).firstOrNull()
         if (!fresh && isOpen(name)) {
             android.util.Log.i("Chitram", "on-device $name: skipped, breaker open")
             return null
@@ -635,7 +659,7 @@ class OnDeviceResolver(
         return try {
             block().also {
                 breakers.remove(name)
-                android.util.Log.i("Chitram", "on-device $name: ${if (it != null && (it as? Collection<*>)?.isEmpty() != true) "ok" else "none"} in ${now() - t0}ms")
+                android.util.Log.i("Chitram", "on-device $name: ${if (it != null && (it as? Collection<*>)?.isEmpty() != true) "ok" else "none"} in ${now() - t0}ms${rowsSuffix(it)}")
             }
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
@@ -674,6 +698,10 @@ class OnDeviceResolver(
         const val SHOWSST = "showsst"
         const val ONETOUCH = "onetouchtv"
         const val VIDRIFT = "vidrift"
+        const val INSERTUNIT = "insertunit"
+        const val VIDOUT = "vidout"
+        /** Server insertunit/vidout budgetMs: page or catalogue + master together. */
+        const val TAGGED_BUDGET_MS = 12_000L
         const val SHOWSST_BUDGET_MS = 15_000L
         const val ONETOUCH_BUDGET_MS = 20_000L
         const val CASTLE_BUDGET_MS = 25_000L
@@ -692,7 +720,15 @@ class OnDeviceResolver(
             SHOWSST -> SHOWSST
             ONETOUCH -> ONETOUCH
             VIDRIFT -> VIDRIFT
+            INSERTUNIT -> INSERTUNIT
+            VIDOUT -> VIDOUT
             else -> null
+        }
+        /** ` rows=N langs=[..]` for a list of rows (the audio languages each row carries), else empty. */
+        internal fun rowsSuffix(result: Any?): String {
+            val rows = (result as? List<*>)?.filterIsInstance<Source>() ?: return ""
+            if (rows.isEmpty()) return ""
+            return " rows=${rows.size} langs=[${rows.flatMap { it.audioLanguages ?: it.languages }.distinctBy { it.lowercase() }.joinToString(",")}]"
         }
         /** `[race] cache hit:` (kept rows) and `[race] continuing prewarm:` (live jobs), each only when not empty. */
         fun raceLines(kept: List<String>, jobs: List<String>): List<String> =

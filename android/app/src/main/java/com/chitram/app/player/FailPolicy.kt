@@ -13,15 +13,15 @@ import com.chitram.app.data.Source
  * fault: wait for the connection instead of failing through every source.
  *
  * A VM row of a provider the device can also resolve (CastleTV, MultiMovies,
- * showsst, OneTouchTV, Vidrift)
+ * showsst, OneTouchTV, Vidrift, Insertunit, VIDOUT)
  * is re-resolved on the device once, at the same position (DEVICE), before a
  * VM refresh: the VM may be the thing that failed (cooperative-APK plan).
  */
 object FailPolicy {
     enum class Action { REFRESH, RERESOLVE, FAILOVER, WAIT_ONLINE, DEVICE }
 
-    /** Providers with an on-device resolver for VM rows (OnDeviceResolver.CASTLE, MULTIMOVIES, SHOWSST, ONETOUCH, VIDRIFT). */
-    private val DEVICE_TWINS = setOf("castletv", "multimovies", "showsst", "onetouchtv", "vidrift")
+    /** Providers with an on-device resolver for VM rows (OnDeviceResolver.CASTLE, MULTIMOVIES, SHOWSST, ONETOUCH, VIDRIFT, INSERTUNIT, VIDOUT). */
+    private val DEVICE_TWINS = setOf("castletv", "multimovies", "showsst", "onetouchtv", "vidrift", "insertunit", "vidout")
 
     /** A CDN timeout cannot be repaired by attaching the identical NetMirror URL again. */
     fun unchangedNetmirrorRetry(previous: Source, fresh: Source): Boolean {

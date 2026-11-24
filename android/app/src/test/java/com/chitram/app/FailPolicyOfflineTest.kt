@@ -21,7 +21,7 @@ class FailPolicyOfflineTest {
     // on-device resolver (CastleTV, MultiMovies, showsst, OneTouchTV, Vidrift)
     // re-resolves on the device once. Only MultiMovies skips it after delivery.
     @Test fun vmTwinProvidersReResolveOnDevice() {
-        for (p in listOf("castletv", "CastleTV", "multimovies", "showsst", "OneTouchTV", "onetouchtv", "vidrift")) {
+        for (p in listOf("castletv", "CastleTV", "multimovies", "showsst", "OneTouchTV", "onetouchtv", "vidrift", "insertunit", "vidout")) {
             assertTrue(p, FailPolicy.hasDeviceTwin(p))
             val row = com.chitram.app.data.Source("vm-$p", p, p, "https://vm/m3u8-proxy?url=x", false, "1080p", emptyList(), listOf("Telugu"), false, false, emptyList(), null, null, false)
             assertEquals(p, FailPolicy.Action.DEVICE, FailPolicy.onError(row, null, refreshedOnce = false))
