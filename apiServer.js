@@ -18,7 +18,7 @@ const { resolveMany } = require('./lib/media/capabilities');
 const streamHeaders = require('./lib/media/streamHeaders');
 const { verifyTopStreams, prewarmTopStreams, verifiable: verifiableRow } = require('./lib/media/segmentVerify');
 const { registerCapabilityRoutes } = require('./routes/capabilities');
-const { createProxyRoutes, processStreamsForProxy } = require('./proxy/proxyServer');
+const { createProxyRoutes, processStreamsForProxy, warmPlaylists } = require('./proxy/proxyServer');
 const { routeStreams, surfaceAllows, surfaceOf, surfaceOnDevice } = require('./lib/routing/providerRoutes');
 const canaryMod = require('./lib/selfheal/canary');
 // MultiMovies hub (lib/mmhub): per-server health, canary, learned ranking,
@@ -493,6 +493,22 @@ const providerEmptyCache = createTtlCache({
 // provider again: two NetMirror probes in seconds, and NetMirror throttles per
 // IP. Joiners get the same outcome; only the caller that started the fetch
 // records it in the breaker and the caches.
+// Fast start (2026-11-24): the playlists a player reads first for the top
+// Telugu rows served through /m3u8-proxy are fetched into the proxy's
+// playlist cache while the answer travels, so the open reads them from VM
+// memory (proxy/proxyServer.js warmPlaylists). Background only, two rows max.
+const WARM_ROWS = 2;
+function warmTeluguPlaylists(streams, tmdbId) {
+  if (process.env.NODE_TEST_CONTEXT) return;
+  const rows = (streams || []).filter((s) => s && typeof s.url === 'string' && s.url.includes('/m3u8-proxy?')
+    && lastKnownGood.isTelugu(s)).slice(0, WARM_ROWS);
+  for (const s of rows) {
+    const t0 = Date.now();
+    warmPlaylists(s.url).then((n) => { if (n) console.log(`[warm] ${s.provider} ${tmdbId} playlists=${n} in ${Date.now() - t0}ms`); },
+      () => {});
+  }
+}
+
 const providerInflight = new Map();
 function fetchProviderShared(prov, ck, ctx, { titleIsResolvable, titleKey }) {
   const running = providerInflight.get(ck);
@@ -851,8 +867,9 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
       // The memo holds the order from when it was built. Re-rank on every
       // read so a playback report that landed since takes effect now, not
       // after STREAMS_MEMO_MS.
-      return res.json({ ...cached,
-        streams: sortStreamsCanonically(cached.streams, { tmdbId, type, season, episode }), cached: true });
+      const ranked = sortStreamsCanonically(cached.streams, { tmdbId, type, season, episode });
+      warmTeluguPlaylists(ranked, tmdbId);
+      return res.json({ ...cached, streams: ranked, cached: true });
     }
     metrics.memoMisses = (metrics.memoMisses || 0) + 1;
     const tmdbType = type === 'movie' ? 'movie' : 'tv';
@@ -1325,6 +1342,7 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
       console.log(`[api] memo-ondevice-error tmdbId=${tmdbId} ignored=${erroredProviders.filter((n) => !cacheBlockingErrors.includes(n)).join(',')}`
         + ` cached=${!late.length && !cacheBlockingErrors.length}`);
     }
+    warmTeluguPlaylists(streams, tmdbId);
     res.json(payload);
   } catch (e) {
     metrics.lastError = e.message;

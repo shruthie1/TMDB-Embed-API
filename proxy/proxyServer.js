@@ -9,6 +9,8 @@ const https = require('https');
 const { publicBase } = require('../lib/runtime/publicBase');
 const headerTokens = require('../lib/routing/headerTokens');
 const { playlistCompression } = require('./playlistCompression');
+const playlistTextCache = require('./playlistTextCache');
+const hlsManifest = require('../lib/media/hlsManifest');
 
 // node-fetch without an explicit agent uses a small default connection pool per
 // host. HLS is connection-hungry (a playlist warm-up plus the segment the player
@@ -661,6 +663,59 @@ setInterval(() => {
     rateStats.ts = 0; rateStats.m3u8 = 0; rateStats.urls.clear();
 }, 10000).unref();
 
+// Fetch one playlist into playlistTextCache (no client attached). Shared with
+// a client request for the same key that arrives while it runs.
+const playlistWarming = new Map(); // key -> Promise<text|null>
+function warmOne(url, headers) {
+    const key = playlistTextCache.keyOf(url, headers);
+    const hit = playlistTextCache.get(url, headers);
+    if (hit != null) return Promise.resolve(hit);
+    if (playlistWarming.has(key)) return playlistWarming.get(key);
+    if (throttledUntil(url) || deadStatusFor(url)) return Promise.resolve(null);
+    const p = (async () => {
+        const r = await fetchWithTimeout(url, { headers: { 'User-Agent': DEFAULT_UA, ...headers } });
+        noteUpstreamStatus(url, r.status);
+        if (!r.ok) { discardBody(r); noteThrottle(url, r.status); return null; }
+        const text = await readBodyWithTimeout(r, BODY_STALL_MS, 'text');
+        playlistTextCache.put(url, headers, text);
+        return text;
+    })().catch(() => null).finally(() => playlistWarming.delete(key));
+    playlistWarming.set(key, p);
+    return p;
+}
+
+/**
+ * Warm the playlists a player reads first for one proxied HLS row: the master,
+ * then its lowest video rung (hls.js starts there, useHls MANIFEST_PARSED) and
+ * the audio rendition in `lang` (Telugu by default; else the DEFAULT one).
+ * Background only; never throws. `proxyUrl` is the row's /m3u8-proxy url.
+ * Measured 2026-11-24: RRR's two 289 KB interkh playlists cost 0.55-1.45 s
+ * each from the VM on every open.
+ */
+async function warmPlaylists(proxyUrl, { lang = 'te' } = {}) {
+    let target; let headers = {};
+    try {
+        const u = new URL(proxyUrl);
+        if (!/\/m3u8-proxy$/.test(u.pathname)) return 0;
+        target = u.searchParams.get('url');
+        if (u.searchParams.get('rebase')) return 0;
+        headers = JSON.parse(u.searchParams.get('headers') || '{}');
+    } catch { return 0; }
+    if (!target || !/^https?:\/\//i.test(target)) return 0;
+    const master = await warmOne(target, headers);
+    if (!master || !hlsManifest.isMaster(master)) return master ? 1 : 0;
+    const levels = hlsManifest.parseLevels(master, target).filter((l) => l.url);
+    const lowest = levels.reduce((best, l) => (!best || (l.bandwidth || Infinity) < (best.bandwidth || Infinity) ? l : best), null);
+    const audio = hlsManifest.parseMedia(master, target, 'AUDIO')
+        .filter((a) => a.url && (!lowest || !lowest.audioGroup || a.groupId === lowest.audioGroup));
+    const want = String(lang || '').toLowerCase().slice(0, 2);
+    const pick = audio.find((a) => want && String(a.languageCode || '').toLowerCase().slice(0, 2) === want)
+        || audio.find((a) => a.isDefault) || null;
+    const jobs = [lowest && warmOne(lowest.url, headers), pick && warmOne(pick.url, headers)].filter(Boolean);
+    const got = await Promise.all(jobs);
+    return 1 + got.filter((t) => t != null).length;
+}
+
 function createProxyRoutes(app) {
     // m3u8 playlist proxy
     app.get('/m3u8-proxy', cors(), playlistCompression(), async (req, res) => {
@@ -695,19 +750,31 @@ function createProxyRoutes(app) {
                     reason: 'this link has expired; resolve the title again',
                 });
             }
-            mstage(`upstream fetch start ${targetUrl.slice(0, 80)}`);
-            const response = await fetchWithTimeout(targetUrl, { signal: gone.signal, headers: { 'User-Agent': DEFAULT_UA, ...headers } });
-            mstage(`upstream headers status=${response.status}`);
-            noteUpstreamStatus(targetUrl, response.status);
-            if (!response.ok) {
-                discardBody(response);
-                noteThrottle(targetUrl, response.status);
-                noteDeadUrl(targetUrl, response.status);
-                return res.status(response.status).json({ error: `M3U8 fetch failed: ${response.status}` });
+            // A VOD playlist read in the last few minutes (or warmed when its
+            // row was resolved, warmPlaylists) comes from memory.
+            let text = playlistTextCache.get(targetUrl, headers);
+            if (text == null && playlistWarming.has(playlistTextCache.keyOf(targetUrl, headers))) {
+                text = await playlistWarming.get(playlistTextCache.keyOf(targetUrl, headers)).catch(() => null);
+                if (text != null) mstage('joined warm fetch');
             }
-            urlStrikes.delete(String(targetUrl));
-            const text = await readBodyWithTimeout(response, BODY_STALL_MS, 'text');
-            mstage(`body read ${text.length}b`);
+            if (text != null) {
+                mstage(`playlist cache hit ${text.length}b`);
+            } else {
+                mstage(`upstream fetch start ${targetUrl.slice(0, 80)}`);
+                const response = await fetchWithTimeout(targetUrl, { signal: gone.signal, headers: { 'User-Agent': DEFAULT_UA, ...headers } });
+                mstage(`upstream headers status=${response.status}`);
+                noteUpstreamStatus(targetUrl, response.status);
+                if (!response.ok) {
+                    discardBody(response);
+                    noteThrottle(targetUrl, response.status);
+                    noteDeadUrl(targetUrl, response.status);
+                    return res.status(response.status).json({ error: `M3U8 fetch failed: ${response.status}` });
+                }
+                urlStrikes.delete(String(targetUrl));
+                text = await readBodyWithTimeout(response, BODY_STALL_MS, 'text');
+                mstage(`body read ${text.length}b`);
+                playlistTextCache.put(targetUrl, headers, text);
+            }
             const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
             const baseProxyUrl = publicBase(req, protocol);
             // A hybrid's audio playlist carries `rebase=1&pts=<n>`; everything
@@ -1179,6 +1246,7 @@ function processStreamsForProxy(streams, serverUrl) {
 }
 
 module.exports = {
+    warmPlaylists,
     createProxyRoutes, processStreamsForProxy, rewriteM3u8, extractOriginalUrl,
     inferContentType, sniffSegmentType, completeCodecs,
     // Exposed for tests.
