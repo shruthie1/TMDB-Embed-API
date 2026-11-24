@@ -1360,7 +1360,8 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     staleRefresh.reset();
   }, [title.mediaType, title.tmdbId, season, episode, staleRefresh]);
 
-  // Startup server switch (15 s, once per stream): lib/player/useStartupSwitch.js.
+  // Startup server switch (15 s, longer while bytes arrive, cap 45 s; once per
+  // stream): lib/player/useStartupSwitch.js.
   // A direct->proxy fallback on the same row bumps routeFallbacks and re-arms it.
   useStartupSwitch({ stream, restartKey: routeFallbacks, videoRef, usedRef: startupFallbackUsedRef,
     startedRef, sourceListRef, currentSourceRef, recoverBySwitchingRef });

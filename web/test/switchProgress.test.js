@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  SWITCH_NO_LIFE_MS, SWITCH_HARD_MS, SWITCH_FLOW_GAP_MS, SWITCH_FLOWING_MAX_MS, beginSourceSwitch, tickSourceSwitch,
+  SWITCH_NO_LIFE_MS, SWITCH_HARD_MS, SWITCH_FLOW_GAP_MS, SWITCH_FLOWING_MAX_MS, beginSourceSwitch, tickSourceSwitch, bytesFlowing,
 } from '../lib/player/switchFlow';
 
 // 2026-11-24: a NetMirror mp4 (bcdnxw) has a 7,323,216-byte moov at the front of a
@@ -35,5 +35,17 @@ describe('switch watchdog measures progress, not a fixed 8 s', () => {
 
   it('no progress reported: the old 8 s rule is unchanged', () => {
     expect(tickSourceSwitch(begin(), { streamKey: NEW, now: SWITCH_NO_LIFE_MS }).verdict).toBe('dead');
+  });
+});
+
+describe('bytesFlowing: the shared rule for the switch and startup watchdogs', () => {
+  it('progress inside the gap after the start is flowing', () => {
+    expect(bytesFlowing({ since: 0, lastProgressAt: 9000, now: 9000 + SWITCH_FLOW_GAP_MS - 1 })).toBe(true);
+  });
+  it('gap passed, or progress before the start, is not flowing', () => {
+    expect(bytesFlowing({ since: 0, lastProgressAt: 9000, now: 9000 + SWITCH_FLOW_GAP_MS })).toBe(false);
+    expect(bytesFlowing({ since: 5000, lastProgressAt: 4999, now: 5000 })).toBe(false);
+    expect(bytesFlowing({ since: 0, lastProgressAt: 0, now: 100 })).toBe(true);
+    expect(bytesFlowing({ since: 1, now: 100 })).toBe(false);
   });
 });

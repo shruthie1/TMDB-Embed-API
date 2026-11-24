@@ -42,6 +42,15 @@ export const SWITCH_FLOW_GAP_MS = 3000;
 export const SWITCH_FLOWING_MAX_MS = 45000;
 
 /**
+ * True when a `progress` event arrived after `since` and within the last
+ * SWITCH_FLOW_GAP_MS. Shared by the switch watchdog and the first-play startup
+ * watchdog (useStartupSwitch).
+ */
+export function bytesFlowing({ since, lastProgressAt = 0, now = Date.now() }) {
+  return lastProgressAt >= since && now - lastProgressAt < SWITCH_FLOW_GAP_MS;
+}
+
+/**
  * Any sign the new stream is alive. `videoWidth` is left out on purpose: the
  * element keeps the PREVIOUS source's dimensions after a failed attach
  * (measured on 1408162, videoWidth read 1722 with VaPlayer down).
@@ -86,7 +95,7 @@ export function tickSourceSwitch(state, { streamKey, frames = false, alive = fal
   // `direct`: the row is still on its web-direct attempt. Its own 10 s timer
   // (useHls, DIRECT_FIRST_FRAME_MS) moves it to the proxied url and the clock is
   // re-armed then, so the no-life rule must not kill it first (re-review I-A).
-  const flowing = attached && lastProgressAt >= state.startedAt && now - lastProgressAt < SWITCH_FLOW_GAP_MS;
+  const flowing = attached && bytesFlowing({ since: state.startedAt, lastProgressAt, now });
   if (elapsed >= (flowing ? SWITCH_FLOWING_MAX_MS : SWITCH_HARD_MS) || (attached && !direct && elapsed >= SWITCH_NO_LIFE_MS && !alive && !flowing)) {
     return { state: null, verdict: 'dead' };
   }
