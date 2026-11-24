@@ -312,6 +312,14 @@ registerCapabilityRoutes(app);
 // The endpoint is unauthenticated and the browser is not trusted: a malformed
 // report is refused or clamped, never stored as sent. Returns null when the
 // report cannot be keyed to a title and provider.
+const STARTUP_OUTLIER_MS = 120000;
+function startupOf(value) {
+  if (value == null || value === '') return 0;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  if (n < 0 || n > STARTUP_OUTLIER_MS) return null;
+  return Math.round(n);
+}
 function clampPlaybackReport(b) {
   b = b && typeof b === 'object' ? b : {};
   const tmdbId = Number(b.tmdbId);
@@ -335,7 +343,10 @@ function clampPlaybackReport(b) {
     // `ok` is the field the player has always sent; playedOk is the new name.
     ok: (b.playedOk ?? b.ok) === true,
     reason: str(b.reason, 60) || (b.ok === true || b.playedOk === true ? null : 'unknown'),
-    startupMs: boundedInt(b.startupMs),
+    // A4: VM 2026-11-20..24 had startups up to 687390 ms (a backgrounded or
+    // paused player). Over 120 s or negative is an outlier, stored as null so
+    // it never reads as a real startup. Missing stays 0 as before.
+    startupMs: startupOf(b.startupMs),
     // Nullable: an older client sends no waitMs, and 0 would read as instant.
     waitMs: b.waitMs == null ? null : boundedInt(b.waitMs),
     stallCount: boundedInt(b.stallCount, 1000),
@@ -369,7 +380,7 @@ app.post('/api/playback-report', (req, res) => {
     }
     if (!r.ok) evictReportedRow(r);
     console.log(`[learn] playback-report ${r.ok ? 'ok' : 'fail'} ${r.type}/${r.tmdbId} s${r.season}e${r.episode} `
-      + `provider=${r.provider} identity=${r.mediaIdentity ? 'yes' : 'no'} startupMs=${r.startupMs}`
+      + `provider=${r.provider} identity=${r.mediaIdentity ? 'yes' : 'no'} startupMs=${r.startupMs === null ? `outlier(${String(req.body && req.body.startupMs).slice(0, 12)})` : r.startupMs}`
       + `${r.langOk === null ? '' : ` langOk=${r.langOk}`}`);
     res.json({ ok: true });
   } catch (e) {
@@ -600,6 +611,17 @@ function evictReportedRow(r) {
   const hit = providerHitCache.delete(`${r.provider}|${titleKey}`);
   const memo = streamsMemo.deleteWhere((k) => k.startsWith(`${titleKey}:`));
   console.log(`[cache] playback-report fail ${r.provider} ${titleKey}: provider rows ${hit ? 'dropped' : 'none'}, memo answers dropped=${memo}`);
+}
+// A3: a heal that moves a provider's host drops the rows cached on the old
+// one, and a master 404 the proxy sees on a provider's own host counts toward
+// that provider's heal (providers/registry.js noteProxyStatus).
+{
+  const { evictHostRows } = require('./lib/selfheal/evictOnHeal');
+  require('./utils/upstreamBase').onHostApplied((name, applied, previous) => {
+    const n = evictHostRows({ providerHitCache, providerEmptyCache, streamsMemo }, name, previous);
+    console.log(`[cache] heal ${name} ${previous} -> ${applied}: dropped rows=${n.hits} empties=${n.empties} memo=${n.memo}`);
+  });
+  require('./proxy/proxyServer').onUpstreamStatus((url, status) => require('./providers/registry').noteProxyStatus(url, status));
 }
 setInterval(() => {
   streamsMemo.prune(); providerHitCache.prune(); providerEmptyCache.prune();

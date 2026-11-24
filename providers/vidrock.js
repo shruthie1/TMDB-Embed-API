@@ -13,6 +13,8 @@
 //      aes-256-ctr with IV||00000002 is the same transform.
 //   3. Fetches the decrypted master with the same headers and keeps it when it
 //      has an #EXT-X-STREAM-INF variant; quality comes from the top variant.
+//      Unlike the scraper, a media playlist (#EXTINF, no variants) is kept
+//      too, as one Auto row (streamFromMaster).
 // Left out on purpose:
 //   - domains.json from raw.githubusercontent.com/sapariyaneel/nuvio-plugin: a
 //     third party's file that would pick the api host at run time. The host is
@@ -99,11 +101,16 @@ function tierOf(width, height) {
 }
 
 // Pure: the row for one server entry whose master was fetched. Exported for tests.
+// A media playlist (#EXTINF segments, no #EXT-X-STREAM-INF) is playable on its
+// own and becomes a single-variant row with quality Auto. The scraper dropped
+// it; VM logs 2026-11-20..24 showed 6 of 8 servers dropped as "no variants".
+// Anything else (HTML error page, empty body) is still no row.
 function streamFromMaster(server, entry, url, masterText) {
     const levels = hls.parseLevels(masterText, url);
-    if (!levels.length) return null;
+    const single = !levels.length && hls.isMedia(masterText);
+    if (!levels.length && !single) return null;
     // The scraper took the highest-BANDWIDTH variant.
-    const top = levels.slice().sort((a, b) => (b.bandwidth || 0) - (a.bandwidth || 0))[0];
+    const top = single ? {} : levels.slice().sort((a, b) => (b.bandwidth || 0) - (a.bandwidth || 0))[0];
     const quality = tierOf(top.width, top.height) || 'Auto';
     const audio = hls.parseMedia(masterText, url, 'AUDIO').map((m) => ({
         language: m.languageCode && !/^(und|unk|mul)$/i.test(m.languageCode) ? m.languageCode : (m.name || null),
@@ -185,9 +192,12 @@ async function getVidrockStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
                 r = await get();
             }
             if (!r.ok) throw new Error(`HTTP ${r.status}`);
-            const row = streamFromMaster(name, entry, url, await r.text());
-            if (!row) console.log(`[vidrock] ${name}: master has no variants, dropped`);
-            else console.log(`[vidrock] ${name}: ${row.quality} lang=${row.languages.join('/') || 'und'} stated=${row.statedLanguage || '-'} audio=${row.audio.length}`);
+            const text = await r.text();
+            const row = streamFromMaster(name, entry, url, text);
+            if (!row) {
+                const kind = /^\s*</.test(text) ? 'html' : (!text.trim() ? 'empty' : (/^#EXTM3U/.test(text.trim()) ? 'playlist-no-segments' : 'other'));
+                console.log(`[vidrock] ${name}: master not playable (${kind}, ${text.length}b), dropped`);
+            } else console.log(`[vidrock] ${name}: ${row.quality}${row.levels.length ? '' : ' single-variant'} lang=${row.languages.join('/') || 'und'} stated=${row.statedLanguage || '-'} audio=${row.audio.length}`);
             return row;
         } catch (e) {
             console.log(`[vidrock] ${name}: master unreadable, dropped: ${e.message}`);

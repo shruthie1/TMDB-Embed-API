@@ -39,8 +39,28 @@ test('Nova row: 1080p, unconfirmed English not claimed, no switchable audio, vid
     assert.deepEqual(row.headers, HEADERS);
 });
 
-test('a media playlist (no variants) yields no row', () => {
-    assert.equal(streamFromMaster('Lyra', NOVA, NOVA_URL, '#EXTM3U\n#EXTINF:4,\na.ts\n'), null);
+// VM logs 2026-11-20..24: 6 of 8 servers were dropped as "master has no
+// variants". A media playlist (#EXTINF segments) is playable on its own, so it
+// is kept as a single-variant row. The stated language stays a hint only.
+test('a media playlist (no variants) is kept as one Auto row, language not invented', () => {
+    const row = streamFromMaster('Lyra', NOVA, NOVA_URL, '#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\na.ts\n#EXTINF:4,\nb.ts\n#EXT-X-ENDLIST\n');
+    assert.ok(row, 'a playable media playlist was dropped');
+    assert.equal(row.quality, 'Auto');
+    assert.equal(row.container, 'hls');
+    assert.equal(row.url, NOVA_URL);
+    assert.deepEqual(row.languages, []);
+    assert.equal(row.statedLanguage, 'English');
+    assert.deepEqual(row.levels, []);
+    assert.equal(row.selectableAudio, false);
+    const n = normaliseStream(row);
+    assert.deepEqual(n.languages, []);
+    assert.equal(n.quality, 'Auto');
+});
+
+test('a body that is not a playlist (HTML error page, empty) still yields no row', () => {
+    assert.equal(streamFromMaster('Atlas', NOVA, NOVA_URL, '<!DOCTYPE html><html><head><title>502</title></head></html>'), null);
+    assert.equal(streamFromMaster('Atlas', NOVA, NOVA_URL, ''), null);
+    assert.equal(streamFromMaster('Atlas', NOVA, NOVA_URL, '#EXTM3U\n#EXT-X-ENDLIST\n'), null);
 });
 
 test('master AUDIO renditions are declared when present', () => {

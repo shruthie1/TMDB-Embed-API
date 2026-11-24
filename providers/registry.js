@@ -244,6 +244,37 @@ function startRediscover(providerInfo, module) {
   });
 }
 
+// A3 (VM 2026-11-21..22): vidrift's masters answered 404 on /m3u8-proxy for
+// ~16 h after a host move, while its resolves were classed title-empty, so
+// the request-path streak never filled and the heal came 14 h late. A master
+// 404/410 seen by the proxy on a provider's current base host now counts on a
+// separate streak (a resolve ok does not reset it; a proxy 2xx on that host
+// does). Crossing FAIL_STREAK starts the same rediscover, under its cooldown.
+const proxyStreak = new Map();
+function hostOfUrl(u) { try { return new URL(u).host; } catch { return null; } }
+function noteProxyStatus(url, status) {
+  const host = hostOfUrl(url);
+  if (!host) return;
+  const s = Number(status) || 0;
+  const gone = s === 404 || s === 410;
+  const ok = s >= 200 && s < 300;
+  if (!gone && !ok) return;
+  for (const info of providerFiles) {
+    const module = loadProvider(info.file);
+    const u = module && module.UPSTREAM;
+    if (!u) continue;
+    const base = upstream.getBase(u.name, u.seed);
+    if (hostOfUrl(base) !== host) continue;
+    if (ok) { proxyStreak.delete(u.name); continue; }
+    const n = (proxyStreak.get(u.name) || 0) + 1;
+    proxyStreak.set(u.name, n);
+    if (n < upstream.FAIL_STREAK) continue;
+    proxyStreak.delete(u.name);
+    console.warn(`[registry] ${info.name} proxy master ${s} x${n} on ${base} - rediscovering`);
+    startRediscover(info, module);
+  }
+}
+
 /**
  * The canary's heal (Task 7/8): one run for a host or key failure, under the
  * same cooldowns and the same verify as the request path. Returns
@@ -454,4 +485,4 @@ function getProvider(name) {
 
 function getCookieStats() { return lastCookieStats; }
 
-module.exports = { listProviders, getProvider, getCookieStats, PROVIDER_DEADLINE_MS, healNow, verifyTitleOf, _noteUpstream: noteUpstream, _checkLegacy: checkLegacy, _makeVerify: makeVerify };
+module.exports = { listProviders, getProvider, getCookieStats, PROVIDER_DEADLINE_MS, healNow, verifyTitleOf, noteProxyStatus, _resetProxyStreaks: () => proxyStreak.clear(), _noteUpstream: noteUpstream, _checkLegacy: checkLegacy, _makeVerify: makeVerify };

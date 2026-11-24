@@ -556,6 +556,15 @@ function mediaCacheControl(req, status) {
 function pipeUpstream(resp, res, label) {
     const body = resp.body;
     if (!body) { res.end(); return; }
+    // The client can hang up while the upstream headers are in flight. Its
+    // 'close' event has then already fired, so the res.on('close') below would
+    // never run and only the 25 s stall watchdog freed the socket. VM logs
+    // 2026-11-20..24: 104 of 115 "stalled" lines followed a CLIENT ABORTED.
+    if (res.destroyed || res.closed || res.writableEnded) {
+        console.log(`[proxy] client gone, upstream cancelled (${label}, before pipe)`);
+        discardBody(resp);
+        return;
+    }
     let settled = false;
     // Only a body that did NOT drain normally may be destroyed. Destroying one
     // that read to completion tears down the keep-alive socket instead of
@@ -592,6 +601,12 @@ function pipeUpstream(resp, res, label) {
         clearStall();
         stallTimer = setTimeout(() => {
             if (settled) return;
+            // A stall only counts while someone is still waiting for the bytes.
+            if (res.destroyed || res.closed) {
+                console.log(`[proxy] client gone, upstream cancelled (${label}, idle)`);
+                cleanup();
+                return;
+            }
             console.warn(`[${label}] upstream body stalled ${BODY_STALL_MS}ms, dropping`);
             cleanup(new Error('upstream body stalled'));
         }, BODY_STALL_MS);
@@ -602,13 +617,28 @@ function pipeUpstream(resp, res, label) {
     body.on('data', armStall);
     body.on('end', () => { settled = true; clearStall(); });
     body.on('error', (e) => { clearStall(); cleanup(e); });
-    res.on('close', () => { clearStall(); cleanup(); });
+    res.on('close', () => {
+        clearStall();
+        if (!settled) console.log(`[proxy] client gone, upstream cancelled (${label}, mid-body)`);
+        cleanup();
+    });
     armStall();
     body.pipe(res);
 }
 
 let tsProxySeq = 0;
 let m3u8Seq = 0;
+
+// Listeners told the upstream status of each /m3u8-proxy fetch. apiServer
+// feeds it to the provider registry so a master 404 on a provider's own host
+// counts toward its heal (A3, vidrift host move 2026-11-21).
+const upstreamStatusListeners = new Set();
+function onUpstreamStatus(fn) { upstreamStatusListeners.add(fn); return () => upstreamStatusListeners.delete(fn); }
+function noteUpstreamStatus(url, status) {
+    for (const fn of upstreamStatusListeners) {
+        try { fn(url, status); } catch (e) { console.warn(`[proxy] status listener failed: ${e.message}`); }
+    }
+}
 
 // Rate telemetry. A runaway client loop is only visible as a RATE and as a
 // repeat-count per URL - a per-request line just buries it. Summarise every
@@ -665,6 +695,7 @@ function createProxyRoutes(app) {
             mstage(`upstream fetch start ${targetUrl.slice(0, 80)}`);
             const response = await fetchWithTimeout(targetUrl, { signal: gone.signal, headers: { 'User-Agent': DEFAULT_UA, ...headers } });
             mstage(`upstream headers status=${response.status}`);
+            noteUpstreamStatus(targetUrl, response.status);
             if (!response.ok) {
                 discardBody(response);
                 noteThrottle(targetUrl, response.status);
@@ -979,6 +1010,9 @@ function createProxyRoutes(app) {
             const cfCookie = cfCookieFor(targetUrl);
             const cfUa = process.env.CF_CLEARANCE_UA;
             const upstreamOptions = {
+                // The client hanging up must cancel this fetch too. Every other
+                // fetch in this route passed gone.signal; this one did not.
+                signal: gone.signal,
                 headers: {
                     'User-Agent': DEFAULT_UA,
                     ...headers,
@@ -1048,7 +1082,11 @@ function createProxyRoutes(app) {
             if (debug) console.log('[ts-proxy] streaming body', { status: resp.status, ct: upstreamCT, cl, contentRange: force200 ? undefined : contentRange });
             stage('piping body');
             pipeUpstream(resp, res, `ts-proxy#${reqId}`);
-        } catch (e) { if (debug) console.log('[ts-proxy] exception', e.message); if (!res.headersSent) res.status(500).json({ error: e.message }); }
+        } catch (e) {
+            if (gone.signal.aborted) { console.log(`[proxy] client gone, upstream cancelled (ts-proxy#${reqId}, before headers)`); return; }
+            if (debug) console.log('[ts-proxy] exception', e.message);
+            if (!res.headersSent) res.status(500).json({ error: e.message });
+        }
     });
 
     // subtitle proxy
@@ -1140,5 +1178,7 @@ module.exports = {
     createProxyRoutes, processStreamsForProxy, rewriteM3u8, extractOriginalUrl,
     inferContentType, sniffSegmentType, completeCodecs,
     // Exposed for tests.
+    _pipeUpstream: pipeUpstream,
+    onUpstreamStatus,
     _segmentCache: { cacheSegment, getCachedSegment, stats: () => ({ entries: segmentCache.size, bytes: segmentCacheBytes, maxBytes: CACHE_MAX_BYTES }) },
 };

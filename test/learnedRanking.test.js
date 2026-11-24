@@ -67,7 +67,9 @@ test('sink clamps every numeric field', async () => {
     assert.strictEqual(r.status, 200);
     const row = getStore().sourceStatsFor({ tmdbId: 4242, type: 'movie' })[0];
     assert.strictEqual(row.provider, 'castletv');
-    assert.strictEqual(row.startup_ms, 86400000);
+    // A4: a startup over 120 s (VM max 687390 ms, a backgrounded app) is an
+    // outlier, stored as null, not as a real startup.
+    assert.strictEqual(row.startup_ms, null);
     assert.strictEqual(row.stall_count, 1000);
     assert.strictEqual(row.stall_ms, 0);
     assert.strictEqual(row.recovery_count, 0);
@@ -75,6 +77,16 @@ test('sink clamps every numeric field', async () => {
     assert.strictEqual(row.play_device.length, 24);
     assert.strictEqual(row.audio_lang, null, 'a non-language string is not stored');
     assert.ok(row.played_ok_at > 0);
+});
+
+test('A4: startupMs over 120000 or negative is stored as null; in range is kept', async () => {
+    const cases = [[120001, null], [687390, null], [-5, null], [120000, 120000], [3179, 3179]];
+    for (const [i, [sent, want]] of cases.entries()) {
+        const id = 4300 + i;
+        assert.strictEqual((await report({ tmdbId: id, type: 'movie', provider: 'castletv', playedOk: true, startupMs: sent })).status, 200);
+        const row = getStore().sourceStatsFor({ tmdbId: id, type: 'movie' })[0];
+        assert.strictEqual(row.startup_ms, want, `startupMs ${sent}`);
+    }
 });
 
 test('a langOk=false report writes viewer evidence keyed on the media identity', async () => {

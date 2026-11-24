@@ -254,6 +254,7 @@ function verifyLegacy(name, verify, budgetMs) {
                 delete e.legacy;
                 e.checkedAt = Date.now();
                 console.warn(`[upstream] heals legacy-adopt ${name} ${base}`);
+                notifyHostApplied(name, base, lastSeed.get(name));
             } else {
                 delete load()[name];
                 console.warn(`[upstream] heals legacy-drop ${name} ${base}${r.timedOut ? ' (verify timed out)' : ''}`);
@@ -291,6 +292,23 @@ function noteOk(name) {
     if (now - (persistedCheck.get(name) || 0) > CHECK_PERSIST_MS) {
         persistedCheck.set(name, now);
         save();
+    }
+}
+
+// Listeners told when a provider's host changes (rediscover apply or a
+// legacy host passing its verify). apiServer drops cached rows on the old
+// host there: VM 2026-11-22 served 25 dead embed.vidrift.net rows after the
+// heal had moved vidrift to .in.
+const hostListeners = new Set();
+/** fn(name, applied, previous). Returns an unsubscribe function. */
+function onHostApplied(fn) {
+    hostListeners.add(fn);
+    return () => hostListeners.delete(fn);
+}
+function notifyHostApplied(name, applied, previous) {
+    if (!previous || strip(previous) === strip(applied)) return;
+    for (const fn of hostListeners) {
+        try { fn(name, strip(applied), strip(previous)); } catch (err) { console.warn(`[heal] ${name} host listener failed: ${err.message}`); }
     }
 }
 
@@ -494,6 +512,7 @@ async function rediscover(name, opts = {}, callDeps = {}) {
             // `previous` is logged so a bad apply can be undone from the log alone.
             console.warn(`[upstream] ${name}: applied ${c.url} (previous ${current}, via ${c.how})`);
             console.warn(`[heal] ${name} adopt ${c.url} via ${c.how}`);
+            notifyHostApplied(name, c.url, current);
             if (typeof opts.onApplied === 'function') {
                 try { await opts.onApplied(c.url); } catch (err) { console.warn(`[heal] ${name} onApplied failed: ${err.message}`); }
             }
@@ -549,7 +568,7 @@ function _reset() {
 module.exports = {
     getBase, isHealed, withBase, pinned, noteOk, noteFail, failStreak, legacyPending, verifyLegacy,
     setField, getField, dropField, allFields,
-    rediscover, triggerRediscover, pending, verifyCapped,
+    rediscover, triggerRediscover, pending, verifyCapped, onHostApplied,
     followRedirect, apiHostsFromPlayer, slugHostFromAggregator,
     FAIL_STREAK, TTL_MS, COOLDOWN_MS, VERIFY_BUDGET_MS, _reset, _setDeps,
 };
