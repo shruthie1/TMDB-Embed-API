@@ -104,6 +104,17 @@ describe('refresh journey state', () => {
     expect(refreshLabel(m, t0 + 5000)).toBe('Refresh again in 25s');
     expect(refreshLabel(m, t0 + REFRESH_COOLDOWN_MS)).toBe('Refresh sources');
   });
+  it('counts Telugu tagged by code (te, tel) as Telugu; untagged and Original never count', () => {
+    const rows = [
+      { masterUrl: 'a', audio: [{ language: 'tel' }] },
+      { masterUrl: 'b', audio: [{ language: 'te' }] },
+      { masterUrl: 'c', audioTracks: [{ language: 'TE' }] },
+      { masterUrl: 'd', languages: ['Original'], audio: [{ language: null, name: 'Audio' }] },
+      { masterUrl: 'e', languages: [] },
+      { masterUrl: 'f', audio: [{ language: 'tam' }] },
+    ];
+    expect(refreshOutcome(new Set(['old']), rows, false, 'Telugu')).toBe('Updated: 6 sources (3 Telugu)');
+  });
   it('no change, failed, empty, and a press in the cooldown', () => {
     const rows = [{ masterUrl: 'u1', languages: ['Telugu'] }];
     expect(refreshOutcome(new Set(['u1']), rows, false)).toBe('No new sources');

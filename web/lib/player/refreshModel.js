@@ -1,3 +1,5 @@
+import { languageName } from '../subtitles';
+
 /**
  * "Refresh sources" journey (owner 2026-11-22), the same words and states as
  * the APK's RefreshModel.kt:
@@ -46,7 +48,10 @@ export const refreshFinish = (m, now, note) => ({ ...m, running: false, note, no
 export const refreshBlocked = (m, now, readyAt) =>
   ({ ...m, running: false, note: RefreshCopy.cooldown(readyAt - now), noteUntil: now + REFRESH_NOTE_MS, readyAt });
 
-const sameLang = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+// A row may name its language ("Telugu") or tag it by code ("te", "tel"):
+// both are the same language. languageName resolves codes; names pass through.
+const langKey = (l) => String(languageName(String(l || '').trim()) || '').trim().toLowerCase();
+const sameLang = (a, b) => Boolean(a) && Boolean(b) && langKey(a) === langKey(b);
 const langsOf = (s) => [...(s?.languages || []), ...(s?.audioLanguages || []),
   ...((s?.audio || []).map((a) => a?.language)), ...((s?.audioTracks || []).map((t) => t?.language || t?.name))]
   .filter(Boolean);
