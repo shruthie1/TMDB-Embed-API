@@ -89,6 +89,22 @@ function mkCanary(s, rowsFor, extra = {}) {
     return { c, logs, advance: (ms) => { now += ms; }, at: () => now };
 }
 
+test('canary: partial answers and outages preserve Telugu memory; a later complete answer recovers',async()=>{
+ const s=store.openStore(':memory:');let answer=[te('https://x/te.m3u8')];
+ const k=mkCanary(s,()=>{if(answer instanceof Error)throw answer;return answer;});
+ await k.c.runDue();
+ for(const incomplete of [Object.assign([ru('https://x/ru.m3u8')],{upstreamError:'quota'}),new Error('quota')]){
+  answer=incomplete;
+  for(let i=0;i<5;i++){k.advance(6*3600e3);await k.c.runDue();}
+  assert.equal(s.canaryGet('mm:insertunit:579974').telugu_ok,1);
+  assert.equal(s.canaryGet('mm:insertunit:579974').fails,0);
+  assert.equal(state.snapshot().servers['GD mirror'].state,'degraded');
+ }
+ answer=[te('https://x/te.m3u8')];k.advance(6*3600e3);await k.c.runDue();
+ assert.equal(state.snapshot().servers['GD mirror'].state,'ok');
+ s.close();
+});
+
 test('canary: pass -> ok, next run in 6 h, Telugu remembered', async () => {
     const s = store.openStore(':memory:');
     const k = mkCanary(s, () => [te('https://x/m.m3u8')]);
@@ -186,7 +202,8 @@ test('canary: a resolve error on every title, or on a title with Telugu before, 
     k.advance(6 * 3600e3);
     await k.c.runDue();
     assert.strictEqual(state.snapshot().servers['GD mirror'].state, 'degraded');
-    assert.match(s.canaryGet('mm:insertunit').last_error, /telugu missing Pushpa 2/);
+    assert.match(s.canaryGet('mm:insertunit').last_error, /error Pushpa 2/);
+    assert.equal(s.canaryGet('mm:insertunit:857598').telugu_ok,1,'an outage does not prove a language disappeared');
 });
 
 test('canary: not due -> no resolve', async () => {

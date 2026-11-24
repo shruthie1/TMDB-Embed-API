@@ -51,6 +51,25 @@ function setup(providers, extra = {}) {
     return { canary, store, outcomes, heals, lines, advance: (ms) => { t += ms; }, now: () => t };
 }
 
+test('partial primary answers do not pass the canary or clear Telugu memory; the next complete run recovers',async()=>{
+ let partial=true;
+ const p=fakeProvider('vidrift',{default:()=>partial?Object.assign([...EN],{upstreamError:'quota'}):TE});
+ const s=setup([p]);s.store.canaryPut('vidrift',{telugu_ok:1});
+ await s.canary.tick();
+ assert.equal(s.store.canaryGet('vidrift').state,'down');assert.equal(s.store.canaryGet('vidrift').telugu_ok,1);
+ assert.equal(s.heals.length,0);assert.equal(s.outcomes.length,0);
+ partial=false;s.advance(7*HOUR);await s.canary.tick();
+ assert.equal(s.store.canaryGet('vidrift').state,'ok');assert.equal(s.outcomes.length,1);
+ s.store.close();
+});
+test('an incomplete extra language check preserves a previous Telugu baseline',async()=>{
+ const p=fakeProvider('multimovies',{'27205':EN,'784572':Object.assign([...EN],{upstreamError:'timeout'})});
+ const s=setup([p]);s.store.canaryPut('multimovies',{telugu_ok:1});
+ await s.canary.tick();
+ assert.equal(s.store.canaryGet('multimovies').telugu_ok,1);
+ assert.equal(s.heals.length,0);s.store.close();
+});
+
 test('(a) one tick runs exactly one provider', async () => {
     const a = fakeProvider('castletv', { default: EN });
     const b = fakeProvider('showsst', { default: EN });

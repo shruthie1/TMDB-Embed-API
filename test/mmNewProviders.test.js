@@ -23,6 +23,54 @@ test('Nexus quota response stops requests and subsequent calls respect cooldown'
  await assert.rejects(()=>nexus.getNexusStreams('579974'),/quota/);
  await assert.rejects(()=>nexus.getNexusStreams('579974'),/cooldown/);assert.equal(calls,1);
 });
+test('Nexus recognizes Cloudflare 1027 hosting limits and honors HTTP-date Retry-After',async()=>{
+ let calls=0,clock=Date.UTC(2026,10,24);nexus._deps.now=()=>clock;
+ nexus._deps.catalog=async()=>({servers:[{name:'Nexus',url:'https://nexus.example/movie/579974'}]});
+ nexus._deps.read=async()=>{calls++;return {status:503,text:'Error 1027: The owner has reached their plan limits.',retryAfter:new Date(clock+7200_000).toUTCString()};};
+ await assert.rejects(()=>nexus.getNexusStreams('579974'),e=>e.status===429&&e.retryAfter===7200&&e.rule==='quota');
+ clock+=3600_000;
+ await assert.rejects(()=>nexus.getNexusStreams('27205'),/cooldown/);assert.equal(calls,1);
+ clock+=3600_001;
+ nexus._deps.read=async()=>{calls++;return {status:404,text:''};};
+ assert.equal((await nexus.getNexusStreams('27205')).notListed,true);assert.equal(calls,2);
+});
+test('Nexus keeps a tagged manifest when a later CDN reaches quota; next call makes no requests',async()=>{
+ let requests=0;nexus._deps.catalog=async()=>({servers:[{name:'Nexus',url:'https://nexus.example/movie/579974'}]});
+ nexus._deps.read=async(url,options)=>{requests++;
+  if(options.method==='POST')return {status:200,text:'1:{"token":"t","nonce":"n","timestamp":1}'};
+  if(url.includes('/api/extract?'))return {status:200,text:JSON.stringify({servers:[{url:'https://cdn.example/a.m3u8'},{url:'https://cdn.example/b.m3u8'},{url:'https://cdn.example/c.m3u8'}]})};
+  return url.endsWith('/a.m3u8')?{status:200,text:master}:{status:429,text:'quota',retryAfter:'600'};};
+ const rows=await nexus.getNexusStreams('579974');assert.equal(rows.length,1);assert.deepEqual(rows[0].languages,['Telugu']);assert.ok(rows.upstreamError);
+ assert.equal(requests,4);await assert.rejects(()=>nexus.getNexusStreams('27205'),/cooldown/);assert.equal(requests,4);
+});
+test('a partial child answer remains partial through the mirror wrapper',async()=>{
+ const {resolveLinked}=require('../lib/mmhub/linkedResolver');
+ const child=Object.assign([{url:'https://cdn.example/a.m3u8',audio:[{languageCode:'te'}]}],{upstreamError:'child timeout'});
+ const rows=await resolveLinked('https://cine.example/embed',{tmdbId:'579974',type:'movie'},
+  {provider:'cineverse',display:'Cineverse',seedText:'<iframe src="https://api.insertunit.ws/embed/579974"></iframe>',resolveService:async()=>child});
+ assert.equal(rows.length,1);assert.deepEqual(rows[0].languages,['Telugu']);assert.ok(rows.upstreamError);
+});
+test('Nexus tries the next manifest after a transport failure and registry normalization keeps the partial marker',async()=>{
+ const seen=[];nexus._deps.catalog=async()=>({servers:[{name:'Nexus',url:'https://nexus.example/movie/579974'}]});
+ nexus._deps.read=async(url,options)=>{
+  seen.push(url);
+  if(options.method==='POST')return {status:200,text:'1:{"token":"t","nonce":"n","timestamp":1}'};
+  if(url.includes('/api/extract?'))return {status:200,text:JSON.stringify({servers:[{url:'https://cdn.example/fails.m3u8'},{url:'https://cdn.example/works.m3u8'}]})};
+  if(url.endsWith('/fails.m3u8'))throw new Error('ETIMEDOUT');
+  return {status:200,text:master};
+ };
+ const provider=require('../providers/registry').getProvider('nexus');
+ const rows=await provider.fetch({tmdbId:'579974',type:'movie'});
+ assert.equal(rows.length,1);assert.deepEqual(rows[0].languages,['Telugu']);assert.ok(rows.upstreamError);
+ assert.ok(seen.at(-1).endsWith('/works.m3u8'));
+});
+test('a quota on a later linked page keeps prior results and stops subsequent requests',async()=>{
+ const {resolveLinked}=require('../lib/mmhub/linkedResolver');const calls=[];
+ const rows=await resolveLinked('https://cine.example/embed',{tmdbId:'579974',type:'movie'},
+  {provider:'cineverse',display:'Cineverse',seedText:'<iframe src="https://api.insertunit.ws/embed/579974"></iframe><iframe src="https://quota.example/embed"></iframe><iframe src="https://never.example/embed"></iframe>',
+   resolveService:async()=>[{url:'https://cdn.example/a.m3u8',audio:[{languageCode:'te'}]}],read:async url=>{calls.push(url);return {status:429,text:'quota'};}});
+ assert.equal(rows.length,1);assert.ok(rows.upstreamError);assert.deepEqual(calls,['https://quota.example/embed']);
+});
 test('public challenge solver is bounded, abortable and never sends an unproven answer',async()=>{
  assert.equal(await nexus.solve('seed','ffffff',{maxIterations:0}),null);
  const controller=new AbortController();controller.abort(new Error('cancelled'));

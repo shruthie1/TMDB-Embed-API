@@ -38,6 +38,18 @@ function captureRediscover(t) {
 }
 const info = (name, fn) => ({ name, file: `${name}.js`, functionName: fn });
 
+test('quota observations neither discover hosts nor seed the next DNS failure streak',t=>{
+ const calls=captureRediscover(t);
+ const {_noteUpstream}=require('../providers/registry');
+ const mod=require('../providers/vidrift');
+ for(let i=0;i<up.FAIL_STREAK;i++)_noteUpstream(info('vidrift','getVidriftStreams'),mod,'fail',{tmdbId:'579974'},new Error('Error 1027: The owner has reached their plan limits.'));
+ assert.equal(calls.length,0);assert.equal(up.failStreak('vidrift'),0);
+ _noteUpstream(info('vidrift','getVidriftStreams'),mod,'fail',{tmdbId:'579974'},new Error('getaddrinfo ENOTFOUND embed.vidrift.net'));
+ assert.equal(calls.length,0);assert.equal(up.failStreak('vidrift'),1);
+ for(let i=1;i<up.FAIL_STREAK;i++)_noteUpstream(info('vidrift','getVidriftStreams'),mod,'fail',{tmdbId:'579974'},new Error('getaddrinfo ENOTFOUND embed.vidrift.net'));
+ assert.equal(calls.length,1);
+});
+
 test('Task 8 (a): 5 mapple failures with a Cloudflare body: zero rediscover calls', (t) => {
     const calls = captureRediscover(t);
     const { _noteUpstream } = require('../providers/registry');

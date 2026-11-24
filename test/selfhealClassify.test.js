@@ -72,6 +72,14 @@ test('429 / throttle is down', () => {
     assert.strictEqual(classify({ status: 429 }), 'down');
     assert.strictEqual(classify({ message: 'multimovies: vidbolt resolve failed for 1: HTTP 429' }), 'down');
 });
+test('hosting quotas are down/quota even when Cloudflare uses a non-429 status',()=>{
+ const {shouldHeal}=require('../lib/selfheal/classify');
+ for(const input of [
+  {status:503,body:'Error 1027: The owner has reached their plan limits.'},
+  {message:'Nexus upstream quota reached',status:429},
+  {message:'GD mirror quota cooldown active'},
+ ]){assert.deepStrictEqual(explain(input),{kind:'down',rule:'quota'});assert.equal(shouldHeal(explain(input)),false);}
+});
 
 // Review I1: a streak of timeouts, resets or refused connections on one host
 // heals (the rule before batch 1); HTTP 403 (blocked), 429 (throttle) and

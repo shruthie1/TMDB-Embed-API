@@ -209,7 +209,6 @@ function noteUpstream(providerInfo, module, outcome, ctx, err = null) {
     ? String(ctx.tmdbId) === String(u.verifyTitle.tmdbId)
     : MAINSTREAM_IDS.has(String(ctx.tmdbId));
   if (outcome === 'empty' && !countsEmpty) return;
-  if (upstream.noteFail(u.name) < upstream.FAIL_STREAK) return;
   // Review I1: a Cloudflare challenge (blocked, incl. HTTP 403), a throttle
   // (HTTP 429) or a 5xx is not a move: rediscovering only spends requests.
   // A timeout or a reset streak may be a move, so it heals (the old rule).
@@ -220,6 +219,8 @@ function noteUpstream(providerInfo, module, outcome, ctx, err = null) {
       return;
     }
   }
+  // Quota/blocked/5xx observations must not seed a later host-failure streak.
+  if (upstream.noteFail(u.name) < upstream.FAIL_STREAK) return;
   console.warn(`[registry] ${providerInfo.name} failed ${upstream.failStreak(u.name)}x in a row on ${upstream.getBase(u.name, u.seed)} - rediscovering`);
   startRediscover(providerInfo, module);
 }

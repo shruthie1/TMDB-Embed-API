@@ -3,6 +3,7 @@ const crypto=require('node:crypto');
 const page=require('../lib/mmhub/page');
 const {fetchPublic}=require('../lib/mmhub/publishedSources');
 const tagged=require('../lib/media/taggedHlsRow');
+const {quotaError}=require('../lib/mmhub/upstreamFailure');
 const ACTION='6083fa9bf317439b0ab1f882f7ba7ccd49d1369361';
 // Public player-format key, not a user's credential. Kept server-side.
 const FORMAT_KEY='nexus-super-secret-key-999';
@@ -10,7 +11,7 @@ const UA=require('../lib/mmhub/linkedResolver').UA;
 const _deps={read:fetchPublic,catalog:page.read,now:Date.now};
 let blockedUntil=0;
 function tokenData(body){
- for(const line of String(body||'').split(/\r?\n/))if(/^1:/.test(line)){try{return JSON.parse(line.slice(2));}catch{}}
+ for(const line of String(body||'').split(/\r?\n/))if(/^1:/.test(line)){try{return JSON.parse(line.slice(2));}catch{/* Try subsequent RSC records, then a plain JSON response. */}}
  try{return JSON.parse(body);}catch{return null;}
 }
 function decodeUrl(value,key=FORMAT_KEY){
@@ -28,13 +29,11 @@ async function solve(seed,prefix='000',{deadline,signal,now=Date.now,maxIteratio
  return null;
 }
 function quota(response){
- if(response.status===429||/quota|daily.{0,20}limit|rate.{0,10}limit|limit.{0,10}exceed/i.test(String(response.text||'').slice(0,1500))){
-  blockedUntil=_deps.now()+Math.min(3600_000,Math.max(60_000,Number(response.retryAfter)*1000||15*60_000));
-  throw Object.assign(new Error('Nexus upstream quota reached'),{status:429,retryAfter:Math.ceil((blockedUntil-_deps.now())/1000)});
- }
+ const error=quotaError(response,'Nexus',_deps.now());
+ if(error){blockedUntil=_deps.now()+error.retryAfter*1000;throw error;}
 }
 async function getNexusStreams(tmdbId,mediaType='movie',season=null,episode=null){
- if(blockedUntil>_deps.now())throw Object.assign(new Error('Nexus quota cooldown active'),{status:429});
+ if(blockedUntil>_deps.now())throw Object.assign(new Error('Nexus quota cooldown active'),{status:429,kind:'down',rule:'quota',retryAfter:Math.ceil((blockedUntil-_deps.now())/1000)});
  const type=mediaType==='movie'?'movie':'tv';if(type==='tv'&&!(season&&episode))return Object.assign([],{notListed:true});
  const deadline=_deps.now()+16000;
  const signal=AbortSignal.timeout(16000);
@@ -69,9 +68,16 @@ async function getNexusStreams(tmdbId,mediaType='movie',season=null,episode=null
  }
  const rows=[];
  for(const candidate of candidates.slice(0,6)){
-  const master=await read(candidate.url,{headers:candidate.headers});if(master.status!==200)continue;
-  const row=tagged.rowFromMaster(master.text,candidate.url,{provider:'nexus',display:'Nexus',headers:candidate.headers});
-  if(row)rows.push({...row,providerGroup:'MultiMovies',serverLabel:'Nexus'});
+  try {
+   const master=await read(candidate.url,{headers:candidate.headers});
+   if(master.status!==200){rows.upstreamError=`Nexus manifest HTTP ${master.status}`;continue;}
+   const row=tagged.rowFromMaster(master.text,candidate.url,{provider:'nexus',display:'Nexus',headers:candidate.headers});
+   if(row)rows.push({...row,providerGroup:'MultiMovies',serverLabel:'Nexus'});
+   else rows.upstreamError='Nexus manifest format unavailable';
+  }catch(error){
+   rows.upstreamError='Nexus manifest discovery incomplete';
+   if(error.status===429||signal.aborted||_deps.now()>=deadline){if(!rows.length)throw error;break;}
+  }
  }
  if(!rows.length)throw new Error('Nexus returned no supported media manifests');
  return rows;
