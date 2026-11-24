@@ -36,3 +36,27 @@ object DetailLayout {
     const val WIDE_TEXT_COLUMN = 162f
     const val WIDE_BOTTOM = 16f
 }
+
+/**
+ * Play/Resume holds focus on the details page from the first frame (owner
+ * 2026-11-24: "focus on play and resume buttons on loading"). TV composed Play
+ * only after the title landed, so the skeleton held no focus and the root
+ * fallback put it on Back. Play is now composed in every state, as the same
+ * node, so loading -> loaded and Play -> Resume keep focus.
+ */
+object DetailFocus {
+    enum class Press { PLAY, QUEUE, RETRY }
+
+    /** What OK on the Play slot does: play, wait for the title, or retry a failed load. */
+    fun press(loaded: Boolean, failed: Boolean): Press = when {
+        loaded -> Press.PLAY
+        failed -> Press.RETRY
+        else -> Press.QUEUE
+    }
+
+    fun label(loaded: Boolean, failed: Boolean, playLabel: String): String =
+        if (!loaded && failed) "Try again" else playLabel
+
+    /** Ask for focus when the title lands only if Play never had it (a viewer on Back stays). */
+    fun focusOnLoad(playFocusedBefore: Int): Boolean = playFocusedBefore == 0
+}

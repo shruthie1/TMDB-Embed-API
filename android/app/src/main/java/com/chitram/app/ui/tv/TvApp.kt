@@ -146,6 +146,7 @@ import com.chitram.app.data.Credit
 import com.chitram.app.data.LanguagePrefs
 import com.chitram.app.data.Progress
 import com.chitram.app.data.Title
+import com.chitram.app.ui.common.DetailFocus
 import com.chitram.app.ui.common.Art
 import com.chitram.app.data.Api
 import com.chitram.app.ui.common.HeroTitle
@@ -889,7 +890,21 @@ private fun TvDetail(nav: Nav, type: String, id: Long) {
         // Play lives in a lazy item, composed during the first measure pass, after
         // this effect starts: a bare requestFocus() threw (swallowed), nothing held
         // focus and the next D-pad press fell to the rail's first item (Search).
-        if (t != null) LaunchedEffect(t.tmdbId) { playFocus.focusWhenAttached(); detailList.scrollToItem(0) }
+        // 2026-11-24 (owner: "focus on play and resume buttons on loading"): Play is
+        // composed in the skeleton too, so focus is asked on entry, not when the
+        // title lands (the skeleton held nothing and the root fallback took Back).
+        // The same node stays through loading -> loaded and Play -> Resume.
+        LaunchedEffect(type, id) { playFocus.focusWhenAttached(); detailList.scrollToItem(0) }
+        if (t != null) LaunchedEffect(t.tmdbId) {
+            if (DetailFocus.focusOnLoad(playFocusCount[0])) playFocus.focusWhenAttached()
+            detailList.scrollToItem(0)
+        }
+        // OK on the skeleton's Play: open the player once the title lands.
+        var playQueued by remember(type, id) { mutableStateOf(false) }
+        if (t != null && playQueued) LaunchedEffect(t.tmdbId) {
+            playQueued = false
+            vm.playRequest()?.let { nav.push(Screen.Player(it)) }
+        }
         // Compose's TV default pivots the focused item to 30% of the height,
         // which pushed the title off the top. Scroll only as far as needed and
         // return to the very top when Play takes focus.
@@ -905,21 +920,18 @@ private fun TvDetail(nav: Nav, type: String, id: Long) {
                         Brand()
                     }
                 }
-                if (t == null) {
-                    // An error still shows text; while loading, a skeleton shaped
-                    // like the head below (poster + title/meta/overview bars), so the
-                    // page does not jump when the title lands. Same static block fill
-                    // as CardSkeleton / the row skeletons.
-                    item(key = "loading") {
-                        if (vm.error != null) {
-                            Text(vm.error!!, color = Tok.textMuted, fontSize = TvWeb.DETAIL_META.pxSp, modifier = Modifier.padding(start = GUTTER, top = 16.dp))
-                        } else {
-                            DetailSkeleton()
-                        }
-                    }
-                    return@LazyColumn
-                }
                 item(key = "head") {
+                    // An error still shows text; while loading, a skeleton shaped
+                    // like the head (poster + title/meta/overview bars) in the same
+                    // hero box, so the page and Play do not jump when the title lands.
+                    // Same static block fill as CardSkeleton / the row skeletons.
+                    if (t == null) {
+                        Box(Modifier.fillMaxWidth().heightIn(min = (TvWeb.HERO_H - TvWeb.BTN_H - TvWeb.DETAIL_PAD_BOTTOM - 66f).px), contentAlignment = Alignment.BottomStart) {
+                            if (vm.error != null) Text(vm.error!!, color = Tok.textMuted, fontSize = TvWeb.DETAIL_META.pxSp, modifier = Modifier.padding(start = GUTTER, top = 16.dp))
+                            else DetailSkeleton()
+                        }
+                        return@item
+                    }
                     Column(Modifier.padding(horizontal = GUTTER)) {
                         // Hero: poster + text column, settled to the bottom of a 70vh block.
                         Box(Modifier.fillMaxWidth().heightIn(min = (TvWeb.HERO_H - TvWeb.BTN_H - TvWeb.DETAIL_PAD_BOTTOM - 66f).px), contentAlignment = Alignment.BottomStart) {
@@ -953,16 +965,24 @@ private fun TvDetail(nav: Nav, type: String, id: Long) {
                 }
                 item(key = "actions") {
                     // Lined up with the text column, clear of the poster (web padding-left 198px).
-                    Row(Modifier.padding(start = GUTTER + (if (t.poster != null) (TvWeb.DETAIL_POSTER_W + TvWeb.DETAIL_POSTER_GAP).px else 0.dp), top = 6.dp, bottom = TvWeb.DETAIL_PAD_BOTTOM.px),
+                    // While loading the skeleton has a poster box, so the row keeps the same start.
+                    // Play is the same node in every state (DetailFocus): it holds focus from entry.
+                    val failed = t == null && vm.error != null
+                    Row(Modifier.padding(start = GUTTER + (if (t == null || t.poster != null) (TvWeb.DETAIL_POSTER_W + TvWeb.DETAIL_POSTER_GAP).px else 0.dp), top = 6.dp, bottom = TvWeb.DETAIL_PAD_BOTTOM.px),
                         horizontalArrangement = Arrangement.spacedBy(TvWeb.ACTION_GAP.px)) {
-                        TvButton(vm.playLabel(), primary = true, modifier = Modifier.focusRequester(playFocus).onFocusChanged {
+                        TvButton(DetailFocus.label(t != null, failed, vm.playLabel()), primary = true, modifier = Modifier.focusRequester(playFocus).onFocusChanged {
                             if (it.isFocused) {
                                 scope.launch { detailList.animateScrollToItem(0) }
                                 if (++playFocusCount[0] > 1) vm.playFocused()
                             }
-                        }, icon = Icons.Filled.PlayArrow) {
-                            vm.playRequest()?.let { nav.push(Screen.Player(it)) }
+                        }, icon = if (failed) Icons.Filled.Replay else Icons.Filled.PlayArrow) {
+                            when (DetailFocus.press(t != null, failed)) {
+                                DetailFocus.Press.PLAY -> vm.playRequest()?.let { nav.push(Screen.Player(it)) }
+                                DetailFocus.Press.QUEUE -> playQueued = true
+                                DetailFocus.Press.RETRY -> vm.retry()
+                            }
                         }
+                        if (t == null) return@Row
                         if (vm.canStartOver) TvButton("Start over", primary = false, icon = Icons.Filled.Replay) {
                             vm.playRequest(fromStart = true)?.let { nav.push(Screen.Player(it)) }
                         }
@@ -979,6 +999,7 @@ private fun TvDetail(nav: Nav, type: String, id: Long) {
                             modifier = Modifier.align(Alignment.CenterVertically).semantics { liveRegion = androidx.compose.ui.semantics.LiveRegionMode.Polite })
                     }
                 }
+                if (t == null) return@LazyColumn
                 if (t.mediaType == "tv" && t.seasonList.isNotEmpty()) {
                     item(key = "seasons") {
                         Column(Modifier.padding(top = TvWeb.ROW_GAP.px)) {

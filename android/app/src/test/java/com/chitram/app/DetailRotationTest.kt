@@ -75,7 +75,7 @@ class DetailRotationTest {
         assertTrue(d.contains("Art(t?.backdrop, Api.BACKDROP_TV, Modifier.fillMaxSize()"))
         assertFalse(d.contains("fillMaxHeight(0.92f)"))
         // D-pad order follows the row: Play, Start over, My List, Refresh.
-        val iPlay = d.indexOf("TvButton(vm.playLabel()"); val iStart = d.indexOf("TvButton(\"Start over\""); val iList = d.indexOf("\"In My List\" else \"My List\""); val iRef = d.indexOf("TvButton(\"\", primary = false, icon = Icons.Filled.Refresh")
+        val iPlay = d.indexOf("TvButton(DetailFocus.label("); val iStart = d.indexOf("TvButton(\"Start over\""); val iList = d.indexOf("\"In My List\" else \"My List\""); val iRef = d.indexOf("TvButton(\"\", primary = false, icon = Icons.Filled.Refresh")
         assertTrue(iPlay in 0 until iStart && iStart < iList && iList < iRef)
         assertTrue("Play still takes the first focus", d.contains("playFocus.focusWhenAttached()"))
     }
