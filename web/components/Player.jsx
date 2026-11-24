@@ -590,6 +590,7 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   // Bumped by useHls when a web-direct row retries via its proxied url.
   const [routeFallbacks, setRouteFallbacks] = useState(0);
   const hls = useHls({ videoRef, stream, onFatal, config: hlsConfig,
+    audioTagsOnly: sources?.find(source => source.id === currentSourceId)?.audioTagsOnly,
     onRouteFallback: () => setRouteFallbacks((n) => n + 1),
     preferredLanguage: wantLang, onLanguage: setWantLang,
     onHlsReady: (h) => { hlsInstance.current = h; } });

@@ -80,7 +80,7 @@ export function muxedAudioLoader(Base, muxed) {
  * carrying it across a source switch offered rungs the new provider does not
  * have.
  */
-export function useHls({ videoRef, stream, onFatal, onHlsReady, onRouteFallback, config = {}, preferredLanguage, onLanguage }) {
+export function useHls({ videoRef, stream, onFatal, onHlsReady, onRouteFallback, config = {}, preferredLanguage, onLanguage, audioTagsOnly = false }) {
   const hlsRef = useRef(null);
   // The language the VIEWER last chose, which outranks the build-time default.
   //
@@ -98,8 +98,8 @@ export function useHls({ videoRef, stream, onFatal, onHlsReady, onRouteFallback,
   // Callbacks and config are new object identities on every render. Depending
   // on them re-ran this effect in a loop, destroying and rebuilding hls.js
   // until the tab ran out of memory. Only `stream` may trigger a re-attach.
-  const cbRef = useRef({ onFatal, onHlsReady, onRouteFallback, config });
-  cbRef.current = { onFatal, onHlsReady, onRouteFallback, config };
+  const cbRef = useRef({ onFatal, onHlsReady, onRouteFallback, config, audioTagsOnly });
+  cbRef.current = { onFatal, onHlsReady, onRouteFallback, config, audioTagsOnly };
   const [levels, setLevels] = useState([]);
   const [currentLevel, setCurrentLevel] = useState(-1);   // -1 = auto
   const [autoLevel, setAutoLevel] = useState(null);       // what ABR chose
@@ -247,12 +247,12 @@ export function useHls({ videoRef, stream, onFatal, onHlsReady, onRouteFallback,
             else if (found) {
               this.tracks = found;
               if (this.active()) {
-                const first = initialAudioTrack(found, wantLangRef.current);
+                const first = initialAudioTrack(found.map(t => ({ ...t, tagged: Boolean(cbRef.current.audioTagsOnly) })), wantLangRef.current);
                 this.slot = found[0].pid;
                 this.pid = found[first].pid;
                 if (!cancelled) {
                   setAudioTracks(found.map((t, i) => ({
-                    id: i, name: languageName(t.lang) || `Track ${i + 1}`, lang: t.lang,
+                    id: i, tagged: Boolean(cbRef.current.audioTagsOnly), name: languageName(t.lang) || `Track ${i + 1}`, lang: t.lang,
                   })));
                   setCurrentAudio(first);
                 }
@@ -311,7 +311,7 @@ export function useHls({ videoRef, stream, onFatal, onHlsReady, onRouteFallback,
         // An empty rendition list says nothing about tracks inside the TS.
         if (!list.length && muxed.active()) return;
         setAudioTracks(list.map((t, i) => ({
-          id: i, name: languageName(t.lang) || t.name || `Track ${i + 1}`,
+          id: i, tagged: Boolean(cbRef.current.audioTagsOnly), name: languageName(t.lang) || t.name || `Track ${i + 1}`,
           lang: t.lang || null,
         })));
         // A provider can publish one track as DEFAULT=NO (the supplied
@@ -320,7 +320,7 @@ export function useHls({ videoRef, stream, onFatal, onHlsReady, onRouteFallback,
         // Select only when hls.js has not already selected a valid track, so
         // an intentional player/user choice is never overwritten.
         if (list.length && hls.audioTrack < 0) {
-          hls.audioTrack = initialAudioTrack(list, wantLangRef.current);
+          hls.audioTrack = initialAudioTrack(list.map(t => ({ ...t, tagged: Boolean(cbRef.current.audioTagsOnly) })), wantLangRef.current);
         }
       };
       hls.on(Hls.Events.MANIFEST_PARSED, (_e, data) => {

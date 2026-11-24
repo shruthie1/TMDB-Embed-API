@@ -111,6 +111,7 @@ function tagOrNameLanguage(tag, name) {
 }
 
 export function trackAudioLanguage(track) {
+  if (track?.tagged) return isResolvedLanguage(track.lang || track.languageCode || track.language) ? String(displayLanguage(track.lang || track.languageCode || track.language)) : null;
   const language = track?.lang || track?.language;
   if (isKnownAudioLanguage(language) && !isResolvedLanguage(language)) {
     const named = tagOrNameLanguage(language, track?.name);
@@ -122,6 +123,7 @@ export function trackAudioLanguage(track) {
 
 /** Language of one audio[] entry: its tag first, then the tag and name read as labels (I1). */
 function renditionLanguage(entry) {
+  if (entry?.tagged) return isResolvedLanguage(entry.languageCode || entry.language || entry.lang) ? String(displayLanguage(entry.languageCode || entry.language || entry.lang)) : null;
   const tag = entry?.language || entry?.lang;
   const named = tagOrNameLanguage(tag, entry?.name);
   if (named) return named;
@@ -175,7 +177,7 @@ export function singleAudioLanguage(renditionLanguages = [], languages = []) {
 
 /** Playable audio evidence, never catalog availability alone. */
 export function sourceAudioLanguages(source) {
-  const languages = source?.languages || [];
+  const languages = source?.audioTagsOnly ? [] : source?.languages || [];
   const hasAudio = Array.isArray(source?.audio) && source.audio.length > 0;
   const real = Array.isArray(source?.audioLanguages) ? source.audioLanguages
     : Array.isArray(source?.audio) ? sourceAudioRenditions(source).map(r => r.language) : null;

@@ -93,7 +93,7 @@ export default function VideoMenu({
     : (currentSource || labels[0]);
   const incomplete = choices.some(c => c.source?.incomplete);
   const only = false;
-  const providerName = c => c.source?.provider || c.label || 'Stream';
+  const providerName = c => c.source?.providerGroup || c.source?.provider || c.label || 'Stream';
   const groups = new Map();
   choices.forEach(c => { const name = providerName(c); if (!groups.has(name)) groups.set(name, []); groups.get(name).push(c); });
   if (onCheckSources && ![...groups.keys()].some(k => k.toLowerCase() === 'netmirror')) groups.set('NetMirror', []);
@@ -142,7 +142,7 @@ export default function VideoMenu({
           ))}
           {provider && providerRows.map(c => {
             const i = choices.indexOf(c);
-            return <MenuRow key={`${c.id}-${i}`} label={labels[i]} meta={[c.source?.netmirrorCatalog, maxOf(c), c.embed ? '' : (sourceAudioLanguages(c.source).join(', ') || 'Unknown audio')].filter(Boolean).join(' · ')} selected={i === selectedIndex} dim={c.unsupported || refresh?.running}
+            return <MenuRow key={`${c.id}-${i}`} label={c.source?.serverLabel || labels[i]} meta={[c.source?.netmirrorCatalog, maxOf(c), c.embed ? '' : (sourceAudioLanguages(c.source).join(', ') || 'Unknown audio')].filter(Boolean).join(' · ')} selected={i === selectedIndex} dim={c.unsupported || refresh?.running}
               // APK A2: the playing row only closes the sheet.
               onClick={() => (i === selectedIndex ? onToggle?.() : onPick?.(c))} />;
           })}

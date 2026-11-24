@@ -222,6 +222,8 @@ export function toSource(s, i = 0) {
       : `${s.provider || 'src'}-${i}`,
     provider: s.provider || s.name || 'Unknown',
     label: s.title || s.provider || 'Stream',
+    providerGroup: s.providerGroup || null,
+    serverLabel: s.serverLabel || null,
     masterUrl: s.url,
     // The upstream url, only when the server's provider config says a browser
     // can fetch it without the proxy (lib/routing/providerRoutes.js). useHls
@@ -248,6 +250,7 @@ export function toSource(s, i = 0) {
     netmirrorCatalog: s.netmirrorCatalog || null,
     catalogLanguages: Array.isArray(s.catalogLanguages) ? s.catalogLanguages : [],
     audio: Array.isArray(s.audio) ? s.audio : [],
+    audioTagsOnly: Boolean(s.audioTagsOnly),
     // True only when the manifest really carries selectable renditions, so the
     // Audio menu is not offered on a stream that cannot switch.
     selectableAudio: Boolean(s.selectableAudio),

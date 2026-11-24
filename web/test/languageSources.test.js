@@ -157,3 +157,8 @@ describe('codec and channel words are not languages (post-review)', () => {
     expect(languageFromTrackName('TEL - Stereo')).toBe('Telugu');
   });
 });
+
+it('tag-only audio preserves its supplied name without promoting it to a language or preference match', () => {
+  const row={id:'tagged',provider:'insertunit',audioTagsOnly:true,selectableAudio:true,languages:['Telugu'],audio:[{tagged:true,language:null,languageCode:'und',name:'Telugu'}]};
+  expect(languageCandidates([row],'Telugu')).toEqual([]);
+});
