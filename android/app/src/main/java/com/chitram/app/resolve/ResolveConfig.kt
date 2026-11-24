@@ -389,8 +389,10 @@ class ResolveConfigStore(
         val c = cached()
         // Gap 1.6: a negative age (the clock was set back after the save) is stale, not fresh for ever.
         if (c != null && now() - c.at in 0 until lifeMs(c)) return c.cfg
-        if (now() - lastAttempt in 0 until RETRY_MS) return c?.cfg ?: ResolveConfig()
-        val job = synchronized(this) { inflight?.takeIf { it.isActive } ?: scope.async { refresh() }.also { inflight = it } }
+        // A refresh already running (refreshIfDueAsync set lastAttempt) is awaited, not skipped.
+        val running = synchronized(this) { inflight?.takeIf { it.isActive } }
+        if (running == null && now() - lastAttempt in 0 until RETRY_MS) return c?.cfg ?: ResolveConfig()
+        val job = running ?: synchronized(this) { inflight?.takeIf { it.isActive } ?: scope.async { refresh() }.also { inflight = it } }
         return withTimeoutOrNull(WAIT_MS) { job.await() } ?: current().also {
             android.util.Log.i("Chitram", "resolve-config: no answer in ${WAIT_MS}ms; using ${if (cached() != null) "cached" else "defaults"}, refresh continues")
         }
