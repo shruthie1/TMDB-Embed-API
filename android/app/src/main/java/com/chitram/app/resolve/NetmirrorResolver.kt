@@ -158,7 +158,7 @@ class NetmirrorResolver(
         }
         // Cheapest plan first: Netflix, Prime, Hotstar (any new catalogue after), one spelling at a
         // time across them; a catalogue is not searched again once it matched or failed. Play stops
-        // at the first catalogue that gives rows; a tap (Check, row pick) asks every catalogue.
+        // once a catalogue gives a Telugu row; a tap (Check, row pick) asks every catalogue.
         val order = catalogs.sortedBy { PLAN.indexOf(it).let { i -> if (i < 0) PLAN.size else i } }
         val spellings = TitleMatch.spellings(title)
         val done = mutableSetOf<String>()
@@ -213,8 +213,14 @@ class NetmirrorResolver(
                             }
                         }
                     if (out.size > before && !tap) {
-                        log("[netmirror] plan: $ott matched on spelling ${n + 1}/${spellings.size}, other catalogues not asked")
-                        break@plan
+                        // 1.2.67: Play stops only once a row carries Telugu (from the file's audio tags);
+                        // else it asks the next catalogue, one search at a time, each catalogue once.
+                        if (out.any(::hasTelugu)) {
+                            log("[netmirror] plan: $ott matched on spelling ${n + 1}/${spellings.size} with a Telugu row, other catalogues not asked")
+                            break@plan
+                        }
+                        val heard = out.subList(before, out.size).flatMap { it.languages }.distinctBy { it.lowercase() }.joinToString(",").ifEmpty { "no tags" }
+                        log("[netmirror] plan: $ott matched on spelling ${n + 1}/${spellings.size} with no Telugu row ($heard), asking the next catalogue")
                     }
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e
@@ -369,6 +375,8 @@ class NetmirrorResolver(
             token.split("::").getOrNull(2)?.takeIf { it.length == 10 && it.all(Char::isDigit) }?.toLongOrNull()?.times(1000)
         /** Catalogue order of the cheapest plan: Netflix, Prime Video, Hotstar. */
         internal val PLAN = listOf("nf", "pv", "hs")
+        /** A row whose audio tags (or single catalogue language) say Telugu; post.lang alone never counts. */
+        internal fun hasTelugu(r: Resolved): Boolean = r.languages.any { com.chitram.app.data.Ranking.languageLabel(it).equals("Telugu", true) }
         /** An empty search answer is kept 30 min, as on the server (NEWTV_EMPTY_TTL_MS). */
         const val EMPTY_SEARCH_TTL_MS = 30 * 60 * 1000L
         const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:136.0) Gecko/20100101 Firefox/136.0 /OS.GatuNewTV v1.0"

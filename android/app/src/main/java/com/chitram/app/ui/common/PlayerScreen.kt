@@ -370,7 +370,9 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
                 Menu.Quality -> if (isTv) vm.qualityItems() + fitItems(fit) else vm.qualityItems()
                 Menu.Subtitles -> vm.subtitleItems()
             }
-            val shown = if (m == Menu.Server && serverProvider.equals("netmirror", true)) items + MenuItem("check:netmirror", if (vm.checkingNetmirror) "Checking sources…" else "Check for more streams", vm.netmirrorNote ?: "Current playback continues") else items
+            // 1.2.67: every provider the device can resolve has a Check row with the real reason.
+            val checkName = if (m == Menu.Server) serverProvider?.let { com.chitram.app.resolve.OnDeviceResolver.nameFor(it) } else null
+            val shown = if (checkName != null) items + MenuItem("check:$checkName", if (vm.checking == checkName) "Checking sources…" else "Check for more streams", vm.checkNotes[checkName] ?: "Current playback continues") else items
             MenuPanel(m, shown, isTv, anchor = if (vm.phase is PlayerVm.Phase.Playing) menuAnchors[m] else null, titleOverride = if (m == Menu.Server) serverProvider else null,
                 onUp = if (m == Menu.Server && serverProvider != null) ({ serverProvider = null }) else null,
                 onClose = { menu = null }, onPick = { key ->
@@ -379,7 +381,7 @@ fun PlayerScreen(req: PlayRequest, isTv: Boolean, onBack: () -> Unit) {
                             serverProvider = key.removePrefix("group:")
                             if (serverProvider.equals("netmirror", true) && vm.serverItems(serverProvider).isEmpty()) vm.checkNetmirror()
                         }
-                        MenuTap.Check -> vm.checkNetmirror()
+                        MenuTap.Check -> vm.checkProvider(key.removePrefix("check:"))
                         // Stays in the list; focus stays on the row (same key) through refreshing and cooldown.
                         MenuTap.Refresh -> { vm.refreshSources(); refreshTick = System.currentTimeMillis() }
                         // TV picture fit: apply and stay in the sheet. Row keys do not change,

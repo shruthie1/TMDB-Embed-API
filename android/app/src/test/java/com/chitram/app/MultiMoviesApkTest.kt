@@ -637,4 +637,21 @@ class MultiMoviesApkTest {
         assertEquals("tel", MultiMoviesResolver.mpdAudioLang(mpdWith("tel")))
         assertNull(MultiMoviesResolver.mpdAudioLang(mpdWith(null)))
     }
+
+    // ---- 1.2.67: a partial answer is marked incomplete (kept 5 min, not 30) ---------
+
+    @Test fun aPartialAnswerIsMarkedIncomplete() = runBlocking {
+        serve(listOf("/dead.m3u8" to "Hindi", "/ok.m3u8" to "Telugu"), mapOf("/dead.m3u8" to null, "/ok.m3u8" to master(generic())))
+        val dropped = MultiMoviesResolver(OkHttpClient(), origin = base).resolveAll("movie", 1, 0, 0)
+        assertTrue("a dropped master", dropped.single().incomplete)
+        MultiMoviesResolver.resetServerState()
+        serve(listOf("/a.m3u8" to "Hindi", "/b.m3u8" to "Telugu"), mapOf("/a.m3u8" to master(generic()), "/b.m3u8" to master(generic())))
+        val full = MultiMoviesResolver(OkHttpClient(), origin = base).resolveAll("movie", 2, 0, 0)
+        assertEquals(2, full.size)
+        assertTrue("every server answered, every master landed", full.none { it.incomplete })
+        MultiMoviesResolver.resetServerState()
+        serveRrrAllServers(status = mapOf("quasar" to 429))
+        assertTrue("a 429 server", MultiMoviesResolver(OkHttpClient(), origin = base).resolveAll("movie", 579974, 0, 0).all { it.incomplete })
+        assertTrue("throttled: plain resolve only", MultiMoviesResolver(OkHttpClient(), origin = base).resolveAll("movie", 579974, 0, 0).all { it.incomplete })
+    }
 }

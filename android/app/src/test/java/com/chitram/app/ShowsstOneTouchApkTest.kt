@@ -124,7 +124,8 @@ class ShowsstOneTouchApkTest {
         val od = od(showsst = ShowsstResolver(OkHttpClient(), listOf(ShowsstResolver.Mirror(base, base))))
         // resolveAll never throws: a failure is a missing row and counts on the breaker.
         assertTrue(od.resolveAll(OnDeviceResolver.SHOWSST, "movie", 1, 0, 0, codecs).isEmpty())
-        repeat(2) { od.resolveAll(OnDeviceResolver.SHOWSST, "movie", 1, 0, 0, codecs) }
+        // 1.2.67: three titles in a row (the same title again counts once).
+        listOf(2L, 3L).forEach { od.resolveAll(OnDeviceResolver.SHOWSST, "movie", it, 0, 0, codecs) }
         assertTrue(od.isOpen(OnDeviceResolver.SHOWSST))
     }
 
@@ -246,9 +247,9 @@ class ShowsstOneTouchApkTest {
         assertEquals(2, first.size)
         detail404 = true
         assertEquals(first.map { it.resolved.url }, r.resolveAll("tv", 93405, "Squid Game", 2021, null, 1, 1).map { it.resolved.url })
-        // No last-good for another episode: retried once, then the 404 is a failure.
-        val fail = runCatching { r.resolveAll("tv", 93405, "Squid Game", 2021, null, 1, 2) }
-        assertTrue(fail.isFailure)
+        // No last-good for another episode: retried once, then the 404 is "not listed" (1.2.67: empty, never the breaker).
+        val again = runCatching { r.resolveAll("tv", 93405, "Squid Game", 2021, null, 1, 2) }
+        assertTrue(again.toString(), again.getOrNull()?.isEmpty() == true)
         // 1 good + 1 last-good + 2 (first try and the one retry).
         assertEquals(4, seen.count { it.path!!.endsWith("/detail") && it.path!!.contains("978626") })
     }

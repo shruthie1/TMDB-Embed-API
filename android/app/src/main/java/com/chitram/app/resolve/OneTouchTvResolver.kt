@@ -37,7 +37,7 @@ class OneTouchTvResolver(
     private val base: String = BASE,
     private val cinemeta: String = CINEMETA,
     private val notFoundRetryMs: Long = 1_000,
-    private val retryDelayMs: Long = 400,
+    private val retryDelayMs: Long = RETRY_DELAY_MS,
     private val now: () -> Long = System::currentTimeMillis,
 ) {
     private val http = client.newBuilder().callTimeout(STEP_TIMEOUT_MS, TimeUnit.MILLISECONDS).build()
@@ -66,7 +66,14 @@ class OneTouchTvResolver(
             lastGood(key)?.let { return it.also { log("last-good served for $key after HTTP 404 (${it.size} rows)") } }
             log("HTTP 404 for $key, no last-good; retrying once in ${notFoundRetryMs}ms")
             delay(notFoundRetryMs)
-            resolveOnce(type, tmdbId, title, year, imdbId, season, episode, verify).also { remember(key, it) }
+            try {
+                resolveOnce(type, tmdbId, title, year, imdbId, season, episode, verify).also { remember(key, it) }
+            } catch (again: StepException) {
+                if (again.code != 404) throw again
+                // 1.2.67: a 404 after a search hit is this title's answer, not a site outage: empty, never the breaker.
+                log("HTTP 404 again for $key: not listed")
+                emptyList()
+            }
         }
     }
 
@@ -183,6 +190,8 @@ class OneTouchTvResolver(
                 last = e
                 val code = (e as? StepException)?.code ?: 0
                 if (code in 400..499) break
+                // 1.2.67: a timed-out call is not asked again: 3 tries of a full step would not fit the budget.
+                if (e is java.io.InterruptedIOException) break
                 if (attempt < RETRIES) delay(retryDelayMs * (attempt + 1))
             }
         }
@@ -241,8 +250,10 @@ class OneTouchTvResolver(
         private const val API_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         /** No Referer: the hitv.ltd CDN 403s a foreign Referer (providers/onetouchtv.js STREAM_HEADERS). */
         val STREAM_HEADERS = mapOf("User-Agent" to "Mozilla/5.0")
-        private const val STEP_TIMEOUT_MS = 15_000L
-        private const val RETRIES = 2
+        /** 1.2.67: 3 tries (2 retries on fast 5xx/network errors, 1.2 s of back-off) fit the 20 s device budget. */
+        internal const val STEP_TIMEOUT_MS = 6_000L
+        internal const val RETRIES = 2
+        internal const val RETRY_DELAY_MS = 400L
         private const val LAST_GOOD_TTL_MS = 30 * 60 * 1000L
         private val KEY = "im72charPasswordofdInitVectorStm".toByteArray()
         private val IV = "im72charPassword".toByteArray()

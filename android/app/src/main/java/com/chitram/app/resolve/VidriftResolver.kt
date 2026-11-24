@@ -159,7 +159,8 @@ class VidriftResolver(
         if (failed.isNotEmpty()) android.util.Log.i("Chitram", "[vidrift] ${failed.size} master(s) dropped for $tmdbId: ${failed.joinToString("; ")}")
         android.util.Log.i("Chitram", "[vidrift] ${rows.size} row(s) for $tmdbId in ${System.currentTimeMillis() - t0}ms: " +
             rows.joinToString { (Hls.languages(it.audio) + it.languages).distinct().joinToString("/").ifEmpty { "unlabelled" } })
-        rows
+        // 1.2.67: a dropped master makes the answer partial (server twin vidrift.js:404): kept 5 min, not 30.
+        if (failed.isNotEmpty()) rows.map { it.copy(incomplete = true) } else rows
     }
 
     internal class Entry(val name: String, val path: String)

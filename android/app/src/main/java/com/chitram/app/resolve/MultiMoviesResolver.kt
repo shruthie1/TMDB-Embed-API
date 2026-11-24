@@ -354,6 +354,14 @@ class MultiMoviesResolver(
             .mapNotNull { (url, _) -> masterKey(url).takeIf { seen.add(it) }?.let { done[it] } }
         android.util.Log.i("Chitram", "[multimovies] ${rows.size} of ${masters.size} master(s) for $tmdbId in ${System.currentTimeMillis() - t0}ms")
         android.util.Log.i("Chitram", "[multimovies] dash-direct $tmdbId sources=${rows.count { it.dash }} bridge=${rows.count { !it.dash && unwrap(it.url) != it.url }}")
+        // 1.2.67: a partial answer (throttled, a server cut/timed out/failed, a master dropped) is
+        // marked incomplete so the cache keeps it 5 min, not 30 (server twin multimovies.js:811-823).
+        val short = labels.filter { answers[it]?.ok != true }
+        val dropped = done.values.count { it == null }
+        if (throttled || short.isNotEmpty() || dropped > 0) {
+            android.util.Log.i("Chitram", "[multimovies] partial for $tmdbId:${if (throttled) " throttled" else ""}${if (short.isEmpty()) "" else " unheard=${short.joinToString(",")}"}${if (dropped > 0) " dropped=$dropped" else ""}")
+            return@coroutineScope rows.map { it.copy(incomplete = true) }
+        }
         rows
     }
 

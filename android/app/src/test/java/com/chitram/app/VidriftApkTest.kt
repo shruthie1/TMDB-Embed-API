@@ -261,4 +261,15 @@ class VidriftApkTest {
         assertTrue(OnDeviceResolver.VIDRIFT in od.names())
         assertEquals(OnDeviceResolver.VIDRIFT, OnDeviceResolver.nameFor("vidrift"))
     }
+
+    /** 1.2.67: a dropped master makes the answer partial (server twin vidrift.js:404). */
+    @Test fun aDroppedMasterMarksTheAnswerIncomplete() = runBlocking {
+        serve(a, rrrPage, rrrMasters - BANGLA)
+        serve(b, null, emptyMap())
+        val partial = resolver().resolveAll("movie", 579974, 0, 0, originalLang = "te")
+        assertEquals(3, partial.size)
+        assertTrue(partial.all { it.incomplete })
+        serve(a, rrrPage, rrrMasters)
+        assertTrue(resolver().resolveAll("movie", 579974, 0, 0, originalLang = "te").none { it.incomplete })
+    }
 }

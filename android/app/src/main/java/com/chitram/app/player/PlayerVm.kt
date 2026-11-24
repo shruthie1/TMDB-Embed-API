@@ -90,13 +90,22 @@ internal fun streamCount(n: Int) = if (n == 1) "1 stream" else "$n streams"
  * Runs a NetMirror check and says what it found, so the tap is never silent. With no
  * rows the note says why: paused (minutes left), budget spent, unavailable, or not on NetMirror.
  */
-internal suspend fun <T> netmirrorCheck(resolve: suspend () -> List<T>): Pair<List<T>, String> {
+internal suspend fun <T> netmirrorCheck(resolve: suspend () -> List<T>): Pair<List<T>, String> =
+    providerCheck(com.chitram.app.resolve.OnDeviceResolver.NETMIRROR, resolve)
+
+/**
+ * 1.2.67: the Check row of any on-device provider. With no rows the note gives the
+ * real reason the resolver recorded: paused (minutes left), failed (the step error),
+ * held back, no network; else "Not on <provider>".
+ */
+internal suspend fun <T> providerCheck(name: String, resolve: suspend () -> List<T>): Pair<List<T>, String> {
     val out = com.chitram.app.resolve.OnDeviceResolver.Outcome()
+    val label = com.chitram.app.resolve.OnDeviceResolver.displayName(name)
     return try {
         val rows = withContext(out) { resolve() }
-        rows to if (rows.isNotEmpty()) "${rows.size} added" else out.note ?: com.chitram.app.resolve.OnDeviceResolver.NOTE_NOT_ON_NETMIRROR
+        rows to if (rows.isNotEmpty()) "${rows.size} added" else out.note ?: "Not on $label"
     } catch (e: com.chitram.app.resolve.StepException) {
-        emptyList<T>() to com.chitram.app.resolve.OnDeviceResolver.NOTE_UNAVAILABLE
+        emptyList<T>() to "$label unavailable"
     }
 }
 
@@ -494,7 +503,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         saveProgress()
         if (request?.id != r.id || request?.type != r.type) selectedAudioLanguage = null
         request = r
-        netmirrorNote = null
+        checkNotes.clear()
         refreshJob?.cancel()
         refreshModel = RefreshModel()
         languageTrial = null
@@ -1825,24 +1834,30 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    var checkingNetmirror by mutableStateOf(false); private set
-    /** Result of the last NetMirror check, shown on the Check row. */
-    var netmirrorNote by mutableStateOf<String?>(null); private set
-    fun checkNetmirror() {
+    /** On-device provider name whose Check is running, or null. */
+    var checking by mutableStateOf<String?>(null); private set
+    /** Result of the last Check per on-device provider name, shown on its Check row. */
+    val checkNotes = androidx.compose.runtime.mutableStateMapOf<String, String>()
+    val checkingNetmirror: Boolean get() = checking == com.chitram.app.resolve.OnDeviceResolver.NETMIRROR
+    val netmirrorNote: String? get() = checkNotes[com.chitram.app.resolve.OnDeviceResolver.NETMIRROR]
+    fun checkNetmirror() = checkProvider(com.chitram.app.resolve.OnDeviceResolver.NETMIRROR)
+    /** 1.2.67: Check for any on-device provider (a row group or its name); the note says the real reason. */
+    fun checkProvider(provider: String) {
         val r = request ?: return
-        if (checkingNetmirror) return
-        checkingNetmirror = true
-        netmirrorNote = null
+        val name = com.chitram.app.resolve.OnDeviceResolver.nameFor(provider) ?: return
+        if (checking != null) return
+        checking = name
+        checkNotes.remove(name)
         viewModelScope.launch {
             val t0 = System.currentTimeMillis()
             try {
-                val (rows, note) = netmirrorCheck { withContext(com.chitram.app.resolve.UserTap()) { g.onDevice.resolveAll("netmirror", r.type, r.id, r.season, r.episode, g.codecs, desiredAudio(), fresh = true, title = r.title) } }
-                android.util.Log.i("Chitram", "[netmirror] check: ${rows.size} rows, note=$note")
+                val (rows, note) = providerCheck(name) { withContext(com.chitram.app.resolve.UserTap()) { g.onDevice.resolveAll(name, r.type, r.id, r.season, r.episode, g.codecs, desiredAudio(), fresh = true, title = r.title) } }
+                android.util.Log.i("Chitram", "[$name] check: ${rows.size} rows, note=$note")
                 if (request == r) putSources(Ranking.merge(sources, rows, desiredAudio(), null))
                 // A cached answer comes back in ~100ms; keep "Checking sources…" up long enough to read.
                 delay((600 - (System.currentTimeMillis() - t0)).coerceAtLeast(0))
-                netmirrorNote = note
-            } finally { checkingNetmirror = false }
+                if (request == r) checkNotes[name] = note
+            } finally { checking = null }
         }
     }
 

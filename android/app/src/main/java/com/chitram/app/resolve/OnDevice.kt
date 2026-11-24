@@ -77,10 +77,23 @@ class OnDeviceResolver(
      * is down does not cost every play its full budget. After the pause one try is
      * let through; a success (or a clean "not here") closes the breaker.
      */
-    private class Breaker(var fails: Int = 0, var openUntil: Long = 0)
+    /** [lastTitle]: the title of the last counted failure; the same title failing again counts once (server lastMissTitle). */
+    private class Breaker(var fails: Int = 0, var openUntil: Long = 0, var lastTitle: String? = null)
     private val breakers = java.util.concurrent.ConcurrentHashMap<String, Breaker>()
 
     internal fun isOpen(name: String): Boolean = (breakers[name]?.openUntil ?: 0L) > now()
+
+    /**
+     * 1.2.67: the breaker holds [name] back for this title. Every skip logs one
+     * `[breaker] skip` line and says why on the Check row (never a silent empty).
+     */
+    private suspend fun skipOpen(name: String, titleKey: String): Boolean {
+        val left = (breakers[name]?.openUntil ?: 0L) - now()
+        if (left <= 0) return false
+        android.util.Log.i("Chitram", "[breaker] skip $name $titleKey: open, ${left / 1000}s left")
+        kotlin.coroutines.coroutineContext[Outcome]?.let { it.skipped = true; it.note = "${displayName(name)} paused, try in ${minutes(left)} min" }
+        return true
+    }
 
     /**
      * The providers [launch] starts, in its order: every provider with a resolver on
@@ -202,8 +215,8 @@ class OnDeviceResolver(
         if (name == INSERTUNIT || name == VIDOUT) return resolveTagged(name, type, id, season, episode, codecs, fresh)
         if (name == SHOWSST || name == ONETOUCH) return resolveRows(name, type, id, season, episode, codecs, fresh, title)
         if (name != NETMIRROR) return listOfNotNull(resolveOne(name, type, id, season, episode, codecs, preferred, fresh, title, later))
-        if (!fresh && isOpen(name)) return emptyList()
         val titleKey = "$type:$id:$season:$episode"
+        if (!fresh && skipOpen(name, titleKey)) return emptyList()
         if (!fresh && netmirrorEmpty(titleKey)) {
             android.util.Log.i("Chitram", "on-device netmirror: $type/$id had no rows ${(now() - (netmirrorNoRows[titleKey] ?: 0)) / 1000}s ago, not asked")
             return emptyList()
@@ -211,7 +224,7 @@ class OnDeviceResolver(
         var searched = false
         val prewarming = kotlin.coroutines.coroutineContext[Prewarming] != null
         val tapping = !prewarming && kotlin.coroutines.coroutineContext[UserTap] != null
-        val got = guarded(name) {
+        val got = guarded(name, titleKey) {
             val cfg = cfgNow().netmirror
             if (!cfg.enabled) return@guarded emptyList()
             var timedOut = true
@@ -246,8 +259,9 @@ class OnDeviceResolver(
     /** Every VidBolt source as its own row (one per language master): never only the first. */
     private suspend fun resolveMultiMovies(type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, fresh: Boolean, originalLang: String?): List<Source> {
         val m = multimovies ?: return emptyList()
-        if (!fresh && isOpen(MULTIMOVIES)) return emptyList()
-        return guarded(MULTIMOVIES) {
+        val titleKey = "$type:$id:$season:$episode"
+        if (!fresh && skipOpen(MULTIMOVIES, titleKey)) return emptyList()
+        return guarded(MULTIMOVIES, titleKey) {
             var timedOut = true
             // The resolver keeps its masters inside the budget and returns what finished;
             // this outer cap is only a backstop (review I5).
@@ -260,8 +274,9 @@ class OnDeviceResolver(
     /** Every Vidrift Orion master as its own row (one per language). */
     private suspend fun resolveVidrift(type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, fresh: Boolean, originalLang: String?): List<Source> {
         val v = vidrift ?: return emptyList()
-        if (!fresh && isOpen(VIDRIFT)) return emptyList()
-        return guarded(VIDRIFT) {
+        val titleKey = "$type:$id:$season:$episode"
+        if (!fresh && skipOpen(VIDRIFT, titleKey)) return emptyList()
+        return guarded(VIDRIFT, titleKey) {
             var timedOut = true
             // The resolver keeps page + masters inside the budget; this outer cap is only a backstop.
             val r = withTimeoutOrNull(VIDRIFT_BUDGET_MS + 2_000) { v.resolveAll(type, id, season, episode, originalLang, budgetMs = VIDRIFT_BUDGET_MS).also { timedOut = false } }
@@ -272,12 +287,13 @@ class OnDeviceResolver(
 
     /** Insertunit / VIDOUT: one tagged master each, bounded by its budget (server budgetMs). */
     private suspend fun resolveTagged(name: String, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, fresh: Boolean): List<Source> {
-        if (!fresh && isOpen(name)) return emptyList()
+        val titleKey = "$type:$id:$season:$episode"
+        if (!fresh && skipOpen(name, titleKey)) return emptyList()
         if (name == INSERTUNIT && insertunit == null || name == VIDOUT && vidout == null) return emptyList()
         val cfg = cfgNow()
         if (!cfg.enabled(name)) return emptyList()
         val budget = if (name == INSERTUNIT) cfg.insertunit.budgetMs else cfg.vidout.budgetMs
-        return guarded(name) {
+        return guarded(name, titleKey) {
             var timedOut = true
             val r = withTimeoutOrNull(budget + 2_000) {
                 val out = if (name == INSERTUNIT) {
@@ -297,8 +313,9 @@ class OnDeviceResolver(
      * progressive (MP4) row stays progressive, or media3 would parse it as HLS.
      */
     private suspend fun resolveRows(name: String, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, fresh: Boolean, title: String?): List<Source> {
-        if (!fresh && isOpen(name)) return emptyList()
-        return guarded(name) {
+        val titleKey = "$type:$id:$season:$episode"
+        if (!fresh && skipOpen(name, titleKey)) return emptyList()
+        return guarded(name, titleKey) {
             val budget = if (name == SHOWSST) SHOWSST_BUDGET_MS else ONETOUCH_BUDGET_MS
             var timedOut = true
             val rows = withTimeoutOrNull(budget) {
@@ -328,11 +345,9 @@ class OnDeviceResolver(
 
     private suspend fun resolveOneNow(name: String, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, preferred: String, fresh: Boolean, title: String?, later: MappleResolver.Later?): Source? {
         if (name == NETMIRROR || name == MULTIMOVIES || name == SHOWSST || name == ONETOUCH || name == VIDRIFT || name == INSERTUNIT || name == VIDOUT) return com.chitram.app.data.Ranking.rank(resolveAll(name, type, id, season, episode, codecs, preferred, fresh, title), preferred).firstOrNull()
-        if (!fresh && isOpen(name)) {
-            android.util.Log.i("Chitram", "on-device $name: skipped, breaker open")
-            return null
-        }
-        return guarded(name) {
+        val titleKey = "$type:$id:$season:$episode"
+        if (!fresh && skipOpen(name, titleKey)) return null
+        return guarded(name, titleKey) {
             val all = cfgNow()
             when (name) {
                 MAPPLE -> {
@@ -394,7 +409,7 @@ class OnDeviceResolver(
         @Volatile var network = false
         /** The provider held itself back (cooldown, budget share): a prewarm job that did this is never reused. */
         @Volatile var skipped = false
-        /** NetMirror only: why it gave no rows, in words for the Check row; null with rows. */
+        /** Why the provider gave no rows, in words for the Check row (1.2.67: every provider); null with rows or a clean empty. */
         @Volatile var note: String? = null
     }
 
@@ -456,7 +471,7 @@ class OnDeviceResolver(
             if (cache?.hasDevice(StreamCache.key(type, id, season, episode), n, preferred) == true && cache.deviceFingerprint(StreamCache.key(type,id,season,episode),n,preferred) == lease.fingerprint) { kept += n; continue }
             if (warm.containsKey(k)) continue
             // Breaker open: the provider is paused for Play too; nothing to warm.
-            if (isOpen(n)) continue
+            if (isOpen(n)) { android.util.Log.i("Chitram", "[breaker] skip $n $type:$id:$season:$episode: open, prewarm not started"); continue }
             if (n == NETMIRROR) {
                 // Gap 2.5: NetMirror said "no rows" for this title a short while ago.
                 if (netmirrorEmpty("$type:$id:$season:$episode")) continue
@@ -728,13 +743,15 @@ class OnDeviceResolver(
         return NOTE_UNAVAILABLE
     }
     private fun minutes(ms: Long) = ((ms + 59_999) / 60_000).coerceAtLeast(1)
+    /** A short reason for the Check row: the step error's message, one line, at most 60 chars. */
+    private fun reason(e: Exception): String = (e.message ?: e.javaClass.simpleName).let { m -> if (e is StepException) m.removePrefix("${e.step}: ") else m }.lineSequence().first().let { if (it.length > 60) it.take(59) + "…" else it }
 
-    private suspend fun <T> guarded(name: String, block: suspend () -> T?): T? {
+    private suspend fun <T> guarded(name: String, titleKey: String, block: suspend () -> T?): T? {
         val t0 = now()
         val out = kotlin.coroutines.coroutineContext[Outcome]
         // Gap 13.10: no network: send nothing, count nothing.
         if (offline()) {
-            out?.apply { failed = true; network = true }
+            out?.apply { failed = true; network = true; note = "No network" }
             android.util.Log.i("Chitram", "on-device $name: offline, skipped")
             return null
         }
@@ -746,7 +763,7 @@ class OnDeviceResolver(
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             val net = isNetwork(e)
-            out?.apply { failed = true; network = network || net || offline() }
+            out?.apply { failed = true; network = network || net || offline(); note = if (network) "No network" else "${displayName(name)} failed: ${reason(e)}" }
             // Gap 13.10: the device went offline mid-resolve, or a prewarm hit its share: not the provider's fault.
             if (offline()) {
                 android.util.Log.i("Chitram", "on-device $name failed in ${now() - t0}ms, not counted (offline): ${e.message}")
@@ -754,12 +771,19 @@ class OnDeviceResolver(
             }
             // 1.2.54: the provider's own pause or budget (cooldown active, budget spent): nothing failed.
             if (e is SelfImposedSkip) {
-                out?.skipped = true
+                out?.apply { skipped = true; note = "${displayName(name)} held back: ${reason(e)}" }
                 android.util.Log.i("Chitram", "[breaker] skip not counted: $name ${e.message}")
                 return null
             }
             val b = breakers.getOrPut(name) { Breaker() }
             synchronized(b) {
+                // 1.2.67: one title failing again is one failure, not a site outage (server metrics.js lastMissTitle).
+                if (b.fails > 0 && b.lastTitle == titleKey) {
+                    android.util.Log.i("Chitram", "[breaker] $name $titleKey failed again, not counted (${b.fails} in a row)")
+                    android.util.Log.i("Chitram", "on-device $name failed in ${now() - t0}ms: ${e.message}")
+                    return null
+                }
+                b.lastTitle = titleKey
                 b.fails++
                 if (b.fails >= BREAKER_FAILS) {
                     val open = (BREAKER_OPEN_MS shl (b.fails - BREAKER_FAILS).coerceAtMost(3)).coerceAtMost(BREAKER_MAX_MS)
@@ -785,6 +809,11 @@ class OnDeviceResolver(
         const val VIDOUT = "vidout"
         const val NOTE_NOT_ON_NETMIRROR = "Not on NetMirror"
         const val NOTE_UNAVAILABLE = "NetMirror unavailable"
+        /** The provider's name on the Check row. */
+        fun displayName(name: String): String = when (name) {
+            MAPPLE -> "Mapple"; VAPLAYER -> "VaPlayer"; CASTLE -> "CastleTV"; MULTIMOVIES -> "MultiMovies"; NETMIRROR -> "NetMirror"
+            SHOWSST -> "ShowsSt"; ONETOUCH -> "OneTouchTV"; VIDRIFT -> "Vidrift"; INSERTUNIT -> "Insertunit"; VIDOUT -> "VIDOUT"; else -> name
+        }
         /** Server insertunit/vidout budgetMs: page or catalogue + master together. */
         const val TAGGED_BUDGET_MS = 12_000L
         const val SHOWSST_BUDGET_MS = 15_000L

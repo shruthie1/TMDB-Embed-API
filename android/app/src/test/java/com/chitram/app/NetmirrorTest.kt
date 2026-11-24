@@ -51,6 +51,8 @@ class NetmirrorTest {
     private var searchTitle = "Test Movie"
     private var searchError = false
     private var reversedCatalogs = false
+    /** 1.2.67: only this catalogue's master carries a Telugu track (null: every catalogue does); "none": no catalogue. */
+    private var teluguOn: String? = null
     private val searches = CopyOnWriteArrayList<String>()
     private val cfg get() = NetmirrorConfig(domains = listOf(base), maxCalls = 50)
 
@@ -105,7 +107,8 @@ class NetmirrorTest {
                     assertNull("API credential must not reach CDN", r.getHeader("Usertoken"))
                     assertNull(r.getHeader("Otp"))
                     val target = if (clip) "220884" else p.substringAfterLast('/').substringBefore('.')
-                    val audio = if (bare) "" else "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",LANGUAGE=\"tel\",NAME=\"[1] Telugu\",URI=\"a/te.m3u8\"\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",LANGUAGE=\"hin\",NAME=\"[2] Hindi\",URI=\"a/hi.m3u8\"\n"
+                    val telugu = teluguOn == null || mapOf("nf" to "111", "pv" to "222", "hs" to "333")[teluguOn] == target
+                    val audio = if (bare) "" else if (!telugu) "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",LANGUAGE=\"hin\",NAME=\"[1] Hindi\",URI=\"a/hi.m3u8\"\n" else "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",LANGUAGE=\"tel\",NAME=\"[1] Telugu\",URI=\"a/te.m3u8\"\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",LANGUAGE=\"hin\",NAME=\"[2] Hindi\",URI=\"a/hi.m3u8\"\n"
                     return MockResponse().setBody("#EXTM3U\n$audio#EXT-X-MEDIA:TYPE=SUBTITLES,NAME=\"English\",LANGUAGE=\"en\",URI=\"subs/en.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720\n$base/files/$target/720.m3u8\n")
                 }
                 return MockResponse().setResponseCode(404)
@@ -621,7 +624,7 @@ class NetmirrorTest {
     @Test fun unusableTreatsASelfImposedSkipAsUnusable() {
         val src = java.io.File("src/main/java/com/chitram/app/resolve/OnDevice.kt").readText()
         assertTrue(src.contains("if (w.outcome.skipped) return true"))
-        assertTrue(src.contains("out?.skipped = true"))
+        assertTrue(src.contains("out?.apply { skipped = true;"))
     }
 
     /** Item 2 and 3: a substituted clip pauses every title; Check says so with minutes left, and the log says why. */
@@ -701,7 +704,7 @@ class NetmirrorTest {
         assertEquals(listOf("nf:Test Movie"), searches)
         assertEquals(1, seen.count { it.requestUrl!!.encodedPath.endsWith("post.php") })
         assertEquals(1, seen.count { it.requestUrl!!.encodedPath.endsWith("player.php") })
-        assertTrue(lines.toString(), lines.contains("[netmirror] plan: nf matched on spelling 1/1, other catalogues not asked"))
+        assertTrue(lines.toString(), lines.contains("[netmirror] plan: nf matched on spelling 1/1 with a Telugu row, other catalogues not asked"))
     }
 
     /** Item 5: catalogue order is Netflix, Prime, Hotstar whatever order ott.php lists them in. */
@@ -731,5 +734,29 @@ class NetmirrorTest {
         assertEquals(1, r.resolve(c, "movie", "Test Movie", 2024, 0, 0, prewarm = true).size)
         assertTrue("requests: ${seen.size}", seen.size <= 12)
         assertFalse(r.prewarmShareSpent(c))
+    }
+
+    /** 1.2.67: Netflix has the title without Telugu; Play asks Prime next and stops there (Telugu); Hotstar not asked. */
+    @Test fun playContinuesPastACatalogueWithoutTelugu() = runBlocking {
+        teluguOn = "pv"
+        val lines = CopyOnWriteArrayList<String>()
+        val r = NetmirrorResolver(client, now = { clock }, log = { lines += it })
+        val rows = resolve(r, tap = false)
+        assertEquals(listOf("NetMirror | Netflix", "NetMirror | Prime Video"), rows.map { it.label })
+        assertEquals(listOf("nf:Test Movie", "pv:Test Movie"), searches)
+        assertTrue(lines.toString(), lines.contains("[netmirror] plan: nf matched on spelling 1/1 with no Telugu row (Hindi), asking the next catalogue"))
+        assertTrue(lines.toString(), lines.contains("[netmirror] plan: pv matched on spelling 1/1 with a Telugu row, other catalogues not asked"))
+    }
+
+    /** 1.2.67: no catalogue has Telugu: Play asks each catalogue once (one search each), keeps every row. */
+    @Test fun playAsksEveryCatalogueOnceWhenNoneHasTelugu() = runBlocking {
+        teluguOn = "none"
+        val lines = CopyOnWriteArrayList<String>()
+        val r = NetmirrorResolver(client, now = { clock }, log = { lines += it })
+        val rows = resolve(r, tap = false)
+        assertEquals(listOf("NetMirror | Netflix", "NetMirror | Prime Video", "NetMirror | Hotstar"), rows.map { it.label })
+        assertEquals(listOf("nf:Test Movie", "pv:Test Movie", "hs:Test Movie"), searches)
+        assertEquals(3, seen.count { it.requestUrl!!.encodedPath.endsWith("player.php") })
+        assertTrue(lines.toString(), lines.contains("[netmirror] plan: hs matched on spelling 1/1 with no Telugu row (Hindi), asking the next catalogue"))
     }
 }

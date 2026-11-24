@@ -94,20 +94,32 @@ class CastleResolver(
         val tracks = (ep["tracks"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }.map { t ->
             Track(str(t, "languageId") ?: str(t, "id"), str(t, "languageName") ?: str(t, "name") ?: str(t, "abbreviate"), (t["isDefault"] as? JsonPrimitive)?.booleanOrNull == true)
         }
+        // 1.2.67: a failed video call is counted, never a silent empty (server twin castletv.js:709/:713).
+        val calls = java.util.concurrent.atomic.AtomicInteger()
+        val errors = java.util.concurrent.CopyOnWriteArrayList<String>()
+        suspend fun videoHits(trackId: String?, name: String, res: Int): List<Hit> {
+            calls.incrementAndGet()
+            return try { hitsOf(video(sec, activeId, episodeId, trackId, res), name, res) } catch (x: Exception) {
+                if (x is kotlinx.coroutines.CancellationException) throw x
+                errors += x.message ?: x.javaClass.simpleName
+                emptyList()
+            }
+        }
         val hits = coroutineScope {
             tracks.filter { it.id != null }.flatMap { t ->
-                RESOLUTIONS.map { res ->
-                    async { runCatching { hitsOf(video(sec, activeId, episodeId, t.id, res), t.name ?: "Unknown", res) }.getOrDefault(emptyList()) }
-                }
+                RESOLUTIONS.map { res -> async { videoHits(t.id, t.name ?: "Unknown", res) } }
             }.awaitAll().flatten()
         }.ifEmpty {
             // One shared file: label it with the default track only, never claim the others.
             val name = (tracks.firstOrNull { it.default } ?: tracks.firstOrNull())?.name ?: "Unknown"
             coroutineScope {
-                RESOLUTIONS.map { res -> async { runCatching { hitsOf(video(sec, activeId, episodeId, null, res), name, res) }.getOrDefault(emptyList()) } }
-                    .awaitAll().flatten()
+                RESOLUTIONS.map { res -> async { videoHits(null, name, res) } }.awaitAll().flatten()
             }
         }
+        if (hits.isEmpty() && errors.isNotEmpty() && errors.size == calls.get())
+            throw StepException("castletv video", 0, "every video call failed (${errors.size}): ${errors.distinct().take(3).joinToString("; ")}")
+        val partial = errors.isNotEmpty()
+        if (partial) log("${errors.size} of ${calls.get()} video call(s) failed for \"$title\": ${errors.distinct().take(3).joinToString("; ")}")
         val best = group(hits, preferred).firstOrNull() ?: return null.also { log("no playable video for \"$title\"") }
         log("${match.title}: ${best.quality} [${best.languages.joinToString("/")}] from ${hits.size} answers")
         val height = Regex("(\\d{3,4})p").find(best.quality)?.groupValues?.get(1)?.toIntOrNull() ?: 0
@@ -122,6 +134,7 @@ class CastleResolver(
             levels = if (height > 0) listOf(Level(height = height, quality = best.quality)) else emptyList(),
             codecs = null,
             muxed = labels(best.languages).size > 1,
+            incomplete = partial,
         )
     }
 

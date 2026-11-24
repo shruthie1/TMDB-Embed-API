@@ -228,7 +228,8 @@ class PrewarmTest {
     @Test fun aDnsFailureWhileTheDeviceReadsOnlineStillCounts() = runBlocking {
         down = true
         // The connectivity check lags: it says online, the DNS fails. A dead host counts (it may be gone).
-        repeat(OnDeviceResolver.BREAKER_FAILS) { od.resolveAll(OnDeviceResolver.CASTLE, "movie", 9, 0, 0, codecs, title = "X") }
+        // 1.2.67: three titles in a row (the same title failing again counts once).
+        listOf(7L, 8L, 9L).forEach { od.resolveAll(OnDeviceResolver.CASTLE, "movie", it, 0, 0, codecs, title = "X") }
         assertTrue(od.isOpen(OnDeviceResolver.CASTLE))
     }
 
@@ -288,8 +289,8 @@ class PrewarmTest {
     }
 
     @Test fun openBreakerSkipsThatProviderOnly() = runBlocking {
-        // 3 chain failures in a row open castletv's breaker (BREAKER_FAILS).
-        repeat(OnDeviceResolver.BREAKER_FAILS) { od.resolveAll(OnDeviceResolver.CASTLE, "movie", 9, 0, 0, codecs, title = "X") }
+        // 3 chain failures in a row (3 titles: 1.2.67 counts one title once) open castletv's breaker (BREAKER_FAILS).
+        listOf(7L, 8L, 9L).forEach { od.resolveAll(OnDeviceResolver.CASTLE, "movie", it, 0, 0, codecs, title = "X") }
         val started = od.prewarm("movie", 9, 0, 0, codecs, "Telugu", "X", "te")
         assertFalse(OnDeviceResolver.CASTLE in started)
         assertTrue(OnDeviceResolver.MAPPLE in started && OnDeviceResolver.MULTIMOVIES in started)

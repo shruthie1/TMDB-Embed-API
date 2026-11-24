@@ -435,7 +435,8 @@ class OnDeviceResolveTest {
         assertEquals(listOf("https://mapple.test"), store.get().mapple.bases)
         val od = OnDeviceResolver(null, store, MappleResolver(routed, hosts, kv) { clock }, VaplayerResolver(routed, hosts) { null }, { _, _ -> null }) { clock }
 
-        repeat(3) { assertNull(od.resolveOne(OnDeviceResolver.MAPPLE, "movie", 1, 0, 0, noCodecs)) }
+        // 1.2.67: three titles in a row (the same title failing again counts once).
+        listOf(3L, 2L, 1L).forEach { assertNull(od.resolveOne(OnDeviceResolver.MAPPLE, "movie", it, 0, 0, noCodecs)) }
         assertTrue(od.isOpen(OnDeviceResolver.MAPPLE))
         seen.clear()
         assertNull(od.resolveOne(OnDeviceResolver.MAPPLE, "movie", 1, 0, 0, noCodecs))

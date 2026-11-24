@@ -145,8 +145,9 @@ class ShowsstResolver(
             Mirror("https://api.vidqueen.st", "https://player.vidqueen.st"),
             Mirror("https://api.vidmario.net", "https://player.vidmario.net"),
         )
-        private const val STEP_TIMEOUT_MS = 12_000L
-        private const val PROBE_TIMEOUT_MS = 4_000L
+        /** 1.2.67: both mirrors plus the container probe fit the 15 s device budget (2 x 5.5 s + 3.5 s). */
+        internal const val STEP_TIMEOUT_MS = 5_500L
+        internal const val PROBE_TIMEOUT_MS = 3_500L
 
         /** Headers for the stream host, as providers/showsst.js streamHeaders. */
         fun streamHeaders(player: String): Map<String, String> = mapOf("User-Agent" to UA, "Referer" to "$player/", "Origin" to player)

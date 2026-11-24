@@ -42,7 +42,7 @@ internal enum class MenuTap { Drill, Check, Close, Choose, Fit, Refresh }
 internal fun menuTap(item: com.chitram.app.player.MenuItem?): MenuTap = when {
     item == null -> MenuTap.Choose
     item.key.startsWith("group:") -> MenuTap.Drill
-    item.key == "check:netmirror" -> MenuTap.Check
+    item.key.startsWith("check:") -> MenuTap.Check
     item.key == com.chitram.app.player.REFRESH_KEY -> MenuTap.Refresh
     item.selected -> MenuTap.Close
     item.key.startsWith(FIT_KEY) -> MenuTap.Fit
