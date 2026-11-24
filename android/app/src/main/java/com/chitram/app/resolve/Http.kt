@@ -37,20 +37,34 @@ internal class Reply(val code: Int, val body: String, val headers: Headers, val 
 
 /** Cancellable call; the body is read on IO. A cancelled coroutine cancels the call. */
 internal suspend fun OkHttpClient.fetch(req: Request, asBytes: Boolean = false): Reply = withContext(Dispatchers.IO) {
-    val res: Response = suspendCancellableCoroutine { cont ->
-        val call = newCall(req)
-        cont.invokeOnCancellation { call.cancel() }
-        call.enqueue(object : Callback {
-            override fun onFailure(call: Call, e: IOException) { cont.resumeWithException(e) }
-            override fun onResponse(call: Call, response: Response) { cont.resume(response) }
-        })
-    }
-    res.use {
-        if (asBytes) {
-            val b = it.body?.bytes() ?: ByteArray(0)
-            Reply(it.code, "", it.headers, b)
-        } else Reply(it.code, it.body?.string().orEmpty(), it.headers)
-    }
+    ensureCurrentConfiguration()
+    val lease=kotlin.coroutines.coroutineContext[ResolveLeaseContext]
+    val call=newCall(req)
+    val unsubscribe=lease?.store?.onChange { _,_ -> if (!lease.store.isCurrent(lease.value)) call.cancel() }
+    try {
+        ensureCurrentConfiguration()
+        val reply: Reply = suspendCancellableCoroutine { cont ->
+            cont.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) { if (cont.isActive) cont.resumeWithException(e) }
+                override fun onResponse(call: Call, response: Response) {
+                    if (!cont.isActive) { response.close(); return }
+                    try {
+                        val value=response.use {
+                            if (asBytes) Reply(it.code,"",it.headers,it.body?.bytes() ?: ByteArray(0))
+                            else Reply(it.code,it.body?.string().orEmpty(),it.headers)
+                        }
+                        cont.resume(value)
+                    } catch (error: Exception) { if (cont.isActive) cont.resumeWithException(error) }
+                }
+            })
+        }
+        ensureCurrentConfiguration()
+        reply
+    } catch (error: Exception) {
+        ensureCurrentConfiguration()
+        throw error
+    } finally { unsubscribe?.invoke() }
 }
 
 /** Cookies for one provider session (mapple's /watch sets them, later steps need them). */

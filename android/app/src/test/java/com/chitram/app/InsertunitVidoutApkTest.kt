@@ -77,6 +77,22 @@ class InsertunitVidoutApkTest {
         assertEquals(emptyList<String>(), Hls.languages(r.audio))
     }
 
+    @Test fun unknownTagsNeverBecomeTeluguFromANameAndLabelsRemainAvailable() {
+        for (tag in listOf("und", "mul", "zxx")) {
+            val text = "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",LANGUAGE=\"$tag\",NAME=\"Telugu\",URI=\"a.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=1,RESOLUTION=1280x720,AUDIO=\"a\"\nv.m3u8\n"
+            val row = TaggedHls.row(text,"https://fixture.test/m.m3u8","insertunit","Insertunit",emptyMap())!!
+            assertTrue(row.audioTagsOnly)
+            assertEquals("Telugu",row.audio.first().name)
+            assertTrue(Hls.languages(row.audio).isEmpty())
+        }
+    }
+
+    @Test fun audioGroupMatchesHighestVariantRatherThanFirstListedVariant() {
+        val text = "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"lo\",LANGUAGE=\"ru\",NAME=\"Russian\",URI=\"ru.m3u8\"\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"hi\",LANGUAGE=\"te\",NAME=\"Original\",URI=\"te.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=100,RESOLUTION=640x360,AUDIO=\"lo\"\nlo.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=200,RESOLUTION=1280x720,AUDIO=\"hi\"\nhi.m3u8\n"
+        val row=TaggedHls.row(text,"https://fixture.test/m.m3u8","insertunit","Insertunit",emptyMap())!!
+        assertEquals(listOf("Telugu"),langs(row))
+    }
+
     @Test fun vidoutPushpaHasFourTaggedLanguagesAndRrrNone() {
         val p = TaggedHls.row(vPushpa, "https://h.test/hls3/x/master.txt", "vidout", "VIDOUT", VidoutResolver.HEADERS)!!
         assertEquals(listOf("Hindi", "Malayalam", "Tamil", "Telugu"), langs(p))

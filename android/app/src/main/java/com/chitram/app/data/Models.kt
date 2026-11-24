@@ -129,6 +129,9 @@ data class RawStream(
     val videoCodec: String? = null,
     /** null: legacy/unknown metadata; []: provider explicitly found no renditions. */
     val audio: List<RawAudio>? = null,
+    val providerGroup: String? = null,
+    val serverLabel: String? = null,
+    val audioTagsOnly: Boolean = false,
     /** Availability labels from a catalog, never proof of selectable audio. */
     val catalogLanguages: List<String> = emptyList(),
     val netmirrorCatalog: String? = null,

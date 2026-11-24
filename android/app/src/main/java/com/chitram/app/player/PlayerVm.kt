@@ -1270,7 +1270,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     /** What is playing now, for auto-advance: the selected audio language and the picture height. */
     private fun snapshotCtx(s: Source) {
         val audio = groups(C.TRACK_TYPE_AUDIO).flatMap { gr -> (0 until gr.length).filter { gr.isTrackSelected(it) }.map { gr.getTrackFormat(it) } }.firstOrNull()
-        ctxLang = audio?.let { Ranking.trackLanguage(it.language, it.label) } ?: s.languages.firstOrNull() ?: ctxLang
+        ctxLang = audio?.let { Ranking.trackLanguage(it.language, if (s.audioTagsOnly) null else it.label) } ?: s.languages.firstOrNull() ?: if (s.audioTagsOnly) null else ctxLang
         if (languageTrial != null && Ranking.sameLanguage(ctxLang, languageTrial)) { languageTrial = null; languageFallback = null }
         ctxHeight = videoSize.height.takeIf { it > 0 } ?: Ranking.height(s).takeIf { it > 0 } ?: ctxHeight
     }
@@ -1374,7 +1374,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         if (audio.isEmpty()) return
         audioPickedFor = s.id
         val want = desiredAudio()
-        fun matches(f: androidx.media3.common.Format): Boolean = Ranking.trackMatches(f.language, f.label, want)
+        fun matches(f: androidx.media3.common.Format): Boolean = Ranking.trackMatches(f.language, if (current?.audioTagsOnly == true) null else f.label, want)
         if (audio.any { gr -> (0 until gr.length).any { gr.isTrackSelected(it) && matches(gr.getTrackFormat(it)) } }) return
         for (gr in audio) for (i in 0 until gr.length) {
             if (gr.isTrackSupported(i) && matches(gr.getTrackFormat(i))) {
@@ -1523,7 +1523,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         val known = t.groups.filter { it.type == C.TRACK_TYPE_AUDIO }.flatMap { group ->
             (0 until group.length).filter { group.isTrackSupported(it) }.mapNotNull { i ->
                 val f = group.getTrackFormat(i)
-                Ranking.trackLanguage(f.language, f.label)
+                Ranking.trackLanguage(f.language, if (current?.audioTagsOnly == true) null else f.label)
             }
         }.filter(AudioChoice::knownLanguage).distinctBy { it.lowercase() }
         if (known.isEmpty()) return
@@ -1718,12 +1718,12 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     fun serverItems(provider: String? = null, now: Long = System.currentTimeMillis()): List<MenuItem> {
         // While refreshing, the old rows stay in place, dimmed, until the new list replaces them in one update.
         val dim = refreshModel.running
-        if (provider == null) return listOf(refreshItem(now)) + sources.groupBy { it.provider.lowercase() }.map { (_, rows) ->
-            val name = rows.first().provider
+        if (provider == null) return listOf(refreshItem(now)) + sources.groupBy { com.chitram.app.data.ProviderFamilies.group(it).lowercase() }.map { (_, rows) ->
+            val name = com.chitram.app.data.ProviderFamilies.group(rows.first())
             val languages = rows.flatMap(AudioChoice::languages).distinct().take(3).joinToString(", ")
             MenuItem("group:$name", name, listOf(streamCount(rows.size), languages).filter { it.isNotEmpty() }.joinToString(" · "), rows.any { it.id == current?.id }, dim = dim)
         } + if (sources.none { it.provider.equals("netmirror", true) }) listOf(MenuItem("group:NetMirror", "NetMirror", "Check streams on demand")) else emptyList()
-        val rows = Ranking.menuOrder(sources.filter { it.provider.equals(provider, true) })
+        val rows = Ranking.menuOrder(sources.filter { com.chitram.app.data.ProviderFamilies.group(it).equals(provider, true) })
         // Owner: nested rows of one provider are told apart by a short host tag (ServerTag).
         val tags = ServerTag.tags(rows)
         return rows.map { source ->
@@ -1732,7 +1732,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             val detail = listOfNotNull(source.netmirrorCatalog, quality, languages, tags[source.id],
                 if (source.incomplete) "More streams pending" else null,
                 if (source.unsupported) "Not supported here" else null).joinToString(" · ")
-            MenuItem("src:${source.id}", label(source), detail, source.id == current?.id, source.unsupported || dim)
+            MenuItem("src:${source.id}", com.chitram.app.data.ProviderFamilies.label(source) ?: label(source), detail, source.id == current?.id, source.unsupported || dim)
         }
     }
 
@@ -1875,7 +1875,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                 if (AudioChoice.candidates(sources, language, tried).isEmpty()) all.forEach { tried.remove(it.id) }
                 // A1: the playing source with no track in this language cannot
                 // switch anything; go to another server or say there is none.
-                val next = nextForLanguage(AudioChoice.candidates(sources, language, tried), all, current?.id, carries(groups(C.TRACK_TYPE_AUDIO), language))
+                val next = nextForLanguage(AudioChoice.candidates(sources, language, tried), all, current?.id, carries(groups(C.TRACK_TYPE_AUDIO), language, current?.audioTagsOnly == true))
                 if (next == null) { notice = "No other $language stream found"; return }
                 // Before the first frame there is nothing to restore: a failed pick moves on (web snapshot()).
                 languageFallback = if (framed) current?.let { Triple(it, selectedAudioLanguage ?: ctxLang, player.currentPosition.coerceAtLeast(0)) } else null
@@ -1925,7 +1925,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                 languageTrial = null; languageFallback = null
                 val gi = p[1].toInt(); val ti = p[2].toInt()
                 val format = groups(C.TRACK_TYPE_AUDIO).getOrNull(gi)?.getTrackFormat(ti)
-                selectedAudioLanguage = Ranking.trackLanguage(format?.language, format?.label) ?: format?.label ?: selectedAudioLanguage
+                selectedAudioLanguage = Ranking.trackLanguage(format?.language, if (current?.audioTagsOnly == true) null else format?.label) ?: if (current?.audioTagsOnly == true) null else format?.label ?: selectedAudioLanguage
                 audioPickedFor = current?.id
                 override(C.TRACK_TYPE_AUDIO, gi, ti)
             }
@@ -2009,9 +2009,9 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         const val OTHER_SERVERS = "Other servers"
 
         /** True when the tracks are not known yet, or a supported track is in [language]. */
-        internal fun carries(audio: List<Tracks.Group>, language: String): Boolean {
+        internal fun carries(audio: List<Tracks.Group>, language: String, tagsOnly: Boolean = false): Boolean {
             if (audio.isEmpty()) return true
-            return audio.any { gr -> (0 until gr.length).any { i -> gr.isTrackSupported(i) && gr.getTrackFormat(i).let { f -> Ranking.trackMatches(f.language, f.label, language) } } }
+            return audio.any { gr -> (0 until gr.length).any { i -> gr.isTrackSupported(i) && gr.getTrackFormat(i).let { f -> Ranking.trackMatches(f.language, if (tagsOnly) null else f.label, language) } } }
         }
 
         /** Next source for a language pick. The playing source only when it [currentCarries] the language (A1). */
@@ -2036,10 +2036,11 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                     val f = gr.getTrackFormat(i)
                     // HLS renditions are often named just "Audio"; prefer a language.
                     // Tag first, then a language in the label ('Telugu 5.1' -> Telugu), then the raw label.
-                    val name = Ranking.trackLanguage(f.language, f.label) ?: f.label?.takeUnless { it.equals("audio", true) || it.isBlank() } ?: unnamed ?: "Default"
-                    if (!names.add(name.lowercase())) continue
+                    val name = Ranking.trackLanguage(f.language, if (current?.audioTagsOnly == true) null else f.label) ?: f.label?.takeUnless { it.equals("audio", true) || it.isBlank() } ?: unnamed ?: "Default"
+                    val verified = current?.audioTagsOnly != true || Ranking.languageCode(f.language) != null
+                    if (verified && !names.add(name.lowercase())) continue
                     val count = AudioChoice.candidates(sources, name).size
-                    out += MenuItem("trk:$gi:$i", name, if (count > 1) "$count streams" else "", gr.isTrackSelected(i), group = IN_STREAM)
+                    out += MenuItem("trk:$gi:$i", name, if (!verified) "Language untagged" else if (count > 1) "$count streams" else "", gr.isTrackSelected(i), group = IN_STREAM)
                 }
             }
             // Tracks not known yet: name the language that will play, not the row's first (A8).

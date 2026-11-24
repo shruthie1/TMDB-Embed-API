@@ -122,6 +122,25 @@ data class MultiMoviesConfig(
     val resolvePath: String = "/api/resolve",
 )
 
+data class InsertunitConfig(
+    val enabled: Boolean = true,
+    val base: String = InsertunitResolver.ORIGIN,
+    val userAgent: String = InsertunitResolver.UA,
+    val budgetMs: Long = 12_000,
+    val stepTimeoutMs: Long = 6000,
+    val hlsPatterns: List<String> = listOf("\\bhls:\\s*\"(https?:\\/\\/[^\"]+)\"", "\"hls\"\\s*:\\s*\"(https?:\\/\\/[^\"]+)\"", "\\bfile:\\s*\"(https?:\\/\\/[^\"]+\\.m3u8[^\"]*)\""),
+    val seasonsPatterns: List<String> = listOf("\\bseasons:\\s*\\[", "\"seasons\"\\s*:\\s*\\["),
+)
+
+data class VidoutConfig(
+    val enabled: Boolean = true,
+    val base: String = VidoutResolver.ORIGIN,
+    val catalogue: String = VidoutResolver.CATALOGUE,
+    val userAgent: String = VidoutResolver.UA,
+    val budgetMs: Long = 12_000,
+    val stepTimeoutMs: Long = 6000,
+)
+
 data class ResolveConfig(
     val version: Int = 5,
     val ttlSec: Long = 6 * 3600L,
@@ -130,6 +149,9 @@ data class ResolveConfig(
     val netmirror: NetmirrorConfig = NetmirrorConfig(),
     val castletv: CastleConfig = CastleConfig(),
     val multimovies: MultiMoviesConfig = MultiMoviesConfig(),
+    val insertunit: InsertunitConfig = InsertunitConfig(),
+    val vidout: VidoutConfig = VidoutConfig(),
+    val disabled: Set<String> = emptySet(),
     /** routes.<provider>.apk: off | direct | proxy | device. Invalid or missing entries are left out. */
     val routes: Map<String, String> = emptyMap(),
     /**
@@ -141,13 +163,26 @@ data class ResolveConfig(
     /** At least one section carried a boolean `prewarm`; false: every flag is the built-in default. */
     val prewarmExplicit: Boolean = false,
 ) {
+    fun enabled(provider: String): Boolean = provider !in disabled && routes[provider] != "off" &&
+        (provider != "insertunit" || insertunit.enabled) && (provider != "vidout" || vidout.enabled)
+
+    fun fingerprint(provider: String): String {
+        val section: Any = when(provider) {
+            "mapple" -> mapple; "vaplayer" -> vaplayer; "netmirror" -> netmirror
+            "castletv" -> castletv; "multimovies" -> multimovies; "insertunit" -> insertunit; "vidout" -> vidout
+            else -> "builtin"
+        }
+        return java.security.MessageDigest.getInstance("SHA-256").digest("$provider|${enabled(provider)}|${routes[provider]}|$section".toByteArray())
+            .joinToString("") { "%02x".format(it) }
+    }
+
     companion object {
         /** Owner 2026-11-22: the Telugu workhorses that resolve on the device. */
         val DEFAULT_PREWARM = setOf("mapple", "vidrift", "multimovies", "castletv", "netmirror")
         /** Sections that may carry `prewarm` (every on-device provider). */
         private val PREWARM_SECTIONS = listOf("mapple", "vaplayer", "netmirror", "castletv", "multimovies", "vidrift", "showsst", "onetouchtv", "insertunit", "vidout")
         private val json = Json { ignoreUnknownKeys = true; isLenient = true }
-        private val SECTIONS = listOf("mapple", "vaplayer", "netmirror", "castletv", "multimovies")
+        private val SECTIONS = listOf("mapple", "vaplayer", "netmirror", "castletv", "multimovies", "insertunit", "vidout")
 
         /**
          * A JSON object with at least one known provider section. A 200 such as
@@ -173,6 +208,9 @@ data class ResolveConfig(
                 multimovies = (root["multimovies"] as? JsonObject)?.let { o ->
                     MultiMoviesConfig(bases = o.hosts("bases") ?: d.multimovies.bases, resolvePath = o.path("resolvePath") ?: d.multimovies.resolvePath)
                 } ?: d.multimovies,
+                insertunit = (root["insertunit"] as? JsonObject)?.let { insertunit(it) } ?: d.insertunit,
+                vidout = (root["vidout"] as? JsonObject)?.let { vidout(it) } ?: d.vidout,
+                disabled = PREWARM_SECTIONS.filter { (root[it] as? JsonObject)?.bool("enabled") == false }.toSet(),
                 routes = (root["routes"] as? JsonObject)?.let { routes(it) } ?: d.routes,
                 // No boolean `prewarm` (absent section, field missing, a string or a number):
                 // the built-in default, never false. A config saved before the flag existed
@@ -180,6 +218,24 @@ data class ResolveConfig(
                 prewarm = PREWARM_SECTIONS.filter { n -> prewarmFlag(root, n) ?: (n in DEFAULT_PREWARM) }.toSet(),
                 prewarmExplicit = PREWARM_SECTIONS.any { prewarmFlag(root, it) != null },
             )
+        }
+
+        private fun patterns(o: JsonObject, key: String, fallback: List<String>): List<String> =
+            o.strings(key)?.take(8)?.filter { it.length <= 512 && runCatching { Regex(it) }.isSuccess }?.takeIf { it.isNotEmpty() } ?: fallback
+        private fun endpoint(o: JsonObject, key: String, fallback: String): String = o.str(key)?.takeIf {
+            runCatching { val u = java.net.URI(it); u.scheme == "https" && u.host != null && u.userInfo == null && u.fragment == null }.getOrDefault(false)
+        }?.trimEnd('/') ?: fallback
+        private fun agent(o: JsonObject, fallback: String): String = o.str("userAgent")?.takeIf { it.length <= 600 && !it.contains('\r') && !it.contains('\n') } ?: fallback
+        private fun insertunit(o: JsonObject): InsertunitConfig {
+            val d=InsertunitConfig()
+            return InsertunitConfig(o.bool("enabled") ?: d.enabled,endpoint(o,"base",d.base),agent(o,d.userAgent),
+                o.long("budgetMs")?.coerceIn(1000,60_000) ?: d.budgetMs,o.long("stepTimeoutMs")?.coerceIn(500,20_000) ?: d.stepTimeoutMs,
+                patterns(o,"hlsPatterns",d.hlsPatterns),patterns(o,"seasonsPatterns",d.seasonsPatterns))
+        }
+        private fun vidout(o: JsonObject): VidoutConfig {
+            val d=VidoutConfig()
+            return VidoutConfig(o.bool("enabled") ?: d.enabled,endpoint(o,"base",d.base),endpoint(o,"catalogue",d.catalogue),agent(o,d.userAgent),
+                o.long("budgetMs")?.coerceIn(1000,60_000) ?: d.budgetMs,o.long("stepTimeoutMs")?.coerceIn(500,20_000) ?: d.stepTimeoutMs)
         }
 
         private fun prewarmFlag(root: JsonObject, n: String): Boolean? =
@@ -304,11 +360,30 @@ class ResolveConfigStore(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var inflight: Deferred<ResolveConfig>? = null
 
+    data class Lease(val provider: String, val cfg: ResolveConfig, val fingerprint: String)
+    private val listeners = java.util.concurrent.CopyOnWriteArrayList<(ResolveConfig, ResolveConfig) -> Unit>()
+    fun onChange(listener: (ResolveConfig, ResolveConfig) -> Unit): () -> Unit { listeners.add(listener); return { listeners.remove(listener) } }
+    fun lease(provider: String): Lease = synchronized(this) { val cfg=current(); Lease(provider,cfg,cfg.fingerprint(provider)) }
+    fun isCurrent(lease: Lease): Boolean = synchronized(this) { current().fingerprint(lease.provider) == lease.fingerprint }
+    fun ifCurrent(lease: Lease, write: () -> Unit): Boolean = synchronized(this) {
+        if (!isCurrent(lease)) false else { write(); true }
+    }
+
     /** Cached or default config, no network. */
     fun current(): ResolveConfig = cached()?.cfg ?: ResolveConfig()
 
     /** Where [current] came from: `vm`, `remote`, or `builtin` (nothing saved). */
     fun source(): String = cached()?.from ?: FROM_BUILTIN
+
+    /** Cache hits and details prewarming can learn about a heal without waiting for the VM. */
+    fun refreshIfDueAsync() {
+        val c = cached()
+        if (c != null && now() - c.at < lifeMs(c)) return
+        if (now() - lastAttempt < RETRY_MS) return
+        synchronized(this) {
+            if (inflight?.isActive != true) inflight = scope.async { refresh() }
+        }
+    }
 
     suspend fun get(): ResolveConfig {
         val c = cached()
@@ -344,10 +419,15 @@ class ResolveConfigStore(
         if (!ResolveConfig.hasConfigShape(r.body)) throw StepException("resolve-config", r.code, "no provider section")
         val cfg = ResolveConfig.parse(r.body)
         val at = now()
-        mem = Copy(cfg, at, from)
-        kv.put(KEY, r.body)
-        kv.put(KEY_AT, at.toString())
-        kv.put(KEY_FROM, from)
+        val previous = synchronized(this) {
+            val old = current()
+            mem = Copy(cfg, at, from)
+            kv.put(KEY, r.body)
+            kv.put(KEY_AT, at.toString())
+            kv.put(KEY_FROM, from)
+            old
+        }
+        listeners.forEach { listener -> runCatching { listener(previous,cfg) }.onFailure { android.util.Log.i("Chitram","resolve-config: listener failed ${it.javaClass.simpleName}") } }
         android.util.Log.i("Chitram", "resolve-config: fetched v${cfg.version} from $from")
         cfg
     } catch (e: Exception) {

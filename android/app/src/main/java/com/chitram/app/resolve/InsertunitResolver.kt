@@ -39,7 +39,12 @@ class InsertunitResolver(
      * master on the page. Throws [StepException] on any other failure so the
      * caller's breaker counts it.
      */
-    suspend fun resolveAll(type: String, tmdbId: Long, imdb: String?, season: Int, episode: Int, budgetMs: Long = BUDGET_MS): List<Resolved> {
+    suspend fun resolveAll(type: String, tmdbId: Long, imdb: String?, season: Int, episode: Int, budgetMs: Long = BUDGET_MS, cfg: InsertunitConfig? = null): List<Resolved> {
+        if (cfg?.enabled == false) return emptyList()
+        val effectiveBase = cfg?.base ?: origin
+        val agent = cfg?.userAgent ?: UA
+        val limit = minOf(budgetMs, cfg?.budgetMs ?: budgetMs)
+        val stepMs = cfg?.stepTimeoutMs ?: this.stepMs
         val t0 = System.currentTimeMillis()
         val tv = type == "tv" || type == "series"
         if (tv && (season <= 0 || episode <= 0)) return emptyList()
@@ -47,30 +52,30 @@ class InsertunitResolver(
             android.util.Log.i("Chitram", "[insertunit] no IMDb id for $type $tmdbId - no rows")
             return emptyList()
         }
-        fun step() = minOf(stepMs, budgetMs - (System.currentTimeMillis() - t0))
-        val page = get("$origin/embed/imdb/$imdb", step())
+        fun step() = minOf(stepMs, limit - (System.currentTimeMillis() - t0))
+        val page = get("$effectiveBase/embed/imdb/$imdb", step(), agent)
         if (page.code == 404) {
             android.util.Log.i("Chitram", "[insertunit] not-found $imdb (HTTP 404)")
             return emptyList()
         }
         if (!page.ok) throw StepException("insertunit page", page.code, "HTTP ${page.code} for $imdb")
-        val master = masterFromPage(page.body, if (tv) "tv" else "movie", season, episode)
+        val master = masterFromPage(page.body, if (tv) "tv" else "movie", season, episode, cfg?.hlsPatterns ?: InsertunitConfig().hlsPatterns, cfg?.seasonsPatterns ?: InsertunitConfig().seasonsPatterns)
         if (master == null) {
             android.util.Log.i("Chitram", "[insertunit] no hls master on the page for $imdb")
             return emptyList()
         }
-        val m = get(master, step())
+        val m = get(master, step(), agent)
         if (!m.ok) throw StepException("insertunit master", m.code, "HTTP ${m.code} for $imdb")
-        val row = TaggedHls.row(m.body, master, "insertunit", "Insertunit", mapOf("User-Agent" to UA))
+        val row = TaggedHls.row(m.body, master, "insertunit", "Insertunit", mapOf("User-Agent" to agent))
             ?: throw StepException("insertunit master", 0, "no variants for $imdb")
         android.util.Log.i("Chitram", "[insertunit] ok $tmdbId in ${System.currentTimeMillis() - t0}ms rows=1 langs=[${TaggedHls.langsOf(row)}]")
         return listOf(row)
     }
 
-    private suspend fun get(url: String, ms: Long): Reply {
+    private suspend fun get(url: String, ms: Long, agent: String): Reply {
         if (ms <= 0) throw StepException("insertunit", 0, "budget spent")
         return try {
-            withTimeoutOrNull(ms) { capped(ms).fetch(Request.Builder().url(url).header("User-Agent", UA).build()) }
+            withTimeoutOrNull(ms) { capped(ms).fetch(Request.Builder().url(url).header("User-Agent", agent).build()) }
                 ?: throw StepException("insertunit", 0, "no answer in ${ms}ms")
         } catch (x: java.io.InterruptedIOException) {
             throw StepException("insertunit", 0, "no answer in ${ms}ms")
@@ -88,15 +93,19 @@ class InsertunitResolver(
         private val MOVIE_HLS = Regex("""\bhls:\s*"(https?://[^"]+)"""")
 
         /** The page's HLS master for a movie, or for one episode; null when none. */
-        fun masterFromPage(html: String?, type: String, season: Int, episode: Int): String? {
+        fun masterFromPage(html: String?, type: String, season: Int, episode: Int, hlsPatterns: List<String> = InsertunitConfig().hlsPatterns, seasonsPatterns: List<String> = InsertunitConfig().seasonsPatterns): String? {
             val s = html ?: return null
-            if (type != "tv") return MOVIE_HLS.find(s)?.groupValues?.get(1)
-            val at = Regex("""\bseasons:\s*\[""").find(s)?.range?.first ?: return null
-            val start = s.indexOf('[', at)
-            val arr = arrayAt(s, start) ?: return null
-            val se = arr.mapNotNull { it as? JsonObject }.firstOrNull { num(it["season"]) == season } ?: return null
-            val ep = (se["episodes"] as? JsonArray)?.mapNotNull { it as? JsonObject }?.firstOrNull { num(it["episode"]) == episode } ?: return null
-            return (ep["hls"] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
+            if (type != "tv") return hlsPatterns.asSequence().mapNotNull { pattern ->
+                runCatching { Regex(pattern).find(s)?.groupValues?.getOrNull(1) }.getOrNull()
+            }.firstOrNull { it.startsWith("https://") || it.startsWith("http://") }
+            for (pattern in seasonsPatterns) for (match in runCatching { Regex(pattern).findAll(s).take(3).toList() }.getOrDefault(emptyList())) {
+                val arr = arrayAt(s, s.indexOf('[', match.range.first)) ?: continue
+                val se = arr.mapNotNull { it as? JsonObject }.firstOrNull { num(it["season"]) == season } ?: continue
+                val ep = (se["episodes"] as? JsonArray)?.mapNotNull { it as? JsonObject }?.firstOrNull { num(it["episode"]) == episode } ?: continue
+                val url = (ep["hls"] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
+                if (url != null && (url.startsWith("http://") || url.startsWith("https://"))) return url
+            }
+            return null
         }
 
         private fun num(e: kotlinx.serialization.json.JsonElement?): Int? = (e as? JsonPrimitive)?.contentOrNull?.toIntOrNull()

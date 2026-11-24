@@ -30,12 +30,18 @@ class VidoutResolver(
 
     private fun capped(ms: Long) = http.newBuilder().callTimeout(ms.coerceAtLeast(1), TimeUnit.MILLISECONDS).build()
 
-    suspend fun resolveAll(type: String, tmdbId: Long, season: Int, episode: Int, budgetMs: Long = BUDGET_MS): List<Resolved> {
+    suspend fun resolveAll(type: String, tmdbId: Long, season: Int, episode: Int, budgetMs: Long = BUDGET_MS, cfg: VidoutConfig? = null): List<Resolved> {
+        if (cfg?.enabled == false) return emptyList()
+        val catalogue = cfg?.catalogue ?: this.catalogue
+        val agent = cfg?.userAgent ?: UA
+        val limit = minOf(budgetMs, cfg?.budgetMs ?: budgetMs)
+        val stepMs = cfg?.stepTimeoutMs ?: this.stepMs
+        val headers = cfg?.let { mapOf("User-Agent" to agent, "Referer" to "${it.base}/", "Origin" to java.net.URI(it.base).let { uri -> "${uri.scheme}://${uri.rawAuthority}" }) } ?: HEADERS
         val t0 = System.currentTimeMillis()
         val tv = type == "tv" || type == "series"
         if (tv && (season <= 0 || episode <= 0)) return emptyList()
-        fun step() = minOf(stepMs, budgetMs - (System.currentTimeMillis() - t0))
-        val cat = get(if (tv) "$catalogue/tv/$tmdbId/S$season.json" else "$catalogue/movie/$tmdbId", mapOf("User-Agent" to UA), step())
+        fun step() = minOf(stepMs, limit - (System.currentTimeMillis() - t0))
+        val cat = get(if (tv) "$catalogue/tv/$tmdbId/S$season.json" else "$catalogue/movie/$tmdbId", mapOf("User-Agent" to agent), step())
         if (cat.code == 404) {
             android.util.Log.i("Chitram", "[vidout] not-in-catalogue $type $tmdbId")
             return emptyList()
@@ -49,9 +55,9 @@ class VidoutResolver(
             android.util.Log.i("Chitram", "[vidout] no direct master for $type $tmdbId")
             return emptyList()
         }
-        val m = get(master, HEADERS, step())
+        val m = get(master, headers, step())
         if (!m.ok) throw StepException("vidout master", m.code, "HTTP ${m.code} for $tmdbId")
-        val row = TaggedHls.row(m.body, master, "vidout", "VIDOUT", HEADERS)
+        val row = TaggedHls.row(m.body, master, "vidout", "VIDOUT", headers)
             ?: throw StepException("vidout master", 0, "no variants for $tmdbId")
         android.util.Log.i("Chitram", "[vidout] ok $tmdbId in ${System.currentTimeMillis() - t0}ms rows=1 langs=[${TaggedHls.langsOf(row)}]")
         return listOf(row)

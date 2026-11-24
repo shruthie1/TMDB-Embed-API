@@ -17,18 +17,21 @@ object TaggedHls {
         val m = Hls.parse(text, url)
         if (m.levels.isEmpty()) return null
         val lines = text.lines().map { it.trim() }
-        val group = lines.firstOrNull { it.startsWith("#EXT-X-STREAM-INF:") }?.let { Hls.attrs(it)["AUDIO"] }
+        val group = lines.filter { it.startsWith("#EXT-X-STREAM-INF:") }.map(Hls::attrs)
+            .sortedWith(compareByDescending<Map<String, String>> { it["RESOLUTION"]?.substringAfter('x')?.toIntOrNull() ?: 0 }
+                .thenByDescending { it["BANDWIDTH"]?.toLongOrNull() ?: 0 }).firstOrNull()?.get("AUDIO")
         val audio = lines.filter { it.startsWith("#EXT-X-MEDIA:") }.map { Hls.attrs(it) }
             .filter { it["TYPE"] == "AUDIO" && (group == null || it["GROUP-ID"] == null || it["GROUP-ID"] == group) }
             .map { a ->
                 val lang = a["LANGUAGE"]?.trim()?.takeIf { it.isNotEmpty() }
-                AudioTrack(lang, if (lang != null) a["NAME"] else null, a["DEFAULT"] == "YES")
+                AudioTrack(lang, a["NAME"], a["DEFAULT"] == "YES", tagged = true)
             }
         return Resolved(
             provider = provider,
             label = label,
             url = url,
             headers = headers,
+            audioTagsOnly = true,
             segmentToken = null,
             audio = audio,
             levels = m.levels,

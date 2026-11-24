@@ -3,9 +3,10 @@ package com.chitram.app.resolve
 import com.chitram.app.data.Level
 
 /** One EXT-X-MEDIA audio rendition, in master order. */
-data class AudioTrack(val language: String?, val name: String?, val isDefault: Boolean) {
+data class AudioTrack(val language: String?, val name: String?, val isDefault: Boolean, val tagged: Boolean = false) {
     /** "Telugu" for te/tel, else the rendition NAME. null when neither says anything. */
-    val label: String? get() = Hls.languageLabel(language)
+    val label: String? get() = if (tagged) com.chitram.app.data.Ranking.languageLabel(language)?.takeIf { com.chitram.app.data.Ranking.languageCode(it) != null }
+        else Hls.languageLabel(language)
         ?: com.chitram.app.data.Ranking.languageFromTrackName(name) ?: name?.takeUnless { it.isBlank() || it.equals("audio", true) }
 }
 

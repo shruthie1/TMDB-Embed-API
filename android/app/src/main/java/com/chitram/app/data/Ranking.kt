@@ -36,6 +36,9 @@ data class Source(
     val segmentToken: String? = null,
     /** Actual known rendition languages; null keeps legacy metadata fallback. */
     val audioLanguages: List<String>? = null,
+    val providerGroup: String? = null,
+    val serverLabel: String? = null,
+    val audioTagsOnly: Boolean = false,
     /** Read-only catalog availability, separate from playable language choices. */
     val catalogLanguages: List<String> = emptyList(),
     val netmirrorCatalog: String? = null,
@@ -266,7 +269,8 @@ object Ranking {
         // the name is; only then does the raw tag stand, as before. A name-only value
         // counts only when it is a real ISO language, so 'Commentary' never becomes one.
         val trackLanguages = s.audio?.mapNotNull { t ->
-            (tagOrNameLanguage(t.language, t.name) ?: tagOrNameLanguage(t.languageCode, null)
+            (if (s.audioTagsOnly) languageLabel(t.languageCode ?: t.language)?.takeIf { languageCode(it) != null }
+                else tagOrNameLanguage(t.language, t.name) ?: tagOrNameLanguage(t.languageCode, null)
                 ?: trackLanguage(t.language, null) ?: trackLanguage(t.languageCode, null)
                 ?: languageFromTrackName(t.name)?.takeIf { languageCode(it) != null })?.let { it to t }
         }
@@ -275,6 +279,7 @@ object Ranking {
         val uriLanguages = trackLanguages.orEmpty().distinctBy { canonLang(it.first) ?: it.first.lowercase() }
             .filter { !it.second.uri.isNullOrBlank() }.map { it.first }
         val languages = when {
+            s.audioTagsOnly -> audioLanguages.orEmpty()
             !audioLanguages.isNullOrEmpty() -> audioLanguages
             s.selectableAudio && audioLanguages != null -> emptyList()
             else -> languageLabels(s.languages)
@@ -301,6 +306,9 @@ object Ranking {
             codecString = s.codecs,
             unsupported = codecs.supports(s.videoCodec, s.codecs) == false,
             audioLanguages = audioLanguages,
+            audioTagsOnly = s.audioTagsOnly,
+            providerGroup = s.providerGroup,
+            serverLabel = s.serverLabel,
             catalogLanguages = languageLabels(s.catalogLanguages),
             netmirrorCatalog = s.netmirrorCatalog,
             uriLanguages = uriLanguages,

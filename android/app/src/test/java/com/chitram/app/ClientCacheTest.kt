@@ -133,6 +133,15 @@ class ClientCacheTest {
         assertEquals(2, vmCalls())
     }
 
+    @Test fun insertunitSignedExpiryAppliesToDirectAndProxiedUrlsOnly() {
+        val at=1_800_000_000_000L
+        val until=at+120_000
+        val direct="https://s2.interkh.com/a.m3u8?t=${until/1000}&h=signature"
+        assertEquals(until,UrlExpiry.at(direct,at))
+        assertEquals(until,UrlExpiry.at("https://proxy.test/m3u8-proxy?url="+java.net.URLEncoder.encode(direct,"UTF-8"),at))
+        assertNull(UrlExpiry.at("https://other.test/a?t=${until/1000}",at))
+    }
+
     @Test fun earlierUrlExpiryIsHonoured() {
         val exp = clock + 10 * 60_000
         val row = sample(url = "https://cdn.test/a/master.m3u8?e=${exp / 1000}&sig=abc")

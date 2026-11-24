@@ -27,7 +27,7 @@ class StreamCache(private val kv: KeyValue?, private val now: () -> Long = Syste
     @Serializable
     internal data class Slot(val at: Long, val until: Long, val rows: List<Source> = emptyList(), val vm: StreamsResponse? = null,
                              /** Rows of a partial answer (a sub-lookup failed): kept [PARTIAL_TTL_MS], replaced by a complete one. */
-                             val partial: Boolean = false)
+                             val partial: Boolean = false, val configFingerprint: String? = null)
 
     @Serializable
     internal data class Title(val at: Long, val slots: Map<String, Slot> = emptyMap())
@@ -45,6 +45,8 @@ class StreamCache(private val kv: KeyValue?, private val now: () -> Long = Syste
     /** The kept rows came from a partial answer: a fresh resolve may add rows (OnDevice refreshes in the background). */
     fun devicePartial(title: String, name: String, preferred: String): Boolean = live(title, deviceSlot(name, preferred))?.partial == true
 
+    fun deviceFingerprint(title: String, name: String, preferred: String): String? = live(title, deviceSlot(name,preferred))?.configFingerprint
+
     fun hasDevice(title: String, name: String, preferred: String): Boolean = device(title, name, preferred) != null
 
     /**
@@ -55,21 +57,21 @@ class StreamCache(private val kv: KeyValue?, private val now: () -> Long = Syste
      * replaces kept rows; a partial one never drops a kept row: rows it lacks stay, and
      * on top of a complete slot it only adds rows (the slot keeps its own end).
      */
-    fun putDevice(title: String, name: String, preferred: String, rows: List<Source>) {
+    fun putDevice(title: String, name: String, preferred: String, rows: List<Source>, configFingerprint: String? = null) {
         if (rows.isEmpty()) return
         val slot = deviceSlot(name, preferred)
-        if (rows.none { it.incomplete }) { put(title, slot, rows = rows, vm = null, expiry = expiryOf(rows)); return }
+        if (rows.none { it.incomplete }) { put(title, slot, rows = rows, vm = null, expiry = expiryOf(rows), configFingerprint = configFingerprint); return }
         val at = now()
         val old = live(title, slot)
         val ids = rows.map { it.id }.toSet()
-        if (old != null && !old.partial) {
+        if (old != null && !old.partial && old.configFingerprint == configFingerprint) {
             val add = rows.filter { r -> old.rows.none { it.id == r.id } }
             if (add.isEmpty()) return
-            put(title, slot, rows = old.rows + add, vm = null, expiry = expiryOf(add), ttlMs = old.until - at)
+            put(title, slot, rows = old.rows + add, vm = null, expiry = expiryOf(add), ttlMs = old.until - at, configFingerprint = configFingerprint)
             return
         }
         val merged = rows + old?.rows.orEmpty().filter { it.id !in ids }
-        put(title, slot, rows = merged, vm = null, expiry = expiryOf(merged), ttlMs = PARTIAL_TTL_MS, partial = true)
+        put(title, slot, rows = merged, vm = null, expiry = expiryOf(merged), ttlMs = PARTIAL_TTL_MS, partial = true, configFingerprint = configFingerprint)
     }
 
     private fun expiryOf(rows: List<Source>): Long? = rows.flatMap { listOfNotNull(it.url, it.directUrl) }.mapNotNull { UrlExpiry.at(it, now()) }.minOrNull()
@@ -110,14 +112,14 @@ class StreamCache(private val kv: KeyValue?, private val now: () -> Long = Syste
         if (s.until > now()) s else null
     }
 
-    private fun put(title: String, slot: String, rows: List<Source>, vm: StreamsResponse?, expiry: Long?, ttlMs: Long = TTL_MS, partial: Boolean = false) {
+    private fun put(title: String, slot: String, rows: List<Source>, vm: StreamsResponse?, expiry: Long?, ttlMs: Long = TTL_MS, partial: Boolean = false, configFingerprint: String? = null) {
         val at = now()
         val until = minOf(at + ttlMs, (expiry ?: Long.MAX_VALUE) - EXPIRY_SKEW_MS)
         if (until <= at) return
         synchronized(lock) {
             load()
             val old = titles.remove(title)?.slots.orEmpty()
-            titles[title] = Title(at, old + (slot to Slot(at, until, rows, vm, partial)))
+            titles[title] = Title(at, old + (slot to Slot(at, until, rows, vm, partial, configFingerprint)))
             prune(at)
             save()
         }
@@ -205,6 +207,13 @@ object UrlExpiry {
             if (best == null || ms < best!!) best = ms
         }
         for (s in decodedForms(url)) {
+            Regex("https?://", RegexOption.IGNORE_CASE).findAll(s).forEach { start ->
+                runCatching { java.net.URI(s.substring(start.range.first).substringBefore(' ').substringBefore('\"').substringBefore(39.toChar())) }.getOrNull()?.let { uri ->
+                    if (uri.host?.let { it.equals("interkh.com", true) || it.lowercase().endsWith(".interkh.com") } == true) {
+                        uri.rawQuery.orEmpty().split('&').firstOrNull { it.startsWith("t=") }?.removePrefix("t=")?.let(::consider)
+                    }
+                }
+            }
             PARAM.findAll(s).forEach { consider(it.groupValues[1]) }
             TOKEN.findAll(s).forEach { consider(it.groupValues[1]) }
         }

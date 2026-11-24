@@ -7,6 +7,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -114,31 +115,60 @@ class OnDeviceResolver(
      */
     suspend fun resolveAll(name: String, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, preferred: String = "Telugu", fresh: Boolean = false, title: String? = null, originalLang: String? = null,
                            later: MappleResolver.Later? = null): List<Source> {
+        if (kotlin.coroutines.coroutineContext[ResolveLeaseContext] != null) {
+            val lease=kotlin.coroutines.coroutineContext[ResolveLeaseContext]!!.value
+            val rows=resolveAllLeased(name,type,id,season,episode,codecs,preferred,fresh,title,originalLang,later)
+            return rows.takeIf { config.isCurrent(lease) }.orEmpty()
+        }
+        if (kotlin.coroutines.coroutineContext[Prewarming] == null) {
+            config.refreshIfDueAsync()
+            val hasCache=cache?.hasDevice(StreamCache.key(type,id,season,episode),name,preferred) == true
+            val hasWarm=warm.containsKey("${warmTitle(type,id,season,episode,preferred)}|$name")
+            if (!hasCache && !hasWarm) config.get()
+        }
+        for (attempt in 0..1) {
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            val lease=config.lease(name)
+            if (!lease.cfg.enabled(name)) return emptyList()
+            observeConfig(lease)
+            val rows=try { withContext(ResolveLeaseContext(config, lease)) {
+                resolveAllLeased(name,type,id,season,episode,codecs,preferred,fresh || attempt > 0,title,originalLang,later)
+            } } catch (obsolete: ObsoleteConfiguration) { kotlinx.coroutines.currentCoroutineContext().ensureActive(); continue }
+            if (config.isCurrent(lease)) return rows
+        }
+        return emptyList()
+    }
+
+    private suspend fun resolveAllLeased(name: String, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, preferred: String = "Telugu", fresh: Boolean = false, title: String? = null, originalLang: String? = null,
+                           later: MappleResolver.Later? = null): List<Source> {
+        val lease = kotlin.coroutines.coroutineContext[ResolveLeaseContext]?.value ?: config.lease(name)
+        if (!lease.cfg.enabled(name)) return emptyList()
         val c = cache ?: return resolveAllNow(name, type, id, season, episode, codecs, preferred, fresh, title, originalLang, later)
         val key = StreamCache.key(type, id, season, episode)
         // Gap 10.5: a fresh resolve keeps the old rows until its own answer is known.
         if (!fresh) c.device(key, name, preferred)?.let { rows ->
             // mapple's late preferred-language row is kept in the same slot: nothing more comes.
             later?.deliver(null)
-            val partial = c.devicePartial(key, name, preferred)
+            val changed = c.deviceFingerprint(key,name,preferred) != lease.fingerprint
+            val partial = changed || c.devicePartial(key, name, preferred)
             android.util.Log.i("Chitram", "[cache] $name $type/$id hit: ${rows.size} row(s), 0 requests${if (partial) ", partial" else ""}")
             if (partial) refreshPartial(c, key, name, type, id, season, episode, codecs, preferred, title, originalLang)
-            return rows
+            return if (changed) rows.map { it.copy(incomplete=true) } else rows
         }
         if (later == null) {
             val out = kotlin.coroutines.coroutineContext[Outcome] ?: Outcome()
-            return withContext(out) { resolveAllNow(name, type, id, season, episode, codecs, preferred, fresh, title, originalLang, null) }.also { keep(c, key, name, preferred, it, fresh, out) }
+            return withContext(out) { resolveAllNow(name, type, id, season, episode, codecs, preferred, fresh, title, originalLang, null) }.also { keep(c, key, name, preferred, it, fresh, out, lease) }
         }
         // mapple: keep its first rows and the late row together, once the late outcome is known,
         // so a kept slot never lacks the preferred-language row a live resolve would add.
         val first = kotlinx.coroutines.CompletableDeferred<List<Source>>()
         val lateRow = kotlinx.coroutines.CompletableDeferred<Source?>()
-        val tap = MappleResolver.Later(later.scope) { r -> lateRow.complete(r?.let { toSource(it, codecs) }); later.deliver(r) }
+        val tap = MappleResolver.Later(CoroutineScope(later.scope.coroutineContext + ResolveLeaseContext(config, lease))) { r -> val active=r?.takeIf { config.isCurrent(lease) }; lateRow.complete(active?.let { toSource(it, codecs) }); later.deliver(active) }
         val out = kotlin.coroutines.coroutineContext[Outcome] ?: Outcome()
         later.scope.launch {
             val rows = first.await()
             val extra = if (tap.handedOff) lateRow.await() else null
-            keep(c, key, name, preferred, rows + listOfNotNull(extra), fresh, out)
+            keep(c, key, name, preferred, rows + listOfNotNull(extra), fresh, out, lease)
         }
         return try {
             withContext(out) { resolveAllNow(name, type, id, season, episode, codecs, preferred, fresh, title, originalLang, tap) }.also { first.complete(it) }
@@ -153,11 +183,14 @@ class OnDeviceResolver(
      * that failed (network, budget, offline) keeps the old rows; a clean empty
      * answer drops them (the provider no longer has the title).
      */
-    private fun keep(c: StreamCache, key: String, name: String, preferred: String, rows: List<Source>, fresh: Boolean, out: Outcome) {
-        if (rows.isNotEmpty()) { if (fresh) c.evictDevice(key, name); c.putDevice(key, name, preferred, rows); return }
-        if (!fresh) return
-        if (out.failed || offline()) android.util.Log.i("Chitram", "[refresh] $name $key failed: kept rows stay")
-        else c.evictDevice(key, name)
+    private fun keep(c: StreamCache, key: String, name: String, preferred: String, rows: List<Source>, fresh: Boolean, out: Outcome, lease: ResolveConfigStore.Lease) {
+        config.ifCurrent(lease) {
+            if (rows.isNotEmpty()) { if (fresh) c.evictDevice(key, name); c.putDevice(key, name, preferred, rows, lease.fingerprint) }
+            else if (fresh) {
+                if (out.failed || offline()) android.util.Log.i("Chitram", "[refresh] $name $key failed: kept rows stay")
+                else c.evictDevice(key,name)
+            }
+        }
     }
 
     private suspend fun resolveAllNow(name: String, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, preferred: String, fresh: Boolean, title: String?, originalLang: String?,
@@ -240,17 +273,20 @@ class OnDeviceResolver(
     private suspend fun resolveTagged(name: String, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, fresh: Boolean): List<Source> {
         if (!fresh && isOpen(name)) return emptyList()
         if (name == INSERTUNIT && insertunit == null || name == VIDOUT && vidout == null) return emptyList()
+        val cfg = cfgNow()
+        if (!cfg.enabled(name)) return emptyList()
+        val budget = if (name == INSERTUNIT) cfg.insertunit.budgetMs else cfg.vidout.budgetMs
         return guarded(name) {
             var timedOut = true
-            val r = withTimeoutOrNull(TAGGED_BUDGET_MS + 2_000) {
+            val r = withTimeoutOrNull(budget + 2_000) {
                 val out = if (name == INSERTUNIT) {
                     val imdb = withTimeoutOrNull(TITLE_WAIT_MS) { runCatching { imdbFor(type, id) }.getOrNull() }
-                    insertunit!!.resolveAll(type, id, imdb, season, episode, budgetMs = TAGGED_BUDGET_MS)
-                } else vidout!!.resolveAll(type, id, season, episode, budgetMs = TAGGED_BUDGET_MS)
+                    insertunit!!.resolveAll(type, id, imdb, season, episode, budgetMs = budget, cfg = cfg.insertunit)
+                } else vidout!!.resolveAll(type, id, season, episode, budgetMs = budget, cfg = cfg.vidout)
                 timedOut = false
                 out
             }
-            if (timedOut) throw StepException(name, 0, "budget ${TAGGED_BUDGET_MS}ms spent")
+            if (timedOut) throw StepException(name, 0, "budget ${budget}ms spent")
             r.orEmpty().map { toSource(it, codecs) }
         }.orEmpty()
     }
@@ -358,11 +394,11 @@ class OnDeviceResolver(
     }
 
     /** Config for a resolve: a prewarm never fetches it (the fetch goes to the VM). */
-    private suspend fun cfgNow(): ResolveConfig =
-        if (kotlin.coroutines.coroutineContext[Prewarming] != null) config.current() else config.get()
+    private suspend fun cfgNow(): ResolveConfig = kotlin.coroutines.coroutineContext[ResolveLeaseContext]?.value?.cfg
+        ?: if (kotlin.coroutines.coroutineContext[Prewarming] != null) config.current() else config.get()
 
     /** One provider's prewarm: its rows, plus mapple's background preferred-language row. */
-    private class Warm(val at: Long, val rows: Deferred<List<Source>>, val late: kotlinx.coroutines.CompletableDeferred<Resolved?>?, val outcome: Outcome = Outcome())
+    private class Warm(val at: Long, val rows: Deferred<List<Source>>, val late: kotlinx.coroutines.CompletableDeferred<Resolved?>?, val outcome: Outcome = Outcome(), val fingerprint: String? = null)
     private val warm = java.util.concurrent.ConcurrentHashMap<String, Warm>()
     private val warmScope = CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO)
     /** NetMirror titles prewarmed, with when: never again inside PREWARM_TTL_MS or NetMirror's cooldown (gap 13.9). */
@@ -373,7 +409,7 @@ class OnDeviceResolver(
     /** Providers a prewarm starts: config `prewarm` true and a resolver on this device. */
     fun prewarmNames(): List<String> {
         val cfg = config.current()
-        val names = names().filter { it in cfg.prewarm }
+        val names = names().filter { it in cfg.prewarm && cfg.enabled(it) }
         val line = prewarmLine(names, if (cfg.prewarmExplicit) config.source() else ResolveConfigStore.FROM_BUILTIN)
         if (prewarmLogged.getAndSet(line) != line) android.util.Log.i("Chitram", line)
         return names
@@ -408,9 +444,11 @@ class OnDeviceResolver(
         // The title's last provider (LastProviderStore) starts first.
         val lead = nameFor(first)
         for (n in prewarmNames().let { all -> if (lead != null && lead in all) listOf(lead) + (all - lead) else all }) {
+            val lease=config.lease(n)
+            observeConfig(lease)
             val k = "$t|$n"
             // Rows kept from an earlier resolve: nothing to warm, 0 requests.
-            if (cache?.hasDevice(StreamCache.key(type, id, season, episode), n, preferred) == true) { kept += n; continue }
+            if (cache?.hasDevice(StreamCache.key(type, id, season, episode), n, preferred) == true && cache.deviceFingerprint(StreamCache.key(type,id,season,episode),n,preferred) == lease.fingerprint) { kept += n; continue }
             if (warm.containsKey(k)) continue
             // Breaker open: the provider is paused for Play too; nothing to warm.
             if (isOpen(n)) continue
@@ -424,7 +462,7 @@ class OnDeviceResolver(
             val late = if (n == MAPPLE) kotlinx.coroutines.CompletableDeferred<Resolved?>() else null
             val later = late?.let { l -> MappleResolver.Later(warmScope) { r -> l.complete(r) } }
             val outcome = Outcome()
-            val job = warmScope.async(Prewarming() + outcome, start = kotlinx.coroutines.CoroutineStart.LAZY) {
+            val job = warmScope.async(Prewarming() + outcome + ResolveLeaseContext(config, lease), start = kotlinx.coroutines.CoroutineStart.LAZY) {
                 val t0 = now()
                 try {
                     resolveAll(n, type, id, season, episode, codecs, preferred, fresh = false, title = title, originalLang = originalLang, later = later).also { rows ->
@@ -438,7 +476,7 @@ class OnDeviceResolver(
                     if (later != null && !later.handedOff) late?.complete(null)
                 }
             }
-            warm[k] = Warm(at, job, late, outcome)
+            warm[k] = Warm(at, job, late, outcome, lease.fingerprint)
             job.start()
             jobs += job
             started += n
@@ -585,9 +623,11 @@ class OnDeviceResolver(
             else -> null
         }
         if (why != null) { android.util.Log.i("Chitram", "[cache] $name $type/$id partial: no refresh, $why"); return }
+        val lease=config.lease(name)
+        if (!lease.cfg.enabled(name)) return
         val k = "$key|$name|${preferred.lowercase()}"
         if (partialJobs[k]?.isActive == true) return
-        partialJobs[k] = warmScope.launch(Prewarming()) {
+        partialJobs[k] = warmScope.launch(Prewarming() + ResolveLeaseContext(config, lease)) {
             val out = Outcome()
             val rows = try {
                 withContext(out) { resolveAllNow(name, type, id, season, episode, codecs, preferred, false, title, originalLang, null) }
@@ -595,7 +635,7 @@ class OnDeviceResolver(
                 if (e is kotlinx.coroutines.CancellationException) throw e
                 emptyList()
             }
-            keep(c, key, name, preferred, rows, fresh = false, out = out)
+            keep(c, key, name, preferred, rows, fresh = false, out = out, lease = lease)
             android.util.Log.i("Chitram", "[cache] $name $type/$id partial refresh: ${rows.size} row(s), complete=${rows.isNotEmpty() && rows.none { it.incomplete }}")
         }.also { j -> j.invokeOnCompletion { partialJobs.remove(k, j) } }
     }
@@ -643,9 +683,30 @@ class OnDeviceResolver(
             }
         }
         return try { w.rows.await() } catch (e: Exception) {
-            if (e is kotlinx.coroutines.CancellationException && !w.rows.isCancelled) throw e
+            if (e is kotlinx.coroutines.CancellationException) {
+                kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                if (!w.rows.isCancelled) throw e
+            }
             android.util.Log.i("Chitram", "prewarm: $name job ended without rows: ${e.javaClass.simpleName}")
             emptyList()
+        }
+    }
+
+    private val observedConfig = java.util.concurrent.ConcurrentHashMap<String,String>()
+    private fun observeConfig(lease: ResolveConfigStore.Lease) {
+        val previous=observedConfig.put(lease.provider,lease.fingerprint)
+        if (previous == null || previous == lease.fingerprint) return
+        val name=lease.provider
+        warm.entries.removeIf { (key,job) ->
+            (key.endsWith("|$name") && job.fingerprint != lease.fingerprint).also { if (it) { job.rows.cancel(); job.late?.cancel() } }
+        }
+        partialJobs.entries.removeIf { (key,job) -> key.contains("|$name|").also { if (it) job.cancel() } }
+        breakers.remove(name)
+        if (name == NETMIRROR) { netmirrorWarmed.clear(); netmirrorNoRows.clear() }
+    }
+    init {
+        config.onChange { before,after ->
+            names().filter { before.fingerprint(it) != after.fingerprint(it) }.forEach { name -> observeConfig(config.lease(name)) }
         }
     }
 
@@ -768,6 +829,7 @@ class OnDeviceResolver(
                 languages = (Hls.languages(r.audio) + r.languages).mapNotNull(com.chitram.app.data.Ranking::languageLabel).distinctBy { it.lowercase() },
                 selectableAudio = r.audio.size > 1 && !r.muxed,
                 audioLanguages = if (r.provider == NETMIRROR || r.audio.isNotEmpty()) Hls.languages(r.audio).mapNotNull(com.chitram.app.data.Ranking::languageLabel).distinctBy { it.lowercase() } else null,
+                audioTagsOnly = r.audioTagsOnly,
                 catalogLanguages = r.catalogLanguages.mapNotNull(com.chitram.app.data.Ranking::languageLabel).distinctBy { it.lowercase() },
                 netmirrorCatalog = r.netmirrorCatalog,
                 incomplete = r.incomplete,
