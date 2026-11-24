@@ -2,6 +2,7 @@ package com.chitram.app.data
 
 import okhttp3.Dns
 import java.net.InetAddress
+import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.util.concurrent.ExecutorCompletionService
 import java.util.concurrent.Executors
@@ -14,30 +15,56 @@ import java.util.concurrent.TimeUnit
  * and the first answer wins. Phone log: `tv.imgcdn.kim ... ok in 53451ms (dns 52932ms)`.
  * A fast lookup never asks another network; a fast failure is thrown as before.
  * [alternates] lists the other networks' resolvers (Network.getAllByName on Android).
+ *
+ * 1.2.63: the phone had no other network with internet (its LTE/NR agents were IMS
+ * only), so the hedge had nobody to ask and waited on Private DNS:
+ * `vidbolt.xyz/api/resolve failed InterruptedIOException in 26680ms (dns 26666ms)`.
+ * Now a slow lookup also asks [direct] (UdpDns: public resolvers over UDP), and no
+ * lookup waits longer than [capMs]: it then fails as a timeout
+ * (SocketTimeoutException), never as UnknownHostException, so a slow resolver is
+ * not read as a dead host or an offline device (OnDevice.isNetwork, MultiMovies dead).
+ * A host answered by a hedge is kept [keepMs], so the next connection skips the wait.
  */
 class HedgedDns(
     private val primary: Dns,
     private val alternates: () -> List<Dns>,
     private val slowMs: Long = SLOW_MS,
+    private val direct: Dns? = null,
+    private val capMs: Long = CAP_MS,
+    private val keepMs: Long = KEEP_MS,
+    private val now: () -> Long = System::currentTimeMillis,
 ) : Dns {
+    private val kept = java.util.concurrent.ConcurrentHashMap<String, Pair<List<InetAddress>, Long>>()
+
     override fun lookup(hostname: String): List<InetAddress> {
+        kept[hostname]?.let { (addrs, until) -> if (now() < until) return addrs else kept.remove(hostname) }
+        val t0 = System.nanoTime()
         val ecs = ExecutorCompletionService<List<InetAddress>>(pool)
         val first = ecs.submit { primary.lookup(hostname) }
         val done = ecs.poll(slowMs, TimeUnit.MILLISECONDS)
         if (done != null) return unwrap(done)
         val others = runCatching { alternates() }.getOrDefault(emptyList())
-        if (others.isEmpty()) return unwrap(first)
-        android.util.Log.i("Chitram", "[dns] $hostname no answer in ${slowMs}ms: asking ${others.size} other network(s)")
+        val names = HashMap<Future<List<InetAddress>>, String>()
+        names[first] = "the default network"
+        android.util.Log.i("Chitram", "[dns] $hostname no answer in ${slowMs}ms: asking ${others.size} other network(s)${if (direct != null) " and the direct resolver" else ""}")
         val all = mutableListOf<Future<List<InetAddress>>>(first)
-        others.forEach { d -> all += ecs.submit { d.lookup(hostname) } }
+        others.forEach { d -> ecs.submit { d.lookup(hostname) }.also { all += it; names[it] = "another network" } }
+        direct?.let { d -> ecs.submit { d.lookup(hostname) }.also { all += it; names[it] = "the direct resolver" } }
         var last: Throwable? = null
         repeat(all.size) {
-            val f = ecs.take()
+            val left = capMs - (System.nanoTime() - t0) / 1_000_000
+            val f = if (left > 0) ecs.poll(left, TimeUnit.MILLISECONDS) else null
+            if (f == null) {
+                all.forEach { it.cancel(true) }
+                android.util.Log.i("Chitram", "[dns] $hostname no answer in ${capMs}ms: giving up")
+                throw SocketTimeoutException("dns $hostname: no answer in ${capMs}ms")
+            }
             try {
                 val r = f.get()
                 if (r.isNotEmpty()) {
                     all.forEach { if (it !== f) it.cancel(true) }
-                    android.util.Log.i("Chitram", "[dns] $hostname answered by ${if (f === first) "the default network" else "another network"}")
+                    if (f !== first) kept[hostname] = r to now() + keepMs
+                    android.util.Log.i("Chitram", "[dns] $hostname answered by ${names[f]} in ${(System.nanoTime() - t0) / 1_000_000}ms")
                     return r
                 }
             } catch (e: java.util.concurrent.ExecutionException) { last = e.cause }
@@ -50,7 +77,11 @@ class HedgedDns(
     }
 
     companion object {
-        const val SLOW_MS = 5_000L
+        /** 1.2.63: 5 s -> 2.5 s; asking the direct resolver costs one UDP packet. */
+        const val SLOW_MS = 2_500L
+        /** Longest any lookup waits (phone: 22.8 s and 26.7 s Private DNS lookups). */
+        const val CAP_MS = 10_000L
+        const val KEEP_MS = 120_000L
         private val pool = Executors.newCachedThreadPool { r -> Thread(r, "chitram-dns").apply { isDaemon = true } }
     }
 }

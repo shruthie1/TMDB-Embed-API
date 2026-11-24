@@ -66,8 +66,9 @@ class App : Application(), ImageLoaderFactory {
         // The copy builds up to 1.2.49 kept in the shared file.
         kv.put(StreamCache.KV_KEY, null)
         val cm = runCatching { getSystemService(android.net.ConnectivityManager::class.java) }.getOrNull()
-        // 1.2.52: a DNS lookup slower than 5 s is asked again on the phone's other network (Wi-Fi + LTE).
-        val dns = com.chitram.app.data.HedgedDns(okhttp3.Dns.SYSTEM, { otherNetworkDns(cm) })
+        // 1.2.52: a slow DNS lookup is asked again on the phone's other network (Wi-Fi + LTE).
+        // 1.2.63: and of public resolvers over UDP; no lookup waits more than 10 s.
+        val dns = com.chitram.app.data.HedgedDns(okhttp3.Dns.SYSTEM, { otherNetworkDns(cm) }, direct = com.chitram.app.data.UdpDns())
         api = Api(Api.buildClient(dns), httpCache = Api.httpCache(cacheDir), vm = com.chitram.app.data.VmHealth(kv), streamCache = streamCache)
         // 1.2.52: a default-network change drops the pooled connections (a dead one hung /api/title 30 s).
         val watch = com.chitram.app.data.NetworkWatch { why -> api.networkChanged(why) }
