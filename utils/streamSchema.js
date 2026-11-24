@@ -149,6 +149,7 @@ function audioLanguageAndName(t) {
     const tag = t && (t.language || t.lang);
     const name = (t && t.name) || null;
     const known = knownLanguage(tag);
+    if (t?.tagged) return { language: knownLanguage(t.languageCode || tag), name };
     if (known) return { language: known, name };
     const canon = canonicalLanguage(tag);
     const parsed = (canon && trackNameLanguage(tag)) || trackNameLanguage(name);
@@ -255,6 +256,7 @@ function normaliseStream(raw) {
     const audio = Array.isArray(raw.audio)
         ? raw.audio.map((t) => ({
             ...audioLanguageAndName(t),
+            ...(t && t.tagged ? { tagged: true } : {}),
             languageCode: (t && (t.languageCode || t.lang || t.language)) || null,
             uri: (t && (t.uri || t.url)) || null,
             channels: (t && Number(t.channels)) || null,
@@ -262,6 +264,8 @@ function normaliseStream(raw) {
             default: Boolean(t && (t.default ?? t.isDefault)),
         }))
         : [];
+
+    if (raw.audioTagsOnly) languages = [...new Set(audio.map(entry => entry.language).filter(Boolean))];
 
     const subtitles = Array.isArray(raw.subtitles)
         ? raw.subtitles.filter((s) => s && s.url).map((s, i) => ({
@@ -306,6 +310,9 @@ function normaliseStream(raw) {
     return {
         url: raw.url,
         provider: raw.provider || raw.name || 'Unknown',
+        ...require('../lib/mmhub/identity').metadata(raw.provider),
+        ...(raw.providerGroup ? {providerGroup:raw.providerGroup} : {}),
+        ...(raw.serverLabel ? {serverLabel:raw.serverLabel} : {}),
         title: raw.title || label || raw.provider || 'Stream',
         quality,
         ...(raw.netmirrorCatalog ? { netmirrorCatalog: String(raw.netmirrorCatalog) } : {}),
@@ -313,6 +320,7 @@ function normaliseStream(raw) {
         languages,
         ...(Array.isArray(raw.catalogLanguages) ? { catalogLanguages: [...new Set(raw.catalogLanguages.map(canonicalLanguage).filter(Boolean))] } : {}),
         audio,
+        ...(raw.audioTagsOnly ? { audioTagsOnly: true } : {}),
         subtitles,
         size: raw.size || null,
         container: raw.container || inferContainer(raw.url),

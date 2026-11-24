@@ -164,3 +164,12 @@ test('Expires= (Castle, capital E) caps the entry', () => {
   assert.ok(ttl < 30 * 60_000, `ttl ${ttl}`);
   assert.equal(ttl, sec(exp) * 1000 - 30_000 - NOW);
 });
+
+test('Insertunit signed t expiry is respected, including nested proxy URLs, without treating unrelated t as expiry', () => {
+  const exp = NOW + 10 * 86400_000;
+  const u = `https://s2.interkh.com/media/master.m3u8?t=${sec(exp)}&h=signature`;
+  assert.equal(urlExpiresAt(u, NOW), exp);
+  assert.equal(urlExpiresAt(`http://localhost/m3u8-proxy?url=${encodeURIComponent(u)}`, NOW), exp);
+  assert.equal(urlExpiresAt(`https://unrelated.example/a?t=${sec(exp)}`, NOW), null);
+  assert.equal(dropExpiredStreams([{url:u}],30_000,exp+1000).length,0);
+});

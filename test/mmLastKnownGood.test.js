@@ -123,3 +123,12 @@ test('remember: keeps at most 3 rows per title', () => {
     lkg.remember(T, rows, { store: s, now: NOW });
     assert.strictEqual(s.lkgFor(T, NOW).length, 3);
 });
+
+test('tag-only rows cannot become a Telugu baseline from a name or stale languages floor', () => {
+    const s = store.openStore(':memory:');
+    const r = { ...teRow('https://cdn.example/unknown/master.m3u8'), provider:'insertunit', audioTagsOnly:true,
+        audio:[{languageCode:'und',language:null,name:'Telugu'}] };
+    assert.equal(lkg.remember(T,[r],{store:s,now:NOW}),0);
+    assert.equal(s.lkgFor(T,NOW).length,0);
+    assert.equal(lkg.remember(T,[{...r,audio:[{languageCode:'te',name:'Original'}]}],{store:s,now:NOW}),1);
+});
