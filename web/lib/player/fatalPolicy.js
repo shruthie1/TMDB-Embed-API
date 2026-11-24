@@ -23,9 +23,40 @@ export function fatalAction(data) {
     return { kind: 'novideo', failover: true, reason: 'no video frames',
       message: 'This device cannot show the picture for this stream.' };
   }
+  if (d === 'badSegments') {
+    return { kind: 'badsegments', failover: true, reason: data.reason || 'bad segments',
+      message: 'This server sent no video.' };
+  }
   if (d === 'manifestLoadError' || d === 'manifestLoadTimeOut' || d === 'manifestParsingError') {
     return { kind: 'unreachable', failover: true, reason: d };
   }
   if (data?.message) return { kind: 'error', failover: true, reason: data.message, message: data.message };
   return { kind: 'nudge', failover: false };
+}
+
+/**
+ * Bad segment guard (APK 1.2.55, PlayPolicy.BadSegments). 2026-11-24 ShowsSt
+ * movie/1359490: every fragment is a 70 B 1x1 PNG, HTTP 200, so hls.js never
+ * raises a fatal error and loads them forever. Three fragments under 1 KB in a
+ * row before the first frame fail the row. Subtitle fragments and unknown
+ * sizes do not count; a real fragment ends the run. Fires once.
+ */
+export const BAD_SEGMENT_BYTES = 1024;
+export const BAD_SEGMENT_COUNT = 3;
+
+export function badSegmentCounter(count = BAD_SEGMENT_COUNT) {
+  let run = 0;
+  let largest = 0;
+  let fired = false;
+  return {
+    onFragment(bytes, type) {
+      if (fired || type === 'subtitle' || !Number.isFinite(bytes) || bytes < 0) return null;
+      if (bytes >= BAD_SEGMENT_BYTES) { run = 0; largest = 0; return null; }
+      run += 1;
+      largest = Math.max(largest, bytes);
+      if (run < count) return null;
+      fired = true;
+      return `${run}x${largest}B`;
+    },
+  };
 }

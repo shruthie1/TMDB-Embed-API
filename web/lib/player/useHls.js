@@ -5,6 +5,7 @@ import { languageName } from '../subtitles';
 import { probeTsAudio, swapPids } from './tsAudio';
 import { planPlayUrl, isEarlyFailure, markDirectFailed, logRoute, DIRECT_FIRST_FRAME_MS, DIRECT_NO_BYTES_MS } from './directRoute';
 import { cachedPlaylistLoader } from './playlistCache';
+import { badSegmentCounter } from './fatalPolicy';
 
 /**
  * HLS allows every audio rendition to be marked DEFAULT=NO. That is valid
@@ -350,6 +351,23 @@ export function useHls({ videoRef, stream, onFatal, onHlsReady, onRouteFallback,
         Hls.Events.AUDIO_TRACK_LOADED, Hls.Events.FRAG_LOADED]) {
         if (ev) hls.on(ev, noteBytes);
       }
+      // Bad segment guard (fatalPolicy.badSegmentCounter): tiny fragments before
+      // the first frame fail the row at once. Same bytes via the proxy, so no
+      // direct->proxy retry: straight to onFatal (failover).
+      const badSegs = badSegmentCounter();
+      hls.on(Hls.Events.FRAG_LOADED, (_e, data) => {
+        if (hlsRef.current !== hls || firstFrame) return;
+        const frag = data?.frag;
+        const bytes = Number(frag?.stats?.loaded ?? data?.payload?.byteLength);
+        const label = badSegs.onFragment(bytes, frag?.type);
+        if (!label) return;
+        console.info(`[switch] ${stream?.provider || 'source'} bad segments ${label}, failing over`);
+        fellBack = true; // no proxy retry: the proxy serves the same bytes
+        clearTimeout(frameTimer);
+        stopByteWatch();
+        try { hls.stopLoad(); } catch { /* torn down */ }
+        cbRef.current.onFatal?.({ fatal: true, type: 'networkError', details: 'badSegments', reason: `bad segments ${label}` }, hls);
+      });
       hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, (_e, data) => {
         applyAudio(data?.audioTracks);
         if (!muxed.active()) setCurrentAudio(hls.audioTrack >= 0 ? hls.audioTrack : initialAudioTrack(data?.audioTracks || [], wantLangRef.current));
