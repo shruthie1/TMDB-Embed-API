@@ -51,6 +51,8 @@ open class MappleResolver(
     client: OkHttpClient,
     private val hosts: HostBook,
     private val kv: KeyValue,
+    /** Cap on the gate steps (watch, ui/session, media-session); see [GATE_STEP_MS]. */
+    private val gateStepMs: Long = GATE_STEP_MS,
     private val now: () -> Long = System::currentTimeMillis,
 ) {
     private val base = client.newBuilder().followRedirects(false).followSslRedirects(false).build()
@@ -102,7 +104,8 @@ open class MappleResolver(
     ): Resolved? {
         val mediaType = if (type == "tv" || type == "series") "tv" else "movie"
         val id = tmdbId.toString()
-        val http = base.newBuilder().callTimeout(cfg.stepTimeoutMs, TimeUnit.MILLISECONDS).build()
+        // Gate steps (watch, ui/session, media-session) run under the longer gate cap; fronts keep their own.
+        val http = base.newBuilder().callTimeout(maxOf(cfg.stepTimeoutMs, gateStepMs), TimeUnit.MILLISECONDS).build()
         val tm = Timing(now())
         var outcome = "error"
         try {
@@ -153,15 +156,15 @@ open class MappleResolver(
     private suspend fun bootstrap(cfg: MappleConfig, http: OkHttpClient, b: String, type: String, id: String): HostBook.Probe<Session> {
         val jar = Jar()
         val watchUrl = b + cfg.watchPath.replace("{type}", type).replace("{id}", id)
-        val page = http.fetch(req(cfg, b, jar, watchUrl).get().build())
+        val page = step("watch") { http.fetch(req(cfg, b, jar, watchUrl).get().build()) }
         jar.absorb(page.headers)
         if (page.code in 300..399) {
             val to = page.location()?.let { resolveAgainst(watchUrl, it) }?.let(::originOf)
             if (to != null && to != b) return HostBook.Probe.Moved(to)
         }
         if (page.code >= 400) return HostBook.Probe.Dead(StepException("mapple watch", page.code, "HTTP ${page.code} from $b"))
-        val res = http.fetch(req(cfg, b, jar, b + cfg.sessionPath).header("accept", "application/json")
-            .post(ByteArray(0).toRequestBody(null)).build())
+        val res = step("session") { http.fetch(req(cfg, b, jar, b + cfg.sessionPath).header("accept", "application/json")
+            .post(ByteArray(0).toRequestBody(null)).build()) }
         jar.absorb(res.headers)
         val token = obj(res.body)?.str("token")
             ?: return HostBook.Probe.Dead(StepException("mapple session", res.code, "no requestToken (watch ${page.code}, session ${res.code}: ${res.body.take(120)})"))
@@ -341,14 +344,22 @@ open class MappleResolver(
      * (the old path's 401 "Invalid request token"), throws [STEP_REJECTED].
      */
     private suspend fun postMedia(cfg: MappleConfig, http: OkHttpClient, s: Session, json: String): JsonObject? {
-        val r = http.fetch(req(cfg, s.base, s.jar, s.base + cfg.mediaSessionPath).header("content-type", "application/json")
-            .post(json.toRequestBody(JSON)).build())
+        val r = step("media-session") { http.fetch(req(cfg, s.base, s.jar, s.base + cfg.mediaSessionPath).header("content-type", "application/json")
+            .post(json.toRequestBody(JSON)).build()) }
         s.jar.absorb(r.headers)
         val o = obj(r.body)
         val err = o?.str("error").orEmpty()
         if (r.code == 401 || r.code == 403 || (o?.str("token") == null && (err.contains("token", true) || err.contains("session", true))))
             throw StepException(STEP_REJECTED, r.code, "HTTP ${r.code} ${err.ifEmpty { r.body.take(80) }}")
         return o
+    }
+
+    /** One gate step, timed: "[mapple] step <name> <ms>ms" (ok or not). */
+    private suspend fun <T> step(name: String, block: suspend () -> T): T {
+        val t0 = System.currentTimeMillis()
+        var ok = false
+        try { return block().also { ok = true } }
+        finally { android.util.Log.i("Chitram", "[mapple] step $name ${System.currentTimeMillis() - t0}ms${if (ok) "" else " failed"}") }
     }
 
     private suspend fun postJson(cfg: MappleConfig, http: OkHttpClient, s: Session, url: String, json: String): JsonObject? {
@@ -369,6 +380,13 @@ open class MappleResolver(
         const val NAME = "mapple"
         const val KEY_FRONT = "resolve.mapple.front"
         private const val STEP_REJECTED = "mapple session rejected"
+        /**
+         * 1.2.57: mapple.fun/watch answered in 8.4 s and 10.8 s from the home IP (11-24) and the
+         * phone cut it, and media-session, at the 8 s step. Nothing else waits on these steps
+         * (fronts have their own caps, other providers run beside), so they get this cap; the
+         * resolve's budgetMs still bounds the whole call.
+         */
+        const val GATE_STEP_MS = 15_000L
         private val JSON = "application/json".toMediaType()
         private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 

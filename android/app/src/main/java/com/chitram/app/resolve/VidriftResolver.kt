@@ -72,6 +72,8 @@ class VidriftResolver(
         val errors = mutableListOf<String>()
         var page: Pair<String, JsonArray>? = null
         var lastCode = 0
+        // A host said orionStreams null: the title has no rows there yet (server twin titleEmpty).
+        var titleEmpty = false
         for (base in order) {
             val step = minOf(pageStepMs, left())
             if (step <= 0) { errors += "$base: budget spent"; break }
@@ -89,7 +91,8 @@ class VidriftResolver(
                         val streams = meta?.get("orionStreams")
                         when {
                             meta == null -> "no embedMeta in page"
-                            streams !is JsonArray -> "orionStreams ${if (streams == null || streams is kotlinx.serialization.json.JsonNull) "null" else "missing"}"
+                            streams is kotlinx.serialization.json.JsonNull -> { titleEmpty = true; "orionStreams null" }
+                            streams !is JsonArray -> "orionStreams missing"
                             else -> { page = base to streams; null }
                         }
                     }
@@ -106,6 +109,7 @@ class VidriftResolver(
             errors += "$base: $msg"
             android.util.Log.i("Chitram", "[vidrift] host $base failed for $tmdbId (${System.currentTimeMillis() - p0}ms): $msg")
         }
+        if (page == null && titleEmpty) throw VidriftTitleEmpty("every host failed for $tmdbId: ${errors.joinToString("; ")}")
         val (pageBase, streams) = page ?: throw StepException("vidrift page", lastCode, "every host failed for $tmdbId: ${errors.joinToString("; ")}")
         val hosts = listOf(pageBase) + order.filter { it != pageBase }
 
@@ -312,3 +316,10 @@ class VidriftResolver(
         }
     }
 }
+
+/**
+ * Every host failed and at least one said orionStreams null: the title has no Orion rows
+ * yet (null was seen to be transient on Krack, so it is not cached as "none" either).
+ * Not the provider's failure, so the breaker never counts it (server twin: err.titleEmpty).
+ */
+class VidriftTitleEmpty(detail: String) : StepException("vidrift page", 0, detail), SelfImposedSkip

@@ -193,6 +193,40 @@ class VidriftApkTest {
         assertEquals(1, a.requestCount)
     }
 
+    // 1.2.57, phone 11-24: 1359490 and 372399 had orionStreams null on both hosts (Mac too):
+    // the title has no rows yet. Server twin marks it titleEmpty and never counts it; the
+    // APK counted it and paused vidrift 300 s for every title after the third one.
+    @Test fun nullOrionStreamsOnEveryHostIsATitleEmptySkipNotAFailure() = runBlocking {
+        serve(a, krackPage, emptyMap())
+        serve(b, krackPage, emptyMap())
+        try { resolver().resolveAll("movie", 1359490, 0, 0); fail("expected a throw") } catch (e: StepException) {
+            assertTrue("not counted by the breaker", e is com.chitram.app.resolve.SelfImposedSkip)
+            assertTrue(e.message!!, e.message!!.contains("orionStreams null"))
+        }
+        // One host null, the other dead: still title-empty (server: any host said null).
+        serve(b, null, emptyMap())
+        try { resolver().resolveAll("movie", 1359490, 0, 0); fail("expected a throw") } catch (e: StepException) {
+            assertTrue(e is com.chitram.app.resolve.SelfImposedSkip)
+        }
+        // Every host dead: a real failure, counted.
+        serve(a, null, emptyMap())
+        try { resolver().resolveAll("movie", 1359490, 0, 0); fail("expected a throw") } catch (e: StepException) {
+            assertTrue(e !is com.chitram.app.resolve.SelfImposedSkip)
+        }
+    }
+
+    @Test fun emptyTitleThreeTimesDoesNotPauseVidrift() = runBlocking {
+        serve(a, krackPage, emptyMap())
+        serve(b, krackPage, emptyMap())
+        val kv = MemoryKeyValue()
+        val od = OnDeviceResolver(null, ResolveConfigStore(client, "http://127.0.0.1:9/config", kv), MappleResolver(client, HostBook(kv), kv),
+            VaplayerResolver(client, HostBook(kv)) { null }, titleFor = { _, _ -> null }, imdbFor = { _, _ -> null }, vidrift = resolver())
+        repeat(3) { od.resolveAll(OnDeviceResolver.VIDRIFT, "movie", 1359490, 0, 0, com.chitram.app.data.CodecSupport { _, _ -> null }) }
+        assertTrue("an empty title must not pause vidrift", !od.isOpen(OnDeviceResolver.VIDRIFT))
+        serve(a, rrrPage, rrrMasters)
+        assertEquals(4, od.resolveAll(OnDeviceResolver.VIDRIFT, "movie", 579974, 0, 0, com.chitram.app.data.CodecSupport { _, _ -> null }).size)
+    }
+
     @Test fun deadMasterIsDroppedOthersSurviveAndAllDeadThrows() = runBlocking {
         serve(a, rrrPage, rrrMasters - BANGLA)
         serve(b, null, emptyMap())

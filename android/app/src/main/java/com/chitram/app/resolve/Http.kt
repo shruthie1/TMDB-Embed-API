@@ -18,8 +18,9 @@ import kotlin.coroutines.resumeWithException
 open class StepException(val step: String, val code: Int, detail: String) : IOException("$step: $detail")
 
 /**
- * A provider held itself back (its own cooldown or request budget): nothing was
- * asked, so the provider did not fail. Never counted by the circuit breaker.
+ * A provider held itself back (its own cooldown or request budget), or the upstream
+ * said the title has nothing yet (vidrift orionStreams null): the provider did not
+ * fail. Never counted by the circuit breaker.
  */
 interface SelfImposedSkip
 

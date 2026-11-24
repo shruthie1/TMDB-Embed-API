@@ -92,14 +92,15 @@ class OnDeviceResolveTest {
         v/1080.m3u8
     """.trimIndent()
 
-    private fun mappleSite(frontDelayMs: Map<String, Long> = emptyMap(), hasOn: Set<String> = setOf("s12"), bare: Set<String> = emptySet(), sessionOk: () -> Boolean = { true }, failKinds: Map<String, String> = emptyMap(), rejectToken: () -> Boolean = { false }, mediaDown: () -> Boolean = { false }, encryptGate: () -> java.util.concurrent.CountDownLatch? = { null }) = serve { r ->
+    private fun mappleSite(frontDelayMs: Map<String, Long> = emptyMap(), hasOn: Set<String> = setOf("s12"), bare: Set<String> = emptySet(), sessionOk: () -> Boolean = { true }, failKinds: Map<String, String> = emptyMap(), rejectToken: () -> Boolean = { false }, mediaDown: () -> Boolean = { false }, encryptGate: () -> java.util.concurrent.CountDownLatch? = { null }, gateDelayMs: Long = 0) = serve { r ->
         val path = r.requestUrl!!.encodedPath
         when {
-            path.startsWith("/watch/") -> MockResponse().addHeader("Set-Cookie", "_mapple_site=c1; Path=/; HttpOnly").setBody("<html/>")
+            path.startsWith("/watch/") -> MockResponse().addHeader("Set-Cookie", "_mapple_site=c1; Path=/; HttpOnly").setBody("<html/>").setHeadersDelay(gateDelayMs, TimeUnit.MILLISECONDS)
             path == "/api/ui/session" ->
                 if (!sessionOk()) MockResponse().setResponseCode(503)
                 else if (r.getHeader("Cookie")?.contains("_mapple_site=c1") == true) json("""{"token":"RT"}""") else json("""{"error":"no cookie"}""")
             path == "/api/media-session" -> {
+                if (gateDelayMs > 0) Thread.sleep(gateDelayMs)
                 val b = bodyJson(r)
                 val pow = b["pow"] as? JsonObject
                 when {
@@ -179,6 +180,26 @@ class OnDeviceResolveTest {
         val r = MappleResolver(client, HostBook(kv), kv).resolve(cfg, "movie", 1)!!
         assertEquals("$base/m/s12/master.m3u8", r.url)
         assertTrue("took ${System.currentTimeMillis() - t0}ms", System.currentTimeMillis() - t0 < 2500)
+    }
+
+    // 1.2.57, phone 11-24: mapple.fun/watch took 8.4 s and 10.8 s (TTFB) from the home IP and
+    // the phone cut /watch and /api/media-session at the 8 s step three times. Those gate steps
+    // block nothing else (fronts have their own caps), so they get the longer gate step.
+    @Test fun mappleSlowWatchAndMediaSessionRunPastTheStepCap() = runBlocking {
+        mappleSite(gateDelayMs = 1_500)
+        val kv = MemoryKeyValue()
+        val cfg = mappleCfg("s12").copy(stepTimeoutMs = 1_000)
+        val r = MappleResolver(client, HostBook(kv), kv, gateStepMs = 4_000).resolve(cfg, "movie", 1)
+        assertEquals("$base/m/s12/master.m3u8", r!!.url)
+    }
+
+    @Test fun mappleGateStepStillCapsADeadWatchPage() = runBlocking {
+        mappleSite(gateDelayMs = 3_000)
+        val kv = MemoryKeyValue()
+        val cfg = mappleCfg("s12").copy(stepTimeoutMs = 500)
+        val t0 = System.currentTimeMillis()
+        try { MappleResolver(client, HostBook(kv), kv, gateStepMs = 1_000).resolve(cfg, "movie", 1); org.junit.Assert.fail("expected a throw") } catch (e: java.io.IOException) { }
+        assertTrue("took ${System.currentTimeMillis() - t0}ms", System.currentTimeMillis() - t0 < 2_800)
     }
 
     @Test fun mappleCoolingFrontIsTriedLastNotDropped() = runBlocking {
