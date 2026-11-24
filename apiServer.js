@@ -1162,6 +1162,10 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
       late.push(...still);
     }
     clearTimeout(budgetTimer);
+    // File tags that landed while the answer waited (lib/media/languagesLater.js)
+    // go on now, not only on the next request.
+    results = results.map((r) => languagesLater.apply(r));
+    castleStreams = languagesLater.apply(castleStreams);
     if (budgetSpent() && late.length) {
       console.log(`[api] request-budget spent after ${Date.now() - reqT0}ms for ${tmdbId}; late: ${late.map((x) => x.name).join(', ')}`);
     }
