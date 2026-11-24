@@ -68,7 +68,7 @@ test('a timed-out provider: response not memoized, no-store, provider asked agai
     assert.match(second.r.headers.get('cache-control'), /^private, max-age=\d+$/);
 });
 
-test('a partial provider answer (upstreamError) is served but not cached anywhere', async () => {
+test('a partial provider answer (upstreamError) is served, cached 5 min as partial, never memoized', async () => {
     let up = false;
     plan[4002] = {
         castletv: async () => [stream('CastleTV')],
@@ -82,10 +82,18 @@ test('a partial provider answer (upstreamError) is served but not cached anywher
     assert.ok(first.d.streams.some((s) => s.provider === 'OneTouchTV'), 'the rows it did get are still served');
 
     up = true;
+    // Within the 5-min partial TTL the cached partial rows are served, still
+    // reported as partial and kept out of the memo and the browser cache.
     const second = await getRes('/api/streams/movie/4002');
-    assert.equal(calls['onetouchtv:4002'], 2, 'partial rows were not kept in providerHitCache');
-    assert.ok(second.d.streams.some((s) => (s.languages || []).includes('Telugu')), 'Telugu row arrives once upstream recovers');
-    assert.equal(second.d.providerErrors, undefined);
+    assert.equal(calls['onetouchtv:4002'], 1, 'partial rows came from providerHitCache');
+    assert.deepEqual(second.d.providerErrors, ['onetouchtv']);
+    assert.equal(second.d.cached, undefined, 'partial answer was not memoized');
+    assert.equal(second.r.headers.get('cache-control'), 'no-store');
+    // ?refresh=1 skips the cache and picks up the recovered Telugu row.
+    const third = await getRes('/api/streams/movie/4002?refresh=1');
+    assert.equal(calls['onetouchtv:4002'], 2);
+    assert.ok(third.d.streams.some((s) => (s.languages || []).includes('Telugu')), 'Telugu row arrives once upstream recovers');
+    assert.equal(third.d.providerErrors, undefined);
 });
 
 test('per-provider route reports a timeout and a partial answer as providerError', async () => {

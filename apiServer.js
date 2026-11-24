@@ -470,8 +470,15 @@ const providerHitCache = createTtlCache({ ttlMs: PROVIDER_HIT_TTL_MS, maxEntries
 // expired row drops the whole entry so the provider is asked again: serving
 // the surviving rows alone could hide the expired one (often the Telugu row).
 const urlExpiry = require('./lib/urlExpiry');
-function providerHitSet(ck, rows) {
-  const ttl = urlExpiry.cappedTtlMs(PROVIDER_HIT_TTL_MS, rows);
+// A partial answer (part of the provider's upstream failed: a VidBolt server
+// cut or paused, a master dropped) is cached for 5 min, the APK's TTL for an
+// incomplete row: long enough that the next request does not rerun the
+// provider from scratch (MultiMovies ~9.5 s, re-asking every VidBolt server),
+// short enough that a missing row comes back soon. The entry carries
+// `partialError`, so a hit is still reported and kept out of the memo.
+const PROVIDER_PARTIAL_TTL_MS = 5 * 60 * 1000;
+function providerHitSet(ck, rows, maxTtl = PROVIDER_HIT_TTL_MS) {
+  const ttl = urlExpiry.cappedTtlMs(maxTtl, rows);
   if (ttl > 0) providerHitCache.set(ck, rows, ttl);
 }
 function providerHitGet(ck) {
@@ -548,12 +555,17 @@ function fetchProviderShared(prov, ck, ctx, { titleIsResolvable, titleKey }) {
       const ms = Date.now()-t0;
       const n = Array.isArray(r) ? r.length : 0;
       // Part of the provider's upstream failed (one language track, one
-      // platform). Serve the rows it got, but cache none of them: a cached
-      // partial answer would hide the missing row (often the Telugu one) for
-      // PROVIDER_HIT_TTL_MS after a blip that lasted seconds.
+      // platform). Serve the rows it got and cache them for
+      // PROVIDER_PARTIAL_TTL_MS only: the full TTL would hide the missing row
+      // (often the Telugu one) for 30 min after a blip that lasted seconds.
       if (r && r.upstreamError) {
         recordProviderOutcome(name, n > 0 ? 'hit' : 'error', ms, n, titleIsResolvable, titleKey);
         console.log(`[api] provider-partial ${name} tmdbId=${ctx.tmdbId} rows=${n} reason=${String(r.upstreamError).slice(0, 120)}`);
+        if (n > 0) {
+          providerHitSet(ck, Object.assign([...r], { partialError: String(r.upstreamError).slice(0, 200) }),
+            PROVIDER_PARTIAL_TTL_MS);
+          console.log(`[api] provider-partial-cached ${name} tmdbId=${ctx.tmdbId} rows=${n} ttl=5min`);
+        }
         return { outcome: 'partial', ms, streams: Array.isArray(r) ? r : [], error: String(r.upstreamError).slice(0, 200) };
       }
       // A provider's own "not in my catalogue" (r.notListed) is no evidence
@@ -941,7 +953,16 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
       const ck = `${name}|${titleKey}`;
       if (!refresh) {
         const hit = providerHitGet(ck);
-        if (hit) { providerTimings[name] = 0; return languagesLater.apply(hit); }
+        if (hit) {
+          providerTimings[name] = 0;
+          // A cached partial stays partial: reported, and kept out of the memo.
+          if (hit.partialError && !erroredProviders.includes(name)) {
+            erroredProviders.push(name);
+            providerErrorWhy[name] = `cached partial: ${hit.partialError}`.slice(0, 120);
+            console.log(`[api] provider-partial-hit ${name} tmdbId=${tmdbId} rows=${hit.length}`);
+          }
+          return languagesLater.apply([...hit]);
+        }
         if (providerEmptyCache.has(ck)) { providerTimings[name] = 0; return []; }
       }
       if (!bypassBreaker && !requestRuns.has(ck) && !providerInflight.has(ck) && breakerOpen(name)) {
@@ -952,7 +973,7 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
       // One run per provider per request. A linked provider (gdmirror,
       // cineverse) asks for its VidBolt/Vidrift child through resolveService;
       // when the fan-out's own run of that child already ended with a partial
-      // answer (never cached) the in-flight entry is gone, and the child ran
+      // answer (then not cached; now cached 5 min) the in-flight entry is gone, and the child ran
       // again with fresh upstream calls. Prod 2026-11-24 [47d21642] 811941:
       // multimovies ran twice in one request, re-asking every VidBolt server.
       let shared = requestRuns.get(ck);
@@ -1223,7 +1244,15 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
     }
     for (const x of late) {
       providerTimings[x.name] = null;
-      console.log(`[api] ${x.name} still running after grace for ${tmdbId}; its result will be cached for the next request`);
+      console.log(`[api] ${x.name} still running after grace for ${tmdbId}; on settle a complete result is cached 30 min, a partial one 5 min`);
+      // What actually happened once it settles: the line above is a promise.
+      const run = requestRuns.get(`${x.name}|${titleKey}`);
+      if (run) run.then((o) => {
+        const cached = o.outcome === 'hit' ? 'cached complete'
+          : o.outcome === 'partial' && o.streams.length ? 'cached partial ttl=5min'
+          : o.outcome === 'empty' ? 'cached empty' : 'not cached';
+        console.log(`[api] late-settled ${x.name} tmdbId=${tmdbId} outcome=${o.outcome} rows=${o.streams.length} ${cached}`);
+      }, () => {});
     }
     if (castleStreams.length === 0 && results.every((r) => r.length === 0) && skippedByBreaker.length
         && budgetSpent()) {
@@ -1435,7 +1464,7 @@ app.get('/api/streams/:provider/:type/:tmdbId', async (req,res) => {
     let raw = refresh ? undefined : providerHitGet(ck);
     // A provider failure keeps this route's old contract (200, count 0) and
     // says why in providerError, instead of a 500.
-    let providerError = null;
+    let providerError = raw && raw.partialError ? `cached partial: ${raw.partialError}` : null;
     if (!raw && !refresh && providerEmptyCache.has(ck)) raw = [];
     if (!raw) {
       const o = await fetchProviderShared(prov, ck, { tmdbId, type, season, episode, imdbId, filters:{} },
