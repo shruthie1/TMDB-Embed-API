@@ -152,6 +152,8 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
 
     /** First-play timing (fix D): master / variant / seg0 logged once per play(), first frame once per tap. Before [player]: its data sources report bytes to it. */
     private val loadMarks = LoadMarks()
+    /** 1.2.55: tiny media loads in a row before the first frame (PlayPolicy.BadSegments). */
+    private val badSegs = PlayPolicy.BadSegments()
 
     /** Start cap: a lower rendition until each play's first frame (StartCapMeter). */
     private val startMeter = StartCapMeter(androidx.media3.exoplayer.upstream.DefaultBandwidthMeter.getSingletonInstance(app))
@@ -339,6 +341,8 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                 mediaLoadData: androidx.media3.exoplayer.source.MediaLoadData,
             ) {
                 trace("load-done", LoadTrace.load(mediaLoadData.dataType, mediaLoadData.trackType, mediaLoadData.trackFormat?.language, loadEventInfo.loadDurationMs, loadEventInfo.bytesLoaded, loadEventInfo.uri.toString()))
+                if (mediaLoadData.dataType == C.DATA_TYPE_MEDIA && !framedThisPlay)
+                    badSegs.onMedia(loadEventInfo.bytesLoaded, text = mediaLoadData.trackType == C.TRACK_TYPE_TEXT)?.let { onBadSegments(it) }
                 val kind = loadMarks.mark(mediaLoadData.dataType) ?: return
                 android.util.Log.i("Chitram", loadLine(kind, loadEventInfo.loadDurationMs, System.currentTimeMillis() - playStartedAt, loadEventInfo.uri.toString()))
             }
@@ -458,6 +462,8 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     private var languageTrial: String? = null
     private val discoveredAudio = HashMap<String, List<String>>()
     private var languageFallback: Triple<Source, String?, Long>? = null
+    /** 1.2.55: the row (and position) on screen before a manual `src` pick, restored when the pick sends bad segments. */
+    private var manualFallback: Pair<Source, Long>? = null
     private fun desiredAudio(): String = selectedAudioLanguage ?: g.prefs.preferredAudio()
 
     fun start(r: PlayRequest) {
@@ -478,6 +484,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         twins = emptyMap()
         refreshedOnce = false
         manualPickId = null
+        manualFallback = null
         nextUp = null
         notice = ""
         ctxLang = null
@@ -732,6 +739,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         framedThisPlay = false
         startMeter.capped = true
         loadMarks.reset()
+        badSegs.reset()
         traced = 0
         directJob?.cancel()
         // Another picture replaces the run's: no late donor answer may land on it.
@@ -1200,8 +1208,39 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         judgeDead(s, alive = false, reason = "proxy host failed", why = LoadingModel.Reason.NO_ANSWER, directWhy = "proxy-host-failed")
     }
 
+    /**
+     * 1.2.55: the row on screen sent [PlayPolicy.BAD_SEGMENT_COUNT] tiny media
+     * segments in a row before a frame (ShowsSt's 70 B PNG placeholders). The
+     * bytes are the same through the proxy, so no proxy retry and no re-resolve:
+     * report it and move on. A manual pick goes back to the row that was playing.
+     */
+    private fun onBadSegments(label: String) {
+        val s = current ?: return
+        if (landed || judged || framedThisPlay || phase != Phase.Playing) return
+        judged = true
+        directJob?.cancel()
+        directFailed += DirectRoute.key(s)
+        android.util.Log.i("Chitram", "[switch] ${s.provider} bad segments $label, failing over")
+        dropKept(s)
+        val reason = "${s.provider}: bad segments $label"
+        val pos = player.currentPosition.coerceAtLeast(0)
+        val back = manualFallback?.takeIf { s.id == manualPickId && it.first.id != s.id }
+        manualFallback = null
+        if (back != null && pairedAudio == null) {
+            endAttempt(LoadingModel.RowState.FAILED, LoadingModel.Reason.NO_PICTURE)
+            tried += s.id
+            report(s, ok = false, reason = reason)
+            android.util.Log.i("Chitram", "[switch] ${s.provider} picked by hand sent no video; back to ${back.first.provider}")
+            play(back.first, back.second)
+            notice = "${label(s)} sent no video. Back to ${label(back.first)}."
+            return
+        }
+        failover(reason, pos, LoadingModel.Reason.NO_PICTURE)
+    }
+
     private fun onLanded(s: Source, now: Long) {
         landed = true
+        if (s.id == manualPickId) manualFallback = null
         markFramed()
         snapshotCtx(s)
         android.util.Log.i("Chitram", "[switch] ${s.provider} landed in ${now - playStartedAt}ms")
@@ -1842,6 +1881,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                     pickPreferredAudio(tracks)
                 } else {
                     manualPickId = source.id
+                    manualFallback = if (framed) current?.let { it to player.currentPosition.coerceAtLeast(0) } else null
                     beginAskedSwitch()
                     play(source, audioLanguage = language ?: selectedAudioLanguage)
                     notice = "Switching to ${label(source)}…"

@@ -58,6 +58,37 @@ object PlayPolicy {
         lastBytesAt > 0 && lastBytesAt >= playStartedAt && now - lastBytesAt < SWITCH_FLOW_GAP_MS
 
     /**
+     * 1.2.55: a media segment under this many bytes carries no picture. ShowsSt
+     * on p16-sg.tiktokcdn.com (2026-11-24, movie/1359490) serves a 70 B 1x1 PNG
+     * for every one of its 1034 segments, HTTP 200, direct and via /ts-proxy.
+     */
+    const val BAD_SEGMENT_BYTES = 1024L
+    const val BAD_SEGMENT_COUNT = 3
+
+    /**
+     * Counts tiny media loads in a row before the first frame. [onMedia] returns
+     * the log label ("3x70B") once the run reaches [count], then null until [reset].
+     * Captions (text) and loads of unknown size do not count; a real segment ends the run.
+     */
+    class BadSegments(private val count: Int = BAD_SEGMENT_COUNT) {
+        private var run = 0
+        private var largest = 0L
+        private var fired = false
+
+        fun reset() { run = 0; largest = 0L; fired = false }
+
+        fun onMedia(bytes: Long, text: Boolean): String? {
+            if (text || bytes < 0 || fired) return null
+            if (bytes >= BAD_SEGMENT_BYTES) { run = 0; largest = 0L; return null }
+            run++
+            largest = maxOf(largest, bytes)
+            if (run < count) return null
+            fired = true
+            return "${run}x${largest}B"
+        }
+    }
+
+    /**
      * multimovies-slow-rca.md fix 3: a mapple row whose own (proxy) host refused
      * the connection before any frame is dead now. ExoPlayer retries a refused
      * connection silently, so without this the 8 s watchdog decides. An HTTP
