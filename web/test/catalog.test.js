@@ -173,6 +173,17 @@ describe('full title enrichment when the fast record is absent', () => {
     globalThis.fetch = vi.fn(async url => ({ ok: !String(url).includes('append_to_response'), json: async () => String(url).includes('external_ids') ? { imdb_id: 'tt1' } : { meta: { name: 'Fast title', year: '2016' } } }));
     expect((await getTitleFull('tv', 1)).title).toBe('Fast title');
   });
+  it('waits for a slow fast record when rich metadata fails (no spurious 404)', async () => {
+    // TMDB rich call fails at once; the Cinemeta chain answers after its 1.2 s race window.
+    globalThis.fetch = vi.fn(async url => {
+      const u = String(url);
+      if (u.includes('append_to_response')) return { ok: false };
+      if (u.includes('external_ids')) return { ok: true, json: async () => ({ imdb_id: 'tt1' }) };
+      await new Promise(r => setTimeout(r, 1500));
+      return { ok: true, json: async () => ({ meta: { name: 'Slow fast title' } }) };
+    });
+    expect((await getTitleFull('movie', 1))?.title).toBe('Slow fast title');
+  });
   it('returns no record when both producers fail', async () => {
     globalThis.fetch = vi.fn(async () => ({ ok: false }));
     expect(await getTitleFull('tv', 1)).toBeNull();

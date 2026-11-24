@@ -622,16 +622,16 @@ export async function getTitleFull(type, id) {
   // an imdbId plus fallbacks. So the Cinemeta chain gets a short leash: if it
   // has not answered by the time TMDB has, the page ships without it rather
   // than holding the render for a field nothing above the fold uses.
+  const slow = getTitle(type, id);
   const [fast, rich] = await Promise.all([
-    Promise.race([
-      getTitle(type, id),
-      new Promise(r => setTimeout(() => r(null), 1200)),
-    ]),
+    Promise.race([slow, new Promise(r => setTimeout(() => r(null), 1200))]),
     // `images` adds the title logos in the same call (no language filter:
     // TMDB then returns every language, and pickLogo chooses).
     j(tmdbUrl(`/${type}/${id}`, { append_to_response: 'credits,images' })),
   ]);
-  if (!rich) return fast;
+  // TMDB failed and the fast record lost its 1.2 s race: wait for it (up to 4 s
+  // more) instead of answering 404, which the app shows as "Could not load".
+  if (!rich) return fast || Promise.race([slow, new Promise(r => setTimeout(() => r(null), 4000))]);
   // The rich producer owns seasons/credits even when the optional fast path loses its race.
   const seed = fast || fromTmdb(rich, type);
   const cast = (rich.credits?.cast || []).slice(0, 8).map(c => c.name);
