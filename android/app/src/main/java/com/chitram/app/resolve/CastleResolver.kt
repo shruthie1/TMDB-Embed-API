@@ -117,10 +117,11 @@ class CastleResolver(
             url = best.url,
             headers = PLAYBACK_HEADERS,
             segmentToken = null,
-            audio = best.languages.mapIndexed { i, l -> AudioTrack(null, l, i == 0) },
+            // 1.2.65: API track names that name no language ("Ost") are left out: unknown beats wrong.
+            audio = labels(best.languages).mapIndexed { i, l -> AudioTrack(null, l, i == 0) },
             levels = if (height > 0) listOf(Level(height = height, quality = best.quality)) else emptyList(),
             codecs = null,
-            muxed = best.languages.size > 1,
+            muxed = labels(best.languages).size > 1,
         )
     }
 
@@ -250,6 +251,11 @@ class CastleResolver(
             json.parseToJsonElement(plain.replace(Regex("""([:{\[,]\s*)(\d{16,})"""), "$1\"$2\"")) as? JsonObject ?: JsonObject(emptyMap())
 
         private fun unwrap(o: JsonObject): JsonObject = o["data"] as? JsonObject ?: o
+
+        /** API track names that are languages; "Ost", "Original" and the like are dropped. */
+        fun labels(names: List<String>): List<String> =
+            names.mapNotNull { com.chitram.app.data.Ranking.trackLanguage(null, it)?.takeIf { l -> com.chitram.app.data.Ranking.languageCode(l) != null } }
+                .distinctBy { it.lowercase() }
 
         private fun str(o: JsonObject, k: String): String? = (o[k] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotEmpty() }
         private fun num(o: JsonObject, k: String): Int? = (o[k] as? JsonPrimitive)?.let { it.intOrNull ?: it.contentOrNull?.toIntOrNull() }

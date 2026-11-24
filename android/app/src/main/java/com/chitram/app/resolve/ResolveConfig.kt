@@ -163,6 +163,24 @@ data class ResolveConfig(
     /** At least one section carried a boolean `prewarm`; false: every flag is the built-in default. */
     val prewarmExplicit: Boolean = false,
 ) {
+    /**
+     * 1.2.65: hosts the phone's resolvers connect to first, for a DNS warm-up (HedgedDns.warm).
+     * Enabled providers only; NetMirror's first domain only (no domain sweep).
+     */
+    fun hosts(): List<String> {
+        val urls = ArrayList<String>()
+        if (enabled("mapple")) urls += mapple.bases
+        if (enabled("vaplayer")) urls += vaplayer.wrapperBases + vaplayer.apiUrl + vaplayer.playerOrigin
+        if (enabled("castletv")) urls += castletv.bases
+        if (enabled("multimovies")) urls += multimovies.bases
+        if (enabled("netmirror")) urls += netmirror.domains.take(1)
+        if (enabled("insertunit")) urls += insertunit.base
+        if (enabled("vidout")) urls += vidout.base
+        if (enabled("showsst")) urls += ShowsstResolver.MIRRORS.flatMap { listOf(it.api, it.player) }
+        if (enabled("onetouchtv")) urls += OneTouchTvResolver.BASE
+        return urls.mapNotNull { runCatching { java.net.URI(it).host }.getOrNull() }.distinct()
+    }
+
     fun enabled(provider: String): Boolean = provider !in disabled && routes[provider] != "off" &&
         (provider != "insertunit" || insertunit.enabled) && (provider != "vidout" || vidout.enabled)
 

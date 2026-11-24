@@ -71,7 +71,12 @@ class App : Application(), ImageLoaderFactory {
         val dns = com.chitram.app.data.HedgedDns(okhttp3.Dns.SYSTEM, { otherNetworkDns(cm) }, direct = com.chitram.app.data.UdpDns())
         api = Api(Api.buildClient(dns), httpCache = Api.httpCache(cacheDir), vm = com.chitram.app.data.VmHealth(kv), streamCache = streamCache)
         // 1.2.52: a default-network change drops the pooled connections (a dead one hung /api/title 30 s).
-        val watch = com.chitram.app.data.NetworkWatch { why -> api.networkChanged(why) }
+        val watch = com.chitram.app.data.NetworkWatch { why ->
+            api.networkChanged(why)
+            // 1.2.65: kept DNS answers belong to the old network; look the provider hosts up again.
+            dns.clear()
+            if (::resolveConfig.isInitialized) dns.warm(resolveConfig.current().hosts())
+        }
         runCatching {
             cm?.registerDefaultNetworkCallback(object : android.net.ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: android.net.Network) = watch.available(network.toString())
@@ -107,7 +112,8 @@ class App : Application(), ImageLoaderFactory {
             metered = { com.chitram.app.player.NetState.metered(cm) },
         )
         refresh = com.chitram.app.resolve.SourceRefresh(onDevice, vm = { t, i, s, e -> api.streams(t, i, s, e, refresh = true) }, vmUp = { api.vmUp })
-        appScope.launch { resolveConfig.get() }
+        // 1.2.65: provider hosts looked up in the background once the config is in (no VM call of its own).
+        appScope.launch { dns.warm(resolveConfig.get().hosts()) }
     }
 
     /** Gap 3.7: Android asks for memory back (Fire TV Stick, 1 GB): the kept playlists go (PlaylistCache.trim). */

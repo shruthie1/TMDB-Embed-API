@@ -144,20 +144,40 @@ class StartRace(
          * lack, is the same source: dropped, so the list has no duplicate. A VM row that
          * adds a language (file tags, hybrid) is kept: no audio information is lost.
          * NetMirror catalogs differ by catalog, so only the same url counts there.
-         * Returns (kept, dropped).
+         *
+         * 1.2.65: a VM row that is the same file as a device row (FileTags.fileKey: host+path,
+         * ShowsSt prism also the query's sha1) gives that device row its languages and
+         * languageSource, then is dropped: one row, with the VM's file tags.
          */
-        fun dropVmDupes(shown: List<Source>, vm: List<Source>): Pair<List<Source>, List<Source>> {
-            val device = shown.filter { it.onDevice != null }
+        data class Dupes(val kept: List<Source>, val dropped: List<Source>, val shown: List<Source>, val merged: List<String> = emptyList())
+
+        fun dropVmDupes(shown: List<Source>, vm: List<Source>): Dupes {
+            val out = shown.toMutableList()
+            val merged = ArrayList<String>()
+            fun keyOf(s: Source) = s.provider.lowercase() to com.chitram.app.resolve.FileTags.fileKey(s.directUrl ?: s.url)
+            val (sameFile, rest) = vm.partition { v ->
+                if (v.onDevice != null || v.provider.lowercase() == "netmirror") return@partition false
+                val k = keyOf(v)
+                val i = out.indexOfFirst { it.onDevice != null && keyOf(it) == k }
+                if (i < 0) return@partition false
+                com.chitram.app.resolve.FileTags.mergeLanguages(out[i], v)?.let { out[i] = it; merged += v.provider.lowercase() }
+                true
+            }
+            val device = out.filter { it.onDevice != null }
             fun langs(s: Source) = (s.audioLanguages ?: s.languages).map { it.lowercase() }.toSet()
             val byProvider = device.groupBy { it.provider.lowercase() }
             val urls = device.map { it.url }.toSet()
-            return vm.partition { v ->
+            val (kept, dropped) = rest.partition { v ->
                 val p = v.provider.lowercase()
                 val same = byProvider[p] ?: return@partition true
                 if (p == "netmirror") return@partition v.url !in urls
                 !same.flatMap(::langs).toSet().containsAll(langs(v))
             }
+            return Dupes(kept, sameFile + dropped, out, merged)
         }
+
+        /** `[lang] vm languages merged onto device row <provider>`, once per merge. */
+        fun mergedLine(provider: String) = "[lang] vm languages merged onto device row $provider"
 
         /**
          * Greppable route lines for one play: `[route] <provider> device-first` per device

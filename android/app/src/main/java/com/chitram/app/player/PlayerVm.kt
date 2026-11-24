@@ -308,6 +308,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
                     val now = System.currentTimeMillis()
                     android.util.Log.i("Chitram", firstFrameLine(now - requestedAt, current?.provider, now - playStartedAt))
                 }
+                readFileTags()
             }
             override fun onCues(cueGroup: CueGroup) { cues = cueGroup.cues.joinToString("\n") { Mojibake.fix(it.text?.toString() ?: "") }.trim() }
             override fun onTracksChanged(t: Tracks) { tracks = t; recordAudio(t); if (pairedAudio != null && !pairFused) applyPair(t) else pickPreferredAudio(t); if (landed) current?.let { snapshotCtx(it) } }
@@ -495,6 +496,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         runEffects(journey.drop())
         discoveredAudio.clear()
         muxedIds.clear()
+        tagTried.clear()
         tried.clear()
         reresolved.clear()
         twinTried.clear()
@@ -557,6 +559,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             val pin = keepProvider ?: saved?.provider
             val manualPin = keepProvider != null || saved?.manual == true
             val preferred = g.prefs.preferredAudio()
+            rankCtx = Triple(preferred, pin, manualPin)
             // Device-first (owner 2026-11-24): every provider the phone can resolve starts now, VM up or
             // down. The VM is asked only for what the phone cannot do; its breaker open means no VM call.
             val vmDown = !g.api.vmUp
@@ -580,7 +583,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             val warmJobs = if (keep) emptyList() else device.zip(names).filter { (_, n) -> n in warmNames }.map { it.first }
             OnDeviceResolver.raceLines(keptNames, jobNames).forEach { android.util.Log.i("Chitram", it) }
             vmJob?.cancel()
-            fullJob?.cancel()
+            fullJob?.cancel(); tagJob?.cancel()
             // A9: set when the VM answered partial or a provider threw; read after the answer lands.
             val wantsFull = java.util.concurrent.atomic.AtomicBoolean(false)
             // The VM call lives in the supervisor scope: its failure must not cancel the start.
@@ -693,10 +696,11 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         endCheck(LoadingModel.CHECK_SERVER, rows?.size ?: 0)
         if (rows == null) { android.util.Log.i("Chitram", "[route] vm unreachable, device only"); return }
         // Device-first: a VM row that repeats a device row already shown is dropped (no duplicate).
-        val (kept, dropped) = StartRace.dropVmDupes(sources, rows)
+        val (kept, dropped, shown, merged) = StartRace.dropVmDupes(sources, rows)
         StartRace.vmRequiredLines(kept).forEach { android.util.Log.i("Chitram", it) }
+        merged.forEach { android.util.Log.i("Chitram", StartRace.mergedLine(it)) }
         if (dropped.isNotEmpty()) android.util.Log.i("Chitram", "[route] ${dropped.size} vm row(s) dropped: same as device rows (${dropped.map { it.provider.lowercase() }.distinct().joinToString(",")})")
-        putSources(Ranking.merge(sources, kept, preferred, pin, manualPin))
+        putSources(Ranking.merge(shown, kept, preferred, pin, manualPin))
         android.util.Log.i("Chitram", "[vm] ${kept.size} row(s) joined late")
         lateAfterEnd(r, kept.size)
         if (wantsFull.get()) followFull(r, preferred, pin, manualPin)
@@ -716,8 +720,10 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             if (request != r) return@launch
             if (more == null) { android.util.Log.i("Chitram", "[vm] full follow-up gave nothing; first list stands"); return@launch }
             val before = sources.size
-            putSources(Ranking.mergeMore(sources, more, preferred, g.codecs, pin, manualPin))
-            android.util.Log.i("Chitram", "[vm] full follow-up: ${sources.size - before} new row(s) of ${more.streams.size} in ${System.currentTimeMillis() - t0}ms")
+            val (list, updated) = Ranking.mergeMoreLanguages(sources, more, preferred, g.codecs, pin, manualPin)
+            putSources(list)
+            updated.forEach { android.util.Log.i("Chitram", "[lang] full follow-up languages updated on $it") }
+            android.util.Log.i("Chitram", "[vm] full follow-up: ${sources.size - before} new row(s), ${updated.size} row(s) with new languages, of ${more.streams.size} in ${System.currentTimeMillis() - t0}ms")
             lateAfterEnd(r, sources.size - before)
         }
     }
@@ -729,7 +735,58 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         twins = twins + lateTwins
         putSources(Ranking.merge(sources, shown, preferred, pin, manualPin))
         android.util.Log.i("Chitram", "on-device ${rows.size} row(s) joined late")
+        if (framedThisPlay) readFileTags()
         lateAfterEnd(r, rows.size)
+    }
+
+    /** (preferred, pin, manualPin) of the running resolve: a background language change re-ranks with it. */
+    private var rankCtx: Triple<String, String?, Boolean>? = null
+    private var tagJob: Job? = null
+    /** Files whose tags this play already asked for (FileTags.fileKey). */
+    private val tagTried = HashSet<String>()
+
+    /**
+     * 1.2.65 (j2-lang-latency.md APK 3-5): after the first frame, the device rows of
+     * ShowsSt, CastleTV, mapple and VaPlayer get their languages from their own file
+     * tags (FileTags: MP4 mdhd/elng, TS PMT, fMP4 init), one row at a time, each read
+     * bounded and kept per file. An untagged file leaves the row as it was (unknown
+     * beats wrong). The playing row is never switched; the list re-ranks in place.
+     */
+    private fun readFileTags() {
+        val r = request ?: return
+        if (tagJob?.isActive == true) return
+        tagJob = viewModelScope.launch {
+            while (request == r) {
+                val row = sources.firstOrNull { com.chitram.app.resolve.FileTags.wants(it) && it.id !in discoveredAudio &&
+                    (com.chitram.app.resolve.FileTags.cached(it.url)?.languages?.isNotEmpty() == true || tagTried.add(com.chitram.app.resolve.FileTags.fileKey(it.url))) } ?: break
+                val t0 = System.currentTimeMillis()
+                val tags = withContext(Dispatchers.IO) { com.chitram.app.resolve.FileTags.read(g.api.client, row) }
+                val ms = System.currentTimeMillis() - t0
+                val provider = row.provider
+                if (tags == null) { android.util.Log.i("Chitram", "[lang] $provider file tags unread (${ms}ms)"); continue }
+                android.util.Log.i("Chitram", "[lang] $provider file tags ${tags.languages.joinToString("/").ifEmpty { "none" }} (${ms}ms)")
+                if (request != r || tags.languages.isEmpty()) continue
+                applyFileTags(row, tags)
+            }
+        }
+    }
+
+    private fun applyFileTags(row: Source, tags: com.chitram.app.resolve.FileTags.Tags) {
+        val key = com.chitram.app.resolve.FileTags.fileKey(row.url)
+        var changed = false
+        val list = sources.map { s ->
+            if (s.onDevice == null || s.id in discoveredAudio || com.chitram.app.resolve.FileTags.fileKey(s.url) != key) s
+            else {
+                // A progressive file with several audio traks is switchable in the player; a muxed TS is swapped (TsAudioSwap).
+                val t = com.chitram.app.resolve.FileTags.withLanguages(s, tags.languages, tags.source)
+                    .let { if (it.progressive && tags.languages.size > 1) it.copy(selectableAudio = true, audioLanguages = tags.languages) else it }
+                if (t != s) changed = true
+                t
+            }
+        }
+        if (!changed) return
+        val (preferred, pin, manual) = rankCtx ?: Triple(g.prefs.preferredAudio(), null, false)
+        putSources(Ranking.merge(list, emptyList(), preferred, pin, manual))
     }
 
     /**
@@ -1466,7 +1523,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         deviceJobs.forEach { it.cancel() }
         deviceBg?.cancel()
         vmJob?.cancel()
-        fullJob?.cancel()
+        fullJob?.cancel(); tagJob?.cancel()
         capJob?.cancel()
         guardJob?.cancel()
         subsJob?.cancel()
@@ -1840,7 +1897,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         }
         // Rows still joining from the start would bring old urls back.
         lateJobs.forEach { it.cancel() }
-        fullJob?.cancel()
+        fullJob?.cancel(); tagJob?.cancel()
         twins = twinMap
         putSources(list)
         listReady = true

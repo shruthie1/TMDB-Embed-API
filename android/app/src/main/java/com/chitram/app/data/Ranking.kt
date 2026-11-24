@@ -427,6 +427,32 @@ object Ranking {
         return merge(sources, fresh, preferred, pin, manual)
     }
 
+    /**
+     * 1.2.65: [mergeMore], and the ?full=1 answer also refreshes rows already shown.
+     * A full row that is the same file (provider + FileTags.fileKey) as a shown row
+     * gives it its languages and languageSource (FileTags.mergeLanguages: file tags
+     * are never replaced by labels) and is not added again. Ids stay, so the playing
+     * row is never switched. Returns (list, provider of each updated row).
+     */
+    fun mergeMoreLanguages(sources: List<Source>, more: StreamsResponse, preferred: String, codecs: CodecSupport, pin: String? = null, manual: Boolean = false): Pair<List<Source>, List<String>> {
+        fun key(s: Source) = s.provider.lowercase() to com.chitram.app.resolve.FileTags.fileKey(s.directUrl ?: s.url)
+        val out = sources.toMutableList()
+        val updated = ArrayList<String>()
+        // Raw indexes of full rows that are the same file as a shown row: they update it, never join.
+        val absorbed = HashSet<Int>()
+        more.streams.forEachIndexed { i, raw ->
+            val f = toSource(raw, i, codecs) ?: return@forEachIndexed
+            if (f.provider.equals("netmirror", true)) return@forEachIndexed
+            val k = key(f)
+            val hits = out.indices.filter { key(out[it]) == k }
+            if (hits.isEmpty()) return@forEachIndexed
+            absorbed += i
+            for (j in hits) com.chitram.app.resolve.FileTags.mergeLanguages(out[j], f)?.let { out[j] = it; updated += it.provider }
+        }
+        val changed = if (updated.isEmpty()) sources else applyPin(rank(out, preferred), pin, preferred, manual)
+        return mergeMore(changed, more.copy(streams = more.streams.filterIndexed { i, _ -> i !in absorbed }), preferred, codecs, pin, manual) to updated
+    }
+
     const val VAPLAYER = "VaPlayer"
 
     /** Server menu labels: "CastleTV 1", "CastleTV 2" when a name repeats. */
