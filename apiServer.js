@@ -1164,6 +1164,7 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
     clearTimeout(budgetTimer);
     // File tags that landed while the answer waited (lib/media/languagesLater.js)
     // go on now, not only on the next request.
+    const tagsAppliedAt = Date.now();
     results = results.map((r) => languagesLater.apply(r));
     castleStreams = languagesLater.apply(castleStreams);
     if (budgetSpent() && late.length) {
@@ -1366,9 +1367,9 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
     }
     // A response missing a late provider is not memoized, so the next request
     // rebuilds it and picks that provider up from providerHitCache.
-    // A probe that landed while this answer was built: its rows may predate the
-    // tags, so this answer is not memoised (the next request rebuilds).
-    const langLanded = languagesLater.landedSince(String(tmdbId), reqT0);
+    // A probe that landed after the tags were applied above: this answer
+    // lacks them, so it is not memoised (the next request rebuilds).
+    const langLanded = languagesLater.landedSince(String(tmdbId), tagsAppliedAt);
     if (!late.length && !cacheBlockingErrors.length && !langLanded) memoSet(mk, payload);
     if (erroredProviders.length > cacheBlockingErrors.length) {
       console.log(`[api] memo-ondevice-error tmdbId=${tmdbId} ignored=${erroredProviders.filter((n) => !cacheBlockingErrors.includes(n)).join(',')}`
