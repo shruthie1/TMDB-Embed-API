@@ -36,6 +36,7 @@
 
 const { createDecipheriv } = require('crypto');
 const hls = require('../lib/media/hlsManifest');
+const tsLang = require('../lib/media/tsLanguages');
 const { canonicalLanguage } = require('../utils/streamSchema');
 
 const API_BASE = 'https://vidrock.net';
@@ -141,6 +142,21 @@ function streamFromMaster(server, entry, url, masterText) {
     };
 }
 
+// A single-variant row (media playlist, no #EXT-X-MEDIA) has no manifest
+// language. Its first segment's PMT can carry ISO 639 tags per audio track:
+// fcxmb/hscow mux hin/tam/tel/mal/kan into every segment (Jailer 937020,
+// 2026-11-24, ffprobe agrees). Those tags become `languages`; untagged/und
+// stays unknown. The server's stated language is never used here: the same
+// file was stated Hindi, Kannada and Telugu on three servers.
+// The tracks are muxed in one TS, not HLS renditions, so selectableAudio
+// stays false (same as CastleTV's plain rows of this file).
+async function withSegmentLanguages(row, playlistText, url, probe = tsLang.probeSegmentLanguages) {
+    if (!row || row.levels.length || row.languages.length) return row;
+    const found = await probe(playlistText, url, row.headers);
+    if (!found || !found.languages.length) return row;
+    return { ...row, languages: found.languages, languageSource: 'ts-pmt' };
+}
+
 async function getVidrockStreams(tmdbId, mediaType = 'movie', seasonNum = null, episodeNum = null) {
     const type = mediaType === 'tv' ? 'tv' : 'movie';
     const id = parseInt(tmdbId, 10);
@@ -193,7 +209,7 @@ async function getVidrockStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
             }
             if (!r.ok) throw new Error(`HTTP ${r.status}`);
             const text = await r.text();
-            const row = streamFromMaster(name, entry, url, text);
+            const row = await withSegmentLanguages(streamFromMaster(name, entry, url, text), text, url);
             if (!row) {
                 const kind = /^\s*</.test(text) ? 'html' : (!text.trim() ? 'empty' : (/^#EXTM3U/.test(text.trim()) ? 'playlist-no-segments' : 'other'));
                 console.log(`[vidrock] ${name}: master not playable (${kind}, ${text.length}b), dropped`);
@@ -232,4 +248,4 @@ function keyHeal(fetchFn) {
     };
 }
 
-module.exports = { getVidrockStreams, decryptStreamUrl, streamFromMaster, tierOf, HEADERS, CONFIG_DEFAULTS, UPSTREAM, _internal: { apiBase, headers, streamKey }, keyHeal };
+module.exports = { getVidrockStreams, decryptStreamUrl, streamFromMaster, withSegmentLanguages, tierOf, HEADERS, CONFIG_DEFAULTS, UPSTREAM, _internal: { apiBase, headers, streamKey }, keyHeal };
