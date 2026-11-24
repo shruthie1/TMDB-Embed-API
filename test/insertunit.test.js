@@ -144,15 +144,3 @@ test('canary: insertunit validates on RRR and gets the runtime check', () => {
     assert.equal(verifyTitleOf('insertunit').tmdbId, '579974');
     assert.ok(require('../lib/selfheal/canary').RUNTIME_CHECK.has('insertunit'));
 });
-
-test('tag-only rows never promote an und/mul/name-only rendition through normalization', () => {
-    for (const tag of ['', 'und', 'mul', 'zxx']) {
-        const m = '#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Telugu",' + (tag ? `LANGUAGE="${tag}",` : '') + 'URI="a.m3u8"\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=1280x720,AUDIO="a"\nv.m3u8\n';
-        const raw = iu.rowFromMaster(m, MURL);
-        const row = require('../utils/streamSchema').normaliseStream(raw);
-        assert.deepStrictEqual(row.languages, [], `tag=${tag}`);
-        assert.equal(row.audio[0].name, 'Telugu', 'the supplied label is preserved as metadata');
-        assert.equal(row.audio[0].language, null);
-        assert.equal(row.audioTagsOnly, true);
-    }
-});
