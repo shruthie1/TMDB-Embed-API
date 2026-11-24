@@ -1,4 +1,5 @@
 'use client';
+import { forwardRef } from 'react';
 import Icon from './Icon';
 
 /** Shimmer placeholder. Always sized like the content it replaces (no CLS). */
@@ -39,14 +40,14 @@ export function Badge({ children, className = '' }) {
   return <span className={`badge ${className}`}>{children}</span>;
 }
 
-export function Button({ children, icon, variant = 'default', className = '', ...rest }) {
+export const Button = forwardRef(function Button({ children, icon, variant = 'default', className = '', ...rest }, ref) {
   return (
-    <button type="button" className={`btn ${variant} focusable ${className}`} data-focus="" {...rest}>
+    <button ref={ref} type="button" className={`btn ${variant} focusable ${className}`} data-focus="" {...rest}>
       {icon && <Icon name={icon} size={14} />}
       {children}
     </button>
   );
-}
+});
 
 export function IconButton({ icon, label, size = 18, className = '', ...rest }) {
   return (

@@ -3,7 +3,8 @@ import { useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { posterSources } from '../lib/posterSources';
 import { peekSeed } from '../lib/titleSeed';
-import { Skeleton } from './ui';
+import { Button, Skeleton } from './ui';
+import { PLAY_ATTR, usePlayFocus } from '../lib/playFocus';
 import { CastRowSkeleton } from './CastRow';
 import { EpisodeListSkeleton } from './EpisodeList';
 import { Row } from './Row';
@@ -17,7 +18,10 @@ import Icon from './Icon';
  * synopsis lines and the Read more line are reserved on desktop and TV
  * (globals.css), so the loaded hero does not grow or shrink on arrival.
  */
-export function HeroInnerSkeleton({ seed = null }) {
+export function HeroInnerSkeleton({ seed = null, onPlay }) {
+  // A real Play, focused from the first frame (lib/playFocus.js), so the
+  // remote's first OK plays: the page queues it until the record lands.
+  const playRef = usePlayFocus();
   return (
     <div className="hero-inner">
       {seed?.poster ? <SeedPoster seed={seed} /> : <Skeleton className="hero-poster" />}
@@ -41,7 +45,7 @@ export function HeroInnerSkeleton({ seed = null }) {
       </div>
       <div className="hero-actions">
         <div className="actions">
-          <span className="btn primary skel skel-btn" style={{ width: '8em' }} />
+          <Button ref={playRef} variant="primary" icon="play" onClick={onPlay} {...{ [PLAY_ATTR]: '' }}>Play</Button>
           <span className="btn skel skel-btn" style={{ width: '8em' }} />
         </div>
       </div>

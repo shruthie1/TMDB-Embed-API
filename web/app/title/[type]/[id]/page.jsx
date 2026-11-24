@@ -23,6 +23,7 @@ import { HeroInnerSkeleton, FactsSkeleton, useTitleSeed } from '../../../../comp
 import HeroBackdrop from '../../../../components/HeroBackdrop';
 import ErrorScreen from '../../../../components/ErrorScreen';
 import { EARLY_TITLE_SCRIPT } from '../../../../lib/earlyRows';
+import { PLAY_ATTR, claimPlay, usePlayFocus } from '../../../../lib/playFocus';
 
 // The player is about 55kB of this route's JS and only mounts after Play. As a
 // static import it rode the first load, so on a phone the page hydrated (and
@@ -232,11 +233,35 @@ export default function TitlePage() {
     return () => window.removeEventListener('resize', check);
   }, [t?.overview]);
 
-  if (!t && loadError) return <ErrorScreen error={loadError} onRetry={() => setAttempt(n => n + 1)} />;
-
   // What the Play button does, and what it should say. For a series this is
   // an episode; for a film, a position. Falls back to S1E1 for a new show.
   const isTv = type === 'tv';
+  const playTarget = isTv
+    ? { season: resume?.season ?? 1, episode: resume?.episode ?? 1,
+        startAt: resume?.resume ? resume.positionSec : 0 }
+    : { startAt: resume?.positionSec || 0 };
+
+  // Play holds focus from the first frame (lib/playFocus.js): the skeleton's
+  // Play, then this one when the record lands, then again when the player
+  // closes (the player's own buttons unmount and focus fell to <body>).
+  const playRef = usePlayFocus();
+  const playNode = playRef.node;
+  const wasPlaying = useRef(false);
+  useEffect(() => {
+    if (play) { wasPlaying.current = true; return; }
+    if (wasPlaying.current) { wasPlaying.current = false; claimPlay(playNode.current); }
+  }, [play, playNode]);
+  // OK on the skeleton's Play: start as soon as the full record (and with it
+  // the series' next-up episode) is in.
+  const [queued, setQueued] = useState(false);
+  useEffect(() => { setQueued(false); }, [type, id]);
+  useEffect(() => {
+    if (queued && t && full) { setQueued(false); setPlay(playTarget); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queued, t, full]);
+
+  if (!t && loadError) return <ErrorScreen error={loadError} onRetry={() => setAttempt(n => n + 1)} />;
+
   // First child of both returns, so the slots below keep their positions.
   // On a hard load it requests the record before hydration (earlyRows.js);
   // inert after that.
@@ -268,7 +293,7 @@ export default function TitlePage() {
         {backButton}
         <div className="hero">
           <HeroBackdrop path={seed?.backdrop || null} />
-          <HeroInnerSkeleton seed={seed} />
+          <HeroInnerSkeleton seed={seed} onPlay={() => setQueued(true)} />
         </div>
         {isTv && <EpisodeListSkeleton />}
         <CastRowSkeleton />
@@ -277,11 +302,6 @@ export default function TitlePage() {
       </article>
     );
   }
-
-  const playTarget = isTv
-    ? { season: resume?.season ?? 1, episode: resume?.episode ?? 1,
-        startAt: resume?.resume ? resume.positionSec : 0 }
-    : { startAt: resume?.positionSec || 0 };
 
   const epTag = isTv ? `S${playTarget.season}E${playTarget.episode}` : null;
   const playLabel = isTv
@@ -347,7 +367,7 @@ export default function TitlePage() {
               element could not do. */}
           <div className="hero-actions">
             <div className="actions" data-focus-group="">
-              <Button variant="primary" icon="play" onClick={() => setPlay(playTarget)}
+              <Button ref={playRef} {...{ [PLAY_ATTR]: '' }} variant="primary" icon="play" onClick={() => setPlay(playTarget)}
                       onPointerEnter={() => dwellRef.current?.now()}
                       onFocus={() => dwellRef.current?.now()}>
                 {playLabel}
