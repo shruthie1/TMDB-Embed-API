@@ -166,9 +166,11 @@ test('a page with no embedMeta is a broken host, not an empty title', async () =
     await assert.rejects(vidrift.getVidriftStreams('579974', 'movie'), /no embedMeta/);
 });
 
-test('Krack page with orionStreams null: transient error, not a cached empty', async () => {
+test('Krack page with orionStreams null on every host: notListed empty, no masters fetched', async () => {
     const calls = stubFetch([[(u) => u.includes('/embed/movie/'), () => text(KRACK_PAGE)]]);
-    await assert.rejects(vidrift.getVidriftStreams('784572', 'movie'), /orionStreams/);
+    const rows = await vidrift.getVidriftStreams('784572', 'movie');
+    assert.deepEqual([...rows], []);
+    assert.equal(rows.notListed, true);
     assert.equal(calls.filter((c) => isMaster(c.url)).length, 0);
 });
 
@@ -395,13 +397,14 @@ test('route: web proxy, apk direct, on both hosts', () => {
 // on .net and .in. The page and embedMeta parse fine, so the title has no
 // rows; the host is fine. The error says so (titleEmpty) so the registry
 // does not feed the host fail streak with it.
-test('orionStreams null on every host: error marked titleEmpty (no rows for this title, not a host fault)', async () => {
+// 2026-11-24: /api/health showed vidrift down after 11 such answers. Every
+// host saying null is now notListed (as vidout/insertunit, b5ab4e6): no error,
+// so it never feeds the hub down streak or the breaker.
+test('orionStreams null on every host: notListed, not an error', async () => {
     stubFetch([[(u) => u.includes('/embed/movie/'), () => text(KRACK_PAGE)]]);
-    await assert.rejects(vidrift.getVidriftStreams('1496785', 'movie'), (e) => {
-        assert.match(e.message, /orionStreams null/);
-        assert.equal(e.titleEmpty, true);
-        return true;
-    });
+    const rows = await vidrift.getVidriftStreams('1496785', 'movie');
+    assert.equal(rows.length, 0);
+    assert.equal(rows.notListed, true);
 });
 
 test('.net answers 502, .in answers orionStreams null: still titleEmpty (a host that answered says no rows)', async () => {

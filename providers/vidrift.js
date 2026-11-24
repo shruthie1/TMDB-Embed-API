@@ -303,6 +303,7 @@ async function fetchPage(tmdbId, type, season, episode, deadline) {
     // on Krack), but marked titleEmpty so it never feeds the host fail
     // streak or a rediscover (providers/registry.js noteUpstream).
     let titleEmpty = false;
+    let nullHosts = 0;
     const bases = liveBases();
     for (let i = 0; i < bases.length; i++) {
         const base = bases[i];
@@ -314,7 +315,7 @@ async function fetchPage(tmdbId, type, season, episode, deadline) {
             if (!(res.status >= 200 && res.status < 300)) throw new Error(`HTTP ${res.status}`);
             const meta = parseEmbedMeta(res.text);
             if (!meta) throw new Error('no embedMeta in page');
-            if (meta.orionStreams === null) { titleEmpty = true; throw new Error('orionStreams null'); }
+            if (meta.orionStreams === null) { titleEmpty = true; nullHosts += 1; throw new Error('orionStreams null'); }
             if (!Array.isArray(meta.orionStreams)) throw new Error('orionStreams missing');
             console.log(`[vidrift] page ${base} ${Date.now() - t0}ms`);
             return { meta, bases: [base, ...bases.filter((b) => b !== base)] };
@@ -325,6 +326,14 @@ async function fetchPage(tmdbId, type, season, episode, deadline) {
             console.log(`[vidrift] host ${base} failed for ${tmdbId} (${Date.now() - t0}ms): ${msg}`);
             if (Date.now() >= deadline) break;
         }
+    }
+    // Every host asked answered "orionStreams null": the title is not listed
+    // there. Not an error (b5ab4e6 rule, as vidout/insertunit): it must not
+    // feed the hub's down streak or the breaker. A mix with a failed host
+    // stays an error marked titleEmpty.
+    if (nullHosts > 0 && nullHosts === errors.length) {
+        console.log(`[vidrift] not-listed ${tmdbId}: orionStreams null on ${nullHosts} host(s)`);
+        return { notListed: true };
     }
     const err = new Error(`vidrift: every host failed for ${tmdbId}: ${errors.join('; ')}`);
     if (titleEmpty) {
@@ -364,7 +373,9 @@ async function getVidriftStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
     }
     console.log(`[vidrift] Fetching streams for TMDB ID: ${tmdbId}, Type: ${type}`);
     const deadline = Date.now() + _config.budgetMs;
-    const { meta, bases } = await fetchPage(tmdbId, type, seasonNum, episodeNum, deadline);
+    const page = await fetchPage(tmdbId, type, seasonNum, episodeNum, deadline);
+    if (page.notListed) return Object.assign([], { notListed: true });
+    const { meta, bases } = page;
     const entries = meta.orionStreams
         .filter((s) => s && (s.url || s.proxyUrl) && (s.type || 'hls') === 'hls');
     if (!entries.length) {
