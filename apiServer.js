@@ -540,7 +540,10 @@ function fetchProviderShared(prov, ck, ctx, { titleIsResolvable, titleKey }) {
         console.log(`[api] provider-partial ${name} tmdbId=${ctx.tmdbId} rows=${n} reason=${String(r.upstreamError).slice(0, 120)}`);
         return { outcome: 'partial', ms, streams: Array.isArray(r) ? r : [], error: String(r.upstreamError).slice(0, 200) };
       }
-      recordProviderOutcome(name, n > 0 ? 'hit' : 'empty', ms, n, titleIsResolvable, titleKey);
+      // A provider's own "not in my catalogue" (r.notListed) is no evidence
+      // about its health: it must not count toward the breaker.
+      const notListed = n === 0 && r && r.notListed === true;
+      recordProviderOutcome(name, n > 0 ? 'hit' : 'empty', ms, n, titleIsResolvable && !notListed, titleKey);
       if (n > 0) providerHitSet(ck, r);
       else if (titleIsResolvable) providerEmptyCache.set(ck, true);
       console.log(`[api] provider ${name} returned ${n} streams`);
@@ -895,6 +898,8 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
     // memoized, or one short upstream blip would pin a result without that
     // provider for STREAMS_MEMO_MS.
     const erroredProviders = [];
+    // Why each errored provider failed, for the MM hub's /api/health view.
+    const providerErrorWhy = {};
     const refresh = req.query.refresh === '1';
     const titleKey = `${type}:${tmdbId}:${season ?? ''}:${episode ?? ''}`;
     const runProvider = async (name, { bypassBreaker = false } = {}) => {
@@ -916,7 +921,10 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
       providerTimings[name] = o.ms;
       // error, timeout and partial all leave this title's answer UNKNOWN for
       // the provider, so the response must not be cached (see below).
-      if (o.outcome !== 'hit' && o.outcome !== 'empty') erroredProviders.push(name);
+      if (o.outcome !== 'hit' && o.outcome !== 'empty') {
+        erroredProviders.push(name);
+        providerErrorWhy[name] = String(o.error || o.outcome).slice(0, 120);
+      }
       return urlExpiry.dropExpiredStreams(o.streams);
     };
 
@@ -1126,7 +1134,10 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
         Promise.all(mmTasks.map((x) => Promise.resolve(x.p).then((rows) => rows, () => [])))
           .then((settled) => {
             const by = new Map(mmTasks.map((x, k) => [x.name, { rows: Array.isArray(settled[k]) ? settled[k] : [],
-              err: erroredProviders.includes(x.name) && !(settled[k] || []).length ? 'provider error' : null }]));
+              // Breaker-skipped: never asked, so not an observation.
+              skipped: skippedByBreaker.includes(x.name) && !providerErrorWhy[x.name],
+              err: erroredProviders.includes(x.name) && !(settled[k] || []).length
+                ? (providerErrorWhy[x.name] || 'provider error') : null }]));
             return mmHub.observe({ tmdbId, type, season, episode, imdbId }, by);
           })
           .catch((e) => console.warn(`[mm] observe failed ${tmdbId}: ${e.message}`));

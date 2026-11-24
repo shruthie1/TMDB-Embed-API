@@ -29,9 +29,40 @@ test('observe: per-server rows, Telugu count and errors land on health', async (
     assert.ok(snap.servers['GD mirror'].lastOk);
     assert.ok(!('Cineverse' in snap.servers) || snap.servers.Cineverse.state === 'unknown');
     const by2 = new Map([['insertunit', { rows: [], err: 'HTTP 503' }]]);
+    // One error is a blip: the server keeps its 'ok' until DOWN_AFTER in a row.
     await hub.observe({ tmdbId: 579974, type: 'movie' }, by2, { read: async () => ({ servers }) });
-    assert.strictEqual(state.snapshot().servers['GD mirror'].state, 'down');
+    assert.strictEqual(state.snapshot().servers['GD mirror'].state, 'ok');
     assert.strictEqual(state.snapshot().servers['GD mirror'].lastErr, 'HTTP 503');
+    for (let i = 1; i < state.DOWN_AFTER; i++) {
+        await hub.observe({ tmdbId: 579974, type: 'movie' }, by2, { read: async () => ({ servers }) });
+    }
+    assert.strictEqual(state.snapshot().servers['GD mirror'].state, 'down');
+    assert.strictEqual(state.snapshot().servers['GD mirror'].errStreak, state.DOWN_AFTER);
+});
+
+// Prod 2026-11-24 15:10 UTC: VIDOUT showed 'down' (lastErr "provider error")
+// after one request that skipped it on an open breaker, while its canary had
+// passed at 15:04. A skipped provider was never asked: no observation.
+test('health: a breaker-skipped provider is not observed; one error after a canary pass stays ok', async () => {
+    const vs = [{ name: 'VIDOUT', host: 'vidout.pages.dev', known: true, extractor: 'vidout' }];
+    state.setCanary('VIDOUT', { state: 'ok', extractor: 'vidout' });
+    await hub.observe({ tmdbId: 857598, type: 'movie' }, new Map([['vidout', { rows: [], skipped: true, err: 'provider error' }]]),
+        { read: async () => ({ servers: vs }) });
+    let v = state.snapshot().servers.VIDOUT;
+    assert.strictEqual(v.state, 'ok');
+    assert.strictEqual(v.lastErr, null);
+    await hub.observe({ tmdbId: 857598, type: 'movie' }, new Map([['vidout', { rows: [], err: 'timeout' }]]),
+        { read: async () => ({ servers: vs }) });
+    v = state.snapshot().servers.VIDOUT;
+    assert.strictEqual(v.state, 'ok');
+    assert.strictEqual(v.errStreak, 1);
+    // Down after the run, then a canary pass brings it back and clears the run.
+    for (let i = 1; i < state.DOWN_AFTER; i++) state.serverResult('VIDOUT', { err: 'timeout' });
+    assert.strictEqual(state.snapshot().servers.VIDOUT.state, 'down');
+    state.setCanary('VIDOUT', { state: 'ok' });
+    v = state.snapshot().servers.VIDOUT;
+    assert.strictEqual(v.state, 'ok');
+    assert.strictEqual(v.errStreak, 0);
 });
 
 test('observe: no page (unknown title) records nothing and never throws', async () => {
@@ -100,6 +131,62 @@ test('canary: zero rows, short runtime, fake first segment each degrade', async 
         assert.strictEqual(state.snapshot().servers['GD mirror'].state, 'degraded', why);
         assert.match(s.canaryGet('mm:insertunit').last_error, re, why);
     }
+});
+
+// Prod 2026-11-24: VidBolt RRR's proxy.vidbolt.xyz row verified ok, timeout,
+// ok in three runs while its other rows always passed.
+test('canary: one flaky row does not degrade when another row plays', async () => {
+    const s = store.openStore(':memory:');
+    const seen = [];
+    const k = mkCanary(s, () => [ru('https://flaky/m.m3u8'), ru('https://good/m.m3u8')], {
+        verify: async (row) => { seen.push(row.url); return row.url.includes('flaky') ? { ok: false, reason: 'segment html' } : { ok: true }; },
+    });
+    await k.c.runDue();
+    assert.strictEqual(state.snapshot().servers['GD mirror'].state, 'ok');
+    assert.deepStrictEqual(seen, ['https://flaky/m.m3u8', 'https://good/m.m3u8']);
+});
+
+test('canary: segment tries stop at SEGMENT_TRIES, Telugu rows first', async () => {
+    const s = store.openStore(':memory:');
+    const seen = [];
+    const rows = [ru('r1'), ru('r2'), te('t1'), ru('r3'), ru('r4')];
+    const k = mkCanary(s, () => rows, { verify: async (row) => { seen.push(row.url); return { ok: false, reason: 'segment html' }; } });
+    await k.c.runDue();
+    assert.deepStrictEqual(seen, ['t1', 'r1', 'r2']);
+    assert.strictEqual(seen.length, canary.SEGMENT_TRIES);
+    assert.strictEqual(state.snapshot().servers['GD mirror'].state, 'degraded');
+});
+
+// Prod 2026-11-24: Vidrift threw "every host failed" (orionStreams null) for
+// Pushpa 2 only; RRR and Kalki resolved and played.
+test('canary: a resolve error on one title without a Telugu baseline is title-level', async () => {
+    const s = store.openStore(':memory:');
+    const k = mkCanary(s, (_e, t) => { if (t.tmdbId === '857598') throw new Error('every host failed'); return [ru('u')]; }, {
+        titles: () => [{ tmdbId: '579974', type: 'movie', label: 'RRR' }, { tmdbId: '857598', type: 'movie', label: 'Pushpa 2' }],
+    });
+    await k.c.runDue();
+    assert.strictEqual(state.snapshot().servers['GD mirror'].state, 'ok');
+    assert.ok(k.logs.some((l) => /title error Pushpa 2/.test(l)), k.logs.join('\n'));
+});
+
+test('canary: a resolve error on every title, or on a title with Telugu before, degrades', async () => {
+    let s = store.openStore(':memory:');
+    let k = mkCanary(s, () => { throw new Error('down'); });
+    await k.c.runDue();
+    assert.strictEqual(state.snapshot().servers['GD mirror'].state, 'degraded');
+    assert.match(s.canaryGet('mm:insertunit').last_error, /rows=0 on every canary title; error RRR: down/);
+    state._reset();
+    s = store.openStore(':memory:');
+    let fail = false;
+    k = mkCanary(s, (_e, t) => { if (fail && t.tmdbId === '857598') throw new Error('gone'); return [te('u')]; }, {
+        titles: () => [{ tmdbId: '579974', type: 'movie', label: 'RRR' }, { tmdbId: '857598', type: 'movie', label: 'Pushpa 2' }],
+    });
+    await k.c.runDue();
+    fail = true;
+    k.advance(6 * 3600e3);
+    await k.c.runDue();
+    assert.strictEqual(state.snapshot().servers['GD mirror'].state, 'degraded');
+    assert.match(s.canaryGet('mm:insertunit').last_error, /telugu missing Pushpa 2/);
 });
 
 test('canary: not due -> no resolve', async () => {

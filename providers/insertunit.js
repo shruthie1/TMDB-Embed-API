@@ -146,7 +146,9 @@ async function getInsertunitStreams(tmdbId, mediaType = 'movie', seasonNum = nul
     const page = await _deps.fetchText(embedUrl(imdb), { 'User-Agent': UA }, left());
     if (page.status === 404) {
         console.log(`[insertunit] not-found ${imdb} (HTTP 404)`);
-        return [];
+        // Upstream says "no such title": not a failure, keep it out of the
+        // breaker (see providers/vidout.js notListed).
+        return Object.assign([], { notListed: true });
     }
     if (!(page.status >= 200 && page.status < 300)) throw new Error(`insertunit: page HTTP ${page.status} for ${imdb}`);
     const masterUrl = masterFromPage(page.text, type, seasonNum, episodeNum);

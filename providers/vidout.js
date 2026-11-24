@@ -52,6 +52,13 @@ function usableLink(value) {
     return link;
 }
 
+// A catalogue 404 is the upstream saying "no such title", not a failure. The
+// marker keeps it out of the breaker: the catalogue holds a few hundred titles,
+// so five misses in a row are normal. Prod 2026-11-24 15:07 UTC: five
+// not-in-catalogue titles tripped vidout's breaker, and Pushpa 2 (its tagged
+// Telugu master) was then skipped for 10 minutes.
+function notListed() { return Object.assign([], { notListed: true }); }
+
 function rowFromMaster(masterText, masterUrl) {
     return tagged.rowFromMaster(masterText, masterUrl, { provider: 'vidout', display: 'VIDOUT', headers: HEADERS });
 }
@@ -68,7 +75,7 @@ async function getVidoutStreams(tmdbId, mediaType = 'movie', seasonNum = null, e
     const cat = await _deps.fetchText(catalogueUrl(tmdbId, type, seasonNum), { 'User-Agent': UA }, left());
     if (cat.status === 404) {
         console.log(`[vidout] not-in-catalogue ${type} ${tmdbId}`);
-        return [];
+        return notListed();
     }
     if (!(cat.status >= 200 && cat.status < 300)) throw new Error(`vidout: catalogue HTTP ${cat.status} for ${tmdbId}`);
     let value = cat.text;

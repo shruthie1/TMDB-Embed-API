@@ -83,7 +83,17 @@ test('getVidoutStreams: Pushpa 2 -> one Telugu row, master fetched with the Refe
 
 test('getVidoutStreams: not in the catalogue (404) is no rows, not an error', async () => {
     stub({ ghStatus: 404, link: '404: Not Found' });
-    assert.deepStrictEqual(await vo.getVidoutStreams('27205', 'movie'), []);
+    const out = await vo.getVidoutStreams('27205', 'movie');
+    assert.deepStrictEqual([...out], []);
+    // Marked so the fan-out keeps it out of the breaker (prod 2026-11-24).
+    assert.equal(out.notListed, true);
+});
+
+test('getVidoutStreams: a catalogue entry without a direct master is not marked notListed', async () => {
+    stub({ link: 'https://vidout.pages.dev/e/abc123' });
+    const out = await vo.getVidoutStreams('27205', 'movie');
+    assert.deepStrictEqual(out, []);
+    assert.equal(out.notListed, undefined);
 });
 
 test('getVidoutStreams: GitHub 5xx throws so the fan-out does not cache it', async () => {

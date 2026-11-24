@@ -147,3 +147,16 @@ test('soak 1: the registry wrapper keeps titleEmpty on the [] + upstreamError th
     assert.equal(calls.length, 0);
     assert.equal(up.failStreak('multimovies'), 0);
 });
+
+// Prod 2026-11-24: vidout's catalogue 404 must reach the fan-out as notListed
+// so it stays out of the breaker count.
+test('the registry wrapper keeps notListed on an empty result', async (t) => {
+    const reg = require('../providers/registry');
+    const vo = require('../providers/vidout');
+    const real = vo.getVidoutStreams;
+    vo.getVidoutStreams = async () => Object.assign([], { notListed: true });
+    t.after(() => { vo.getVidoutStreams = real; });
+    const out = await reg.getProvider('vidout').fetch({ tmdbId: '27205', type: 'movie' });
+    assert.deepStrictEqual([...out], []);
+    assert.equal(out.notListed, true);
+});

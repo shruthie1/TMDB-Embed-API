@@ -417,6 +417,9 @@ function createFetchFunction(providerInfo) {
       // is shaped identically regardless of what that provider emits.
       const out = normaliseStreams(result.map(s => ({ ...s, provider: s.provider || providerInfo.name })));
       if (result.upstreamError) out.upstreamError = result.upstreamError;
+      // `notListed`: the provider's catalogue answered that it lacks this
+      // title. The caller keeps such an empty out of the breaker count.
+      if (result.notListed === true && out.length === 0) out.notListed = true;
       return out;
 
     } catch (e) {
