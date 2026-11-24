@@ -159,24 +159,24 @@ describe('where it shows', () => {
     expect(busy[1].className).toContain('dim');
   });
 
-  it('failure card: Refresh sources (primary, TV focus) and Back', () => {
+  it('failure card: Try again (primary, TV focus) and Back (owner 2026-11-24)', () => {
     document.documentElement.dataset.tv = 'true';
-    const { container } = render(<PlayerError error={{ message: 'x' }} embeds={[]} headline="Couldn't play this title"
-      onClose={() => {}} onRetry={() => {}} refresh={r()} />);
+    const { container } = render(<PlayerError error={{ message: 'x' }} embeds={[]} headline="No sources found for RRR"
+      onClose={() => {}} onRetry={() => {}} />);
     const btns = [...container.querySelectorAll('.ov-actions button')].map((b) => b.textContent);
-    expect(btns).toEqual(['Refresh sources', 'Back']);
-    expect(document.activeElement?.textContent).toBe('Refresh sources');
-    expect(container.querySelector('.ov-actions .refresh-btn').className).toContain('primary');
+    expect(btns).toEqual(['Try again', 'Back']);
+    expect(document.activeElement?.textContent).toBe('Try again');
+    expect(container.querySelector('.ov-actions .btn.primary').textContent).toBe('Try again');
   });
 
   it('failure view copy and TV focus', () => {
     const list = [{ id: 'a', provider: 'CastleTV', quality: '1080p', languages: ['Telugu'], masterUrl: 'u' }];
     const failed = loadingView({ now: 90000, playAt: 0, title: 'RRR', sources: list, labels: {}, firstListSize: 1, failed: true,
       attempts: [{ id: 'a', startedAt: 0, endedAt: 1, state: RowState.FAILED, reason: Reason.NO_ANSWER }] });
-    expect(failed.headline).toBe("Couldn't play this title");
-    expect(tvFocus(failed)).toBe('refresh');
+    expect(failed.headline).toBe("Couldn't play any source");
+    expect(tvFocus(failed)).toBe('retry');
     const none = loadingView({ now: 90000, playAt: 0, title: 'RRR', sources: [], labels: {}, failed: true, attempts: [] });
-    expect(none.headline).toBe('No sources found yet');
+    expect(none.headline).toBe('No sources found for RRR');
     expect(tvFocus(loadingView({ now: 1000, playAt: 0, title: 'RRR', sources: null, labels: {}, attempts: [] }))).toBe('details');
   });
 });

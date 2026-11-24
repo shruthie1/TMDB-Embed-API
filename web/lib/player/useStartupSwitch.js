@@ -16,6 +16,10 @@ import { bytesFlowing, SWITCH_FLOWING_MAX_MS, SWITCH_TICK_MS } from './switchFlo
 // fragment on high-latency mobile/TV networks. Switching at 8s looked
 // like provider flapping even when playback was about to start.
 export const STARTUP_SWITCH_MS = 15000;
+/** No picture and no other row to switch to: the start ends on the player's
+ *  end card at this point instead of "Starting <server>" forever (owner
+ *  2026-11-24). Rows that land before it are still switched to. */
+export const STARTUP_GIVE_UP_MS = 45000;
 
 /**
  * `restartKey` re-arms the window: useHls bumps it when a direct row falls
@@ -28,7 +32,7 @@ export const STARTUP_SWITCH_MS = 15000;
  * on 4g until all of it is in. Same rule as the in-player switch (switchFlow).
  */
 export default function useStartupSwitch({ stream, restartKey = 0, videoRef, usedRef, startedRef,
-  sourceListRef, currentSourceRef, recoverBySwitchingRef }) {
+  sourceListRef, currentSourceRef, recoverBySwitchingRef, giveUpRef = null }) {
   useEffect(() => {
     if (!stream) return undefined;
     const startedAt = Date.now();
@@ -49,7 +53,16 @@ export default function useStartupSwitch({ stream, restartKey = 0, videoRef, use
       const alternate = sourceListRef.current.find(
         s => s.masterUrl && s.provider !== currentSourceRef.current,
       );
-      if (!alternate || !canFailOver(globalThis.navigator?.onLine)) return;
+      if (!canFailOver(globalThis.navigator?.onLine)) return;
+      if (!alternate) {
+        // Nothing to switch to yet: keep watching for a late row, and end the
+        // start at STARTUP_GIVE_UP_MS (bytes still flowing or not).
+        if (!giveUpRef) return;
+        if (now - startedAt < STARTUP_GIVE_UP_MS) { timer = setTimeout(check, SWITCH_TICK_MS); return; }
+        usedRef.current = true;
+        giveUpRef.current?.('startup give-up');
+        return;
+      }
       usedRef.current = true;
       recoverBySwitchingRef.current?.('startup timeout');
     };

@@ -9,15 +9,19 @@ import { heightOf } from './trackChoices';
  * still loading: it shows only after 30s with no source list, or on the end
  * card. From 30s with a list and no frame, "Choose a server" opens Details.
  */
-/** Failure card headlines (LoadingModel.Copy COULDNT_PLAY / NO_SOURCES). */
-export const FAIL_COPY = Object.freeze({ COULDNT_PLAY: "Couldn't play this title", NO_SOURCES: 'No sources found yet' });
+/** Failure card headlines (owner 2026-11-24). NO_SOURCES takes " for <title>". */
+export const FAIL_COPY = Object.freeze({ COULDNT_PLAY: "Couldn't play any source", NO_SOURCES: 'No sources found' });
+export const noSourcesHeadline = (title) => (title ? `${FAIL_COPY.NO_SOURCES} for ${title}` : FAIL_COPY.NO_SOURCES);
 
-/** Where TV focus starts: Refresh sources on the failure card, Details while loading (LoadingModel.tvFocus). */
-export const tvFocus = (v) => (v?.showRefresh ? 'refresh' : 'details');
+/** Where TV focus starts: Try again on the end card, Details while loading (LoadingModel.tvFocus). */
+export const tvFocus = (v) => (v?.phase === 'failed' ? 'retry' : 'details');
 
 export const LOADING_SLOW_HINT_MS = 15000;
 export const LOADING_CHOOSER_MS = 30000;
 export const LOADING_RETRY_MS = 30000;
+/** No rows at all after this long: the search ends on the no-sources card
+ *  instead of counting up (owner 2026-11-24). */
+export const LOADING_NO_SOURCES_MS = 45000;
 
 /**
  * Caps for "Add <L> audio from another server" (Step 2, 2026-11-21): at most
@@ -55,6 +59,8 @@ export const Reason = {
   NOT_TELUGU: 'not Telugu',
   // Web only: the 15s startup verdict (Player.jsx STARTUP_SWITCH_MS). The APK has none.
   NO_PICTURE_STARTUP: 'no picture in 15s',
+  // Web only: no picture and no other row by 45 s (useStartupSwitch STARTUP_GIVE_UP_MS).
+  NO_PICTURE_GIVE_UP: 'no picture in 45s',
 };
 
 /** Search-phase Try again re-asks the server only; on the end card it is a full refresh. */
@@ -132,6 +138,7 @@ export function reasonFromText(text) {
   if (t === 'stale' || t.includes('stale') || t.includes('expired')) return Reason.EXPIRED;
   if (t === 'codecs' || t === 'novideo' || t.includes('codec') || t.includes('no video')) return Reason.UNSUPPORTED;
   if (t.includes('startup timeout')) return Reason.NO_PICTURE_STARTUP;
+  if (t.includes('startup give-up')) return Reason.NO_PICTURE_GIVE_UP;
   if (t === 'unreachable' || t.includes('not responding')) return Reason.SERVER;
   if (t.includes('404') || t.includes('not found')) return Reason.NOT_FOUND;
   return Reason.STOPPED;
@@ -215,19 +222,24 @@ export function loadingView(i) {
 
   const rows = list == null ? checkRows(i) : sourceRows(i, list, label, preferred);
   const footer = `Started ${secs(t)}s ago${list != null ? ` · ${k} of ${n} tried` : ''}`;
-  const view = (phase, headline, detail, showChooser, showTryAgain, showRefresh = false) =>
-    ({ phase, headline, detail, showChooser, showTryAgain, rows, footer, showRefresh });
+  const view = (phase, headline, detail, showChooser, showTryAgain, showRefresh = false, noSources = false) =>
+    ({ phase, headline, detail, showChooser, showTryAgain, rows, footer, showRefresh, noSources });
 
-  if (i.failed) {
+  // The end card (owner 2026-11-24): Try again re-resolves. The streams call
+  // finished with 0 rows, or 45 s passed with none: "No sources found for
+  // <title>" (Try again, Back). Rows existed but all failed: "Couldn't play
+  // any source" (Try again, Pick a source).
+  // Counted from the latest search start (a search-phase Try again restarts it).
+  const searchAt = i.checks?.[0]?.startedAt ?? i.playAt;
+  const searchOver = list == null && i.now - searchAt >= LOADING_NO_SOURCES_MS;
+  if (i.failed || searchOver) {
     const distinct = new Set(triedAttempts.map((a) => a.id)).size;
+    const none = distinct === 0 && !list?.length;
     const detail = distinct > 0
       ? `We tried ${distinct} sources. None of them played.`
-      : (i.failMessage || 'No playable source found.');
-    // "Refresh sources" (primary) replaces Try again on the failure card (owner
-    // 2026-11-22). Every source failed: "Couldn't play this title". None at all:
-    // "No sources found yet". Same words as LoadingModel.kt.
-    const headline = distinct === 0 && !list?.length ? FAIL_COPY.NO_SOURCES : FAIL_COPY.COULDNT_PLAY;
-    return view(Phase.FAILED, headline, detail, false, false, true);
+      : (i.failed && i.failMessage) || 'No playable source found.';
+    return view(Phase.FAILED, none ? noSourcesHeadline(i.title) : FAIL_COPY.COULDNT_PLAY, detail,
+      false, true, false, none);
   }
   const chooser = list != null && !i.framed && t >= LOADING_CHOOSER_MS;
   const cur = attempts[attempts.length - 1];

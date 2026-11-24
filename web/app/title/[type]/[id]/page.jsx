@@ -361,7 +361,7 @@ export default function TitlePage() {
               <Button icon={saved ? 'check' : 'plus'} onClick={onSave} aria-pressed={saved}>
                 {saved ? 'In My List' : 'My List'}
               </Button>
-              <RefreshSources r={refreshSources} />
+              <RefreshSources r={refreshSources} iconOnly />
             </div>
           </div>
         </div>

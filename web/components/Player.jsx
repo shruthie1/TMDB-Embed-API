@@ -19,7 +19,7 @@ import useSwitchGuard from '../lib/player/useSwitchGuard';
 import useStaleRefresh from '../lib/player/staleRefresh';
 import { videoChoices, videoIdOf } from '../lib/player/trackChoices';
 import {
-  CHECK_SERVER, Copy, Reason, RowState, labelRows, loadingView, reasonFromText,
+  CHECK_SERVER, Copy, Phase, Reason, RowState, labelRows, loadingView, reasonFromText,
 } from '../lib/player/loadingModel';
 import EmbedStage from './player/EmbedStage';
 import useFocusTrap from './useFocusTrap';
@@ -1363,8 +1363,16 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
   // Startup server switch (15 s, longer while bytes arrive, cap 45 s; once per
   // stream): lib/player/useStartupSwitch.js.
   // A direct->proxy fallback on the same row bumps routeFallbacks and re-arms it.
+  // One row, no picture, nothing to switch to by 45 s: the end card ("Couldn't
+  // play any source": Try again, Pick a source), not "Starting <server>" forever.
+  const startupGiveUpRef = useRef(null);
+  startupGiveUpRef.current = (reason) => {
+    const label = rowLabel(resolve.currentSourceId, resolve.currentSource);
+    if (recoverBySwitchingRef.current?.(reason)) return;
+    resolve.setError({ message: `${label} didn't start, and no other server is left.` });
+  };
   useStartupSwitch({ stream, restartKey: routeFallbacks, videoRef, usedRef: startupFallbackUsedRef,
-    startedRef, sourceListRef, currentSourceRef, recoverBySwitchingRef });
+    startedRef, sourceListRef, currentSourceRef, recoverBySwitchingRef, giveUpRef: startupGiveUpRef });
 
   // Measure viewer-visible stalls, not hls.js retries. A repeated `waiting`
   // event belongs to one stall episode and must not inflate the metric.
@@ -2071,6 +2079,22 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
     checks: [{ id: CHECK_SERVER, label: 'Chitram server', startedAt: searchAtRef.current, endedAt: null }],
     framed: framedOnce, failed: Boolean(error), switching: switchAsked,
   }), [loadNow, title.title, listReady, sources, rowLabels, attempts, framedOnce, error, switchAsked]);
+  // 45 s with no rows (loadingModel LOADING_NO_SOURCES_MS): the search ends on
+  // the no-sources card. The request is dropped so the count-up stops for good.
+  const searchOver = !error && !framedOnce && loadView.phase === Phase.FAILED;
+  useEffect(() => {
+    if (searchOver) resolve.stop({ message: 'No playable source found.', timedOut: true });
+  }, [searchOver, resolve]);
+  // One greppable line per no-sources end card (0 rows answered, or 45 s).
+  const noSourcesShown = Boolean(error) && loadView.noSources;
+  useEffect(() => {
+    if (!noSourcesShown) return;
+    console.debug('[resolve] no sources', {
+      type: title.mediaType, tmdbId: title.tmdbId, season, episode,
+      timedOut: Boolean(error?.timedOut), afterMs: Date.now() - playAtRef.current,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [noSourcesShown]);
   // Search-phase Try again (only offered at 30s with no list): ask again
   // WITHOUT the refresh path. A non-refresh ask joins the /api/streams
   // request still running (lib/backend.js fetchStreamsShared) rather than
@@ -2341,7 +2365,8 @@ export default function Player({ title, startAt = 0, season = 0, episode = 0,
       {error && !embedOn && (
         <PlayerError error={error} embeds={embeds}
           headline={loadView.headline} detail={attempts.length ? loadView.detail : null}
-          onRetry={retryAll} onClose={onClose} refresh={refreshSources} />
+          onRetry={retryAll} onClose={onClose}
+          onPick={loadView.noSources ? null : () => setSourceChooserOpen(true)} />
       )}
       {ep.ended && ep.nextEp && !error && (
         <NextUp ep={ep.nextEp}

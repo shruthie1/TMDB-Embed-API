@@ -23,6 +23,9 @@ export default function HeaderScroll() {
       for (const el of document.querySelectorAll('.page-backdrop')) {
         const top = el.parentElement.getBoundingClientRect().top + window.scrollY;
         el.style.setProperty('--backdrop-reach', `${Math.max(0, Math.round(top))}px`);
+        // The box too: the details hero sizes itself to end at the first
+        // screen's bottom edge (globals.css, landscape details).
+        el.parentElement.style.setProperty('--backdrop-reach', `${Math.max(0, Math.round(top))}px`);
       }
     };
     let mraf = 0;

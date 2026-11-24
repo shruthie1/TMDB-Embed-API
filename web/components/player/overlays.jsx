@@ -1,7 +1,6 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
 import Icon from '../Icon';
-import RefreshSources from '../RefreshSources';
 
 /**
  * The player's overlays: the resolving progress, the end-of-episode card and
@@ -196,10 +195,15 @@ export function EmbedFallback({ embeds, onClose }) {
   );
 }
 
-export function PlayerError({ error, embeds, onClose, onRetry, headline = null, detail = null, refresh = null }) {
+export function PlayerError({ error, embeds, onClose, onRetry, onPick = null, headline = null, detail = null }) {
   // With sources tried, the card says how many (loading-ux end card); the
   // player's own message moves under Details.
   const more = error.detail || error.tried?.length > 0 || Boolean(detail);
+  // TV focus starts on Try again.
+  const retryRef = useRef(null);
+  useEffect(() => {
+    if (typeof document !== 'undefined' && document.documentElement.dataset.tv === 'true') retryRef.current?.focus();
+  }, []);
   return (
     <div className="overlay ov-screen">
       <button type="button" className="ov-back focusable" data-focus="" onClick={onClose} aria-label="Back">
@@ -210,12 +214,13 @@ export function PlayerError({ error, embeds, onClose, onRetry, headline = null, 
         <p className="ov-name">{headline || 'Couldn’t start playback'}</p>
         <p className="ov-status">{detail || error.message}</p>
         <div className="ov-actions" data-focus-group="">
-          {/* "Refresh sources" (primary, TV focus starts here); it starts the
-              best new row by itself. Without it, the old full Retry. */}
-          {refresh
-            ? <RefreshSources r={refresh} primary focusOnTv />
-            : <button className="btn primary focusable" data-focus="" onClick={onRetry}>Retry</button>}
-          <button className="btn focusable" data-focus="" onClick={onClose}>Back</button>
+          {/* Owner 2026-11-24: Try again re-resolves (fresh VM answer). No
+              rows at all: Try again and Back. Rows that all failed: Try again
+              and Pick a source (Back stays top left). */}
+          <button ref={retryRef} type="button" className="btn primary focusable" data-focus="" onClick={onRetry}>Try again</button>
+          {onPick
+            ? <button type="button" className="btn focusable" data-focus="" onClick={onPick}>Pick a source</button>
+            : <button type="button" className="btn focusable" data-focus="" onClick={onClose}>Back</button>}
         </div>
         {/* A configuration fault needs the specifics, or it reads as "the
             film is unavailable" when the deployment is simply misconfigured. */}

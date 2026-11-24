@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { act, render } from '@testing-library/react';
-import useStartupSwitch, { STARTUP_SWITCH_MS } from '../../lib/player/useStartupSwitch';
+import useStartupSwitch, { STARTUP_SWITCH_MS, STARTUP_GIVE_UP_MS } from '../../lib/player/useStartupSwitch';
 import { SWITCH_FLOW_GAP_MS, SWITCH_FLOWING_MAX_MS } from '../../lib/player/switchFlow';
 
 // The 15 s startup switch must give a same-row direct->proxy fallback its own
@@ -85,5 +85,60 @@ describe('useStartupSwitch waits while bytes arrive', () => {
     rerender(1);
     act(() => { vi.advanceTimersByTime(STARTUP_SWITCH_MS + 1); });
     expect(switchTo).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Owner 2026-11-24: one row that never shows a picture, and nothing to switch
+// to, left "Starting <server>" up forever (measured: 90 s on the local dev
+// server, RRR, OneTouchTV only). At 45 s it ends on the end card.
+describe('useStartupSwitch gives up with no alternate', () => {
+  function single({ giveUp = vi.fn(), list } = {}) {
+    const switchTo = vi.fn();
+    const refs = {
+      videoRef: { current: document.createElement('video') },
+      usedRef: { current: false },
+      startedRef: { current: false },
+      sourceListRef: { current: list || [{ masterUrl: 'https://vm/a', provider: 'A' }] },
+      currentSourceRef: { current: 'A' },
+      recoverBySwitchingRef: { current: switchTo },
+      giveUpRef: { current: giveUp },
+    };
+    function Probe() { useStartupSwitch({ stream: { masterUrl: 'https://vm/a' }, ...refs }); return null; }
+    render(<Probe />);
+    return { switchTo, giveUp, refs };
+  }
+
+  it('no switch at 15 s; gives up once at 45 s', () => {
+    vi.useFakeTimers();
+    const { switchTo, giveUp } = single();
+    act(() => { vi.advanceTimersByTime(STARTUP_GIVE_UP_MS - 1000); });
+    expect(giveUp).not.toHaveBeenCalled();
+    act(() => { vi.advanceTimersByTime(2000); });
+    expect(STARTUP_GIVE_UP_MS).toBe(45000);
+    expect(giveUp).toHaveBeenCalledTimes(1);
+    expect(giveUp).toHaveBeenCalledWith('startup give-up');
+    expect(switchTo).not.toHaveBeenCalled();
+    act(() => { vi.advanceTimersByTime(60000); });
+    expect(giveUp).toHaveBeenCalledTimes(1);
+  });
+
+  it('a second row that lands at 20 s is switched to instead', () => {
+    vi.useFakeTimers();
+    const { switchTo, giveUp, refs } = single();
+    act(() => { vi.advanceTimersByTime(20000); });
+    refs.sourceListRef.current = [...refs.sourceListRef.current, { masterUrl: 'https://vm/b', provider: 'B' }];
+    act(() => { vi.advanceTimersByTime(1000); });
+    expect(switchTo).toHaveBeenCalledWith('startup timeout');
+    act(() => { vi.advanceTimersByTime(60000); });
+    expect(giveUp).not.toHaveBeenCalled();
+  });
+
+  it('a picture before 45 s: no give-up', () => {
+    vi.useFakeTimers();
+    const { giveUp, refs } = single();
+    act(() => { vi.advanceTimersByTime(30000); });
+    refs.startedRef.current = true;
+    act(() => { vi.advanceTimersByTime(30000); });
+    expect(giveUp).not.toHaveBeenCalled();
   });
 });

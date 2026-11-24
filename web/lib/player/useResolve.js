@@ -387,7 +387,15 @@ export function useResolve({ mediaType, tmdbId, season = 0, episode = 0 }) {
     setSourcesPending(false);
   }, []);
 
+  /** The search gave up (45 s, no rows): drop the request so a late answer
+   *  cannot start playback under the end card. Try again calls load(). */
+  const stop = useCallback((reason) => {
+    cancelRef.current?.(); cancelRef.current = null;
+    setSourcesPending(false);
+    setError(reason);
+  }, []);
+
   return { stream, sources, currentSource, currentSourceId, sourcesPending, log, stage, error, providers, refreshing,
            mergeSources, replaceSource, replaceSources, requestedAt,
-           load, switchSource, setError };
+           load, switchSource, setError, stop };
 }

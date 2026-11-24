@@ -34,6 +34,8 @@ const P = {
   seasons:    { d: 'M4 6h16v12H4zM4 10h16M9 6v4' },
   chevron:    { d: 'M9 5l7 7-7 7' },
   restart:    { d: 'M4 12a8 8 0 1 0 2.5-5.8M4 4v4h4' },
+  // Two arrows round a circle: "Refresh sources", distinct from Start over.
+  refresh:    { d: 'M19.5 10A8 8 0 0 0 5.3 7.5M4.5 4v4h4M4.5 14a8 8 0 0 0 14.2 2.5M19.5 20v-4h-4' },
   sort:       { d: 'M6 5v14M3 16l3 3 3-3M18 19V5M15 8l3-3 3 3' },
   // Skip back/forward 10s. PlayerControls asked for these by name and the set
   // had neither, so Icon returned null and both buttons rendered EMPTY — the
