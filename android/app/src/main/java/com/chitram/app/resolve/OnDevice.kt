@@ -235,6 +235,7 @@ class OnDeviceResolver(
         // Gap 2.5: a clean "not on NetMirror" is remembered NO_ROWS_MS; rows clear the mark.
         if (got != null && got.isEmpty() && searched) netmirrorNoRows[titleKey] = now()
         else if (!got.isNullOrEmpty()) netmirrorNoRows.remove(titleKey)
+        kotlin.coroutines.coroutineContext[Outcome]?.let { o -> o.note = netmirrorNote(got, o, cfgNow().netmirror) }
         return got.orEmpty()
     }
 
@@ -391,6 +392,10 @@ class OnDeviceResolver(
         companion object Key : kotlin.coroutines.CoroutineContext.Key<Outcome>
         @Volatile var failed = false
         @Volatile var network = false
+        /** The provider held itself back (cooldown, budget share): a prewarm job that did this is never reused. */
+        @Volatile var skipped = false
+        /** NetMirror only: why it gave no rows, in words for the Check row; null with rows. */
+        @Volatile var note: String? = null
     }
 
     /** Config for a resolve: a prewarm never fetches it (the fetch goes to the VM). */
@@ -652,7 +657,7 @@ class OnDeviceResolver(
         if (now() - w.at > PREWARM_TTL_MS || w.rows.isCancelled) { w.rows.cancel(); w.late?.cancel(); return null }
         if (unusable(name, w)) {
             w.late?.cancel()
-            android.util.Log.i("Chitram", "prewarm: $name $type/$id job ended with 0 rows (${if (w.outcome.network) "network" else if (w.outcome.failed) "failed" else "empty"}), resolving again")
+            android.util.Log.i("Chitram", "prewarm: $name $type/$id job ended with 0 rows (${if (w.outcome.network) "network" else if (w.outcome.skipped) "skipped" else if (w.outcome.failed) "failed" else "empty"}), resolving again")
             return null
         }
         android.util.Log.i("Chitram", "prewarm: $name $type/$id reused (age ${now() - w.at}ms, ${if (w.rows.isCompleted) "done" else "in flight"})")
@@ -670,6 +675,8 @@ class OnDeviceResolver(
         val rows = runCatching { w.rows.getCompleted() }.getOrNull()
         if (!rows.isNullOrEmpty()) return false
         if (w.outcome.network) return true
+        // A prewarm that stopped on its own share or a cooldown asked nothing: Play asks with its own budget.
+        if (w.outcome.skipped) return true
         return name != NETMIRROR
     }
 
@@ -710,6 +717,18 @@ class OnDeviceResolver(
         }
     }
 
+    /** Why NetMirror gave no rows, in words for the Check row: pause, budget, upstream error, or not there. */
+    private fun netmirrorNote(got: List<Source>?, out: Outcome, cfg: NetmirrorConfig): String? {
+        if (!got.isNullOrEmpty()) return null
+        if (got != null) return NOTE_NOT_ON_NETMIRROR
+        if (out.network) return "No network"
+        val nm = netmirror ?: return NOTE_UNAVAILABLE
+        nm.pausedForMs().takeIf { it > 0 }?.let { return "NetMirror paused, try in ${minutes(it)} min" }
+        nm.budgetSpentForMs(cfg).takeIf { it > 0 }?.let { return "Budget spent, try in ${minutes(it)} min" }
+        return NOTE_UNAVAILABLE
+    }
+    private fun minutes(ms: Long) = ((ms + 59_999) / 60_000).coerceAtLeast(1)
+
     private suspend fun <T> guarded(name: String, block: suspend () -> T?): T? {
         val t0 = now()
         val out = kotlin.coroutines.coroutineContext[Outcome]
@@ -735,6 +754,7 @@ class OnDeviceResolver(
             }
             // 1.2.54: the provider's own pause or budget (cooldown active, budget spent): nothing failed.
             if (e is SelfImposedSkip) {
+                out?.skipped = true
                 android.util.Log.i("Chitram", "[breaker] skip not counted: $name ${e.message}")
                 return null
             }
@@ -763,6 +783,8 @@ class OnDeviceResolver(
         const val VIDRIFT = "vidrift"
         const val INSERTUNIT = "insertunit"
         const val VIDOUT = "vidout"
+        const val NOTE_NOT_ON_NETMIRROR = "Not on NetMirror"
+        const val NOTE_UNAVAILABLE = "NetMirror unavailable"
         /** Server insertunit/vidout budgetMs: page or catalogue + master together. */
         const val TAGGED_BUDGET_MS = 12_000L
         const val SHOWSST_BUDGET_MS = 15_000L

@@ -69,6 +69,19 @@ class NetmirrorResolver(
     /** True while a 429/403, a substituted clip or a refused OTP holds every request back. */
     val throttled: Boolean get() = blockedUntil > now()
 
+    /** Ms left in the pause [throttled] reports; 0 when not paused. */
+    fun pausedForMs(): Long = (blockedUntil - now()).coerceAtLeast(0)
+
+    /** Ms until the request window resets, when this window's whole budget is spent; else 0. */
+    fun budgetSpentForMs(cfg: NetmirrorConfig): Long =
+        if (now() - bucketAt < cfg.budgetWindowMs && calls >= cfg.maxCalls) bucketAt + cfg.budgetWindowMs - now() else 0
+
+    /** One bad answer pauses every title (the guard stays); the log says why and for how long. */
+    private fun pause(cfg: NetmirrorConfig, reason: String) {
+        blockedUntil = now() + cfg.cooldownMs
+        log("[netmirror] paused ${cfg.cooldownMs / 1000}s after $reason")
+    }
+
     init {
         kv?.let { s ->
             val t = s.get(KV_TOKEN); val c = s.get(KV_CREDENTIAL); val b = s.get(KV_BASE); val u = s.get(KV_UNTIL)?.toLongOrNull()
@@ -116,7 +129,7 @@ class NetmirrorResolver(
     suspend fun resolve(cfg: NetmirrorConfig, type: String, title: String, year: Int?, season: Int, episode: Int, fresh: Boolean = false, prewarm: Boolean = false, tap: Boolean = false, onRow: (Resolved) -> Unit = {}): List<Resolved> = lock.withLock {
         if (!cfg.enabled || title.isBlank()) return@withLock emptyList()
         if (blockedUntil > now()) {
-            if (!tap || prewarm) throw NetmirrorSkip("cooldown active")
+            if (!tap || prewarm) throw NetmirrorSkip("cooldown active, ${(blockedUntil - now()) / 1000}s left")
             log("[netmirror] cooldown skipped for tap (${(blockedUntil - now()) / 1000}s left)")
             blockedUntil = 0
         }
@@ -143,56 +156,73 @@ class NetmirrorResolver(
             failed = true
             listOf("nf", "pv", "hs")
         }
-        for (ott in catalogs) {
-            try {
-                val matches = search(cfg, base, ott, title)
-                for (match in matches) {
-                    try {
-                    val id = str(match, "id") ?: continue
-                    val post = json(cfg, base, ott, "/newtv/post.php?id=${enc(id)}", mapOf("Lastep" to ""), cache = true)
-                    val postYear = str(post, "year")?.take(4)?.toIntOrNull()
-                    if (year != null && postYear != null && kotlin.math.abs(year - postYear) > 1) continue
-                    val target = if (type == "tv" || type == "series") episodeId(cfg, base, ott, post, season, episode)
-                        else if (str(post, "type") == "t" || objects(post, "episodes").isNotEmpty()) null else str(post, "main_id") ?: id
-                    if (target == null) continue
-                    val player = json(cfg, base, ott, "/newtv/player.php?id=${enc(target)}")
-                    val link = str(player, "video_link") ?: continue
-                    val referer = str(player, "referer") ?: "$base/"
-                    val headers = mapOf("Referer" to referer, "User-Agent" to UA, "X-Requested-With" to "NetmirrorNewTV v1.0")
-                    val reply = mediaHttp.fetch(Request.Builder().url(link).apply { headers.forEach { (k, v) -> header(k, v) } }.build())
-                    if (!reply.ok || !reply.body.trimStart().startsWith("#EXTM3U")) throw StepException("netmirror master", reply.code, "unavailable playlist")
-                    if (!masterMatchesTitle(reply.body, target)) {
-                        blockedUntil = now() + cfg.cooldownMs
-                        throw StepException("netmirror master", 0, "substituted video rejected")
-                    }
-                    val master = Hls.parse(reply.body, link)
-                    if (master.empty) throw StepException("netmirror master", 0, "empty playlist")
-                    val langs = objects(post, "lang").mapNotNull { str(it, "l") }
-                    // Only actual renditions are selectable; post.lang never invents tracks.
-                    val audio = master.audio.map { a -> a.copy(name = a.name?.replace(Regex("^\\[\\d+]\\s*"), "")) }
-                        .let { a -> if (a.size == 1 && a[0].label == null && langs.size == 1) listOf(a[0].copy(language = langs[0])) else a }
-                    val label = when (ott) { "nf" -> "Netflix"; "pv" -> "Prime Video"; "hs" -> "Hotstar"; else -> ott.uppercase() }
-                    val subtitles = reply.body.lines().filter { it.startsWith("#EXT-X-MEDIA:") }.mapNotNull { line ->
-                        val a = Hls.attrs(line)
-                        if (a["TYPE"] != "SUBTITLES") null else a["URI"]?.takeUnless { it.substringBefore('?').endsWith(".m3u8", true) }?.let { uri ->
-                            com.chitram.app.data.SubtitleRef(url = Hls.resolve(uri, link), lang = a["LANGUAGE"].orEmpty(), id = a["NAME"].orEmpty())
+        // Cheapest plan first: Netflix, Prime, Hotstar (any new catalogue after), one spelling at a
+        // time across them; a catalogue is not searched again once it matched or failed. Play stops
+        // at the first catalogue that gives rows; a tap (Check, row pick) asks every catalogue.
+        val order = catalogs.sortedBy { PLAN.indexOf(it).let { i -> if (i < 0) PLAN.size else i } }
+        val spellings = TitleMatch.spellings(title)
+        val done = mutableSetOf<String>()
+        plan@ for ((n, q) in spellings.withIndex()) {
+            for (ott in order) {
+                if (ott in done) continue
+                try {
+                    val matches = search(cfg, base, ott, q, title)
+                    if (matches.isEmpty()) continue
+                    done += ott
+                    val before = out.size
+                        for (match in matches) {
+                            try {
+                            val id = str(match, "id") ?: continue
+                            val post = json(cfg, base, ott, "/newtv/post.php?id=${enc(id)}", mapOf("Lastep" to ""), cache = true)
+                            val postYear = str(post, "year")?.take(4)?.toIntOrNull()
+                            if (year != null && postYear != null && kotlin.math.abs(year - postYear) > 1) continue
+                            val target = if (type == "tv" || type == "series") episodeId(cfg, base, ott, post, season, episode)
+                                else if (str(post, "type") == "t" || objects(post, "episodes").isNotEmpty()) null else str(post, "main_id") ?: id
+                            if (target == null) continue
+                            val player = json(cfg, base, ott, "/newtv/player.php?id=${enc(target)}")
+                            val link = str(player, "video_link") ?: continue
+                            val referer = str(player, "referer") ?: "$base/"
+                            val headers = mapOf("Referer" to referer, "User-Agent" to UA, "X-Requested-With" to "NetmirrorNewTV v1.0")
+                            val reply = mediaHttp.fetch(Request.Builder().url(link).apply { headers.forEach { (k, v) -> header(k, v) } }.build())
+                            if (!reply.ok || !reply.body.trimStart().startsWith("#EXTM3U")) throw StepException("netmirror master", reply.code, "unavailable playlist")
+                            if (!masterMatchesTitle(reply.body, target)) {
+                                pause(cfg, "substituted video")
+                                throw StepException("netmirror master", 0, "substituted video rejected")
+                            }
+                            val master = Hls.parse(reply.body, link)
+                            if (master.empty) throw StepException("netmirror master", 0, "empty playlist")
+                            val langs = objects(post, "lang").mapNotNull { str(it, "l") }
+                            // Only actual renditions are selectable; post.lang never invents tracks.
+                            val audio = master.audio.map { a -> a.copy(name = a.name?.replace(Regex("^\\[\\d+]\\s*"), "")) }
+                                .let { a -> if (a.size == 1 && a[0].label == null && langs.size == 1) listOf(a[0].copy(language = langs[0])) else a }
+                            val label = when (ott) { "nf" -> "Netflix"; "pv" -> "Prime Video"; "hs" -> "Hotstar"; else -> ott.uppercase() }
+                            val subtitles = reply.body.lines().filter { it.startsWith("#EXT-X-MEDIA:") }.mapNotNull { line ->
+                                val a = Hls.attrs(line)
+                                if (a["TYPE"] != "SUBTITLES") null else a["URI"]?.takeUnless { it.substringBefore('?').endsWith(".m3u8", true) }?.let { uri ->
+                                    com.chitram.app.data.SubtitleRef(url = Hls.resolve(uri, link), lang = a["LANGUAGE"].orEmpty(), id = a["NAME"].orEmpty())
+                                }
+                            }
+                            out += Resolved("netmirror", "NetMirror | $label", link, headers, null, audio, master.levels, master.codecs,
+                                key = "netmirror-$ott-$target", subtitles = subtitles,
+                                languages = if (audio.isEmpty() && langs.size == 1) langs else Hls.languages(audio), catalogLanguages = langs, netmirrorCatalog = label).also(onRow)
+                            } catch (e: Exception) {
+                                if (e is CancellationException) throw e
+                                failed = true
+                                android.util.Log.i("Chitram", "netmirror $ott catalog row failed: ${e.message}")
+                                if (blockedUntil > now() || calls >= limit(cfg)) throw e
+                            }
                         }
+                    if (out.size > before && !tap) {
+                        log("[netmirror] plan: $ott matched on spelling ${n + 1}/${spellings.size}, other catalogues not asked")
+                        break@plan
                     }
-                    out += Resolved("netmirror", "NetMirror | $label", link, headers, null, audio, master.levels, master.codecs,
-                        key = "netmirror-$ott-$target", subtitles = subtitles,
-                        languages = if (audio.isEmpty() && langs.size == 1) langs else Hls.languages(audio), catalogLanguages = langs, netmirrorCatalog = label).also(onRow)
-                    } catch (e: Exception) {
-                        if (e is CancellationException) throw e
-                        failed = true
-                        android.util.Log.i("Chitram", "netmirror $ott catalog row failed: ${e.message}")
-                        if (blockedUntil > now() || calls >= limit(cfg)) throw e
-                    }
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    failed = true
+                    done += ott
+                    android.util.Log.i("Chitram", "netmirror $ott: ${e.message}")
+                    if (blockedUntil > now() || calls >= limit(cfg)) break@plan
                 }
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
-                failed = true
-                android.util.Log.i("Chitram", "netmirror $ott: ${e.message}")
-                if (blockedUntil > now() || calls >= limit(cfg)) break
             }
         }
         // Never cache a partial result as a complete answer; a fresh resolve may add languages.
@@ -239,7 +269,7 @@ class NetmirrorResolver(
         val data = MappleResolver.obj(r.body)
         val value = data?.let { str(it, "usertoken") }
         if (data == null || str(data, "status") != "ok" || value.isNullOrBlank()) {
-            blockedUntil = now() + cfg.cooldownMs
+            pause(cfg, "OTP not accepted")
             throw StepException("netmirror login", r.code, "OTP not accepted")
         }
         saveToken(value, entered, base, cfg.sessionTtlMs)
@@ -257,13 +287,19 @@ class NetmirrorResolver(
                 val age = if (tokenIssuedAt > 0) (now() - tokenIssuedAt) / 60_000 else -1
                 log("[netmirror] token rejected age=${if (age >= 0) "$age" else "?"}m")
                 clearToken()
-                if (attempt == 1) { blockedUntil = now() + cfg.cooldownMs; throw StepException("netmirror login", 0, "session rejected after renewal") }
+                if (attempt == 1) { pause(cfg, "session rejected after renewal"); throw StepException("netmirror login", 0, "session rejected after renewal") }
             } else {
                 acceptedOn(base)
                 if (str(data, "status") == "error") throw StepException("netmirror API", r.code, "upstream error")
                 if (cache) {
                     if (metadata.size >= 128) metadata.remove(metadata.keys.first())
-                    metadata[key] = Cached(data, now() + if (path == "/newtv/ott.php") cfg.apiTtlMs else cfg.metadataTtlMs)
+                    val ttl = when {
+                        path == "/newtv/ott.php" -> cfg.apiTtlMs
+                        // One transient empty answer must not hide a title for days (server: NEWTV_EMPTY_TTL_MS).
+                        path.startsWith("/newtv/search.php") && objects(data, "searchResult").isEmpty() -> EMPTY_SEARCH_TTL_MS
+                        else -> cfg.metadataTtlMs
+                    }
+                    metadata[key] = Cached(data, now() + ttl)
                 }
                 return data
             }
@@ -271,14 +307,10 @@ class NetmirrorResolver(
         error("unreachable")
     }
 
-    private suspend fun search(cfg: NetmirrorConfig, base: String, ott: String, title: String): List<JsonObject> {
-        for (q in TitleMatch.spellings(title)) {
-            val data = json(cfg, base, ott, "/newtv/search.php?s=${enc(q)}", cache = true)
-            val rows = objects(data, "searchResult")
-            val matches = rows.filter { TitleMatch.find(listOf(it), title) { r -> str(r, "t") ?: str(r, "title").orEmpty() } != null }
-            if (matches.isNotEmpty()) return matches
-        }
-        return emptyList()
+    /** One spelling [q] on one catalogue: the rows whose title matches [title]. */
+    private suspend fun search(cfg: NetmirrorConfig, base: String, ott: String, q: String, title: String): List<JsonObject> {
+        val data = json(cfg, base, ott, "/newtv/search.php?s=${enc(q)}", cache = true)
+        return objects(data, "searchResult").filter { TitleMatch.find(listOf(it), title) { r -> str(r, "t") ?: str(r, "title").orEmpty() } != null }
     }
 
     private suspend fun episodeId(cfg: NetmirrorConfig, base: String, ott: String, post: JsonObject, season: Int, episode: Int): String? {
@@ -314,14 +346,14 @@ class NetmirrorResolver(
     }
 
     private suspend fun request(cfg: NetmirrorConfig, url: String, headers: Map<String, String>): Reply {
-        if (blockedUntil > now()) throw NetmirrorSkip("cooldown active")
+        if (blockedUntil > now()) throw NetmirrorSkip("cooldown active, ${(blockedUntil - now()) / 1000}s left")
         if (now() - bucketAt >= cfg.budgetWindowMs) { bucketAt = now(); calls = 0 }
         if (calls >= limit(cfg)) throw if (calls < cfg.maxCalls) PrewarmShareSpent() else NetmirrorSkip("request budget spent")
         calls++
         val r = http.fetch(Request.Builder().url(url).header("User-Agent", UA)
             .header("X-Requested-With", "NetmirrorNewTV v1.0").header("Cache-Control", "no-cache, no-store, must-revalidate")
             .header("Pragma", "no-cache").header("Expires", "0").apply { headers.forEach { (k, v) -> header(k, v) } }.build())
-        if (r.code == 429 || (r.code == 403 && r.body.contains("Page Not Found", true))) blockedUntil = now() + cfg.cooldownMs
+        if (r.code == 429 || (r.code == 403 && r.body.contains("Page Not Found", true))) pause(cfg, "HTTP ${r.code}")
         if (!r.ok) throw StepException("netmirror API", r.code, "HTTP ${r.code}")
         return r
     }
@@ -335,6 +367,10 @@ class NetmirrorResolver(
         /** Part 3 of `<hex>::<hex>::<epoch s>::ni` is the issue time (POC 2026-11-22). */
         internal fun issuedAtOf(token: String): Long? =
             token.split("::").getOrNull(2)?.takeIf { it.length == 10 && it.all(Char::isDigit) }?.toLongOrNull()?.times(1000)
+        /** Catalogue order of the cheapest plan: Netflix, Prime Video, Hotstar. */
+        internal val PLAN = listOf("nf", "pv", "hs")
+        /** An empty search answer is kept 30 min, as on the server (NEWTV_EMPTY_TTL_MS). */
+        const val EMPTY_SEARCH_TTL_MS = 30 * 60 * 1000L
         const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:136.0) Gecko/20100101 Firefox/136.0 /OS.GatuNewTV v1.0"
         fun masterMatchesTitle(text: String, id: String): Boolean {
             val ids = text.lines().map(String::trim).filter { it.isNotBlank() && !it.startsWith('#') }

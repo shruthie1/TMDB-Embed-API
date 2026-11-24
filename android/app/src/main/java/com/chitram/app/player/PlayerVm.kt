@@ -86,12 +86,18 @@ internal const val REFRESH_KEY = "refresh:sources"
 
 internal fun streamCount(n: Int) = if (n == 1) "1 stream" else "$n streams"
 
-/** Runs a NetMirror check and says what it found, so the tap is never silent. */
-internal suspend fun <T> netmirrorCheck(resolve: suspend () -> List<T>): Pair<List<T>, String> = try {
-    val rows = resolve()
-    rows to if (rows.isEmpty()) "No NetMirror streams for this title" else "${rows.size} added"
-} catch (e: com.chitram.app.resolve.StepException) {
-    emptyList<T>() to "NetMirror unavailable"
+/**
+ * Runs a NetMirror check and says what it found, so the tap is never silent. With no
+ * rows the note says why: paused (minutes left), budget spent, unavailable, or not on NetMirror.
+ */
+internal suspend fun <T> netmirrorCheck(resolve: suspend () -> List<T>): Pair<List<T>, String> {
+    val out = com.chitram.app.resolve.OnDeviceResolver.Outcome()
+    return try {
+        val rows = withContext(out) { resolve() }
+        rows to if (rows.isNotEmpty()) "${rows.size} added" else out.note ?: com.chitram.app.resolve.OnDeviceResolver.NOTE_NOT_ON_NETMIRROR
+    } catch (e: com.chitram.app.resolve.StepException) {
+        emptyList<T>() to com.chitram.app.resolve.OnDeviceResolver.NOTE_UNAVAILABLE
+    }
 }
 
 class PlayerVm(app: Application) : AndroidViewModel(app) {
@@ -1831,7 +1837,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             val t0 = System.currentTimeMillis()
             try {
                 val (rows, note) = netmirrorCheck { withContext(com.chitram.app.resolve.UserTap()) { g.onDevice.resolveAll("netmirror", r.type, r.id, r.season, r.episode, g.codecs, desiredAudio(), fresh = true, title = r.title) } }
-                android.util.Log.i("Chitram", "[netmirror] check: ${rows.size} rows")
+                android.util.Log.i("Chitram", "[netmirror] check: ${rows.size} rows, note=$note")
                 if (request == r) putSources(Ranking.merge(sources, rows, desiredAudio(), null))
                 // A cached answer comes back in ~100ms; keep "Checking sources…" up long enough to read.
                 delay((600 - (System.currentTimeMillis() - t0)).coerceAtLeast(0))

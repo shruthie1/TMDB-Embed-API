@@ -22,7 +22,7 @@ class V129Test {
     @Test fun `netmirror check with no rows says so`() = runBlocking {
         val (rows, note) = netmirrorCheck { emptyList<String>() }
         assertTrue(rows.isEmpty())
-        assertEquals("No NetMirror streams for this title", note)
+        assertEquals("Not on NetMirror", note)
     }
 
     @Test fun `netmirror check with rows reports the count`() = runBlocking {

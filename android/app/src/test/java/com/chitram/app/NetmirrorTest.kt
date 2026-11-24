@@ -45,6 +45,13 @@ class NetmirrorTest {
     private var slowPlayer = false
     private var slowHotstar = false
     private var apiPrefix = ""
+    /** 1.2.66 plan fixtures: the catalogue holding the title (null: all), the one spelling it answers, every search sent. */
+    private var onlyOn: String? = null
+    private var onlySpelling: String? = null
+    private var searchTitle = "Test Movie"
+    private var searchError = false
+    private var reversedCatalogs = false
+    private val searches = CopyOnWriteArrayList<String>()
     private val cfg get() = NetmirrorConfig(domains = listOf(base), maxCalls = 50)
 
     @Before fun setup() {
@@ -67,9 +74,14 @@ class NetmirrorTest {
                 }
                 val ott = r.getHeader("Ott").orEmpty()
                 val id = when (ott) { "pv" -> "222"; "hs" -> "333"; else -> "111" }
+                if (p.endsWith("/ott.php") && reversedCatalogs) return json("""{"ott":[{"value":"hs"},{"value":"pv"},{"value":"nf"}]}""")
                 if (p.endsWith("/ott.php")) return json(if (extraCatalog) """{"ott":[{"value":"nf"},{"value":"pv"},{"value":"hs"},{"value":"extra"}]}""" else """{"ott":[{"value":"nf"},{"value":"pv"},{"value":"hs"}]}""")
                 if (p.endsWith("/search.php")) {
-                    val out = json("""{"searchResult":[{"id":"$id","t":"Test Movie"}${if (failFirstDub && ott == "nf") ",{\"id\":\"112\",\"t\":\"Test Movie (Telugu)\"}" else ""}]}""")
+                    val q = r.requestUrl!!.queryParameter("s")
+                    searches += "$ott:$q"
+                    if (searchError) return MockResponse().setResponseCode(500)
+                    if ((onlyOn != null && ott != onlyOn) || (onlySpelling != null && q != onlySpelling)) return json("""{"searchResult":[]}""")
+                    val out = json("""{"searchResult":[{"id":"$id","t":"$searchTitle"}${if (failFirstDub && ott == "nf") ",{\"id\":\"112\",\"t\":\"Test Movie (Telugu)\"}" else ""}]}""")
                     return if (held || (slowHotstar && ott == "hs")) out.setBodyDelay(5, TimeUnit.SECONDS) else out
                 }
                 if (p.endsWith("/post.php")) {
@@ -102,7 +114,11 @@ class NetmirrorTest {
     }
     @After fun teardown() { server.shutdown() }
     private fun resolver() = NetmirrorResolver(client, now = { clock })
-    private suspend fun resolve(r: NetmirrorResolver, config: NetmirrorConfig = cfg, fresh: Boolean = false) = r.resolve(config, if (series) "tv" else "movie", "Test Movie", 2024, 2, 2, fresh)
+    /**
+     * The fixture title is on every catalogue. `tap` (default here) asks all of them, as Check does;
+     * Play (tap false) stops at the first catalogue with rows (1.2.66 cheapest plan).
+     */
+    private suspend fun resolve(r: NetmirrorResolver, config: NetmirrorConfig = cfg, fresh: Boolean = false, tap: Boolean = true) = r.resolve(config, if (series) "tv" else "movie", "Test Movie", 2024, 2, 2, fresh, tap = tap)
 
     @Test fun authenticatesOnceCarriesTokenEverywhereAndPreservesCatalogs() = runBlocking {
         val r = resolver()
@@ -278,7 +294,7 @@ class NetmirrorTest {
         assertFalse(nm.throttled)
         assertFalse(od.isOpen(OnDeviceResolver.NETMIRROR))
         assertTrue("Play sent its requests", nmCalls() > spent)
-        assertEquals(3, rows.size)
+        assertEquals(1, rows.size)
     }
 
     /** Gap 13.9: a prewarm resolve stops at half the window budget; Play's own resolve does not. */
@@ -323,7 +339,7 @@ class NetmirrorTest {
         assertEquals(2, logins)
         assertEquals(0, seen.count { it.requestUrl!!.encodedPath.startsWith("/media/") })
         val before = seen.size
-        assertTrue(runCatching { resolve(r) }.isFailure)
+        assertTrue(runCatching { resolve(r, tap = false) }.isFailure)
         assertEquals(before, seen.size)
     }
     @Test fun loginFailureIsNotCachedAsAnEmptyCatalog() = runBlocking {
@@ -358,7 +374,7 @@ class NetmirrorTest {
         assertTrue(runCatching { resolve(r) }.isFailure)
         assertEquals(1, seen.count { it.requestUrl!!.encodedPath.endsWith("player.php") })
         val before = seen.size
-        assertTrue(runCatching { resolve(r) }.isFailure)
+        assertTrue(runCatching { resolve(r, tap = false) }.isFailure)
         assertEquals(before, seen.size)
     }
     @Test fun oneFailedDubDoesNotHideItsTeluguSibling() = runBlocking {
@@ -428,12 +444,13 @@ class NetmirrorTest {
         val device = OnDeviceResolver(null, store, MappleResolver(routed, hosts, kv), VaplayerResolver(routed, hosts) { null },
             titleFor = { _, _ -> throw java.io.IOException("VM unavailable") }, netmirror = NetmirrorResolver(routed, now = { clock }))
         slowHotstar = true
-        val rows = device.resolveAll("netmirror", "movie", 1, 1, 1, codecs, title = "Test Movie")
+        // A tap asks every catalogue (Play stops at the first with rows).
+        val rows = kotlinx.coroutines.withContext(UserTap()) { device.resolveAll("netmirror", "movie", 1, 1, 1, codecs, title = "Test Movie") }
         assertEquals("nf and pv survive hs timeout", 2, rows.size)
         assertTrue(rows.all { it.languages.contains("Telugu") })
         slowHotstar = false
         // The timed-out result was not cached as complete; hs joins next time.
-        assertEquals(3, device.resolveAll("netmirror", "movie", 1, 1, 1, codecs, title = "Test Movie").size)
+        assertEquals(3, kotlinx.coroutines.withContext(UserTap()) { device.resolveAll("netmirror", "movie", 1, 1, 1, codecs, title = "Test Movie") }.size)
         assertTrue(device.names().contains("netmirror"))
     }
 
@@ -514,7 +531,7 @@ class NetmirrorTest {
     @Test fun aKeptNetmirrorAnswerMakesZeroRequestsOnReopen() = runBlocking {
         val od = onDevice(NetmirrorResolver(redirect, now = { clock }))
         val first = od.resolveAll(OnDeviceResolver.NETMIRROR, "movie", 605153, 0, 0, codecs, "Telugu", title = "Test Movie")
-        assertEquals(3, first.size)
+        assertEquals("Play: the first catalogue with rows", 1, first.size)
         val n = nmCalls()
         clock += StreamCache.TTL_MS - 60_000
         assertEquals(first, od.resolveAll(OnDeviceResolver.NETMIRROR, "movie", 605153, 0, 0, codecs, "Telugu", title = "Test Movie"))
@@ -530,7 +547,7 @@ class NetmirrorTest {
         failFirstDub = true
         val od = onDevice(NetmirrorResolver(redirect, now = { clock }))
         val first = od.resolveAll(OnDeviceResolver.NETMIRROR, "movie", 605153, 0, 0, codecs, "Telugu", title = "Test Movie")
-        assertEquals(3, first.size)
+        assertEquals(1, first.size)
         assertTrue(first.all { it.incomplete })
         val n = nmCalls()
         slowPlayer = true // any NetMirror player.php now takes 5 s
@@ -552,7 +569,7 @@ class NetmirrorTest {
         failFirstDub = false
         clock += 61_000
         val again = od.resolveAll(OnDeviceResolver.NETMIRROR, "movie", 605153, 0, 0, codecs, "Telugu", title = "Test Movie")
-        assertEquals(3, again.size)
+        assertEquals(1, again.size)
         val jobs = od.partialRefreshJobs()
         assertEquals("one background refresh", 1, jobs.size)
         kotlinx.coroutines.withTimeout(30_000) { jobs.forEach { it.join() } }
@@ -565,9 +582,10 @@ class NetmirrorTest {
 
     /** The background refresh never runs once the prewarm share of the request budget is spent. */
     @Test fun aPartialHitDoesNotRefreshWhenTheBudgetShareIsSpent() = runBlocking {
-        val od = onDevice(NetmirrorResolver(redirect, now = { clock }))
+        // 16 calls a window (prewarm share 8): the two plays below spend 10.
+        val od = onDevice(NetmirrorResolver(redirect, now = { clock }), ""","maxCalls":16""")
         failFirstDub = true
-        // One play of another title, then the partial one: more than half of the 24-call window.
+        // One play of another title, then the partial one: more than half of the window.
         od.resolveAll(OnDeviceResolver.NETMIRROR, "movie", 1, 0, 0, codecs, "Telugu", title = "Test Movie")
         od.resolveAll(OnDeviceResolver.NETMIRROR, "movie", 605153, 0, 0, codecs, "Telugu", title = "Test Movie (Dub)")
         val n = nmCalls()
@@ -575,5 +593,143 @@ class NetmirrorTest {
         assertTrue(again.isNotEmpty())
         assertTrue("no refresh started", od.partialRefreshJobs().isEmpty())
         assertEquals("0 NetMirror requests", n, nmCalls())
+    }
+
+    // ---- 1.2.66: NetMirror shows nothing for most titles (Amaran) ----------------------------
+
+    private suspend fun check(od: OnDeviceResolver, id: Long, title: String = "Test Movie", tap: Boolean = true) =
+        com.chitram.app.player.netmirrorCheck {
+            if (tap) kotlinx.coroutines.withContext(UserTap()) { od.resolveAll(OnDeviceResolver.NETMIRROR, "movie", id, 0, 0, codecs, "Telugu", fresh = true, title = title) }
+            else od.resolveAll(OnDeviceResolver.NETMIRROR, "movie", id, 0, 0, codecs, "Telugu", fresh = true, title = title)
+        }
+
+    /** Item 1: a prewarm stopped by its own share leaves no empty job; Play asks with its own budget. */
+    @Test fun aPrewarmStoppedByItsShareIsNotReusedAsNoRows() = runBlocking {
+        val nm = NetmirrorResolver(redirect, now = { clock })
+        // 8 calls a window: the prewarm share (4) ends before post.php; Play keeps 4.
+        val od = onDevice(nm, ""","maxCalls":8""")
+        assertTrue(OnDeviceResolver.NETMIRROR in od.prewarm("movie", 927342, 0, 0, codecs, "Telugu", "Test Movie"))
+        kotlinx.coroutines.withTimeout(30_000) { od.prewarmJobs().forEach { runCatching { it.await() } } }
+        assertTrue("the prewarm stopped at its share", nm.prewarmShareSpent(NetmirrorConfig(domains = listOf(base), maxCalls = 8)))
+        assertEquals(0, seen.count { it.requestUrl!!.encodedPath.endsWith("player.php") })
+        val rows = od.resolveAll(OnDeviceResolver.NETMIRROR, "movie", 927342, 0, 0, codecs, "Telugu", title = "Test Movie")
+        assertEquals("Play ran its own NetMirror call", 1, rows.size)
+        assertEquals("one resolve for this play", 1, seen.count { it.requestUrl!!.encodedPath.endsWith("player.php") })
+    }
+
+    /** Item 1: the skip is marked on the outcome; any other NetMirror empty prewarm is still reused. */
+    @Test fun unusableTreatsASelfImposedSkipAsUnusable() {
+        val src = java.io.File("src/main/java/com/chitram/app/resolve/OnDevice.kt").readText()
+        assertTrue(src.contains("if (w.outcome.skipped) return true"))
+        assertTrue(src.contains("out?.skipped = true"))
+    }
+
+    /** Item 2 and 3: a substituted clip pauses every title; Check says so with minutes left, and the log says why. */
+    @Test fun checkSaysPausedWithMinutesLeftAndTheLogSaysWhy() = runBlocking {
+        clip = true
+        val lines = CopyOnWriteArrayList<String>()
+        val nm = NetmirrorResolver(redirect, now = { clock }, log = { lines += it })
+        val od = onDevice(nm)
+        val (rows, note) = check(od, 3001)
+        assertTrue(rows.isEmpty())
+        assertEquals("NetMirror paused, try in 10 min", note)
+        assertTrue(lines.toString(), lines.contains("[netmirror] paused 600s after substituted video"))
+        clock += 3 * 60_000
+        // An auto resolve inside the pause: no request, the note still says paused.
+        val n = seen.size
+        assertEquals("NetMirror paused, try in 7 min", check(od, 3002, tap = false).second)
+        assertEquals(n, seen.size)
+    }
+
+    /** Item 3: a 429 pauses with its own reason in the log. */
+    @Test fun aRateLimitPauseIsLoggedWithItsReason() = runBlocking {
+        val lines = CopyOnWriteArrayList<String>()
+        val nm = NetmirrorResolver(client, now = { clock }, log = { lines += it })
+        val old = server.dispatcher
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest) =
+                if (request.requestUrl!!.encodedPath.endsWith("search.php")) MockResponse().setResponseCode(429) else old.dispatch(request)
+        }
+        assertTrue(runCatching { resolve(nm, tap = false) }.isFailure)
+        assertTrue(lines.toString(), lines.contains("[netmirror] paused 600s after HTTP 429"))
+        assertTrue(nm.throttled)
+        assertEquals(600_000L, nm.pausedForMs())
+    }
+
+    /** Item 2: the whole window budget spent: Check says when it resets. */
+    @Test fun checkSaysBudgetSpentWithMinutesLeft() = runBlocking {
+        val od = onDevice(NetmirrorResolver(redirect, now = { clock }), ""","maxCalls":2""")
+        assertEquals("Budget spent, try in 5 min", check(od, 3003).second)
+    }
+
+    /** Item 2: an upstream error (no pause, budget left) says unavailable. */
+    @Test fun checkSaysUnavailableOnAnUpstreamError() = runBlocking {
+        searchError = true
+        val od = onDevice(NetmirrorResolver(redirect, now = { clock }))
+        assertEquals("NetMirror unavailable", check(od, 3004).second)
+    }
+
+    /** Item 2: a clean empty answer says the title is not on NetMirror; rows say how many. */
+    @Test fun checkSaysNotOnNetmirrorOrTheCount() = runBlocking {
+        val od = onDevice(NetmirrorResolver(redirect, now = { clock }))
+        assertEquals("Not on NetMirror", check(od, 3005, title = "Nowhere Film").second)
+        assertEquals("3 added", check(od, 3006).second)
+    }
+
+    /** Item 4: an empty search answer is kept 30 min, not metadataTtlMs (7 days). */
+    @Test fun anEmptySearchIsAskedAgainAfterThirtyMinutes() = runBlocking {
+        onlyOn = "none"
+        val r = resolver()
+        assertTrue(resolve(r, tap = false).isEmpty())
+        val first = searches.size
+        assertEquals(3, first)
+        clock += 29 * 60_000
+        assertTrue(resolve(r, tap = false).isEmpty())
+        assertEquals("inside 30 min: kept", first, searches.size)
+        clock += 2 * 60_000
+        resolve(r, tap = false)
+        assertEquals("after 30 min: asked again", 2 * first, searches.size)
+        assertEquals(30 * 60_000L, NetmirrorResolver.EMPTY_SEARCH_TTL_MS)
+    }
+
+    /** Item 5: a title on Netflix (Amaran): one search, one post, one player; Prime and Hotstar not asked. */
+    @Test fun playStopsAtTheFirstCatalogueWithRows() = runBlocking {
+        val lines = CopyOnWriteArrayList<String>()
+        val r = NetmirrorResolver(client, now = { clock }, log = { lines += it })
+        val rows = resolve(r, tap = false)
+        assertEquals(listOf("NetMirror | Netflix"), rows.map { it.label })
+        assertEquals(listOf("nf:Test Movie"), searches)
+        assertEquals(1, seen.count { it.requestUrl!!.encodedPath.endsWith("post.php") })
+        assertEquals(1, seen.count { it.requestUrl!!.encodedPath.endsWith("player.php") })
+        assertTrue(lines.toString(), lines.contains("[netmirror] plan: nf matched on spelling 1/1, other catalogues not asked"))
+    }
+
+    /** Item 5: catalogue order is Netflix, Prime, Hotstar whatever order ott.php lists them in. */
+    @Test fun planOrderIsNetflixPrimeHotstar() = runBlocking {
+        reversedCatalogs = true
+        onlyOn = "hs"
+        val rows = resolve(resolver(), tap = false)
+        assertEquals(listOf("NetMirror | Hotstar"), rows.map { it.label })
+        assertEquals(listOf("nf:Test Movie", "pv:Test Movie", "hs:Test Movie"), searches)
+    }
+
+    /** Item 5: one spelling at a time across catalogues; stop at the first match, no spelling repeated on a matched catalogue. */
+    @Test fun spellingsAreTriedInOrderAcrossCataloguesAndStopAtTheFirstMatch() = runBlocking {
+        searchTitle = "Amaran"
+        onlyOn = "pv"
+        val second = TitleMatch.spellings("Amaran").also { assertEquals(2, it.size) }[1]
+        onlySpelling = second
+        val rows = resolver().resolve(cfg, "movie", "Amaran", 2024, 0, 0)
+        assertEquals(listOf("NetMirror | Prime Video"), rows.map { it.label })
+        assertEquals(listOf("nf:Amaran", "pv:Amaran", "hs:Amaran", "nf:$second", "pv:$second"), searches)
+    }
+
+    /** Item 5: a prewarm of a Netflix title fits inside its share (12 of 24). */
+    @Test fun aPrewarmOfANetflixTitleFitsItsShare() = runBlocking {
+        val r = resolver()
+        val c = cfg.copy(maxCalls = 24)
+        assertEquals(1, r.resolve(c, "movie", "Test Movie", 2024, 0, 0, prewarm = true).size)
+        assertTrue("requests: ${seen.size}", seen.size <= 12)
+        assertFalse(r.prewarmShareSpent(c))
     }
 }
