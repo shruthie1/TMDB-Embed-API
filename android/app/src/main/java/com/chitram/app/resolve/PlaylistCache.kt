@@ -175,6 +175,33 @@ object MasterPlaylist {
         val fit = vs.filter { it.bandwidth > 0 && it.bandwidth <= capBps * 7 / 10 }
         return fit.maxByOrNull { it.bandwidth } ?: vs.minByOrNull { if (it.bandwidth > 0) it.bandwidth else Long.MAX_VALUE }
     }
+
+    /**
+     * 1.2.56: [text] with the [startVariant] block (its EXT-X-STREAM-INF line and uri)
+     * moved to the first variant slot. media3 loads its first chunk from the first
+     * listed variant; every MultiMovies master lists a 1080p 5 Mbps variant first,
+     * so the start loaded 1080p, then the cap picked 720p and cancelled it (phone
+     * 1.2.54: 1790 ms and 261660 B lost). Every line is kept; the same object comes
+     * back when there is nothing to move.
+     */
+    fun startFirst(text: String, capBps: Long): String {
+        val vs = variants(text)
+        val start = startVariant(vs, capBps) ?: return text
+        if (vs.size < 2 || vs.first() == start) return text
+        val lines = text.lines()
+        val trimmed = lines.map { it.trim() }
+        // The start block: its EXT-X-STREAM-INF line through its uri line.
+        val infos = trimmed.indices.filter { trimmed[it].startsWith("#EXT-X-STREAM-INF:") }
+        val from = infos.firstOrNull { i ->
+            trimmed.drop(i + 1).firstOrNull { it.isNotEmpty() && !it.startsWith("#") } == start.uri &&
+                variants(trimmed[i] + "\n" + start.uri).firstOrNull() == start
+        } ?: return text
+        val to = (from + 1 until lines.size).first { trimmed[it].isNotEmpty() && !trimmed[it].startsWith("#") }
+        val block = lines.subList(from, to + 1)
+        val rest = lines.subList(0, from) + lines.subList(to + 1, lines.size)
+        val at = rest.indexOfFirst { it.trim().startsWith("#EXT-X-STREAM-INF:") }
+        return (rest.subList(0, at) + block + rest.subList(at, rest.size)).joinToString("\n")
+    }
 }
 
 /**
@@ -221,10 +248,22 @@ class PlaylistInterceptor(
         val text = body?.takeIf { it.size <= PlaylistCache.MAX_BODY }?.let { String(it, Charsets.UTF_8) }
         if (text == null || !text.trimStart().startsWith("#EXTM3U")) { if (prefetch) cache.finish(url, null); return res }
         val master = MasterPlaylist.isMaster(text)
-        if (master || text.contains("#EXT-X-ENDLIST")) cache.put(url, body, res.header("Content-Type"))
+        // 1.2.56: the start variant first, so media3's first chunk is the one the cap plays.
+        val served = if (master) MasterPlaylist.startFirst(text, capBps) else text
+        val moved = served !== text
+        if (moved) {
+            val from = MasterPlaylist.variants(text).first()
+            val to = MasterPlaylist.variants(served).first()
+            android.util.Log.i("Chitram", "[playlist] start variant first ${req.url.host}: ${to.height}p ${to.bandwidth}bps before ${from.height}p ${from.bandwidth}bps")
+        }
+        val keptBody = if (moved) served.toByteArray(Charsets.UTF_8) else body
+        if (master || text.contains("#EXT-X-ENDLIST")) cache.put(url, keptBody, res.header("Content-Type"))
         if (prefetch) cache.finish(url, cache.get(url))
-        if (master) prefetchChildren(req, text)
-        return res
+        if (master) prefetchChildren(req, served)
+        if (!moved) return res
+        val type = res.header("Content-Type")
+        return res.newBuilder().removeHeader("Content-Length")
+            .body(keptBody.toResponseBody((type ?: M3U8).toMediaTypeOrNull())).build().also { res.close() }
     }
 
     /** The master's first playlists, all at once, through this same client (its headers and token). */

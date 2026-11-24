@@ -54,6 +54,15 @@ object PlayPolicy {
     const val SWITCH_FLOW_GAP_MS = 3_000L
     const val SWITCH_FLOWING_MAX_MS = 45_000L
 
+    /**
+     * 1.2.56: progress for the frozen watchdog. The position moved, or, while
+     * buffering, the buffer grew: a slow rebuffer after a seek is loading, not
+     * frozen (checkStall owns it). Phone 1.2.54 re-prepared one at 12 s, which
+     * restarts the segment in flight. In READY only the position counts (0-fps freeze).
+     */
+    fun frozenProgress(pos: Long, lastPos: Long, buffering: Boolean, buffered: Long, lastBuffered: Long): Boolean =
+        pos > lastPos + 250 || (buffering && buffered > lastBuffered + 250)
+
     fun bytesFlowing(lastBytesAt: Long, playStartedAt: Long, now: Long): Boolean =
         lastBytesAt > 0 && lastBytesAt >= playStartedAt && now - lastBytesAt < SWITCH_FLOW_GAP_MS
 

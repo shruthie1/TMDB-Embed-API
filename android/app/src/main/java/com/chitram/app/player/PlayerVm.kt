@@ -435,6 +435,9 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     private var frozenPos = -1L
     private var frozenSince = 0L
     private var frozenRepreparedAt = 0L
+    private var frozenBuffered = 0L
+    private var posStuckSince = 0L
+    private var loadingLogged = false
     private fun checkFrozen() {
         val active = landed && !offline && phase == Phase.Playing &&
             player.playWhenReady && !isPlaying &&
@@ -442,7 +445,16 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         if (!active) { frozenSince = 0; frozenRepreparedAt = 0; return }
         val now = System.currentTimeMillis()
         val pos = player.currentPosition
-        if (frozenSince == 0L || pos > frozenPos + 250) { frozenSince = now; frozenPos = pos; frozenRepreparedAt = 0; return }
+        val buffering = player.playbackState == Player.STATE_BUFFERING
+        val buffered = player.bufferedPosition
+        if (frozenSince == 0L || PlayPolicy.frozenProgress(pos, frozenPos, buffering, buffered, frozenBuffered)) {
+            if (frozenSince == 0L || pos > frozenPos + 250) { posStuckSince = now; loadingLogged = false }
+            else if (!loadingLogged && now - posStuckSince >= FROZEN_REPREPARE_MS) {
+                loadingLogged = true
+                android.util.Log.i("Chitram", "recover: rebuffer at ${pos}ms for ${now - posStuckSince}ms still loading (buffered ${buffered}ms), no re-prepare")
+            }
+            frozenSince = now; frozenPos = pos; frozenBuffered = buffered; frozenRepreparedAt = 0; return
+        }
         val stuckFor = now - frozenSince
         // One re-prepare+seek (cheap, keeps the source) before the heavier switch.
         if (frozenRepreparedAt == 0L && stuckFor >= FROZEN_REPREPARE_MS) {

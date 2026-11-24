@@ -184,7 +184,7 @@ class FastSecondPlayTest {
         val before = paths.size
         // Second Play: a new player client (another row's headers), the same memory.
         val second = PlaylistInterceptor.attach(OkHttpClient(), cache) { listOf("te") }
-        assertEquals(master, get(second, "/master.m3u8"))
+        assertEquals(MasterPlaylist.startFirst(master, StartCap.START_BPS), get(second, "/master.m3u8"))
         assertEquals(vod, get(second, "/v720.m3u8"))
         assertEquals(vod, get(second, "/a_te.m3u8"))
         assertEquals("0 requests on the second Play", before, paths.size)
@@ -216,9 +216,10 @@ class FastSecondPlayTest {
     @Test fun droppingARowDropsItsPlaylists() {
         val cache = PlaylistCache({ clock })
         val c = PlaylistInterceptor.attach(OkHttpClient(), cache) { listOf("te") }
-        get(c, "/master.m3u8"); get(c, "/v1080.m3u8"); get(c, "/v720.m3u8"); get(c, "/a_te.m3u8")
+        get(c, "/master.m3u8"); get(c, "/v720.m3u8"); get(c, "/a_te.m3u8")
         assertTrue(cache.has("$base/v720.m3u8"))
-        assertEquals(4, cache.evict("$base/master.m3u8"))
+        // 1.2.56: the start variant is listed first, so the 1080p is never fetched ahead.
+        assertEquals(3, cache.evict("$base/master.m3u8"))
         assertFalse(cache.has("$base/master.m3u8"))
         assertFalse(cache.has("$base/v720.m3u8"))
     }
@@ -227,7 +228,8 @@ class FastSecondPlayTest {
         val cache = PlaylistCache({ clock })
         assertTrue(PlaylistInterceptor.warm(OkHttpClient(), cache, "$base/master.m3u8", mapOf("Referer" to "https://row.test/"), null, listOf("te")))
         runBlocking { withTimeout(5_000) { while (!cache.has("$base/a_te.m3u8") || !cache.has("$base/v720.m3u8")) kotlinx.coroutines.delay(20) } }
-        assertTrue(cache.has("$base/v1080.m3u8"))
+        // 1.2.56: the start variant is first in the kept master, so the 1080p is not warmed.
+        assertFalse(cache.has("$base/v1080.m3u8"))
         assertEquals(0, count("/seg0.ts"))
         assertTrue(referers.toString(), referers.contains("/a_te.m3u8 https://row.test/"))
         // Kept already: nothing to warm.
