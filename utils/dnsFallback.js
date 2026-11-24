@@ -37,4 +37,38 @@ function lookupWithFallback(hostname, options, callback) {
     });
 }
 
-module.exports = { lookupWithFallback };
+// Agents for the fallback fetch (keepAlive off: a verify is one-off and must
+// not hold the process open).
+let agents = null;
+function fallbackAgents() {
+    if (!agents) {
+        const http = require('node:http');
+        const https = require('node:https');
+        agents = { http: new http.Agent({ lookup: lookupWithFallback }), https: new https.Agent({ lookup: lookupWithFallback }) };
+    }
+    return agents;
+}
+
+function lookupFailed(err) {
+    const c = err && (err.cause || err);
+    return Boolean(c && FALLBACK_CODES.has(c.code));
+}
+
+/**
+ * globalThis.fetch, and when it fails because the name did not resolve,
+ * the same request once more through node-fetch with [lookupWithFallback].
+ * Any other error is thrown as is. (segmentVerify byte checks on VM1.)
+ */
+async function fetchWithFallback(url, opts = {}) {
+    const primary = fetchWithFallback._primary || globalThis.fetch;
+    try {
+        return await primary(url, opts);
+    } catch (err) {
+        if (!lookupFailed(err)) throw err;
+        const nodeFetch = require('node-fetch');
+        const a = fallbackAgents();
+        return nodeFetch(url, { ...opts, agent: (u) => (u.protocol === 'http:' ? a.http : a.https) });
+    }
+}
+
+module.exports = { lookupWithFallback, fetchWithFallback };
