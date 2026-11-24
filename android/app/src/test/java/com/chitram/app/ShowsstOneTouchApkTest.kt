@@ -267,11 +267,9 @@ class ShowsstOneTouchApkTest {
         assertEquals(listOf("$base/s2e2.m3u8"), rows.map { it.resolved.url })
     }
 
-    @Test fun onlyWhenTheVmIsDownAndUrlExpiryIsRead() {
+    @Test fun startsOnEveryPlayDeviceFirstAndUrlExpiryIsRead() {
         val od = od(showsst = ShowsstResolver(OkHttpClient()), onetouch = OneTouchTvResolver(OkHttpClient()))
-        assertFalse(od.names(vmDown = false).contains(OnDeviceResolver.SHOWSST))
-        assertFalse(od.names(vmDown = false).contains(OnDeviceResolver.ONETOUCH))
-        assertTrue(od.names(vmDown = true).containsAll(listOf(OnDeviceResolver.SHOWSST, OnDeviceResolver.ONETOUCH)))
+        assertTrue(od.names().containsAll(listOf(OnDeviceResolver.SHOWSST, OnDeviceResolver.ONETOUCH)))
         assertEquals("showsst", OnDeviceResolver.nameFor("showsst"))
         assertEquals(1795275514000L, com.chitram.app.resolve.OneTouchTvResolver.expiryOf("https://h/a.m3u8?hdnts=exp=1795275514_acl=/x/*"))
         assertEquals(1795279103000L, com.chitram.app.resolve.OneTouchTvResolver.expiryOf("https://h/m.m3u8?md5=x&expires=1795279103"))

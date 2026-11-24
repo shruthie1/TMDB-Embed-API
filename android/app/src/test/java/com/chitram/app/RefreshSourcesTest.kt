@@ -167,12 +167,13 @@ class RefreshSourcesTest {
         assertTrue(jobs.all { it.isCancelled })
     }
 
-    @Test fun vmFailureAndNoRowsIsAFailedRefresh() {
+    @Test fun vmFailureStillRefreshesDeviceProviders() {
+        // Device-first (2026-11-24): VM up but failing, MultiMovies still refreshes on the device.
         val down = SourceRefresh(od, vm = { _, _, _, _ -> throw java.io.IOException("down") }, vmUp = { true }) { clock }
         val res = runBlocking { withTimeout(60_000) { down.run("movie", 999, 0, 0, codecs, "Telugu") } } as SourceRefresh.Done
         assertNull(res.vm)
-        assertTrue(res.device.isEmpty())
-        assertTrue(res.failed)
+        assertTrue(res.device.isNotEmpty())
+        assertTrue(res.device.all { it.onDevice != null })
     }
 
     /** Gap 10.5: Refresh tapped offline. The kept rows survive, no breaker counts, the line says so. */
@@ -188,7 +189,7 @@ class RefreshSourcesTest {
         assertEquals("Couldn't refresh. Try again.", RefreshModel.outcome(res.kept, res.device, res.failed, "Telugu"))
         assertEquals("kept device rows survive", keptDevice, cache.device(key, OnDeviceResolver.MULTIMOVIES, "Telugu"))
         assertEquals("kept VM answer survives", keptVm, cache.vm(key, full = false))
-        for (n in od.names(vmDown = true)) assertFalse("$n paused", od.isOpen(n))
+        for (n in od.names()) assertFalse("$n paused", od.isOpen(n))
         // Online again, after the cooldown: the refresh replaces the rows.
         down = false; offline = false
         clock += SourceRefresh.COOLDOWN_MS

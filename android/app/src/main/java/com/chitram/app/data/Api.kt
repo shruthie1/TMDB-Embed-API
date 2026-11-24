@@ -92,6 +92,8 @@ class Api(
 ) {
     /** False while the VM breaker is open (paused after failures): no VM call would go out. */
     val vmUp: Boolean get() = vm?.allow() != false
+    /** Launch extra `vmDown`: pause VM calls as after FAILS failures (VmHealth.forceDown). */
+    fun forceVmDown() { vm?.forceDown() }
 
     /** The VM breaker is open: no call went out. */
     class VmDown(detail: String) : IOException(detail)

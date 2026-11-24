@@ -8,10 +8,11 @@ import kotlinx.coroutines.delay
 
 /**
  * The first source list of a start (cooperative-APK plan, sections 3-4).
- * The VM and the device resolvers run together from t=0. The VM leads while it
- * answers within VM_LEAD_MS; after that, or as soon as the VM call fails, a
- * playable device row in the viewer's language starts the film and the VM
- * rows join late without interrupting. Device rows never wait on the VM.
+ * The VM and the device resolvers run together from t=0. Device-first (owner
+ * 2026-11-24): a playable device row in the viewer's language starts the film
+ * at once, with no VM lead; the VM rows join late without interrupting. The VM
+ * leads only while no device row can play (its rows are then the VM-required
+ * providers), never past VM_LEAD_MS when any device row is in hand.
  */
 class StartRace(
     private val leadMs: Long = VM_LEAD_MS,
@@ -89,12 +90,13 @@ class StartRace(
         val t0 = now()
         fun good(s: Source) = !s.unsupported && Ranking.tier(s, preferred) <= 2
 
-        // 1. The VM's lead: wait for it, but never past VM_LEAD_MS when a device row can play.
+        // 1. Device-first: a good device row starts the film at once; the VM never holds it.
+        // The VM leads only while no device row can play, never past VM_LEAD_MS.
         while (backend != null && !backend.isCompleted) {
             val r = ready()
-            // A prewarmed row in the viewer's language is in hand: no reason to wait for the VM.
-            if (warmReady().any(::good)) {
-                android.util.Log.i("Chitram", "[race] prewarmed ${preferred} row ready after ${now() - t0}ms: starting before the VM with ${r.size} device row(s)")
+            if (r.any(::good)) {
+                val how = if (warmReady().any(::good)) "prewarmed" else "device"
+                android.util.Log.i("Chitram", "[race] $how ${preferred} row ready after ${now() - t0}ms: starting before the VM with ${r.size} device row(s)")
                 return First(emptyList(), null, r, backendPending = true)
             }
             val leadOver = now() - t0 >= leadMs
@@ -136,6 +138,39 @@ class StartRace(
          * cast-ready URL) and the device row is kept as a hidden twin for a VM
          * failure. Keyed by lowercase provider.
          */
+        /**
+         * Device-first (owner 2026-11-24): VM rows that land after device rows. A VM row
+         * of a provider the device already shows, carrying no language those device rows
+         * lack, is the same source: dropped, so the list has no duplicate. A VM row that
+         * adds a language (file tags, hybrid) is kept: no audio information is lost.
+         * NetMirror catalogs differ by catalog, so only the same url counts there.
+         * Returns (kept, dropped).
+         */
+        fun dropVmDupes(shown: List<Source>, vm: List<Source>): Pair<List<Source>, List<Source>> {
+            val device = shown.filter { it.onDevice != null }
+            fun langs(s: Source) = (s.audioLanguages ?: s.languages).map { it.lowercase() }.toSet()
+            val byProvider = device.groupBy { it.provider.lowercase() }
+            val urls = device.map { it.url }.toSet()
+            return vm.partition { v ->
+                val p = v.provider.lowercase()
+                val same = byProvider[p] ?: return@partition true
+                if (p == "netmirror") return@partition v.url !in urls
+                !same.flatMap(::langs).toSet().containsAll(langs(v))
+            }
+        }
+
+        /**
+         * Greppable route lines for one play: `[route] <provider> device-first` per device
+         * provider, then `[route] vm-required: VM asked` or `[route] vm unreachable, device only`.
+         */
+        fun routeLines(device: List<String>, vmAsked: Boolean): List<String> =
+            device.map { "[route] $it device-first" } + if (vmAsked) "[route] vm-required: VM asked for providers the phone cannot resolve" else "[route] vm unreachable, device only"
+
+        /** `[route] <provider> vm-required rows=N` for each VM provider the device cannot resolve. */
+        fun vmRequiredLines(vm: List<Source>): List<String> =
+            vm.filter { com.chitram.app.resolve.OnDeviceResolver.nameFor(it.provider) == null }.groupingBy { it.provider.lowercase() }.eachCount()
+                .map { (p, n) -> "[route] $p vm-required rows=$n" }
+
         fun splitTwins(backend: List<Source>, device: List<Source>): Pair<List<Source>, Map<String, Source>> {
             val vmProviders = backend.map { it.provider.lowercase() }.toSet()
             // NetMirror catalogs carry different language/quality offerings; never hide them by provider name.

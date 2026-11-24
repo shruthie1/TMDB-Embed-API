@@ -1,7 +1,6 @@
 package com.chitram.app
 
 import com.chitram.app.data.MemoryKeyValue
-import com.chitram.app.player.PlayerVm
 import com.chitram.app.resolve.AudioTrack
 import com.chitram.app.resolve.Hls
 import com.chitram.app.resolve.HostBook
@@ -255,13 +254,11 @@ class VidriftApkTest {
         assertEquals("$baseA/embed/tv/1/2/3", VidriftResolver.embedUrl(baseA, 1, true, 2, 3))
     }
 
-    @Test fun registeredAsVmDownOnlyAndJoinsTheVmDownLoop() {
+    @Test fun registeredAndStartsOnEveryPlayDeviceFirst() {
         val kv = MemoryKeyValue()
         val od = OnDeviceResolver(null, ResolveConfigStore(client, "http://127.0.0.1:9/config", kv), MappleResolver(client, HostBook(kv), kv),
             VaplayerResolver(client, HostBook(kv)) { null }, titleFor = { _, _ -> null }, imdbFor = { _, _ -> null }, vidrift = VidriftResolver(client))
-        assertTrue(OnDeviceResolver.VIDRIFT in od.names(vmDown = true))
-        assertTrue(OnDeviceResolver.VIDRIFT !in od.names(vmDown = false))
-        assertEquals(listOf(OnDeviceResolver.VIDRIFT), PlayerVm.vmDownExtras(od.names(vmDown = true), od.names(vmDown = false), od.names(vmDown = false)))
+        assertTrue(OnDeviceResolver.VIDRIFT in od.names())
         assertEquals(OnDeviceResolver.VIDRIFT, OnDeviceResolver.nameFor("vidrift"))
     }
 }

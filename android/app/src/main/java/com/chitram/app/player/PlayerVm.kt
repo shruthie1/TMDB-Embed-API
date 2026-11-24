@@ -194,8 +194,6 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
      */
     private var deviceBg: Job? = null
     private var deviceLate: Deferred<List<Source>>? = null
-    /** OnDeviceResolver names of [deviceJobs], same order. */
-    private var deviceNames: List<String> = emptyList()
     /** The VM /api/streams call of this start (null when the breaker skipped it). */
     private var vmJob: Deferred<List<Source>>? = null
     /** A9: the one ?full=1 follow-up after a partial VM answer. */
@@ -517,7 +515,8 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Backend streams and the on-device resolves (mapple, vaplayer) run together.
+     * Device-first: every on-device resolve and the VM call run together; a good
+     * device row starts at once (StartRace), never waiting on the VM.
      * Once the backend answers, on-device rows get DEVICE_GRACE_MS more to join
      * the first ranking (all of their budget when the backend gave nothing); any
      * that finish later are merged into the list without interrupting playback.
@@ -553,29 +552,27 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             val pin = keepProvider ?: saved?.provider
             val manualPin = keepProvider != null || saved?.manual == true
             val preferred = g.prefs.preferredAudio()
-            // VM breaker open: no VM call, MultiMovies, showsst and OneTouchTV resolve on the device instead.
+            // Device-first (owner 2026-11-24): every provider the phone can resolve starts now, VM up or
+            // down. The VM is asked only for what the phone cannot do; its breaker open means no VM call.
             val vmDown = !g.api.vmUp
-            val names = g.onDevice.names(vmDown)
-            // prewarm.md: providers the details page already resolved. Each continues from that job;
-            // one Play would start only on a VM failure (multimovies, vidrift) joins the first list now.
+            val names = g.onDevice.names()
+            // prewarm.md: providers the details page already resolved. Each continues from that job.
             val (keptNames, jobNames) = if (keep) emptyList<String>() to emptyList() else g.onDevice.warmSplit(r.type, r.id, r.season, r.episode, preferred)
-            val warmNames = g.onDevice.names(vmDown = true).filter { it in keptNames || it in jobNames }
-            val warmExtra = warmNames.filter { it !in names }
+            val warmNames = names.filter { it in keptNames || it in jobNames }
+            if (!keep) StartRace.routeLines(names, vmAsked = !vmDown).forEach { android.util.Log.i("Chitram", it) }
             val device = if (keep) deviceJobs else {
                 val bg = kotlinx.coroutines.SupervisorJob(viewModelScope.coroutineContext[Job])
                 val late = kotlinx.coroutines.CompletableDeferred<List<Source>>()
                 deviceBg = bg
                 deviceLate = late
-                g.onDevice.launchAll(viewModelScope, r.type, r.id, r.season, r.episode, g.codecs, preferred, r.title, vmDown, r.originalLang,
-                    late = late, lateScope = kotlinx.coroutines.CoroutineScope(viewModelScope.coroutineContext + bg)) +
-                    warmExtra.map { n -> viewModelScope.async { g.onDevice.resolveAll(n, r.type, r.id, r.season, r.episode, g.codecs, preferred, title = r.title, originalLang = r.originalLang) } }
+                g.onDevice.launchAll(viewModelScope, r.type, r.id, r.season, r.episode, g.codecs, preferred, r.title, r.originalLang,
+                    late = late, lateScope = kotlinx.coroutines.CoroutineScope(viewModelScope.coroutineContext + bg))
             }.also { d ->
                 if (keep) return@also
-                deviceNames = names + warmExtra
-                d.zip(names + warmExtra).forEach { (job, n) -> watchCheck(job, n, t0) }
+                d.zip(names).forEach { (job, n) -> watchCheck(job, n, t0) }
             }
             deviceJobs = device
-            val warmJobs = if (keep) emptyList() else device.zip(names + warmExtra).filter { (_, n) -> n in warmNames }.map { it.first }
+            val warmJobs = if (keep) emptyList() else device.zip(names).filter { (_, n) -> n in warmNames }.map { it.first }
             OnDeviceResolver.raceLines(keptNames, jobNames).forEach { android.util.Log.i("Chitram", it) }
             vmJob?.cancel()
             fullJob?.cancel()
@@ -589,18 +586,16 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             }
             vmJob = vm
             if (vm == null) android.util.Log.i("Chitram", "[vm] paused: starting from device rows only")
-            // Fix A: VM-down-only providers start once the VM fails or its lead ends with no row in the viewer's language.
             // The remembered provider's job: the start waits for it at most StartRace.PIN_WAIT_MS (LastPlayed).
             val pinnedJobs = if (keep || keepProvider != null || saved == null) emptyList()
-                else device.zip(names + warmExtra).filter { (_, n) -> n.equals(saved.provider, ignoreCase = true) }.map { it.first }
-            val first = StartRace().firstMany(vm, device, preferred, warm = warmJobs, extras = if (vm == null) null else { why ->
-                startVmDownJobs(r, preferred, t0, vmDownExtras(g.onDevice.names(vmDown = true), g.onDevice.names(vmDown = false), deviceNames), why)
-            }, pinned = pinnedJobs)
+                else device.zip(names).filter { (_, n) -> n.equals(saved.provider, ignoreCase = true) }.map { it.first }
+            val first = StartRace().firstMany(vm, device, preferred, warm = warmJobs, pinned = pinnedJobs)
             val backend = first.backend
             val backendError = first.backendError
             if (!first.backendPending) {
                 endCheck(LoadingModel.CHECK_SERVER, backend.size)
-                if (vm == null || backendError != null) launchVmDownOnly(r, preferred, pin, manualPin, t0)
+                if (vm != null && backendError != null) android.util.Log.i("Chitram", "[route] vm unreachable, device only")
+                StartRace.vmRequiredLines(backend).forEach { android.util.Log.i("Chitram", it) }
             }
             // Same provider from both sides: the VM row shows, the device row waits as its twin.
             val (shown, twinMap) = StartRace.splitTwins(backend, first.device)
@@ -612,7 +607,7 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             listReady = list.isNotEmpty()
             // Include jobs completing between the initial snapshot and listener setup.
             lateJobs = (deviceJobs + listOfNotNull(deviceLate)).map { d -> viewModelScope.launch { joinLate(r, d, preferred, pin, manualPin) } } +
-                listOfNotNull(vm?.takeIf { first.backendPending }?.let { j -> viewModelScope.launch { joinVm(r, j, preferred, pin, manualPin, t0, wantsFull) } })
+                listOfNotNull(vm?.takeIf { first.backendPending }?.let { j -> viewModelScope.launch { joinVm(r, j, preferred, pin, manualPin, wantsFull) } })
             if (!first.backendPending && backendError == null && wantsFull.get()) followFull(r, preferred, pin, manualPin)
             if (sources.isEmpty() && isOffline()) {
                 pendingResolveMs = startMs
@@ -682,31 +677,8 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { val got = runCatching { job.await() }.getOrNull(); endCheck(id, got?.size ?: 0) }
     }
 
-    /**
-     * The VM is down or failed: start every VM-down-only on-device provider
-     * (MultiMovies, showsst, OneTouchTV, Vidrift) not already running, once per start.
-     * Each joins late on its own; nothing here waits, so the first row is not delayed.
-     */
-    private fun launchVmDownOnly(r: PlayRequest, preferred: String, pin: String?, manualPin: Boolean, t0: Long) {
-        for (d in startVmDownJobs(r, preferred, t0, vmDownExtras(g.onDevice.names(vmDown = true), g.onDevice.names(vmDown = false), deviceNames), "VM failed after start")) {
-            lateJobs = lateJobs + viewModelScope.launch { joinLate(r, d, preferred, pin, manualPin) }
-        }
-    }
-
-    /** Starts [names] on the device (each recorded in deviceNames, so never twice) and returns their jobs. */
-    private fun startVmDownJobs(r: PlayRequest, preferred: String, t0: Long, names: List<String>, why: String): List<Deferred<List<Source>>> {
-        if (names.isNotEmpty()) android.util.Log.i("Chitram", "[race] $why: starting ${names.joinToString(",")} on device after ${System.currentTimeMillis() - t0}ms")
-        return names.map { n ->
-            deviceNames = deviceNames + n
-            val d = viewModelScope.async { g.onDevice.resolveAll(n, r.type, r.id, r.season, r.episode, g.codecs, preferred, title = r.title, originalLang = r.originalLang) }
-            deviceJobs = deviceJobs + d
-            watchCheck(d, n, t0)
-            d
-        }
-    }
-
     /** VM rows that came after the film started from a device row: join without interrupting. */
-    private suspend fun joinVm(r: PlayRequest, j: Deferred<List<Source>>, preferred: String, pin: String?, manualPin: Boolean, t0: Long, wantsFull: java.util.concurrent.atomic.AtomicBoolean) {
+    private suspend fun joinVm(r: PlayRequest, j: Deferred<List<Source>>, preferred: String, pin: String?, manualPin: Boolean, wantsFull: java.util.concurrent.atomic.AtomicBoolean) {
         val rows = try { j.await() } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException && !j.isCancelled) throw e
             android.util.Log.i("Chitram", "[vm] late answer failed: ${e.message}")
@@ -714,10 +686,14 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
         }
         if (request != r) return
         endCheck(LoadingModel.CHECK_SERVER, rows?.size ?: 0)
-        if (rows == null) { launchVmDownOnly(r, preferred, pin, manualPin, t0); return }
-        putSources(Ranking.merge(sources, rows, preferred, pin, manualPin))
-        android.util.Log.i("Chitram", "[vm] ${rows.size} row(s) joined late")
-        lateAfterEnd(r, rows.size)
+        if (rows == null) { android.util.Log.i("Chitram", "[route] vm unreachable, device only"); return }
+        // Device-first: a VM row that repeats a device row already shown is dropped (no duplicate).
+        val (kept, dropped) = StartRace.dropVmDupes(sources, rows)
+        StartRace.vmRequiredLines(kept).forEach { android.util.Log.i("Chitram", it) }
+        if (dropped.isNotEmpty()) android.util.Log.i("Chitram", "[route] ${dropped.size} vm row(s) dropped: same as device rows (${dropped.map { it.provider.lowercase() }.distinct().joinToString(",")})")
+        putSources(Ranking.merge(sources, kept, preferred, pin, manualPin))
+        android.util.Log.i("Chitram", "[vm] ${kept.size} row(s) joined late")
+        lateAfterEnd(r, kept.size)
         if (wantsFull.get()) followFull(r, preferred, pin, manualPin)
     }
 
@@ -2008,8 +1984,6 @@ class PlayerVm(app: Application) : AndroidViewModel(app) {
             "play: first-frame total=${totalMs}ms provider=${provider ?: "?"} sincePlay=${sincePlayMs}ms"
 
         /** VM-down-only names ([down] minus [up]) not yet started ([running]), in [down] order. */
-        internal fun vmDownExtras(down: List<String>, up: List<String>, running: List<String>): List<String> =
-            down.filter { it !in up && it !in running }
 
         private val CHECK_LABELS = mapOf("mapple" to "Mapple", "vaplayer" to "VaPlayer", "castletv" to "CastleTV", "multimovies" to "MultiMovies", "netmirror" to "NetMirror", "showsst" to "showsst", "onetouchtv" to "OneTouchTV", "vidrift" to "Vidrift", "insertunit" to "Insertunit", "vidout" to "VIDOUT")
         const val DEVICE_GRACE_MS = 3_000L

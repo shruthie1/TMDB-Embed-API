@@ -74,15 +74,16 @@ class FirstPlayFixesTest {
         mapple.cancel()
     }
 
-    /** A Telugu device row inside the lead: no extras, and the VM still leads (fix E is not made). */
-    @Test fun teluguDeviceRowKeepsTheFullVmLeadAndStartsNoExtras() = runBlocking {
+    /** Device-first (2026-11-24): a Telugu device row starts at once, no extras, the VM joins late. */
+    @Test fun teluguDeviceRowStartsBeforeTheVmAndStartsNoExtras() = runBlocking {
         val vm = async { delay(600); listOf(row("vm-castle", "CastleTV", "Telugu").copy(onDevice = null)) }
         val castle = async { delay(50); listOf(row("dev-castle", "CastleTV", "Telugu")) }
         var n = 0
         val first = StartRace(leadMs = 2_000).firstMany(vm, listOf(castle), "Telugu") { n++; emptyList() }
         assertEquals(0, n)
-        assertFalse(first.backendPending)
-        assertEquals(listOf("vm-castle"), first.backend.map { it.id })
+        assertTrue(first.backendPending)
+        assertEquals(listOf("dev-castle"), first.device.map { it.id })
+        vm.cancel()
     }
 
     /** VM answered without Telugu: a ready Telugu device row ends the wait at once, not after the grace. */
@@ -99,7 +100,7 @@ class FirstPlayFixesTest {
 
     @Test fun playerVmWiresExtrasIntoTheRaceAndJoinsThemLate() {
         val vm = listOf(File("src/main/java/com/chitram/app/player/PlayerVm.kt"), File("app/src/main/java/com/chitram/app/player/PlayerVm.kt")).first { it.exists() }.readText()
-        assertTrue(vm.contains("firstMany(vm, device, preferred, warm = warmJobs, extras ="))
+        assertTrue(vm.contains("firstMany(vm, device, preferred, warm = warmJobs, pinned = pinnedJobs)"))
         assertTrue("late joins cover jobs started in the race", vm.contains("lateJobs = (deviceJobs + listOfNotNull(deviceLate))"))
     }
 

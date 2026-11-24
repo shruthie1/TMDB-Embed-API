@@ -37,6 +37,19 @@ class VmHealth(private val kv: KeyValue, private val now: () -> Long = System::c
         kv.put(UNTIL_KEY, openUntil.toString())
     }
 
+    /**
+     * Launch extra `--ez vmDown true` (on-phone proof of the VM-down path): the same
+     * state as FAILS failures in a row, paused MAX_MS. It clears itself when the
+     * pause ends and the probe succeeds, or on the next VM success.
+     */
+    @Synchronized fun forceDown() {
+        fails = FAILS
+        openUntil = now() + MAX_MS
+        kv.put(FAILS_KEY, fails.toString())
+        kv.put(UNTIL_KEY, openUntil.toString())
+        android.util.Log.i("Chitram", "[vm] forced down by launch extra")
+    }
+
     companion object {
         const val FAILS = 2
         const val OPEN_MS = 60_000L

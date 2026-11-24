@@ -11,13 +11,13 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
- * mapple, vaplayer, CastleTV and MultiMovies, resolved from the device's own
- * (residential) IP. Castle runs on every start (it is the Telugu workhorse and
- * must not depend on the VM); MultiMovies, showsst, OneTouchTV and Vidrift only
- * when the VM is down or failed.
- * Every other provider stays on the backend. Each resolve is bounded by its config
- * budget and never throws: a failure is a missing row, so the player simply has
- * one source fewer and moves on.
+ * Every provider the phone can resolve itself (mapple, vaplayer, NetMirror,
+ * CastleTV, MultiMovies, showsst, OneTouchTV, Vidrift, Insertunit, VIDOUT),
+ * from the device's own (residential) IP. Owner 2026-11-24 (device-first): each
+ * of them runs on every start, VM up or down; the VM is asked only for what the
+ * phone cannot do (VM-required providers, hybrid audio, file language tags).
+ * Each resolve is bounded by its config budget and breaker and never throws: a
+ * failure is a missing row, so the player simply has one source fewer.
  */
 class OnDeviceResolver(
     private val api: Api?,
@@ -31,12 +31,12 @@ class OnDeviceResolver(
     private val castle: CastleResolver? = null,
     private val multimovies: MultiMoviesResolver? = null,
     private val netmirror: NetmirrorResolver? = null,
-    /** showsst and OneTouchTV: VM down/failed only, like MultiMovies. Built from the app's client when an Api is given. */
+    /** showsst and OneTouchTV, on every start (device-first). Built from the app's client when an Api is given. */
     private val showsst: ShowsstResolver? = api?.let { ShowsstResolver(it.client) },
     private val onetouch: OneTouchTvResolver? = api?.let { OneTouchTvResolver(it.client) },
-    /** Vidrift Orion (RRR Telugu): VM down/failed only, like MultiMovies. */
+    /** Vidrift Orion (RRR Telugu), on every start (device-first). */
     private val vidrift: VidriftResolver? = api?.let { VidriftResolver(it.client) },
-    /** Insertunit and VIDOUT (MultiMovies servers, tagged Telugu masters): VM down/failed only, like Vidrift. */
+    /** Insertunit and VIDOUT (MultiMovies servers, tagged Telugu masters), on every start (device-first). */
     private val insertunit: InsertunitResolver? = api?.let { InsertunitResolver(it.client) },
     private val vidout: VidoutResolver? = api?.let { VidoutResolver(it.client) },
     /**
@@ -81,14 +81,17 @@ class OnDeviceResolver(
 
     internal fun isOpen(name: String): Boolean = (breakers[name]?.openUntil ?: 0L) > now()
 
-    /** The providers [launch] starts, in its order. MultiMovies only when the VM is not expected to answer. */
-    fun names(vmDown: Boolean): List<String> =
-        listOf(MAPPLE, VAPLAYER) + listOfNotNull(NETMIRROR.takeIf { netmirror != null }, CASTLE.takeIf { castle != null }, MULTIMOVIES.takeIf { vmDown && multimovies != null },
-            SHOWSST.takeIf { vmDown && showsst != null }, ONETOUCH.takeIf { vmDown && onetouch != null }, VIDRIFT.takeIf { vmDown && vidrift != null },
-            INSERTUNIT.takeIf { vmDown && insertunit != null }, VIDOUT.takeIf { vmDown && vidout != null })
+    /**
+     * The providers [launch] starts, in its order: every provider with a resolver on
+     * this device, VM up or down (device-first, owner 2026-11-24).
+     */
+    fun names(): List<String> =
+        listOf(MAPPLE, VAPLAYER) + listOfNotNull(NETMIRROR.takeIf { netmirror != null }, CASTLE.takeIf { castle != null }, MULTIMOVIES.takeIf { multimovies != null },
+            SHOWSST.takeIf { showsst != null }, ONETOUCH.takeIf { onetouch != null }, VIDRIFT.takeIf { vidrift != null },
+            INSERTUNIT.takeIf { insertunit != null }, VIDOUT.takeIf { vidout != null })
 
-    fun launch(scope: CoroutineScope, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, preferred: String = "Telugu", title: String? = null, vmDown: Boolean = false): List<Deferred<Source?>> =
-        names(vmDown).map { n -> scope.async { resolveOne(n, type, id, season, episode, codecs, preferred, fresh = false, title = title) } }
+    fun launch(scope: CoroutineScope, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, preferred: String = "Telugu", title: String? = null): List<Deferred<Source?>> =
+        names().map { n -> scope.async { resolveOne(n, type, id, season, episode, codecs, preferred, fresh = false, title = title) } }
 
     /** Providers may return several distinct catalogs/dubs; keep every row. */
     /**
@@ -97,12 +100,12 @@ class OnDeviceResolver(
      * completes `late`, always, so a caller can join it like any late row. It is not
      * one of the returned jobs, so the start never waits on it.
      */
-    fun launchAll(scope: CoroutineScope, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, preferred: String = "Telugu", title: String? = null, vmDown: Boolean = false, originalLang: String? = null,
+    fun launchAll(scope: CoroutineScope, type: String, id: Long, season: Int, episode: Int, codecs: CodecSupport, preferred: String = "Telugu", title: String? = null, originalLang: String? = null,
                   late: kotlinx.coroutines.CompletableDeferred<List<Source>>? = null, lateScope: CoroutineScope = scope): List<Deferred<List<Source>>> =
-        names(vmDown).map { n ->
+        names().map { n ->
             val later = if (n == MAPPLE && late != null) MappleResolver.Later(lateScope) { r -> late.complete(listOfNotNull(r?.let { toSource(it, codecs) })) } else null
             scope.async { resolveAll(n, type, id, season, episode, codecs, preferred, title = title, originalLang = originalLang, later = later) }
-        }.also { if (late != null && MAPPLE !in names(vmDown)) late.complete(emptyList()) }
+        }.also { if (late != null && MAPPLE !in names()) late.complete(emptyList()) }
 
     /**
      * One provider's rows. Kept rows (StreamCache, 30 min) answer first with no request;
@@ -370,7 +373,7 @@ class OnDeviceResolver(
     /** Providers a prewarm starts: config `prewarm` true and a resolver on this device. */
     fun prewarmNames(): List<String> {
         val cfg = config.current()
-        val names = names(vmDown = true).filter { it in cfg.prewarm }
+        val names = names().filter { it in cfg.prewarm }
         val line = prewarmLine(names, if (cfg.prewarmExplicit) config.source() else ResolveConfigStore.FROM_BUILTIN)
         if (prewarmLogged.getAndSet(line) != line) android.util.Log.i("Chitram", line)
         return names
@@ -448,11 +451,10 @@ class OnDeviceResolver(
 
     /**
      * Providers with a fresh prewarm job for this Play, not yet taken, in launch order.
-     * Play starts each of them (even one it would otherwise start only when the VM
-     * fails) so its rows join the first list at once.
+     * Play continues each of them so its rows join the first list at once.
      */
     fun prewarmedNames(type: String, id: Long, season: Int, episode: Int, preferred: String): List<String> =
-        warmSplit(type, id, season, episode, preferred).let { (kept, jobs) -> names(vmDown = true).filter { it in kept || it in jobs } }
+        warmSplit(type, id, season, episode, preferred).let { (kept, jobs) -> names().filter { it in kept || it in jobs } }
 
     /**
      * [prewarmedNames] in two parts, each in launch order: providers whose rows are
@@ -462,7 +464,7 @@ class OnDeviceResolver(
         val t = warmTitle(type, id, season, episode, preferred)
         val at = now()
         val key = StreamCache.key(type, id, season, episode)
-        val all = names(vmDown = true)
+        val all = names()
         val kept = all.filter { n -> cache?.hasDevice(key, n, preferred) == true }
         val jobs = all.filter { n -> n !in kept && warm["$t|$n"]?.let { at - it.at <= PREWARM_TTL_MS && !it.rows.isCancelled } == true }
         return kept to jobs
@@ -553,7 +555,7 @@ class OnDeviceResolver(
         val key = StreamCache.key(type, id, season, episode)
         warmScope.launch(Prewarming()) {
             val fresh = jobs.flatMap { j -> runCatching { j.await() }.getOrDefault(emptyList()) }
-            val kept = names(vmDown = true).flatMap { n -> cache?.device(key, n, preferred).orEmpty() }
+            val kept = names().flatMap { n -> cache?.device(key, n, preferred).orEmpty() }
             val top = com.chitram.app.data.Ranking.rank((fresh + kept).distinctBy { it.url }.filter { !it.unsupported }, preferred).firstOrNull() ?: return@launch
             runCatching { warmUp(top, preferred) }.onFailure {
                 if (it is kotlinx.coroutines.CancellationException) throw it

@@ -161,15 +161,15 @@ class V123Test {
         server.shutdown()
     }
 
-    /** VM healthy and quick: VM rows still lead, device rows join. */
+    /** VM answers before any device row: VM rows lead, the device row joins as a twin. */
     @Test fun healthyVmStillLeads() = runBlocking {
-        val backend = async { delay(300); listOf(src("CastleTV-0", "CastleTV", sel = true)) }
-        val castle = async { delay(100); src("device-CastleTV", "CastleTV", onDevice = "CastleTV") }
+        val backend = async { delay(100); listOf(src("CastleTV-0", "CastleTV", sel = true)) }
+        val castle = async { delay(300); src("device-CastleTV", "CastleTV", onDevice = "CastleTV") }
         val first = StartRace().first(backend, listOf(castle), "Telugu")
         assertFalse(first.backendPending)
         assertEquals(listOf("CastleTV-0"), first.backend.map { it.id })
-        // Same provider from both sides: the device row is a hidden twin.
-        val (shown, twins) = StartRace.splitTwins(first.backend, first.device)
+        // Same provider from both sides: the device row (late) is a hidden twin.
+        val (shown, twins) = StartRace.splitTwins(first.backend, listOfNotNull(castle.await()))
         assertTrue(shown.isEmpty())
         assertEquals("device-CastleTV", twins["castletv"]?.id)
     }

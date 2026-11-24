@@ -15,6 +15,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val app = application as App
+        applyLaunchExtras(intent)
         // The app is always dark: light status and navigation bar icons on any
         // system theme (the default follows the system and drew dark icons).
         if (!app.isTv) enableEdgeToEdge(
@@ -27,5 +28,19 @@ class MainActivity : ComponentActivity() {
             val nav = remember { app.prefs.seedDefault(); Nav(Screen.Home) }
             if (app.isTv) TvApp(nav) else PhoneApp(nav)
         }
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        applyLaunchExtras(intent)
+    }
+
+    /** `am start -n com.chitram.app/.MainActivity --ez vmDown true`: mark the VM paused (VmHealth.forceDown). */
+    private fun applyLaunchExtras(intent: android.content.Intent?) {
+        if (intent?.getBooleanExtra(EXTRA_VM_DOWN, false) == true) (application as App).api.forceVmDown()
+    }
+
+    companion object {
+        const val EXTRA_VM_DOWN = "vmDown"
     }
 }

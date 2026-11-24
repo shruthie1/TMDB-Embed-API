@@ -434,7 +434,7 @@ class NetmirrorTest {
         slowHotstar = false
         // The timed-out result was not cached as complete; hs joins next time.
         assertEquals(3, device.resolveAll("netmirror", "movie", 1, 1, 1, codecs, title = "Test Movie").size)
-        assertTrue(device.names(false).contains("netmirror"))
+        assertTrue(device.names().contains("netmirror"))
     }
 
     @Test fun completionBetweenSnapshotAndLateListenersIsStillMerged() = runBlocking {

@@ -147,7 +147,7 @@ class PrewarmTest {
         // Play, VM down so every on-device provider starts (the widest case).
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val late = CompletableDeferred<List<Source>>()
-        val jobs = od.launchAll(scope, "movie", 579974, 0, 0, codecs, "Telugu", "RRR", vmDown = true, originalLang = "te", late = late, lateScope = scope)
+        val jobs = od.launchAll(scope, "movie", 579974, 0, 0, codecs, "Telugu", "RRR", originalLang = "te", late = late, lateScope = scope)
         val rows = withTimeout(60_000) { jobs.awaitAll() }
         // MultiMovies answered with rows: taken from the prewarm, no new request.
         for (h in listOf("127.0.0.1", "localhost")) assertEquals(h, before.getValue(h), count(h))
@@ -157,7 +157,7 @@ class PrewarmTest {
         assertTrue(count("mapple.fun") > before.getValue("mapple.fun"))
         assertTrue(count("api.hlowb.com") > before.getValue("api.hlowb.com"))
         // MultiMovies rows came from the prewarm with their language tags intact.
-        val mmRows = rows[od.names(vmDown = true).indexOf(OnDeviceResolver.MULTIMOVIES)]
+        val mmRows = rows[od.names().indexOf(OnDeviceResolver.MULTIMOVIES)]
         assertEquals(2, mmRows.size)
         assertTrue(mmRows.any { it.languages.contains("Telugu") })
         // mapple failed here, so its late row completes empty: no switch, no hang.
@@ -215,8 +215,8 @@ class PrewarmTest {
         }
         assertEquals("an offline prewarm sends nothing", n0, hits.size)
         // Play while offline: nothing counts toward a breaker.
-        repeat(OnDeviceResolver.BREAKER_FAILS + 1) { for (n in od.names(vmDown = true)) od.resolveAll(n, "movie", 9, 0, 0, codecs, "Telugu", title = "X") }
-        for (n in od.names(vmDown = true)) assertFalse("$n paused", od.isOpen(n))
+        repeat(OnDeviceResolver.BREAKER_FAILS + 1) { for (n in od.names()) od.resolveAll(n, "movie", 9, 0, 0, codecs, "Telugu", title = "X") }
+        for (n in od.names()) assertFalse("$n paused", od.isOpen(n))
         // Online again: Play resolves every provider at once.
         down = false; offline = false
         val before = local()
@@ -329,15 +329,16 @@ class PrewarmTest {
         assertTrue(first.backendPending)
     }
 
-    @Test fun nothingPrewarmedReadyKeepsTodaysVmLead() = runBlocking {
-        // A non-prewarm Telugu row and a prewarmed Hindi-only row: the VM still leads, as before.
+    @Test fun nonPrewarmTeluguDeviceRowAlsoStartsBeforeTheVm() = runBlocking {
+        // Device-first (2026-11-24): a non-prewarm Telugu device row starts at once too; the VM joins late.
         val vm = async { delay(400); listOf(row("vm-te", "castletv", "Telugu")) }
         val castle = CompletableDeferred(listOf(row("dev-te", "castletv", "Telugu")))
         val warmHi = CompletableDeferred(listOf(row("mm-hi", "multimovies", "Hindi")))
         val pending = CompletableDeferred<List<Source>>()
         val first = com.chitram.app.player.StartRace(leadMs = 5_000).firstMany(vm, listOf(castle, warmHi, pending), "Telugu", warm = listOf(warmHi, pending))
-        assertFalse(first.backendPending)
-        assertEquals(listOf("vm-te"), first.backend.map { it.id })
+        assertTrue(first.backendPending)
+        assertTrue(first.device.any { it.id == "dev-te" })
+        vm.cancel()
     }
 
     @Test fun vmRowsMergeLaterWithoutSwitchingPlayback() {
@@ -350,10 +351,10 @@ class PrewarmTest {
         val vm = listOf(File("src/main/java/com/chitram/app/player/PlayerVm.kt"), File("app/src/main/java/com/chitram/app/player/PlayerVm.kt")).first { it.exists() }.readText()
         val join = vm.substringAfter("private suspend fun joinVm(").substringBefore("\n    }\n")
         assertEquals(0, Regex("""\bplay\(""").findAll(join).count())
-        assertTrue(join.contains("lateAfterEnd(r, rows.size)"))
-        // Play passes the prewarm jobs to the race, and starts prewarmed VM-down-only providers now.
+        assertTrue(join.contains("lateAfterEnd(r, kept.size)"))
+        // Play passes the prewarm jobs to the race; every device provider already starts (device-first).
         assertTrue(vm.contains("firstMany(vm, device, preferred, warm = warmJobs,"))
-        assertTrue(vm.contains("val warmExtra = warmNames.filter { it !in names }"))
+        assertTrue(vm.contains("val warmNames = names.filter { it in keptNames || it in jobNames }"))
     }
 
     @Test fun prewarmedNamesListsFreshUntakenJobsOnly() = runBlocking {

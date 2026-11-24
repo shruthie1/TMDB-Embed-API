@@ -61,7 +61,7 @@ class SourceRefresh(
         }
         val kept = od.forgetTitle(type, id, season, episode)
         val up = vmUp()
-        val names = (od.names(vmDown = !up) + also.mapNotNull(OnDeviceResolver::nameFor)).distinct()
+        val names = (od.names() + also.mapNotNull(OnDeviceResolver::nameFor)).distinct()
         android.util.Log.i("Chitram", "[refresh] $type/$id s$season e$episode start: ${names.joinToString(",")}${if (up) " + vm refresh=1" else " (vm paused)"}")
         return coroutineScope {
             val vmJob = if (!up) null else async {
