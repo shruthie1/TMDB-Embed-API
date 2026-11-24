@@ -326,7 +326,9 @@ test('all servers: plain resolve gives luna, callisto adds its two "Telugu" rows
     const mm = freshMM(t);
     const calls = stubVidbolt(t, rrrVidbolt());
     const rows = (await mm.getMultimoviesStreams('579974', 'movie')).map(normaliseStream);
-    assert.deepEqual(rows.map((r) => r.languages.join('/')), ['', 'Audio', 'Telugu']);
+    // The dropped claim's rendition is NAME "Audio", no LANGUAGE: unknown,
+    // never the language "Audio" (VM 2026-11-24 shipped languages ["Audio"]).
+    assert.deepEqual(rows.map((r) => r.languages.join('/')), ['', '', 'Telugu']);
     assert.equal(rows.filter((r) => r.languages.includes('Telugu')).length, 1);
     assert.match(rows.find((r) => r.languages.includes('Telugu')).url, /5355663801620775816/);
     assert.ok(rows.every((r) => r.container === 'hls'), 'mp4 sources stay out');

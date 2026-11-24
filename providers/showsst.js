@@ -28,8 +28,10 @@
 // 2160p, with byte-range support. The old 1080p HLS ladder ("VidAPI") died
 // with phantomflix.net. HLS is still handled in case it returns.
 //
-// NO SELECTABLE AUDIO. One muxed track in the release language; no language
-// is claimed because the api does not say.
+// NO SELECTABLE AUDIO. One muxed track in the release language. The api names
+// no language, but the MP4 does: ffprobe reads the audio track's own tag
+// (mdhd/elng). Measured 2026-11-24: Jailer 937020 MovieBox file tagged `tam`,
+// shipped as languages []. Only that tag is used; `und` stays unknown.
 
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
     + '(KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36';
@@ -59,6 +61,8 @@ const CONFIG_DEFAULTS = {
 // pairing every mirror so far has used.
 const upstream = require('../utils/upstreamBase');
 const { verifyOne } = require('../lib/media/segmentVerify');
+const { probeAudioTracks } = require('../lib/media/mp4AudioProbe');
+const { canonicalLanguage } = require('../utils/streamSchema');
 const playerFor = (api) => api.replace('//api.', '//player.');
 const selfheal = require('../lib/selfheal/config');
 // Env mirror first (as today), then the config list (remote, else built-in =
@@ -142,6 +146,18 @@ async function deadSegments(url, headers) {
     return !v.ok && DEAD_SEGMENT.test(v.reason || '') ? v.reason : null;
 }
 
+// The MP4's own audio tags, or nothing. ffprobe reads the moov (a few hundred
+// KB) and caches per file for 30 min (lib/media/mp4AudioProbe.js, 12 s
+// timeout). It blocks the row on purpose, as NetMirror's does: an unlabelled
+// row is invisible to the Telugu-first ranking (CLAUDE.md non-negotiable 1).
+async function fileAudio(url, headers, { probe = probeAudioTracks } = {}) {
+    const tracks = await Promise.resolve().then(() => probe(url, headers)).catch(() => null);
+    if (!Array.isArray(tracks) || !tracks.length) return null;
+    const audio = tracks.map((t) => ({ ...t, language: (t.language && canonicalLanguage(t.language)) || t.language || null }));
+    const languages = [...new Set(audio.map((t) => t.language).filter(Boolean))];
+    return { audio, languages };
+}
+
 function forProxy(url, container) {
     return container === 'mp4' || container === 'mkv' ? `${url}#.${container}` : url;
 }
@@ -211,11 +227,18 @@ async function getShowsstStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
             return [];
         }
     }
-    console.log(`[showsst] Got ${variants.length} stream(s) for ${tmdbId} (${label}, ${container}, ${mirror.api})`);
-    return variants.map((v) => ({
+    // Each quality is its own file: each is read for its own tags.
+    const found = container === 'mp4' || container === 'mkv'
+        ? await Promise.all(variants.map((v) => fileAudio(v.url, headers)))
+        : variants.map(() => null);
+    console.log(`[showsst] Got ${variants.length} stream(s) for ${tmdbId} (${label}, ${container}, ${mirror.api}) `
+        + `lang=${found.map((f) => (f && f.languages.join('/')) || 'und').join(',')}`);
+    return variants.map((v, i) => ({
         url: forProxy(v.url, container),
         provider: 'showsst',
-        languages: [],
+        languages: found[i] ? found[i].languages : [],
+        ...(found[i] ? { audio: found[i].audio } : {}),
+        ...(found[i] && found[i].languages.length ? { languageSource: 'mp4-tag' } : {}),
         selectableAudio: false,
         quality: v.quality,
         container,
@@ -225,4 +248,4 @@ async function getShowsstStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
     }));
 }
 
-module.exports = { getShowsstStreams, API_BASE, MIRRORS, UPSTREAM, streamHeaders, CONFIG_DEFAULTS, _mirrors: mirrors };
+module.exports = { getShowsstStreams, fileAudio, API_BASE, MIRRORS, UPSTREAM, streamHeaders, CONFIG_DEFAULTS, _mirrors: mirrors };

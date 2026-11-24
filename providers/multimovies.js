@@ -393,7 +393,9 @@ function audioFromMaster(text, baseUrl, deadUrls = null, srcLanguage = null) {
         const name = cleanName(m.name);
         const language = code && !/^(und|unk|mul|zxx)$/i.test(code) ? code
             : (single && srcLanguage && (!name || GENERIC_AUDIO_NAME.test(name))) ? srcLanguage
-            : name || null;
+            // A generic NAME ("Audio") is not a language: RRR 579974 shipped
+            // languages ["Audio"] (2026-11-24). It stays in `name` only.
+            : (name && !GENERIC_AUDIO_NAME.test(name)) ? name : null;
         return { language, name: cleanName(m.name) || null, channels: m.channels || null, codec: null };
     });
 }

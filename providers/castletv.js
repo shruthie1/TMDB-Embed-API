@@ -3,6 +3,10 @@ const { getDetails } = require('../utils/tmdb');
 const { searchSpellings, findTitleMatch } = require('../utils/titleMatch');
 
 const upstream = require('../utils/upstreamBase');
+const hls = require('../lib/media/hlsManifest');
+const tsLang = require('../lib/media/tsLanguages');
+const { fetchText } = require('../lib/media/taggedHlsRow');
+const { knownLanguage } = require('../utils/streamSchema');
 
 // Seed only; castleBase() is the live host (utils/upstreamBase.js).
 const CASTLE_BASE = 'https://api.hlowb.com';
@@ -391,6 +395,53 @@ function normalizeLanguageTrack(track) {
     };
 }
 
+// The file's own tags decide a row's languages. Castle labels each file with
+// the API track name it was asked for. Measured 2026-11-24 (Inception 27205):
+// three distinct files labelled English / Tamil / "Ost"; their first segments'
+// PMT tags are eng / und / und. "Ost" is not a language. Jailer 937020's muxed
+// file is listed in API order and tagged hin/tam/tel/mal/kan.
+//   - tags in the file: they replace the API labels (file order);
+//   - untagged / unreadable: API labels that name a real language stay
+//     (no file says otherwise; dropping them would hide a Telugu file), any
+//     other word ("Ost") is removed.
+function listedLanguages(stream) {
+    if (stream.language) return String(stream.language).split('/').map((l) => l.trim()).filter(Boolean);
+    const m = /^CastleTV \[([^\]]*)\]/.exec(stream.name || '');
+    return m ? m[1].split('/').map((l) => l.trim()).filter(Boolean) : [];
+}
+
+function relabel(stream, langs) {
+    const tag = langs.length ? `CastleTV [${langs.join('/')}]` : 'CastleTV';
+    stream.name = /^CastleTV \[[^\]]*\]/.test(stream.name || '')
+        ? stream.name.replace(/^CastleTV \[[^\]]*\]/, tag) : stream.name;
+    if (langs.length) stream.language = langs.join('/');
+    else delete stream.language;
+}
+
+async function withFileLanguages(streams, { get = fetchText, probe = tsLang.probeSegmentLanguages } = {}) {
+    await Promise.all(streams.map(async (s) => {
+        const listed = listedLanguages(s);
+        let found = null;
+        try {
+            const r = await get(s.url, s.headers || {}, 5000);
+            if (r.status === 200 && hls.isMedia(r.text)) found = await probe(r.text, s.url, s.headers || {});
+        } catch (e) { /* unreadable: no verdict */ }
+        if (found && found.languages.length) {
+            const same = found.languages.length === listed.length
+                && found.languages.every((l) => listed.some((x) => knownLanguage(x) === l));
+            if (!same) console.log(`[CastleTV] file tags ${found.languages.join('/')} replace listed ${listed.join('/') || '-'}`);
+            relabel(s, found.languages);
+            return;
+        }
+        const known = listed.filter((l) => knownLanguage(l));
+        if (known.length !== listed.length) {
+            console.log(`[CastleTV] untagged file: listed ${listed.join('/')} -> ${known.join('/') || 'unknown'}`);
+            relabel(s, known);
+        }
+    }));
+    return streams;
+}
+
 async function getCastletvStreams(tmdbId, mediaType = 'movie', seasonNum = null, episodeNum = null) {
     console.log(`[CastleTV] Fetching streams for TMDB ID: ${tmdbId}, Type: ${mediaType}`);
 
@@ -606,6 +657,7 @@ async function getCastletvStreams(tmdbId, mediaType = 'movie', seasonNum = null,
             console.log(`[CastleTV] partial ${tmdbId} failed-tracks=${failedTracks.join('/')}: ${why}`);
             streams.upstreamError = `track(s) ${failedTracks.join('/')} failed: ${why}`;
         }
+        await withFileLanguages(streams);
         return streams;
     } catch (err) {
         console.error(`[CastleTV] Error: ${err.message}`);
@@ -613,4 +665,4 @@ async function getCastletvStreams(tmdbId, mediaType = 'movie', seasonNum = null,
     }
 }
 
-module.exports = { getCastletvStreams, UPSTREAM, CONFIG_DEFAULTS, _deriveKey: deriveKey, _internal: { castleBase, apiVersion, dropReason } };
+module.exports = { getCastletvStreams, UPSTREAM, CONFIG_DEFAULTS, _deriveKey: deriveKey, _internal: { castleBase, apiVersion, dropReason, withFileLanguages } };
