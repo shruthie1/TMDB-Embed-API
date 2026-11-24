@@ -37,6 +37,7 @@
 const { createDecipheriv } = require('crypto');
 const hls = require('../lib/media/hlsManifest');
 const tsLang = require('../lib/media/tsLanguages');
+const languagesLater = require('../lib/media/languagesLater');
 const { canonicalLanguage } = require('../utils/streamSchema');
 
 const API_BASE = 'https://vidrock.net';
@@ -157,6 +158,32 @@ async function withSegmentLanguages(row, playlistText, url, probe = tsLang.probe
     return { ...row, languages: found.languages, languageSource: 'ts-pmt' };
 }
 
+// The same, from the probe cache only: never waits on the segment read. A row
+// the cache cannot answer goes out unlabelled and is probed in the background
+// (lib/media/languagesLater.js); the next read of this title carries the tags.
+function segmentLanguagesNow(row, playlistText, url, cached = tsLang.cachedSegmentLanguages) {
+    if (!row || row.levels.length || row.languages.length) return { row, cold: false };
+    const found = cached(playlistText, url);
+    if (found === undefined) return { row, cold: true };
+    if (!found || !found.languages.length) return { row, cold: false };
+    return { row: { ...row, languages: found.languages, languageSource: 'ts-pmt' }, cold: false };
+}
+
+// Background: probe the cold rows, relabel them in place, return the changed ones.
+function probeColdRows(cold, probe = tsLang.probeSegmentLanguages) {
+    return async () => {
+        const changed = [];
+        await Promise.all(cold.map(async (c) => {
+            const r = await withSegmentLanguages(c.row, c.text, c.url, probe);
+            if (r && r !== c.row && r.languages.length) {
+                Object.assign(c.row, { languages: r.languages, languageSource: r.languageSource });
+                changed.push(c.row);
+            }
+        }));
+        return changed;
+    };
+}
+
 async function getVidrockStreams(tmdbId, mediaType = 'movie', seasonNum = null, episodeNum = null) {
     const type = mediaType === 'tv' ? 'tv' : 'movie';
     const id = parseInt(tmdbId, 10);
@@ -186,6 +213,7 @@ async function getVidrockStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
     // Every entry failing the GCM tag means the key is wrong, not "no
     // streams": thrown, so the registry's key heal can see it (Task 6).
     let decryptFails = 0; let lastDecryptErr = '';
+    const cold = []; // single-variant rows whose PMT tags are not cached yet
     const rows = await Promise.all(entries.map(async ({ name, entry }) => {
         let url;
         try {
@@ -209,7 +237,9 @@ async function getVidrockStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
             }
             if (!r.ok) throw new Error(`HTTP ${r.status}`);
             const text = await r.text();
-            const row = await withSegmentLanguages(streamFromMaster(name, entry, url, text), text, url);
+            const now = segmentLanguagesNow(streamFromMaster(name, entry, url, text), text, url);
+            const row = now.row;
+            if (now.cold) cold.push({ row, text, url });
             if (!row) {
                 const kind = /^\s*</.test(text) ? 'html' : (!text.trim() ? 'empty' : (/^#EXTM3U/.test(text.trim()) ? 'playlist-no-segments' : 'other'));
                 console.log(`[vidrock] ${name}: master not playable (${kind}, ${text.length}b), dropped`);
@@ -226,7 +256,10 @@ async function getVidrockStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
     }
     const seen = new Set();
     const out = rows.filter((r) => r && !seen.has(r.url) && seen.add(r.url));
-    console.log(`[vidrock] Got ${out.length} stream(s) for ${id} from ${entries.length} server(s)`);
+    console.log(`[vidrock] Got ${out.length} stream(s) for ${id} from ${entries.length} server(s)`
+        + (cold.length ? `; ${cold.length} PMT probe(s) in background` : ''));
+    const sent = cold.filter((c) => out.includes(c.row));
+    if (sent.length) languagesLater.later('vidrock', id, probeColdRows(sent));
     return out;
 }
 
@@ -248,4 +281,4 @@ function keyHeal(fetchFn) {
     };
 }
 
-module.exports = { getVidrockStreams, decryptStreamUrl, streamFromMaster, withSegmentLanguages, tierOf, HEADERS, CONFIG_DEFAULTS, UPSTREAM, _internal: { apiBase, headers, streamKey }, keyHeal };
+module.exports = { getVidrockStreams, decryptStreamUrl, streamFromMaster, withSegmentLanguages, segmentLanguagesNow, probeColdRows, tierOf, HEADERS, CONFIG_DEFAULTS, UPSTREAM, _internal: { apiBase, headers, streamKey }, keyHeal };

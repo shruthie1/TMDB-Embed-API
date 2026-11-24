@@ -61,7 +61,8 @@ const CONFIG_DEFAULTS = {
 // pairing every mirror so far has used.
 const upstream = require('../utils/upstreamBase');
 const { verifyOne } = require('../lib/media/segmentVerify');
-const { probeAudioTracks } = require('../lib/media/mp4AudioProbe');
+const { probeAudioTracks, cachedAudioTracks } = require('../lib/media/mp4AudioProbe');
+const languagesLater = require('../lib/media/languagesLater');
 const { canonicalLanguage } = require('../utils/streamSchema');
 const playerFor = (api) => api.replace('//api.', '//player.');
 const selfheal = require('../lib/selfheal/config');
@@ -148,14 +149,25 @@ async function deadSegments(url, headers) {
 
 // The MP4's own audio tags, or nothing. ffprobe reads the moov (a few hundred
 // KB) and caches per file for 30 min (lib/media/mp4AudioProbe.js, 12 s
-// timeout). It blocks the row on purpose, as NetMirror's does: an unlabelled
-// row is invisible to the Telugu-first ranking (CLAUDE.md non-negotiable 1).
-async function fileAudio(url, headers, { probe = probeAudioTracks } = {}) {
-    const tracks = await Promise.resolve().then(() => probe(url, headers)).catch(() => null);
+// timeout). The answer never waits for it (owner 2026-11-24: ShowsSt went
+// from ~2.0 s to 3.0 s average, 5.5 s max, and J2's ?full=1 to 7.5 s): a
+// cached tag labels the row now, a cold file is probed in the background and
+// the next read carries the tag (lib/media/languagesLater.js).
+function shapeAudio(tracks) {
     if (!Array.isArray(tracks) || !tracks.length) return null;
     const audio = tracks.map((t) => ({ ...t, language: (t.language && canonicalLanguage(t.language)) || t.language || null }));
     const languages = [...new Set(audio.map((t) => t.language).filter(Boolean))];
     return { audio, languages };
+}
+
+/** Cached tags only: undefined = never probed (probe later), null = probed, nothing usable. */
+function fileAudioNow(url, { cached = cachedAudioTracks } = {}) {
+    const tracks = cached(url);
+    return tracks === undefined ? undefined : shapeAudio(tracks);
+}
+
+async function fileAudio(url, headers, { probe = probeAudioTracks } = {}) {
+    return shapeAudio(await Promise.resolve().then(() => probe(url, headers)).catch(() => null));
 }
 
 function forProxy(url, container) {
@@ -228,12 +240,12 @@ async function getShowsstStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
         }
     }
     // Each quality is its own file: each is read for its own tags.
-    const found = container === 'mp4' || container === 'mkv'
-        ? await Promise.all(variants.map((v) => fileAudio(v.url, headers)))
-        : variants.map(() => null);
+    const isFile = container === 'mp4' || container === 'mkv';
+    const found = isFile ? variants.map((v) => fileAudioNow(v.url)) : variants.map(() => null);
+    const coldIdx = found.map((f, i) => (f === undefined ? i : -1)).filter((i) => i >= 0);
     console.log(`[showsst] Got ${variants.length} stream(s) for ${tmdbId} (${label}, ${container}, ${mirror.api}) `
-        + `lang=${found.map((f) => (f && f.languages.join('/')) || 'und').join(',')}`);
-    return variants.map((v, i) => ({
+        + `lang=${found.map((f) => (f === undefined ? 'probing' : (f && f.languages.join('/')) || 'und')).join(',')}`);
+    const rows = variants.map((v, i) => ({
         url: forProxy(v.url, container),
         provider: 'showsst',
         languages: found[i] ? found[i].languages : [],
@@ -246,6 +258,23 @@ async function getShowsstStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
         headers,
         title: `showsst · ${label}`,
     }));
+    if (coldIdx.length) languagesLater.later('showsst', tmdbId, probeColdFiles(coldIdx.map((i) => ({ row: rows[i], url: variants[i].url })), headers));
+    return rows;
 }
 
-module.exports = { getShowsstStreams, fileAudio, API_BASE, MIRRORS, UPSTREAM, streamHeaders, CONFIG_DEFAULTS, _mirrors: mirrors };
+// Background: ffprobe each cold file, label its row in place, return the changed rows.
+function probeColdFiles(cold, headers, { probe = probeAudioTracks } = {}) {
+    return async () => {
+        const changed = [];
+        await Promise.all(cold.map(async ({ row, url }) => {
+            const f = await fileAudio(url, headers, { probe });
+            if (!f) return;
+            row.audio = f.audio;
+            if (f.languages.length) { row.languages = f.languages; row.languageSource = 'mp4-tag'; }
+            changed.push(row);
+        }));
+        return changed;
+    };
+}
+
+module.exports = { getShowsstStreams, fileAudio, fileAudioNow, probeColdFiles, API_BASE, MIRRORS, UPSTREAM, streamHeaders, CONFIG_DEFAULTS, _mirrors: mirrors };

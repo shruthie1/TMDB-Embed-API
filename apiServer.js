@@ -619,6 +619,15 @@ function memoGet(key) {
   }
   return payload;
 }
+// A background file-tag probe relabelled rows of a title (lib/media/
+// languagesLater.js): the memo answer was built without them. Drop it so the
+// ?full=1 follow-up or the next request rebuilds from the provider cache,
+// where languagesLater.apply() puts the tags on.
+const languagesLater = require('./lib/media/languagesLater');
+languagesLater.onChanged(({ provider, tmdbId }) => {
+  const n = streamsMemo.deleteWhere((k) => k.split(':')[1] === tmdbId);
+  console.log(`[lang-later] ${provider} ${tmdbId} languages landed: memo answers dropped=${n}`);
+});
 function memoSet(key, payload) {
   // Never cache an empty result: a transient upstream failure would otherwise
   // be pinned for the full TTL, turning one bad moment into ten dead minutes.
@@ -925,7 +934,7 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
       const ck = `${name}|${titleKey}`;
       if (!refresh) {
         const hit = providerHitGet(ck);
-        if (hit) { providerTimings[name] = 0; return hit; }
+        if (hit) { providerTimings[name] = 0; return languagesLater.apply(hit); }
         if (providerEmptyCache.has(ck)) { providerTimings[name] = 0; return []; }
       }
       if (!bypassBreaker && !providerInflight.has(ck) && breakerOpen(name)) {
@@ -946,7 +955,7 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
         erroredProviders.push(name);
         providerErrorWhy[name] = String(o.error || o.outcome).slice(0, 120);
       }
-      return urlExpiry.dropExpiredStreams(o.streams);
+      return languagesLater.apply(urlExpiry.dropExpiredStreams(o.streams));
     };
 
     const serverUrlEarly = publicBase(req);
@@ -1353,7 +1362,10 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
     }
     // A response missing a late provider is not memoized, so the next request
     // rebuilds it and picks that provider up from providerHitCache.
-    if (!late.length && !cacheBlockingErrors.length) memoSet(mk, payload);
+    // A probe that landed while this answer was built: its rows may predate the
+    // tags, so this answer is not memoised (the next request rebuilds).
+    const langLanded = languagesLater.landedSince(String(tmdbId), reqT0);
+    if (!late.length && !cacheBlockingErrors.length && !langLanded) memoSet(mk, payload);
     if (erroredProviders.length > cacheBlockingErrors.length) {
       console.log(`[api] memo-ondevice-error tmdbId=${tmdbId} ignored=${erroredProviders.filter((n) => !cacheBlockingErrors.includes(n)).join(',')}`
         + ` cached=${!late.length && !cacheBlockingErrors.length}`);

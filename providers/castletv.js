@@ -5,6 +5,7 @@ const { searchSpellings, findTitleMatch } = require('../utils/titleMatch');
 const upstream = require('../utils/upstreamBase');
 const hls = require('../lib/media/hlsManifest');
 const tsLang = require('../lib/media/tsLanguages');
+const languagesLater = require('../lib/media/languagesLater');
 const { fetchText } = require('../lib/media/taggedHlsRow');
 const { knownLanguage } = require('../utils/streamSchema');
 
@@ -418,28 +419,82 @@ function relabel(stream, langs) {
     else delete stream.language;
 }
 
-async function withFileLanguages(streams, { get = fetchText, probe = tsLang.probeSegmentLanguages } = {}) {
-    await Promise.all(streams.map(async (s) => {
-        const listed = listedLanguages(s);
-        let found = null;
-        try {
-            const r = await get(s.url, s.headers || {}, 5000);
-            if (r.status === 200 && hls.isMedia(r.text)) found = await probe(r.text, s.url, s.headers || {});
-        } catch (e) { /* unreadable: no verdict */ }
-        if (found && found.languages.length) {
-            const same = found.languages.length === listed.length
-                && found.languages.every((l) => listed.some((x) => knownLanguage(x) === l));
-            if (!same) console.log(`[CastleTV] file tags ${found.languages.join('/')} replace listed ${listed.join('/') || '-'}`);
-            relabel(s, found.languages);
-            return;
-        }
+// One file's verdict, kept 30 min by url path (the query is a signature):
+// { languages } from PMT tags, or { languages: [] } for a readable untagged
+// file. An unreadable file is no verdict and is not kept.
+const FILE_TTL_MS = 30 * 60 * 1000;
+const fileVerdicts = new Map();
+function fileKey(url) { try { const u = new URL(url); return `${u.hostname}${u.pathname}`; } catch { return String(url); } }
+function cachedVerdict(url) {
+    const hit = fileVerdicts.get(fileKey(url));
+    if (!hit) return undefined;
+    if (hit.expiresAt < Date.now()) { fileVerdicts.delete(fileKey(url)); return undefined; }
+    return hit.value;
+}
+
+// Relabel one row from a verdict (null = no verdict). Returns true when the row changed.
+function applyVerdict(s, found) {
+    const listed = listedLanguages(s);
+    const before = `${s.name}|${s.language || ''}|${s.languageSource || ''}`;
+    if (found && found.languages.length) {
+        const same = found.languages.length === listed.length
+            && found.languages.every((l) => listed.some((x) => knownLanguage(x) === l));
+        if (!same) console.log(`[CastleTV] file tags ${found.languages.join('/')} replace listed ${listed.join('/') || '-'}`);
+        relabel(s, found.languages);
+        s.languageSource = 'ts-pmt';
+    } else {
         const known = listed.filter((l) => knownLanguage(l));
         if (known.length !== listed.length) {
             console.log(`[CastleTV] untagged file: listed ${listed.join('/')} -> ${known.join('/') || 'unknown'}`);
             relabel(s, known);
         }
-    }));
+    }
+    return `${s.name}|${s.language || ''}|${s.languageSource || ''}` !== before;
+}
+
+async function readVerdict(s, get, probe) {
+    try {
+        const r = await get(s.url, s.headers || {}, 5000);
+        if (r.status === 200 && hls.isMedia(r.text)) {
+            const found = await probe(r.text, s.url, s.headers || {});
+            if (found) fileVerdicts.set(fileKey(s.url), { value: found, expiresAt: Date.now() + FILE_TTL_MS });
+            return found;
+        }
+    } catch (e) { /* unreadable: no verdict */ }
+    return null;
+}
+
+// Blocking form (tests, background): read every file, then relabel.
+async function withFileLanguages(streams, { get = fetchText, probe = tsLang.probeSegmentLanguages } = {}) {
+    await Promise.all(streams.map(async (s) => applyVerdict(s, await readVerdict(s, get, probe))));
     return streams;
+}
+
+// Answer-time form: never waits on a file (owner 2026-11-24, no language
+// delay). A cached verdict relabels now. Otherwise labels that are not
+// languages go now ("Ost"), the real ones stay until the file is read in the
+// background (lib/media/languagesLater.js); the next read carries the tags.
+// Returns the rows still to read.
+function fileLanguagesNow(streams) {
+    const cold = [];
+    for (const s of streams) {
+        const v = cachedVerdict(s.url);
+        applyVerdict(s, v || null);
+        if (v === undefined) cold.push(s);
+    }
+    return cold;
+}
+
+function readColdFiles(cold, { get = fetchText, probe = tsLang.probeSegmentLanguages } = {}) {
+    return async () => {
+        const raws = cold.map((s) => ({ ...s, headers: s.headers }));
+        const changed = [];
+        await Promise.all(raws.map(async (s) => {
+            const found = await readVerdict(s, get, probe);
+            if (found && applyVerdict(s, found)) changed.push(s);
+        }));
+        return changed;
+    };
 }
 
 async function getCastletvStreams(tmdbId, mediaType = 'movie', seasonNum = null, episodeNum = null) {
@@ -657,7 +712,8 @@ async function getCastletvStreams(tmdbId, mediaType = 'movie', seasonNum = null,
             console.log(`[CastleTV] partial ${tmdbId} failed-tracks=${failedTracks.join('/')}: ${why}`);
             streams.upstreamError = `track(s) ${failedTracks.join('/')} failed: ${why}`;
         }
-        await withFileLanguages(streams);
+        const cold = fileLanguagesNow(streams);
+        if (cold.length) languagesLater.later('castletv', tmdbId, readColdFiles(cold));
         return streams;
     } catch (err) {
         console.error(`[CastleTV] Error: ${err.message}`);
@@ -665,4 +721,4 @@ async function getCastletvStreams(tmdbId, mediaType = 'movie', seasonNum = null,
     }
 }
 
-module.exports = { getCastletvStreams, UPSTREAM, CONFIG_DEFAULTS, _deriveKey: deriveKey, _internal: { castleBase, apiVersion, dropReason, withFileLanguages } };
+module.exports = { getCastletvStreams, UPSTREAM, CONFIG_DEFAULTS, _deriveKey: deriveKey, _internal: { castleBase, apiVersion, dropReason, withFileLanguages, fileLanguagesNow, readColdFiles, _fileVerdicts: fileVerdicts } };

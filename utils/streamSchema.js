@@ -321,6 +321,10 @@ function normaliseStream(raw) {
         ...(Array.isArray(raw.catalogLanguages) ? { catalogLanguages: [...new Set(raw.catalogLanguages.map(canonicalLanguage).filter(Boolean))] } : {}),
         audio,
         ...(raw.audioTagsOnly ? { audioTagsOnly: true } : {}),
+        // Where `languages` came from when a file said so: "ts-pmt" (segment
+        // PMT tags; APK 1.2.64 TsAudio lists every tagged track and picks
+        // Telugu inside the stream) or "mp4-tag". Dropped with no languages.
+        ...(raw.languageSource && languages.length ? { languageSource: String(raw.languageSource) } : {}),
         subtitles,
         size: raw.size || null,
         container: raw.container || inferContainer(raw.url),
