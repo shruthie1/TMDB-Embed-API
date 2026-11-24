@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "ttlSec": 21600,
   "mapple": {
     "enabled": true,
@@ -166,6 +166,14 @@
         "player": "https://player.vidmario.net"
       }
     ],
+    "prewarm": false
+  },
+  "insertunit": {
+    "enabled": true,
+    "prewarm": false
+  },
+  "vidout": {
+    "enabled": true,
     "prewarm": false
   }
 }

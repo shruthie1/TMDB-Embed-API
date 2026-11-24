@@ -53,7 +53,7 @@ const LANG_CANON = {
     urd: 'Urdu', ur: 'Urdu', urdu: 'Urdu', ori: 'Odia', odia: 'Odia', oriya: 'Odia',
     asm: 'Assamese', assamese: 'Assamese', spa: 'Spanish', fra: 'French',
     deu: 'German', ger: 'German', jpn: 'Japanese', kor: 'Korean',
-    zho: 'Chinese', chi: 'Chinese', por: 'Portuguese', rus: 'Russian',
+    zho: 'Chinese', chi: 'Chinese', por: 'Portuguese', rus: 'Russian', ru: 'Russian',
     tur: 'Turkish', ara: 'Arabic', tha: 'Thai', ind: 'Indonesian',
 };
 

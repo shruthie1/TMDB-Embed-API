@@ -223,16 +223,16 @@ test('M5 remote host lists: https only, at most 10, netmirror.domains capped at 
     assert.ok(logs.lines.some((l) => l.startsWith('[selfheal-config] remote trim multimovies.bases 15->10')), logs.lines.join('\n'));
 });
 
-test('prewarm: /api/resolve-config passes boolean prewarm through (built-in v4 defaults), drops bad values', async () => {
+test('prewarm: /api/resolve-config passes boolean prewarm through (built-in v5 defaults), drops bad values', async () => {
     const shipped = path.join(__dirname, '..', 'routes', 'resolve-config.json');
     const snap = createConfig({ builtin: shipped }).snapshot();
-    assert.equal(snap.version, 4);
+    assert.equal(snap.version, 5);
     const on = Object.keys(snap).filter((k) => snap[k] && snap[k].prewarm === true).sort();
     assert.deepStrictEqual(on, ['castletv', 'mapple', 'multimovies', 'netmirror', 'vidrift']);
-    for (const k of ['vaplayer', 'showsst', 'onetouchtv']) assert.strictEqual(snap[k].prewarm, false, k);
+    for (const k of ['vaplayer', 'showsst', 'onetouchtv', 'insertunit', 'vidout']) assert.strictEqual(snap[k].prewarm, false, k);
     // The static web copy the APK falls back to carries the same flags.
     const web = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'web', 'public', 'resolve-config.json'), 'utf8'));
-    assert.equal(web.version, 4);
+    assert.equal(web.version, 5);
     for (const k of Object.keys(snap)) if (snap[k] && typeof snap[k] === 'object' && 'prewarm' in snap[k]) assert.strictEqual(web[k].prewarm, snap[k].prewarm, k);
 
     // A remote edit wins per field; a non-boolean is dropped (APK reads it as false); heals never touch it.

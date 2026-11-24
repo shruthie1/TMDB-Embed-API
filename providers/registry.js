@@ -27,6 +27,8 @@ const providerFunctionMap = {
   'multimovies.js': 'getMultimoviesStreams',
   'vidrock.js': 'getVidrockStreams',
   'vidrift.js': 'getVidriftStreams',
+  'insertunit.js': 'getInsertunitStreams',
+  'vidout.js': 'getVidoutStreams',
 };
 
 // Per-request cookie context.
@@ -302,11 +304,14 @@ async function healNow(name, kind) {
   return { applied: false };
 }
 
-/** UPSTREAM.verifyTitle for name, or null (the canary's validation title). */
+/**
+ * UPSTREAM.verifyTitle for name, else its CANARY_TITLE (a provider with no
+ * heal, insertunit/vidout), or null (the canary's validation title).
+ */
 function verifyTitleOf(name) {
   const info = providerFiles.find((p) => p.name === String(name).toLowerCase());
   const module = info && loadProvider(info.file);
-  return (module && module.UPSTREAM && module.UPSTREAM.verifyTitle) || null;
+  return (module && module.UPSTREAM && module.UPSTREAM.verifyTitle) || (module && module.CANARY_TITLE) || null;
 }
 
 // Create fetch function for a provider

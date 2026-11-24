@@ -123,7 +123,7 @@ data class MultiMoviesConfig(
 )
 
 data class ResolveConfig(
-    val version: Int = 4,
+    val version: Int = 5,
     val ttlSec: Long = 6 * 3600L,
     val mapple: MappleConfig = MappleConfig(),
     val vaplayer: VaplayerConfig = VaplayerConfig(),
@@ -145,7 +145,7 @@ data class ResolveConfig(
         /** Owner 2026-11-22: the Telugu workhorses that resolve on the device. */
         val DEFAULT_PREWARM = setOf("mapple", "vidrift", "multimovies", "castletv", "netmirror")
         /** Sections that may carry `prewarm` (every on-device provider). */
-        private val PREWARM_SECTIONS = listOf("mapple", "vaplayer", "netmirror", "castletv", "multimovies", "vidrift", "showsst", "onetouchtv")
+        private val PREWARM_SECTIONS = listOf("mapple", "vaplayer", "netmirror", "castletv", "multimovies", "vidrift", "showsst", "onetouchtv", "insertunit", "vidout")
         private val json = Json { ignoreUnknownKeys = true; isLenient = true }
         private val SECTIONS = listOf("mapple", "vaplayer", "netmirror", "castletv", "multimovies")
 

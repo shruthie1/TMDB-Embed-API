@@ -22,8 +22,11 @@ const { playlistCompression } = require('./playlistCompression');
 // `timeout` here is socket-IDLE only - it does NOT bound a request whose body
 // stalls, which is why the watchdog in pipeUpstream exists.
 const MAX_SOCKETS = Number(process.env.PROXY_MAX_SOCKETS) || 256;
-const httpAgent = new http.Agent({ keepAlive: true, maxSockets: MAX_SOCKETS, timeout: 60000 });
-const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: MAX_SOCKETS, timeout: 60000 });
+// lookupWithFallback: VM1's stub resolver fails DNAME'd hosts (insertunit's
+// *.interkh.com renditions) that dns.resolve4 answers (utils/dnsFallback.js).
+const { lookupWithFallback } = require('../utils/dnsFallback');
+const httpAgent = new http.Agent({ keepAlive: true, maxSockets: MAX_SOCKETS, timeout: 60000, lookup: lookupWithFallback });
+const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: MAX_SOCKETS, timeout: 60000, lookup: lookupWithFallback });
 const agentFor = (url) => (String(url).startsWith('https:') ? httpsAgent : httpAgent);
 
 // Socket exhaustion is invisible until you print it: a request queued in
@@ -335,7 +338,7 @@ function inferContentType(upstreamCT, targetUrl) {
     // image/jpeg to the browser makes MSE reject the buffer, so the player just
     // spins on "Loading stream...". A disguised type is therefore as unusable
     // as a missing one: fall through to extension/URL sniffing in both cases.
-    const disguised = upstreamCT && /^(image|text)\//i.test(upstreamCT);
+    const disguised = upstreamCT && /^(image|text|font)\//i.test(upstreamCT);
     const bad = !upstreamCT || disguised || /application\/octet-stream/i.test(upstreamCT) || /application\/(x-)?zip/i.test(upstreamCT) || /application\/javascript/i.test(upstreamCT);
     if (!bad) return upstreamCT;
     if (/\.mkv(\?|$)/i.test(targetUrl)) return 'video/x-matroska';
@@ -777,7 +780,8 @@ function createProxyRoutes(app) {
         if (range) headers.Range = range;
         // An HLS segment, playlist or key is small and fetched whole. Anything
         // else is a progressive media body (NetMirror serves a whole .mp4).
-        const looksLikeHlsSegment = /\.(ts|jpg|jpeg|png|js|m4s|aac)(\?|$)/i.test(String(targetUrl));
+        // .woff2: VIDOUT names its MPEG-TS segments as fonts (2026-11-24).
+        const looksLikeHlsSegment = /\.(ts|jpg|jpeg|png|js|m4s|aac|woff2?)(\?|$)/i.test(String(targetUrl));
         const looksLikeSmallHlsFile = looksLikeHlsSegment || /\.(m3u8|key|vtt|srt)(\?|$)/i.test(String(targetUrl));
         // A no-Range request for a progressive body gets the same bounded first
         // window as bytes=0-. Unclamped, it pulled the whole NetMirror mp4
@@ -1179,6 +1183,7 @@ module.exports = {
     inferContentType, sniffSegmentType, completeCodecs,
     // Exposed for tests.
     _pipeUpstream: pipeUpstream,
+    _agents: { http: httpAgent, https: httpsAgent },
     onUpstreamStatus,
     _segmentCache: { cacheSegment, getCachedSegment, stats: () => ({ entries: segmentCache.size, bytes: segmentCacheBytes, maxBytes: CACHE_MAX_BYTES }) },
 };
