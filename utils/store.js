@@ -119,6 +119,21 @@ const MIGRATIONS = [
         runs integer not null default 0,
         fails integer not null default 0
      );`,
+    // v4: last-known-good Telugu rows (lib/mmhub/lastKnownGood.js). One row per
+    // title + provider + media; `row` is the stream JSON as served, tags kept.
+    `create table if not exists last_known_good (
+        tmdb_id integer not null,
+        type text not null,
+        season integer not null default 0,
+        episode integer not null default 0,
+        provider text not null,
+        media_identity text not null,
+        row text not null,
+        expires_at integer not null,
+        stored_at integer not null,
+        primary key (tmdb_id, type, season, episode, provider, media_identity)
+     );
+     create index if not exists last_known_good_expires on last_known_good (expires_at);`,
 ];
 
 // ---- input shaping -------------------------------------------------------
@@ -225,6 +240,18 @@ function sqliteBackend(file) {
              last_run_at=excluded.last_run_at, last_ok_at=excluded.last_ok_at, next_due_at=excluded.next_due_at,
              last_error=excluded.last_error, telugu_ok=excluded.telugu_ok, heal_how=excluded.heal_how,
              heal_at=excluded.heal_at, runs=excluded.runs, fails=excluded.fails`),
+        lkgUpsert: db.prepare(`insert into last_known_good
+            (tmdb_id,type,season,episode,provider,media_identity,row,expires_at,stored_at)
+            values (@tmdb_id,@type,@season,@episode,@provider,@media_identity,@row,@expires_at,@stored_at)
+            on conflict (tmdb_id,type,season,episode,provider,media_identity) do update set
+             row=excluded.row, expires_at=excluded.expires_at, stored_at=excluded.stored_at`),
+        lkgFor: db.prepare(`select * from last_known_good where tmdb_id=? and type=? and season=? and episode=?
+                            and expires_at > ? order by stored_at desc`),
+        lkgEvict: db.prepare(`delete from last_known_good where tmdb_id=? and type=? and season=? and episode=?
+                              and provider=? and media_identity=?`),
+        lkgPrune: db.prepare('delete from last_known_good where expires_at <= ?'),
+        playStatsByProvider: db.prepare(`select provider, sum(case when played_ok_at is not null and play_fails=0 then 1 else 0 end) as ok,
+            sum(case when play_fails>0 then 1 else 0 end) as fail from source_stats group by provider`),
     };
 
     return {
@@ -245,6 +272,11 @@ function sqliteBackend(file) {
         canaryGet: (name) => q.canaryGet.get(name),
         canaryAll: () => q.canaryAll.all(),
         canaryPut: (row) => { q.canaryUpsert.run(row); },
+        lkgPut: (row) => { q.lkgUpsert.run(row); },
+        lkgFor: (k, at) => q.lkgFor.all(k.tmdb_id, k.type, k.season, k.episode, at),
+        lkgEvict: (k, provider, id) => q.lkgEvict.run(k.tmdb_id, k.type, k.season, k.episode, provider, id).changes,
+        lkgPrune: (at) => q.lkgPrune.run(at).changes,
+        playStatsByProvider: () => q.playStatsByProvider.all(),
         close: () => db.close(),
     };
 }
@@ -257,7 +289,7 @@ function sqliteBackend(file) {
 
 function jsonBackend(file) {
     const empty = () => ({ version: MIGRATIONS.length, source_stats: {}, audio_evidence: [], provider_health: {},
-        castle_demux_job: {}, provider_canary: {} });
+        castle_demux_job: {}, provider_canary: {}, last_known_good: {} });
     let data = empty();
     let writable = file !== ':memory:';
     if (writable) {
@@ -283,6 +315,7 @@ function jsonBackend(file) {
     };
     const flush = () => { if (!timer) { timer = setTimeout(flushNow, 200); timer.unref?.(); } };
     const statsId = (k) => [k.tmdb_id, k.type, k.season, k.episode, k.provider, k.media_identity].join('|');
+    const lkgId = statsId;
     let nextId = data.audio_evidence.reduce((m, r) => Math.max(m, r.id || 0), 0) + 1;
 
     return {
@@ -321,6 +354,33 @@ function jsonBackend(file) {
         canaryGet: (name) => data.provider_canary[name],
         canaryAll: () => Object.values(data.provider_canary),
         canaryPut: (row) => { data.provider_canary[row.provider] = { ...row }; flush(); },
+        lkgPut: (row) => { data.last_known_good[lkgId(row)] = { ...row }; flush(); },
+        lkgFor: (k, at) => Object.values(data.last_known_good).filter((r) => r.tmdb_id === k.tmdb_id
+            && r.type === k.type && r.season === k.season && r.episode === k.episode && r.expires_at > at)
+            .sort((a, b) => b.stored_at - a.stored_at),
+        lkgEvict: (k, provider, id) => {
+            const key = lkgId({ ...k, provider, media_identity: id });
+            if (!data.last_known_good[key]) return 0;
+            delete data.last_known_good[key]; flush(); return 1;
+        },
+        lkgPrune: (at) => {
+            let n = 0;
+            for (const [id, r] of Object.entries(data.last_known_good)) {
+                if (r.expires_at <= at) { delete data.last_known_good[id]; n++; }
+            }
+            if (n) flush();
+            return n;
+        },
+        playStatsByProvider: () => {
+            const m = new Map();
+            for (const r of Object.values(data.source_stats)) {
+                const e = m.get(r.provider) || { provider: r.provider, ok: 0, fail: 0 };
+                if (r.played_ok_at != null && !r.play_fails) e.ok++;
+                if (r.play_fails > 0) e.fail++;
+                m.set(r.provider, e);
+            }
+            return [...m.values()];
+        },
         close: () => { if (timer) { clearTimeout(timer); flushNow(); } },
     };
 }
@@ -443,6 +503,24 @@ function openStore(file = DEFAULT_PATH, { backend } = {}) {
         return row;
     }
 
+    // last-known-good rows (lib/mmhub/lastKnownGood.js). The row JSON is the
+    // caller's; this layer stores it with an expiry and never reads tags.
+    function lkgPut(e) {
+        const k = { ...titleKey(e), provider: lc(e.provider), media_identity: String(e.mediaIdentity || '').slice(0, 300) };
+        b.lkgPut({ ...k, row: JSON.stringify(e.row), expires_at: Math.trunc(e.expiresAt), stored_at: Math.trunc(e.storedAt ?? now()) });
+    }
+    function lkgFor(title, at = now()) {
+        return b.lkgFor(titleKey(title), at).map((r) => ({ provider: r.provider, mediaIdentity: r.media_identity,
+            row: safeParse(r.row), expiresAt: r.expires_at, storedAt: r.stored_at })).filter((r) => r.row);
+    }
+    function lkgEvict(title, provider, mediaIdentity) {
+        return b.lkgEvict(titleKey(title), lc(provider), String(mediaIdentity || ''));
+    }
+    function lkgPrune(at = now()) { return b.lkgPrune(at); }
+    // Playback-report outcomes per provider across every title: rows whose last
+    // report played (ok) and rows with failures (fail). Learned ranking input.
+    function playStatsByProvider() { return b.playStatsByProvider(); }
+
     return {
         get backend() { return b.kind; },
         // Why sqlite was not used, or null. Health reports it so a silent
@@ -455,6 +533,7 @@ function openStore(file = DEFAULT_PATH, { backend } = {}) {
         providerHealth, allProviderHealth, saveProviderHealth,
         putDemuxJob, getDemuxJob, touchDemuxJob, pruneDemuxJobs,
         canaryGet, canaryAll, canaryPut,
+        lkgPut, lkgFor, lkgEvict, lkgPrune, playStatsByProvider,
         close: () => b.close(),
     };
 }

@@ -170,10 +170,88 @@
   },
   "insertunit": {
     "enabled": true,
-    "prewarm": false
+    "prewarm": false,
+    "hlsPatterns": [
+      "\\bhls:\\s*\"(https?:\\/\\/[^\"]+)\"",
+      "\"hls\"\\s*:\\s*\"(https?:\\/\\/[^\"]+)\"",
+      "\\bfile:\\s*\"(https?:\\/\\/[^\"]+\\.m3u8[^\"]*)\""
+    ],
+    "seasonsPatterns": [
+      "\\bseasons:\\s*\\[",
+      "\"seasons\"\\s*:\\s*\\["
+    ]
   },
   "vidout": {
     "enabled": true,
     "prewarm": false
+  },
+  "mmhub": {
+    "site": "https://m1.multimovies.courses",
+    "searchPath": "/search?q={q}",
+    "episodePath": "/season/{s}/episode/{e}",
+    "titleLinkPatterns": [
+      "href=\"(/(?:movie|series)/[a-z0-9][a-z0-9-]*-\\d+)\"",
+      "href='(/(?:movie|series)/[a-z0-9][a-z0-9-]*-\\d+)'"
+    ],
+    "watchConfigPatterns": [
+      "const\\s+watchConfig\\s*=\\s*\\{",
+      "(?:var|let|window\\.)\\s*watchConfig\\s*=\\s*\\{",
+      "watchConfig\\s*[=:]\\s*\\{"
+    ],
+    "serverListPaths": [
+      "initialServers",
+      "servers",
+      "sources"
+    ],
+    "servers": [
+      {
+        "name": "^vidbolt$",
+        "hosts": [
+          "vidbolt.xyz",
+          "vidbolt.pro"
+        ],
+        "extractor": "multimovies"
+      },
+      {
+        "name": "^vidrift$",
+        "hosts": [
+          "embed.vidrift.net",
+          "embed.vidrift.in"
+        ],
+        "extractor": "vidrift"
+      },
+      {
+        "name": "^vidout$",
+        "hosts": [
+          "vidout.pages.dev"
+        ],
+        "extractor": "vidout"
+      },
+      {
+        "name": "^gd mirror$",
+        "hosts": [
+          "streams.iqsmartgames.com"
+        ],
+        "extractor": "insertunit"
+      },
+      {
+        "name": "^cineverse$",
+        "hosts": [
+          "rozgarlelo.modiplay.xyz"
+        ],
+        "extractor": null
+      },
+      {
+        "name": "^nexus$",
+        "hosts": [
+          "www.moviesnexus.fun",
+          "moviesnexus.fun"
+        ],
+        "extractor": null
+      }
+    ],
+    "titleTtlSec": 604800,
+    "serversTtlSec": 21600,
+    "maxCandidates": 3
   }
 }

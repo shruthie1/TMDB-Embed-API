@@ -38,6 +38,34 @@ const _deps = {
     runtimeMinutes: (tmdbId) => require('../lib/selfheal/proof').runtimeMinutes(tmdbId),
 };
 
+// Page patterns (Part B item 3): read from resolve-config `insertunit` at call
+// time, tried in order; these code defaults stand in when the config has none.
+// The first is the form measured 2026-11-24 (`hls: "https://..."`); the
+// others are the shapes the same player config takes when serialised as JSON
+// or as a jwplayer-style `file:`.
+const CONFIG_DEFAULTS = {
+    hlsPatterns: [
+        '\\bhls:\\s*"(https?:\\/\\/[^"]+)"',
+        '"hls"\\s*:\\s*"(https?:\\/\\/[^"]+)"',
+        '\\bfile:\\s*"(https?:\\/\\/[^"]+\\.m3u8[^"]*)"',
+    ],
+    seasonsPatterns: [
+        '\\bseasons:\\s*\\[',
+        '"seasons"\\s*:\\s*\\[',
+    ],
+};
+
+function patterns(override) {
+    const pick = (field) => {
+        if (override && Array.isArray(override[field])) return override[field];
+        try { return require('../lib/selfheal/config').cfg('insertunit', field, CONFIG_DEFAULTS[field]); } catch { return CONFIG_DEFAULTS[field]; }
+    };
+    // Config first, then any code default it does not already list.
+    const merged = (field) => [...new Set([...pick(field), ...CONFIG_DEFAULTS[field]])];
+    return { hls: merged('hlsPatterns'), seasons: merged('seasonsPatterns') };
+}
+function safeRe(src) { try { return new RegExp(src); } catch { return null; } }
+
 // The canary's validation title (providers/registry.js verifyTitleOf): RRR,
 // where the Telugu rendition was found. No heal: this provider has one host.
 const CANARY_TITLE = { tmdbId: '579974', mediaType: 'movie' };
@@ -64,16 +92,31 @@ function arrayAt(s, from) {
     return null;
 }
 
-/** Pure: the page's HLS master for a movie, or for one episode; null when none. */
-function masterFromPage(html, type, season = null, episode = null) {
-    const s = String(html || '');
-    if (type !== 'tv') {
-        const m = s.match(/\bhls:\s*"(https?:\/\/[^"]+)"/);
-        return m ? m[1] : null;
+/** The seasons array on a series page, or null. */
+function seasonsFromPage(s, pats) {
+    for (const src of pats.seasons) {
+        const re = safeRe(src);
+        const m = re && re.exec(s);
+        if (!m) continue;
+        const seasons = arrayAt(s, s.indexOf('[', m.index));
+        if (Array.isArray(seasons)) return seasons;
     }
-    const at = s.search(/\bseasons:\s*\[/);
-    if (at < 0) return null;
-    const seasons = arrayAt(s, s.indexOf('[', at));
+    return null;
+}
+
+/** Pure: the page's HLS master for a movie, or for one episode; null when none. */
+function masterFromPage(html, type, season = null, episode = null, override = null) {
+    const s = String(html || '');
+    const pats = patterns(override);
+    if (type !== 'tv') {
+        for (const src of pats.hls) {
+            const re = safeRe(src);
+            const m = re && re.exec(s);
+            if (m && m[1]) return m[1];
+        }
+        return null;
+    }
+    const seasons = seasonsFromPage(s, pats);
     if (!Array.isArray(seasons)) return null;
     const se = seasons.find((x) => x && Number(x.season) === Number(season));
     const ep = se && Array.isArray(se.episodes) && se.episodes.find((x) => x && Number(x.episode) === Number(episode));
@@ -109,6 +152,11 @@ async function getInsertunitStreams(tmdbId, mediaType = 'movie', seasonNum = nul
     const masterUrl = masterFromPage(page.text, type, seasonNum, episodeNum);
     if (!masterUrl) {
         console.log(`[insertunit] no hls master on the page for ${imdb}${type === 'tv' ? ` S${seasonNum}E${episodeNum}` : ''}`);
+        // No pattern matched anything (a series page with no seasons array,
+        // or a movie page with no master): keep a redacted copy for diagnosis.
+        if (type !== 'tv' || !seasonsFromPage(String(page.text || ''), patterns())) {
+            require('../lib/mmhub/page').parseFailed('insertunit', page.text, { sampleDir: _deps.sampleDir });
+        }
         return [];
     }
     const master = await _deps.fetchText(masterUrl, { 'User-Agent': UA }, left());
@@ -132,6 +180,7 @@ async function getInsertunitStreams(tmdbId, mediaType = 'movie', seasonNum = nul
 
 module.exports = {
     getInsertunitStreams,
+    CONFIG_DEFAULTS,
     CANARY_TITLE,
     UA,
     embedUrl,

@@ -21,6 +21,12 @@ const { registerCapabilityRoutes } = require('./routes/capabilities');
 const { createProxyRoutes, processStreamsForProxy } = require('./proxy/proxyServer');
 const { routeStreams, surfaceAllows, surfaceOf, surfaceOnDevice } = require('./lib/routing/providerRoutes');
 const canaryMod = require('./lib/selfheal/canary');
+// MultiMovies hub (lib/mmhub): per-server health, canary, learned ranking,
+// last-known-good Telugu rows.
+const mmState = require('./lib/mmhub/state');
+const mmHub = require('./lib/mmhub/hub');
+const mmRanking = require('./lib/mmhub/ranking');
+const lastKnownGood = require('./lib/mmhub/lastKnownGood');
 const { resolveImdbId, searchTitles } = require('./utils/tmdb');
 const { applyFilters } = require('./utils/streamFilters');
 const castleDemux = require('./utils/castleDemux');
@@ -209,6 +215,7 @@ app.get('/api/health', (req, res) => {
     memory: { rssMB: mb(mem.rss), heapUsedMB: mb(mem.heapUsed), heapTotalMB: mb(mem.heapTotal) },
     openBreakers: Object.keys(breakers).filter((n) => breakers[n].open),
     breakers,
+    multimovies: mmState.snapshot(),
     ...storeStatus(),
     processErrors,
   });
@@ -378,7 +385,7 @@ app.post('/api/playback-report', (req, res) => {
         provider: r.provider, mediaIdentity: r.mediaIdentity, lang: r.audioLang,
         source: 'viewer', refuted: r.langOk === false });
     }
-    if (!r.ok) evictReportedRow(r);
+    if (!r.ok) { evictReportedRow(r); lastKnownGood.evictReported(r); }
     console.log(`[learn] playback-report ${r.ok ? 'ok' : 'fail'} ${r.type}/${r.tmdbId} s${r.season}e${r.episode} `
       + `provider=${r.provider} identity=${r.mediaIdentity ? 'yes' : 'no'} startupMs=${r.startupMs === null ? `outlier(${String(req.body && req.body.startupMs).slice(0, 12)})` : r.startupMs}`
       + `${r.langOk === null ? '' : ` langOk=${r.langOk}`}`);
@@ -706,9 +713,12 @@ function learnedFacts(s, idx, ewmaCache) {
   const startup = st && st.played_ok_at && !st.play_fails ? st.startup_ms : null;
   return {
     sink: st && (st.play_fails >= 2 || runtimeBad) ? 1 : 0,
+    degraded: mmRanking.isDegraded(provider) ? 1 : 0,
     unconfirmed: st && st.played_ok_at && !runtimeBad ? 0 : 1,
+    // serverScore: playback outcomes of this MultiMovies server across every
+    // title, in [-0.5, 0.5]; 0 for any other provider.
     score: 1.5 * (Math.min(heightOf(effectiveQuality(s)), 2160) / 2160)
-      + unit(ewmaCache.get(provider)) + 1.5 * unit(startup),
+      + unit(ewmaCache.get(provider)) + 1.5 * unit(startup) + mmRanking.serverScore(provider),
   };
 }
 
@@ -727,6 +737,8 @@ function sortStreamsCanonically(streams, learn = null) {
       const db = b.s && b.s.byteCheck && b.s.byteCheck.ok === false ? 1 : 0;
       if (da !== db) return da - db;
       if (a.l.sink !== b.l.sink) return a.l.sink - b.l.sink;
+      // A MultiMovies server the hub canary marks degraded (lib/mmhub).
+      if (a.l.degraded !== b.l.degraded) return a.l.degraded - b.l.degraded;
       if (a.l.unconfirmed !== b.l.unconfirmed) return a.l.unconfirmed - b.l.unconfirmed;
       if (Math.abs(a.l.score - b.l.score) > 1e-9) return b.l.score - a.l.score;
       const qa = qualityRank(effectiveQuality(a.s));
@@ -1106,6 +1118,20 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
     // A Castle that missed the gate cap but answered in time still gets its
     // demuxed audio menu.
     const castleTask = tasks.find((x) => x.name === GATE_PROVIDER);
+    // MultiMovies hub: once each MM-server provider has settled (late ones
+    // included), record its outcome per listed server. Background only.
+    {
+      const mmTasks = tasks.filter((x) => mmRanking.MM_PROVIDERS.has(x.name));
+      if (mmTasks.length) {
+        Promise.all(mmTasks.map((x) => Promise.resolve(x.p).then((rows) => rows, () => [])))
+          .then((settled) => {
+            const by = new Map(mmTasks.map((x, k) => [x.name, { rows: Array.isArray(settled[k]) ? settled[k] : [],
+              err: erroredProviders.includes(x.name) && !(settled[k] || []).length ? 'provider error' : null }]));
+            return mmHub.observe({ tmdbId, type, season, episode, imdbId }, by);
+          })
+          .catch((e) => console.warn(`[mm] observe failed ${tmdbId}: ${e.message}`));
+      }
+    }
     if (castleTask && castleGate && !late.includes(castleTask)) {
       const g = await castleGate;
       if (!demuxed) demuxed = g.demux;
@@ -1196,6 +1222,16 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
     }
 
     const learn = { tmdbId, type, season, episode };
+    // Last-known-good (owner go 2026-11-24): no live Telugu row, but one was
+    // seen earlier and its URL is still inside its expiry -> one master +
+    // first-segment check, then served tagged `lastKnownGood` with the tags
+    // it had when live. A failed check evicts it.
+    try {
+      const kept = await lastKnownGood.serveIfMissing(learn, streams);
+      if (kept.length) streams = [...streams, ...kept];
+    } catch (e) {
+      console.warn(`[lkg] serve failed ${tmdbId}: ${e.message}`);
+    }
     streams = sortStreamsCanonically(streams, learn);
     // Read the first bytes of the top candidates before serving them. Runs
     // before routeStreamsForBrowser, which strips the upstream headers the
@@ -1203,6 +1239,11 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
     const verifyT0 = Date.now();
     streams = sortStreamsCanonically(await verifyTopStreams(streams, { skipPrefix: serverUrl }), learn);
     console.log(`[api] verify-top tmdbId=${tmdbId} at=+${verifyT0 - reqT0}ms took=${Date.now() - verifyT0}ms`);
+    // Keep this answer's Telugu rows (any provider) before the routing below
+    // strips the upstream headers they need.
+    try { lastKnownGood.remember(learn, streams, { skipPrefix: serverUrl }); } catch (e) {
+      console.warn(`[lkg] remember failed ${tmdbId}: ${e.message}`);
+    }
     streams = routeStreamsForBrowser(streams, serverUrl);
     // Every call here fans out to a dozen providers, and NetMirror rate limits
     // per IP ("Too Many Requests in Short Period of Time"). A plain page reload
@@ -1368,6 +1409,8 @@ if (require.main === module) {
   // Provider canary: one provider per 10 min, 6 h healthy / 30 min failing.
   // Drives auto-heal only (no alerts). Only in the real server process.
   canaryMod.startCanary({ registry: require('./providers/registry'), store: getStore(), recordOutcome: recordProviderOutcome });
+  // MultiMovies hub per-server canary: 6 h, RRR / Pushpa 2 / one series.
+  require('./lib/mmhub/canary').startMmCanary({ getProvider, store: getStore() });
   installGracefulShutdown(server, { exit: (code) => { allowControlledExit = true; realProcessExit(code); } });
 }
 
