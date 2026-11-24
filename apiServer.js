@@ -19,7 +19,7 @@ const streamHeaders = require('./lib/media/streamHeaders');
 const { verifyTopStreams, prewarmTopStreams, verifiable: verifiableRow } = require('./lib/media/segmentVerify');
 const { registerCapabilityRoutes } = require('./routes/capabilities');
 const { createProxyRoutes, processStreamsForProxy, warmPlaylists } = require('./proxy/proxyServer');
-const { routeStreams, surfaceAllows, surfaceOf, surfaceOnDevice } = require('./lib/routing/providerRoutes');
+const { routeStreams, routeFor, surfaceAllows, surfaceOf, surfaceOnDevice } = require('./lib/routing/providerRoutes');
 const canaryMod = require('./lib/selfheal/canary');
 // MultiMovies hub (lib/mmhub): per-server health, canary, learned ranking,
 // last-known-good Telugu rows.
@@ -992,8 +992,20 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
         console.warn(`[api] verify-prewarm failed for ${tmdbId}: ${e.message}`);
       }
     };
+    // Fast start: warm a Telugu row's playlists the moment its provider lands,
+    // not when the answer goes out (first open after a restart, 2026-11-24:
+    // RRR's insertunit row landed at +2.8 s, the answer left at +5.8 s, and
+    // the player then waited 2.3 s on the same playlists).
+    const warmLanded = (rows) => {
+      try {
+        const proxied = rows.filter((x) => x && typeof x.url === 'string' && x.headers && Object.keys(x.headers).length
+          && lastKnownGood.isTelugu(x) && routeFor(x.provider, x.url).web !== 'direct')
+          .map((x) => processStreamsForProxy([x], serverUrlEarly)[0]);
+        warmTeluguPlaylists(proxied, tmdbId);
+      } catch (e) { console.warn(`[warm] land failed ${tmdbId}: ${e.message}`); }
+    };
     const onLanded = (name, p) => p.then((rows) => {
-      if (Array.isArray(rows) && rows.length) { landed.set(name, rows); prewarm(); }
+      if (Array.isArray(rows) && rows.length) { landed.set(name, rows); prewarm(); warmLanded(rows); }
     }, () => {});
     for (const [name, p] of early) onLanded(name, p);
     // ?full=1 is the web's follow-up to a partial answer: it waits for every
